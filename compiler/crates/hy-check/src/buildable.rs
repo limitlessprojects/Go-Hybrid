@@ -1522,6 +1522,14 @@ impl<'a> Collector<'a> {
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::Ident { name, span } => {
+                if name == "_" {
+                    self.emit_e1002(
+                        *span,
+                        "cannot use `_` as value — Go refuses `cannot use _ as value or type` (HYB-E1002)".to_string(),
+                        "the blank identifier `_` can only appear on the left side of an assignment or declaration to discard a value; it cannot be read as a value",
+                    );
+                    return;
+                }
                 self.read(name);
                 // #778: a value position, so a type name here cannot build.
                 self.check_type_name_in_value_position(name, *span);
@@ -1619,6 +1627,13 @@ impl<'a> Collector<'a> {
                 // must not fire there. `read` still runs, because an unused
                 // local closure called as `f()` has been read.
                 match unwrap_parens(callee) {
+                    Expr::Ident { name, span } if name == "_" => {
+                        self.emit_e1002(
+                            *span,
+                            "cannot use `_` as value — Go refuses `cannot use _ as value or type` (HYB-E1002)".to_string(),
+                            "the blank identifier `_` cannot be called or read as a value",
+                        );
+                    }
                     Expr::Ident { name, .. } => self.read(name),
                     other => self.expr(other),
                 }
@@ -2254,6 +2269,9 @@ impl<'a> Collector<'a> {
     pub(crate) fn kind_of_expr(&self, e: &Expr) -> OpKind {
         match e {
             Expr::Ident { name, .. } => {
+                if name == "_" {
+                    return OpKind::Unknown;
+                }
                 if let Some(k) = self.lookup_kind(name) {
                     return k;
                 }
@@ -2448,6 +2466,9 @@ impl<'a> Collector<'a> {
                 Some(vec![OpKind::Slice(Box::new(self.kind_of_ty(t, 0)))])
             }
             Expr::Ident { name, .. } => {
+                if name == "_" {
+                    return None;
+                }
                 if let Some(k) = self.lookup_kind(name) {
                     if let OpKind::Fn(res, _) = k {
                         return Some(res);
@@ -4740,6 +4761,9 @@ impl<'a> Collector<'a> {
                 }
             }
             Expr::Ident { name, .. } => {
+                if name == "_" {
+                    return;
+                }
                 if let Some(k) = self.lookup_kind(name) {
                     match k {
                         // A local bound to a closure or fn-typed value carries
