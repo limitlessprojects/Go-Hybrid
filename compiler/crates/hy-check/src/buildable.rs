@@ -3108,6 +3108,7 @@ impl<'a> Collector<'a> {
                     "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
                     "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
                     "recover" => return Some(vec![OpKind::Interface]),
+                    "real" | "imag" => return Some(vec![OpKind::Float]),
                     "min" | "max" => {
                         let res_kind = args
                             .iter()
