@@ -87,15 +87,30 @@ impl<'a> Checker<'a> {
                 let mut tmp = st.clone();
                 if let Some(Stmt::Local(l)) = init.as_deref() {
                     tmp.scope_push();
+                    let pre = tmp.clone();
                     let tys = if l.values.len() == 1 && l.names.len() > 1 {
-                        self.multi_value_tys(st, &l.values[0], l.names.len())
+                        self.multi_value_tys(&pre, &l.values[0], l.names.len())
                     } else {
-                        l.values.iter().map(|v| self.ty_of_expr(st, v)).collect()
+                        l.values.iter().map(|v| self.ty_of_expr(&pre, v)).collect()
                     };
                     for (i, n) in l.names.iter().enumerate() {
                         let ty = l.ty.clone().or_else(|| tys.get(i).cloned().flatten());
                         let s = ty.as_ref().map(|t| self.shape_of_type(t)).unwrap_or(TypeShape::Unknown);
                         self.define_binding(&mut tmp, n, s, ty, false, false, false);
+                        tmp.closure_defs.remove(n);
+                        if l.names.len() == l.values.len() {
+                            if let Some(val) = l.values.get(i) {
+                                match unwrap_parens_and_move(val) {
+                                    Expr::Ident { name: src, .. } if src != n => {
+                                        tmp.aliases.insert(n.clone(), src.clone());
+                                    }
+                                    Expr::FnLit { params, results, body, .. } => {
+                                        tmp.closure_defs.insert(n.clone(), (params.clone(), results.clone(), body.clone()));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                     }
                 }
                 self.check_expr_single_value(&tmp, cond, cond.span());
@@ -115,7 +130,11 @@ impl<'a> Checker<'a> {
             },
             Stmt::Return { values, .. } => {
                 if values.len() == 1 {
-                    if st.result_shapes.len() == 1 && !self.buildable_owns_multi_value_call(st, &values[0]) {
+                    let is_try = matches!(unwrap_parens_and_move(&values[0]), Expr::Try { .. });
+                    if is_try
+                        || (st.result_shapes.len() == 1
+                            && !self.buildable_owns_multi_value_call(st, &values[0]))
+                    {
                         self.check_multi_value_bind(st, &values[0], 1, values[0].span());
                     }
                     self.check_subexprs_single_value(st, &values[0]);
@@ -158,6 +177,7 @@ impl<'a> Checker<'a> {
                             if segments == &["some"] {
                                 arm_st.scope_push();
                                 self.bind_match_arm(&mut arm_st, b, subject, false);
+                                arm_st.closure_defs.remove(b);
                                 if let Some(TypeExpr::Option { elem, .. }) = self.ty_of_expr(st, subject).map(|t| self.resolve_type_alias(&t)) {
                                     if let Some(bind) = arm_st.env_lookup_mut(b) {
                                         bind.ty = Some(*elem);
@@ -355,14 +375,19 @@ impl<'a> Checker<'a> {
             );
             return;
         }
-        // results == 1: a 1-result source bound to 2+ names is a plain
-        // assignment mismatch — Go refuses `assignment mismatch: N
-        // variables but name returns 1 value`. Void sources (0 results)
-        // stay owned by the void-position rule.
+        // results <= 1: a 0- or 1-result source bound to 2+ names is a plain
+        // assignment mismatch — Go refuses `assignment mismatch`. (1-target
+        // void sources stay owned by buildable's void-position rule.)
         if targets > 1 {
-            let msg = format!(
-                "`{name}` returns 1 value, but {targets} names are bound: assignment mismatch (T23 binding count)"
-            );
+            let msg = if results == 1 {
+                format!(
+                    "`{name}` returns 1 value, but {targets} names are bound: assignment mismatch (T23 binding count)"
+                )
+            } else {
+                format!(
+                    "`{name}` produces no value, but {targets} names are bound: assignment mismatch (T23 binding count)"
+                )
+            };
             self.diags.push(
                 Diagnostic::error("HYB-E1002", self.path.clone(), span, msg).with_notes(vec![
                     "why: Go rejects the emitted binding (`assignment mismatch`), so the program would not build".to_string(),
@@ -370,6 +395,13 @@ impl<'a> Checker<'a> {
                 ]),
             );
         }
+    }
+
+    fn is_error_result_ty(&self, ty: &TypeExpr) -> bool {
+        matches!(
+            self.resolve_type_alias(ty),
+            TypeExpr::Named { name, .. } if name == "error"
+        )
     }
 
     /// The statically known value count of a non-call binding source:
@@ -398,6 +430,29 @@ impl<'a> Checker<'a> {
     }
 
     fn forwarded_tuple_arity(&self, st: &FnState, callee: &Expr, arg: &Expr) -> Option<usize> {
+        if let Expr::Try { operand, .. } = unwrap_parens_and_move(arg) {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                if self.lookup_binding(st, name).is_none() {
+                    let head = Self::base_named_type_str(name);
+                    if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                        let buildable_owns_try = matches!(
+                            unwrap_parens(operand),
+                            Expr::Call { callee: tc, .. } if match unwrap_parens(tc) {
+                                Expr::Ident { name: tn, .. } => self.lookup_binding(st, tn).is_none() && self.fns.get(tn.as_str()).is_some_and(|f| matches!(f.results.last().map(|r| &r.ty), Some(TypeExpr::Named { name: rn, .. }) if rn == "error")),
+                                Expr::FnLit { results, .. } => matches!(results.last().map(|r| &r.ty), Some(TypeExpr::Named { name: rn, .. }) if rn == "error"),
+                                _ => false,
+                            }
+                        );
+                        if buildable_owns_try
+                            && self.static_result_count(st, arg).is_some_and(|(_, r)| r != decl.params.len())
+                        {
+                            return None;
+                        }
+                    }
+                }
+            }
+            return Some(1);
+        }
         match unwrap_parens_and_move(callee) {
             Expr::Ident { name, .. } => {
                 if self.lookup_binding(st, name).is_some() {
@@ -466,29 +521,42 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `Some((callee, result count))` when `expr` is a direct or indirect call
-    /// with a statically known result count (excluding `?`-unwrapped calls).
+    /// `Some((callee, result count))` when `expr` is a direct, indirect, or
+    /// `?`-unwrapped call with a statically known result count.
     fn static_result_count(&self, st: &FnState, expr: &Expr) -> Option<(String, usize)> {
-        let Expr::Call { callee, .. } = unwrap_parens_and_move(expr) else {
-            return None;
+        let (callee, is_try) = match unwrap_parens_and_move(expr) {
+            Expr::Call { callee, .. } => (callee.as_ref(), false),
+            Expr::Try { operand, .. } => match unwrap_parens_and_move(operand) {
+                Expr::Call { callee, .. } => (callee.as_ref(), true),
+                _ => return None,
+            },
+            _ => return None,
         };
-        match unwrap_parens_and_move(callee) {
+        let (label, count, err_tail) = match unwrap_parens_and_move(callee) {
             Expr::Ident { name, .. } => {
                 // 1. Local bindings (fn values, closures, parameters, aliases)
                 if self.lookup_binding(st, name).is_some() {
                     if let Some(TypeExpr::Fn { results, .. }) =
                         self.resolve_fn_callee_ty(st, callee)
                     {
-                        return Some((name.clone(), results.len()));
+                        let err = results.last().is_some_and(|r| self.is_error_result_ty(r));
+                        (name.clone(), results.len(), err)
+                    } else {
+                        return None;
                     }
-                    return None;
+                } else {
+                    // 2. Direct call to a file-local top-level function
+                    let head = Self::base_named_type_str(name);
+                    let decl = self.fns.get(name.as_str()).or_else(|| self.fns.get(head))?;
+                    let err = decl.results.last().is_some_and(|r| self.is_error_result_ty(&r.ty));
+                    (name.clone(), decl.results.len(), err)
                 }
-                // 2. Direct call to a file-local top-level function
-                let head = Self::base_named_type_str(name);
-                let decl = self.fns.get(name.as_str()).or_else(|| self.fns.get(head))?;
-                Some((name.clone(), decl.results.len()))
             }
-            Expr::FnLit { results, .. } => Some(("fn".to_string(), results.len())),
+            Expr::FnLit { results, .. } => (
+                "fn".to_string(),
+                results.len(),
+                results.last().is_some_and(|r| self.is_error_result_ty(&r.ty)),
+            ),
             Expr::Field {
                 base,
                 name: method_name,
@@ -500,10 +568,28 @@ impl<'a> Checker<'a> {
                     if self.lookup_binding(st, pkg).is_none() {
                         let full = format!("{pkg}.{head}");
                         if let Some(decl) = self.fns.get(full.as_str()) {
-                            return Some((format!("{pkg}.{method_name}"), decl.results.len()));
+                            let err = decl.results.last().is_some_and(|r| self.is_error_result_ty(&r.ty));
+                            let lbl = format!("{pkg}.{method_name}");
+                            return if is_try {
+                                (err && !decl.results.is_empty()).then(|| (format!("{lbl}()?"), decl.results.len() - 1))
+                            } else {
+                                Some((lbl, decl.results.len()))
+                            };
+                        }
+                        if is_try && pkg == "httptest" && matches!(head, "get" | "post") {
+                            return Some((format!("{pkg}.{method_name}()?"), 2));
                         }
                         if let Some(count) = foreign::package_result_count(pkg.as_str(), head) {
-                            return Some((format!("{pkg}.{method_name}"), count));
+                            let lbl = format!("{pkg}.{method_name}");
+                            return if is_try {
+                                let non_err = matches!(
+                                    (pkg.as_str(), head),
+                                    ("strings", "cut" | "cut_prefix" | "cut_suffix" | "Cut" | "CutPrefix" | "CutSuffix")
+                                );
+                                (!non_err && count >= 1).then(|| (format!("{lbl}()?"), count - 1))
+                            } else {
+                                Some((lbl, count))
+                            };
                         }
                     }
                 }
@@ -526,26 +612,38 @@ impl<'a> Checker<'a> {
                     });
                 if let Some(rb) = recv_base {
                     if let Some(decl) = self.method_decls.get(&(rb, head.to_string())) {
-                        return Some((
-                            format!("{}.{method_name}", base.render()),
-                            decl.results.len(),
-                        ));
+                        let err = decl.results.last().is_some_and(|r| self.is_error_result_ty(&r.ty));
+                        let lbl = format!("{}.{method_name}", base.render());
+                        return if is_try {
+                            (err && !decl.results.is_empty()).then(|| (format!("{lbl}()?"), decl.results.len() - 1))
+                        } else {
+                            Some((lbl, decl.results.len()))
+                        };
                     }
                 }
                 // 3. Struct field holding a fn value (`h.mm(3, 9)`)
                 let callee_ty = self.resolve_fn_callee_ty(st, callee)?;
                 if let TypeExpr::Fn { results, .. } = callee_ty {
-                    return Some((callee.render(), results.len()));
+                    let err = results.last().is_some_and(|r| self.is_error_result_ty(r));
+                    (callee.render(), results.len(), err)
+                } else {
+                    return None;
                 }
-                None
             }
             other => {
                 let callee_ty = self.resolve_fn_callee_ty(st, other)?;
                 if let TypeExpr::Fn { results, .. } = callee_ty {
-                    return Some((callee.render(), results.len()));
+                    let err = results.last().is_some_and(|r| self.is_error_result_ty(r));
+                    (callee.render(), results.len(), err)
+                } else {
+                    return None;
                 }
-                None
             }
+        };
+        if is_try {
+            (err_tail && count >= 1).then(|| (format!("{label}()?"), count - 1))
+        } else {
+            Some((label, count))
         }
     }
 
@@ -813,6 +911,7 @@ impl<'a> Checker<'a> {
                         let shape = self.shape_of_expr(&pre_st, val);
                         let ty = self.ty_of_expr(&pre_st, val).or_else(|| l.ty.clone());
                         self.define_binding(st, name, shape, ty, immutable, false, is_let);
+                        st.closure_defs.remove(name);
                         match unwrap_parens_and_move(val) {
                             Expr::Ident { name: src, .. } if src != name => {
                                 st.aliases.insert(name.clone(), src.clone());
@@ -830,6 +929,16 @@ impl<'a> Checker<'a> {
                             }
                             _ => {}
                         }
+                    }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let pre_st = st.clone();
+                    let shapes = self.multi_value_shapes(&pre_st, &l.values[0], l.names.len());
+                    let tys = self.multi_value_tys(&pre_st, &l.values[0], l.names.len());
+                    for (i, name) in l.names.iter().enumerate() {
+                        let shape = shapes.get(i).cloned().unwrap_or(TypeShape::Unknown);
+                        let ty = l.ty.clone().or_else(|| tys.get(i).cloned().flatten());
+                        self.define_binding(st, name, shape, ty, immutable, false, is_let);
+                        st.closure_defs.remove(name);
                     }
                 }
             }
@@ -870,6 +979,27 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Stmt::Assign {
+                targets,
+                op: AssignOp::Assign,
+                values,
+                ..
+            } if values.len() == 1 && targets.len() > 1 => {
+                let pre_st = st.clone();
+                let tys = self.multi_value_tys(&pre_st, &values[0], targets.len());
+                for (i, t) in targets.iter().enumerate() {
+                    if let PlaceKind::Ident(name) = &t.kind {
+                        let ty = tys.get(i).cloned().flatten();
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if ty.is_some() || b.ty.is_none() {
+                                b.ty = ty;
+                            }
+                        }
+                        st.aliases.remove(name);
+                        st.closure_defs.remove(name);
+                    }
+                }
+            }
             Stmt::If {
                 init,
                 then,
@@ -891,9 +1021,31 @@ impl<'a> Checker<'a> {
                 self.check_const_closure_block(st, body);
                 st.scope_pop();
             }
-            Stmt::Match { arms, .. } => {
+            Stmt::Match { subject, arms, .. } => {
+                let elem_ty = self
+                    .ty_of_expr(st, subject)
+                    .map(|t| self.resolve_type_alias(&t))
+                    .and_then(|t| match t {
+                        TypeExpr::Option { elem, .. } => Some(*elem),
+                        _ => None,
+                    });
                 for arm in arms {
                     st.scope_push();
+                    if let hy_syntax::MatchPattern::Path {
+                        segments,
+                        binding: Some(b),
+                    } = &arm.pattern
+                    {
+                        if segments == &["some"] {
+                            self.bind_match_arm(st, b, subject, false);
+                            st.closure_defs.remove(b);
+                            if let Some(t) = &elem_ty {
+                                if let Some(bind) = st.env_lookup_mut(b) {
+                                    bind.ty = Some(t.clone());
+                                }
+                            }
+                        }
+                    }
                     self.check_const_closure_block(st, &arm.body);
                     st.scope_pop();
                 }
