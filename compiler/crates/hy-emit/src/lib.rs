@@ -618,6 +618,9 @@ pub struct Emitter {
     /// a call can run such a closure inside an O8 slot-loan window, so any
     /// slot loan keyed by one of these names snapshots its key into `hyKeyN`.
     closure_written: BTreeSet<String>,
+    /// True when the current fn declares any named result item (so Go's
+    /// result signature is fully named and bare `return` returns live slots).
+    cur_fn_has_named_results: bool,
     /// Per-fn result shapes, collected eagerly (Batch I): name →
     /// (n_results, ends_in_error, first_result's binding kind, per-param
     /// pointer-base types). Drives the `?` hoist arity (13:
@@ -689,6 +692,7 @@ impl Emitter {
             export_pub: false,
             cur_fn_error_returns: None,
             closure_written: BTreeSet::new(),
+            cur_fn_has_named_results: false,
             fn_shapes: BTreeMap::new(),
             closure_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
@@ -1434,6 +1438,7 @@ impl Emitter {
         if let Some(body) = &f.body {
             Self::collect_closure_writes_block(body, false, &mut self.closure_written);
         }
+        self.cur_fn_has_named_results = f.results.iter().any(|r| r.name.is_some());
         if !is_main && !f.results.is_empty() && !main_needs_wrapper {
             let last_is_err = matches!(
                 &f.results.last().unwrap().ty,
