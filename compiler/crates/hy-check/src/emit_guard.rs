@@ -841,6 +841,49 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------------
 
     fn check_negative_shift(&mut self, rhs: &Expr, span: Span) {
+        match unwrap_parens(rhs) {
+            Expr::Lit {
+                kind: LitKind::Float(_),
+                ..
+            } => {
+                let msg = format!(
+                    "shift count `{}` must be an integer, not a float constant (HYB-E6005)",
+                    rhs.render()
+                );
+                self.diags.push(
+                    Diagnostic::error("HYB-E6005", self.path.clone(), span, msg).with_notes(vec![
+                        format!(
+                            "why: Go rejects non-integer shift count `{}` (`shift count {} must be integer`), so an accepted Hybrid program would emit unbuildable Go (issue #1777)",
+                            rhs.render(),
+                            rhs.render()
+                        ),
+                        "fix: use a non-negative integer shift count".to_string(),
+                    ]),
+                );
+                return;
+            }
+            Expr::Lit {
+                kind: LitKind::Str(_) | LitKind::RawStr(_) | LitKind::Bool(_) | LitKind::Nil,
+                ..
+            }
+            | Expr::Interp { .. } => {
+                let msg = format!(
+                    "invalid shift count `{}`: shift count must be an integer (HYB-E6005)",
+                    rhs.render()
+                );
+                self.diags.push(
+                    Diagnostic::error("HYB-E6005", self.path.clone(), span, msg).with_notes(vec![
+                        format!(
+                            "why: Go rejects non-integer or untyped nil shift count `{}` in shift expressions, so an accepted Hybrid program would emit unbuildable Go (issue #1777)",
+                            rhs.render()
+                        ),
+                        "fix: use a non-negative integer shift count".to_string(),
+                    ]),
+                );
+                return;
+            }
+            _ => {}
+        }
         let Some(v) = const_int_value(rhs) else {
             return;
         };
