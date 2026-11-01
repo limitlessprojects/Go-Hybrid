@@ -560,6 +560,8 @@ pub struct Emitter {
     /// The enclosing fn's single result type IF it is an option (`option[v]`)
     /// — `return none` lowers to that type's zero value.
     cur_option_result: Option<String>,
+    cur_results_all_named: bool,
+    cur_results_fnlit_depth: usize,
     /// Go label of the loop currently open in THIS function (innermost last).
     /// `hyLoop` is a fixed name, so two sibling loops that each own a labeled
     /// `break loop` would emit two `hyLoop:` declarations and the module would
@@ -647,6 +649,10 @@ pub struct Emitter {
     local_vars: BTreeSet<String>,
     /// Functions whose first result is a pointer type.
     ptr_returning_fns: BTreeSet<String>,
+    /// Functions/methods/associated functions whose first result is a user struct.
+    fn_return_structs: BTreeMap<String, String>,
+    /// Functions/methods/struct fields whose result/field type is a callable `fn(...) ...`.
+    fn_return_callables: BTreeMap<String, (usize, bool)>,
     /// N5 (zeroinit.rs): non-generic user struct → its declared fields,
     /// and user type alias → its target, for zero values that allocate.
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
@@ -660,6 +666,11 @@ pub(crate) struct ScopeSnapshot {
     var_struct: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
     loan_aliases: BTreeMap<String, BTreeSet<String>>,
+    closure_shapes: BTreeMap<String, (usize, bool)>,
+    cur_option_result: Option<String>,
+    cur_fn_conv_result: Option<&'static str>,
+    cur_results_all_named: bool,
+    cur_results_fnlit_depth: usize,
 }
 
 impl Emitter {
@@ -675,6 +686,8 @@ impl Emitter {
             for_depth: 0,
             assoc_fns: BTreeSet::new(),
             cur_option_result: None,
+            cur_results_all_named: false,
+            cur_results_fnlit_depth: 0,
             loop_labels: Vec::new(),
             loop_label_n: 0,
             loan_frames: Vec::new(),
@@ -698,6 +711,8 @@ impl Emitter {
             loan_aliases: BTreeMap::new(),
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
+            fn_return_structs: BTreeMap::new(),
+            fn_return_callables: BTreeMap::new(),
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
@@ -716,6 +731,11 @@ impl Emitter {
             var_struct: self.var_struct.clone(),
             pointer_vars: self.pointer_vars.clone(),
             loan_aliases: self.loan_aliases.clone(),
+            closure_shapes: self.closure_shapes.clone(),
+            cur_option_result: self.cur_option_result.clone(),
+            cur_fn_conv_result: self.cur_fn_conv_result,
+            cur_results_all_named: self.cur_results_all_named,
+            cur_results_fnlit_depth: self.cur_results_fnlit_depth,
         }
     }
 
@@ -726,6 +746,11 @@ impl Emitter {
         self.var_struct = saved.var_struct;
         self.pointer_vars = saved.pointer_vars;
         self.loan_aliases = saved.loan_aliases;
+        self.closure_shapes = saved.closure_shapes;
+        self.cur_option_result = saved.cur_option_result;
+        self.cur_fn_conv_result = saved.cur_fn_conv_result;
+        self.cur_results_all_named = saved.cur_results_all_named;
+        self.cur_results_fnlit_depth = saved.cur_results_fnlit_depth;
     }
 
     pub(crate) fn shadow_local_name(&mut self, name: &str) {
@@ -735,6 +760,7 @@ impl Emitter {
             self.var_ty.remove(name);
             self.var_struct.remove(name);
             self.pointer_vars.remove(name);
+            self.closure_shapes.remove(name);
             self.loan_aliases.remove(name);
             for aliases in self.loan_aliases.values_mut() {
                 aliases.remove(name);
@@ -836,13 +862,17 @@ impl Emitter {
                 _ => None,
             })
             .collect();
-        self.ptr_returning_fns = file
-            .fns()
+        let all_fns = file.decls.iter().filter_map(|d| match d {
+            Decl::Fn(f) => Some(f),
+            _ => None,
+        });
+        self.ptr_returning_fns = all_fns
+            .clone()
             .filter(|f| f.results.first().is_some_and(|r| self.is_pointer_ty(&r.ty)))
-            .map(|f| f.name.clone())
+            .map(|f| self.fn_shape_key(f))
             .collect();
-        self.fn_shapes = file
-            .fns()
+        self.fn_shapes = all_fns
+            .clone()
             .map(|f| {
                 let err = matches!(
                     f.results.last(),
@@ -868,9 +898,30 @@ impl Emitter {
                 // made the ? hoister emit `hyT0, hyErr1 := step()` against a
                 // `func ... error` (assignment mismatch, accepted-then-fails-go-build).
                 let value_count = if err { f.results.len() - 1 } else { f.results.len() };
-                (f.name.clone(), (value_count, err, kind, ptr_params))
+                (self.fn_shape_key(f), (value_count, err, kind, ptr_params))
             })
             .collect();
+        for d in &file.decls {
+            if let Decl::Struct(s) = d {
+                for f in &s.fields {
+                    if let Some(cs) = self.ty_callable_shape(&f.ty) {
+                        self.fn_return_callables.insert(format!("{}::{}", s.name, f.name), cs);
+                    }
+                }
+            } else if let Decl::Fn(f) = d {
+                let key = self.fn_shape_key(f);
+                if self.fn_shapes.get(&key).is_some_and(|(n, _, _, _)| *n > 0) {
+                    if let Some(r0) = f.results.first() {
+                        if let Some(sn) = self.ty_struct_name(&r0.ty) {
+                            self.fn_return_structs.insert(key.clone(), sn);
+                        }
+                        if let Some(cs) = self.ty_callable_shape(&r0.ty) {
+                            self.fn_return_callables.insert(key, cs);
+                        }
+                    }
+                }
+            }
+        }
 
         // Pass 1: render every declaration into the body buffer, collecting
         // used packages as we go. Top-level decls separate with a blank line
@@ -1412,20 +1463,7 @@ impl Emitter {
             .unwrap_or(false);
         let main_needs_wrapper = is_main && (!f.results.is_empty() || body_has_try);
 
-        // `return none` lowers to the declared option result's zero value.
-        self.cur_option_result = None;
-        // Batch E: a single conversion-target result (`fn logging(…) http.handler`)
-        // makes `return fn(…)` wrap in the conversion (HandlerFunc).
-        self.cur_fn_conv_result = None;
-        if f.results.len() == 1 && f.results[0].name.is_none() {
-            let rt = self.type_text(&f.results[0].ty);
-            if rt.starts_with("option[") {
-                self.cur_option_result = Some(rt);
-            }
-            if let Some(conv) = self.result_conv_key(&f.results[0].ty) {
-                self.cur_fn_conv_result = Some(conv);
-            }
-        }
+        self.update_result_context(&f.results);
 
         // E3 in an error-result fn (package mode, example 09): the
         // propagation tail returns the zero results + the error.
@@ -1605,7 +1643,56 @@ impl Emitter {
     /// as two named string results, so preserving a mixed Hybrid list verbatim
     /// can change its types. Name every result only when the list is mixed;
     /// fully named and fully unnamed lists retain their existing emission.
+    fn update_result_context(&mut self, results: &[FnResult]) {
+        self.cur_results_fnlit_depth = self.fnlit_depth;
+        self.cur_results_all_named =
+            !results.is_empty() && results.iter().all(|r| r.name.is_some());
+        self.cur_option_result = None;
+        self.cur_fn_conv_result = None;
+        if results.len() == 1 {
+            let rt = self.type_text(&results[0].ty);
+            if rt.starts_with("option[") {
+                self.cur_option_result = Some(rt);
+            }
+            if let Some(conv) = self.result_conv_key(&results[0].ty) {
+                self.cur_fn_conv_result = Some(conv);
+            }
+        }
+    }
+
+    fn fn_shape_key(&self, f: &FnDecl) -> String {
+        match &f.receiver {
+            None => f.name.clone(),
+            Some(recv) => {
+                let rty = self.resolve_type_alias(&recv.ty);
+                let base = base_ty_name(rty).unwrap_or_default();
+                format!("{}::{}", base.split('[').next().unwrap_or(&base), f.name)
+            }
+        }
+    }
+
+    pub(crate) fn ty_callable_shape(&self, ty: &TypeExpr) -> Option<(usize, bool)> {
+        match self.resolve_type_alias(ty) {
+            TypeExpr::Fn { results, .. } => {
+                let err = matches!(results.last(), Some(TypeExpr::Named { name, .. }) if name == "error");
+                Some((if err { results.len() - 1 } else { results.len() }, err))
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn ty_struct_name(&self, ty: &TypeExpr) -> Option<String> {
+        let resolved = match self.resolve_type_alias(ty) {
+            TypeExpr::Pointer { to, .. } => self.resolve_type_alias(to),
+            other => other,
+        };
+        let base = base_ty_name(resolved)?;
+        let sname = base.split('[').next().unwrap_or(&base);
+        self.struct_fields.contains_key(sname).then(|| sname.to_string())
+    }
+
     fn result_list_text(&mut self, results: &[FnResult]) -> String {
+        self.update_result_context(results);
         let mixed = results.iter().any(|r| r.name.is_some())
             && results.iter().any(|r| r.name.is_none());
         let mut used: BTreeSet<String> = results
@@ -1696,13 +1783,9 @@ impl Emitter {
             Expr::Paren { inner, .. } => self.expr_is_pointer(inner),
             Expr::Try { operand, .. } => self.expr_is_pointer(operand),
             Expr::Ident { name, .. } => self.pointer_vars.contains(name),
-            Expr::Call { callee, .. } => {
-                if let Expr::Ident { name, .. } = callee.as_ref() {
-                    self.ptr_returning_fns.contains(name)
-                } else {
-                    false
-                }
-            }
+            Expr::Call { callee, .. } => self
+                .callee_shape_key(callee)
+                .is_some_and(|k| self.ptr_returning_fns.contains(&k)),
             _ => false,
         }
     }
@@ -1712,6 +1795,9 @@ impl Emitter {
     /// whose type is a user struct (`pool_stats`, value or pointer) lands
     /// in var_struct — `stats.mu.lock()` types through struct_fields.
     fn register_var_ty(&mut self, name: &str, ty: &TypeExpr) {
+        if let Some(shape) = self.ty_callable_shape(ty) {
+            self.closure_shapes.insert(name.to_string(), shape);
+        }
         let (base, ptr) = match self.resolve_type_alias(ty) {
             TypeExpr::Pointer { to, .. } => (base_ty_name(self.resolve_type_alias(to)), true),
             t => (base_ty_name(t), false),
