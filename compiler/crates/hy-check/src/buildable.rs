@@ -4482,6 +4482,25 @@ impl<'a> Collector<'a> {
             );
             return;
         }
+        // #2989: `set[T]` is `OpKind::Unknown`, which the `!`/`-` gates below
+        // treat as fail-open. A set is a Go struct, so neither operator is
+        // defined on it (`operator - not defined on ... of struct type set[T]`).
+        if matches!(op, UnOp::Not | UnOp::Neg) {
+            if let Some(elem) = self.set_elem_of_expr(operand) {
+                let sym = op.render();
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "operator `{}` not defined on `{}` (type `set[{}]`) (HYB-E1002)",
+                        sym,
+                        operand.render(),
+                        elem
+                    ),
+                    "unary operators are not defined on a set",
+                );
+                return;
+            }
+        }
         let k = self.kind_of_expr(operand);
         match op {
             UnOp::Not => {
@@ -4652,6 +4671,45 @@ impl<'a> Collector<'a> {
         self.check_single_value_position(rhs, "a binary operation", /*binding_position=*/ false);
         let lk = self.kind_of_expr(lhs);
         let rk = self.kind_of_expr(rhs);
+        // #2989: `set[T]` is `OpKind::Unknown`, which every per-op gate below
+        // treats as fail-open. A set is a Go struct, so no binary operator is
+        // defined on it (`operator + not defined on ... of struct type set[T]`).
+        if let Some((e, elem)) = [lhs, rhs]
+            .into_iter()
+            .find_map(|e| self.set_elem_of_expr(e).map(|el| (e, el)))
+        {
+            let op_str = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Mod => "%",
+                BinOp::BitAnd => "&",
+                BinOp::BitOr => "|",
+                BinOp::BitXor => "^",
+                BinOp::And => "&&",
+                BinOp::Or => "||",
+                BinOp::Shl => "<<",
+                BinOp::Eq => "==",
+                BinOp::Ne => "!=",
+                BinOp::Lt => "<",
+                BinOp::Le => "<=",
+                BinOp::Gt => ">",
+                BinOp::Ge => ">=",
+                _ => ">>",
+            };
+            self.emit_e1002(
+                span,
+                format!(
+                    "operator `{}` not defined on `{}` (type `set[{}]`) (HYB-E1002)",
+                    op_str,
+                    e.render(),
+                    elem
+                ),
+                "binary operators are not defined on a set",
+            );
+            return;
+        }
         match op {
             // `==` / `!=`: incomparable shapes (slice, map, func) are rejected
             // by `emit_guard.rs` (HYB-E2006). Mismatched concrete operand types
@@ -6524,6 +6582,20 @@ impl<'a> Collector<'a> {
                 }
                 let slice_arg = &args[0].value;
                 let sk = self.kind_of_expr(slice_arg);
+                // #2989: `set[T]` is `OpKind::Unknown` -> the slice gate below
+                // fails open, but a set is a Go struct, not a slice.
+                if let Some(elem) = self.set_elem_of_expr(slice_arg) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "first argument to `append` must be a slice, found `{}` (type `set[{}]`) (HYB-E2005)",
+                            slice_arg.render(),
+                            elem
+                        ),
+                        "the first argument to `append(xs, ...)` must be a slice (`[]T`)",
+                    );
+                    return;
+                }
                 if !matches!(sk, OpKind::Unknown | OpKind::Slice(_)) {
                     self.emit_e2005(
                         span,
@@ -6544,6 +6616,23 @@ impl<'a> Collector<'a> {
                 let src_arg = &args[1].value;
                 let dk = self.kind_of_expr(dst_arg);
                 let sk = self.kind_of_expr(src_arg);
+
+                // #2989: `set[T]` is `OpKind::Unknown` -> the slice gates below
+                // fail open; a set is a Go struct, not a slice.
+                if let Some(elem) = self
+                    .set_elem_of_expr(dst_arg)
+                    .or_else(|| self.set_elem_of_expr(src_arg))
+                {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "arguments to `copy` must be slices, found `set[{}]` (HYB-E2005)",
+                            elem
+                        ),
+                        "`copy(dst, src)` requires slices (`[]T`)",
+                    );
+                    return;
+                }
 
                 if !matches!(dk, OpKind::Unknown | OpKind::Slice(_)) {
                     self.emit_e2005(
@@ -6623,6 +6712,20 @@ impl<'a> Collector<'a> {
                 let mut first_typed_scalar: Option<(&Expr, &'static str)> = None;
                 for arg in args {
                     let k = self.kind_of_expr(&arg.value);
+                    // #2989: `set[T]` is `OpKind::Unknown` -> skipped by the
+                    // `continue` below, but a set has no order.
+                    if let Some(elem) = self.set_elem_of_expr(&arg.value) {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "invalid argument `{}` (type `set[{}]`) for `{name}`: type has no order (HYB-E2005)",
+                                arg.value.render(),
+                                elem
+                            ),
+                            "the arguments to `min` and `max` must have ordered type (integers, floats, or strings)",
+                        );
+                        return;
+                    }
                     if matches!(k, OpKind::Unknown | OpKind::Void) {
                         continue;
                     }
