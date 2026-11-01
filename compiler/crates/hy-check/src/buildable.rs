@@ -3105,7 +3105,7 @@ impl<'a> Collector<'a> {
                         return Some(vec![first]);
                     }
                     "make" => return Some(vec![self.make_kind(args)]),
-                    "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
+                    "new" => return Some(vec![self.new_kind(args)]),
                     "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
                     "recover" => return Some(vec![OpKind::Interface]),
                     "min" | "max" => {
@@ -3199,6 +3199,37 @@ impl<'a> Collector<'a> {
             Expr::Ident { name, .. } => self.kind_of_named(name, 0),
             _ => OpKind::Unknown,
         }
+    }
+
+    fn new_kind(&self, args: &[CallArg]) -> OpKind {
+        let Some(first) = args.first() else {
+            return OpKind::Pointer(Box::new(OpKind::Unknown));
+        };
+        let bare = unwrap_parens(&first.value);
+        let inner = match bare {
+            Expr::StructLit { ty: Some(t), .. } => self.kind_of_ty(t, 0),
+            Expr::SliceLit { elem: Some(t), .. } => {
+                if let Some((_, inner_elem, _)) = bare.as_array_lit() {
+                    OpKind::Array(Box::new(self.kind_of_ty(inner_elem, 0)))
+                } else {
+                    OpKind::Slice(Box::new(self.kind_of_ty(t, 0)))
+                }
+            }
+            Expr::MapLit { key, value, .. } => OpKind::Map(
+                Box::new(self.kind_of_ty(key, 0)),
+                Box::new(self.kind_of_ty(value, 0)),
+            ),
+            Expr::Ident { name, .. } => self.kind_of_named(name, 0),
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    self.kind_of_named(&format!("{pkg}.{name}"), 0)
+                } else {
+                    OpKind::Unknown
+                }
+            }
+            _ => OpKind::Unknown,
+        };
+        OpKind::Pointer(Box::new(inner))
     }
 
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
