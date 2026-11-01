@@ -25,7 +25,16 @@ impl<'a> Checker<'a> {
         value: &Expr,
         st: Option<&FnState>,
     ) {
-        if is_composite_lit(value) {
+        let empty_st = FnState::default();
+        let st_ref = st.unwrap_or(&empty_st);
+        if is_composite_lit(value)
+            || self.resolve_enum_unit_variant(st_ref, value).is_some()
+            || matches!(
+                unwrap_parens(value),
+                Expr::Call { callee, .. }
+                    if self.resolve_enum_payload_variant_callee(st_ref, callee).is_some()
+            )
+        {
             // Emitter rewrites these to `var` — not the #205 contract break.
             return;
         }

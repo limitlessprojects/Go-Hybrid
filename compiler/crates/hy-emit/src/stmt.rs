@@ -365,7 +365,7 @@ impl Emitter {
                     },
                     (Some(t), Some(v)) => {
                         self.hoist_tries_expr(v)?;
-                        let mut e = self.emit_expr(v, 0)?;
+                        let mut e = self.emit_expr_exp(v, 0, l.ty.as_ref())?;
                         if matches!(alias, Some((_, true))) {
                             e = format!("&{}", e);
                         }
@@ -425,11 +425,15 @@ impl Emitter {
                     .values
                     .first()
                     .ok_or_else(|| EmitError::unsupported("`const` without an initializer"))?;
-                let value = self.emit_expr(first, 0)?;
+                let value = self.emit_expr_exp(first, 0, l.ty.as_ref())?;
                 let composite = matches!(
                     Self::peel_parens(first),
                     Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
-                );
+                ) || self.is_enum_variant_expr(first)
+                    || matches!(
+                        Self::peel_parens(first),
+                        Expr::Ident { name, .. } if name == "none"
+                    );
                 let kw = if composite { "var" } else { "const" };
                 let names = l.names.join(", ");
                 match &l.ty {
@@ -2395,7 +2399,254 @@ impl Emitter {
     ///
     /// General enum subjects land with the enum Go-representation decision
     /// (SPEC D-note); this surface is exactly what example 07 needs.
+    fn resolve_enum_match_pattern(
+        &self,
+        pat: &MatchPattern,
+    ) -> Option<(String, usize, Option<String>)> {
+        match pat {
+            MatchPattern::Path { segments, binding } => match segments.as_slice() {
+                [vname] if vname != "some" && vname != "none" => {
+                    let (ename, tag, _) = self.bare_variants.get(vname)?;
+                    Some((ename.clone(), *tag, binding.clone()))
+                }
+                [ename, vname] => {
+                    let vs = self.enums.get(ename)?;
+                    let (tag, _) = vs.iter().enumerate().find(|(_, (v, _))| v == vname)?;
+                    Some((ename.clone(), tag, binding.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn emit_enum_match(&mut self, subject: &Expr, arms: &[MatchArm]) -> Result<(), EmitError> {
+        enum EnumArmKind {
+            Variant {
+                ename: String,
+                tag: usize,
+                binding: Option<String>,
+            },
+            Wildcard,
+        }
+        let mut classified: Vec<(EnumArmKind, &MatchArm)> = Vec::new();
+        for a in arms {
+            let kind = match &a.pattern {
+                MatchPattern::Wildcard => EnumArmKind::Wildcard,
+                other => {
+                    if let Some((ename, tag, binding)) = self.resolve_enum_match_pattern(other) {
+                        EnumArmKind::Variant {
+                            ename,
+                            tag,
+                            binding,
+                        }
+                    } else {
+                        return Err(EmitError::unsupported(format!(
+                            "match pattern `{:?}` in enum match",
+                            other
+                        )));
+                    }
+                }
+            };
+            classified.push((kind, a));
+        }
+        if let Some((EnumArmKind::Wildcard, _)) = classified.first() {
+            return Err(EmitError::unsupported(
+                "`_` as the FIRST match arm (MVP-0 lowers some→if, none/_→else)",
+            ));
+        }
+
+        self.hoist_tries_expr(subject)?;
+        let temp = self.next_temp("hyMatch");
+        let s = self.emit_expr(subject, 0)?;
+        self.push(&format!("{} := {}", temp, s));
+
+        let has_guards = classified.iter().any(|(_, arm)| arm.guard.is_some());
+        if !has_guards {
+            let mut reachable: Vec<(&EnumArmKind, &MatchArm)> = Vec::new();
+            let mut seen_tags = std::collections::BTreeSet::new();
+            let mut enum_name: Option<&str> = None;
+            let mut has_wildcard = false;
+            for (kind, arm) in &classified {
+                match kind {
+                    EnumArmKind::Variant { ename, tag, .. } => {
+                        if enum_name.is_none() {
+                            enum_name = Some(ename.as_str());
+                        }
+                        if seen_tags.insert(*tag) {
+                            reachable.push((kind, *arm));
+                        }
+                    }
+                    EnumArmKind::Wildcard => {
+                        has_wildcard = true;
+                        reachable.push((kind, *arm));
+                        break;
+                    }
+                }
+            }
+            let total_variants = enum_name
+                .and_then(|en| self.enums.get(en))
+                .map(|vs| vs.len())
+                .unwrap_or(0);
+            let exhaustive =
+                has_wildcard || (total_variants > 0 && seen_tags.len() >= total_variants);
+
+            if reachable.is_empty() {
+                self.push(&format!("_ = {}", temp));
+                return Ok(());
+            }
+            if reachable.len() == 1 && exhaustive {
+                self.push(&format!("_ = {}", temp));
+                let (kind, arm) = reachable[0];
+                self.push("{");
+                let saved_scope = self.save_scope();
+                if let EnumArmKind::Variant {
+                    tag,
+                    binding: Some(b),
+                    ..
+                } = kind
+                {
+                    self.shadow_local_name(b);
+                    if b != "_" && crate::rangebind::body_reads(&arm.body, b) {
+                        self.indent += 1;
+                        self.push(&format!("{} := {}.v{}", b, temp, tag));
+                        self.indent -= 1;
+                    }
+                }
+                let arm_res = self.emit_block_body(&arm.body.stmts);
+                self.restore_scope(saved_scope);
+                arm_res?;
+                self.push("}");
+                return Ok(());
+            }
+
+            for (i, (kind, arm)) in reachable.iter().enumerate() {
+                if i == 0 {
+                    if let EnumArmKind::Variant { tag, .. } = kind {
+                        self.push(&format!("if {}.tag == {} {{", temp, tag));
+                    }
+                } else if i + 1 == reachable.len() && exhaustive {
+                    self.push("} else {");
+                } else {
+                    match kind {
+                        EnumArmKind::Variant { tag, .. } => {
+                            self.push(&format!("}} else if {}.tag == {} {{", temp, tag));
+                        }
+                        EnumArmKind::Wildcard => {
+                            self.push("} else {");
+                        }
+                    }
+                }
+                let saved_scope = self.save_scope();
+                if let EnumArmKind::Variant {
+                    tag,
+                    binding: Some(b),
+                    ..
+                } = kind
+                {
+                    self.shadow_local_name(b);
+                    if b != "_" && crate::rangebind::body_reads(&arm.body, b) {
+                        self.indent += 1;
+                        self.push(&format!("{} := {}.v{}", b, temp, tag));
+                        self.indent -= 1;
+                    }
+                }
+                let arm_res = self.emit_block_body(&arm.body.stmts);
+                self.restore_scope(saved_scope);
+                arm_res?;
+            }
+            self.push("}");
+            return Ok(());
+        }
+
+        // Guarded enum match arms:
+        let matched_temp = self.next_temp("hyMatched");
+        self.push(&format!("{} := false", matched_temp));
+        for (i, (kind, arm)) in classified.iter().enumerate() {
+            if i > 0 {
+                self.push(&format!("if !{} {{", matched_temp));
+                self.indent += 1;
+            }
+            let saved_scope = self.save_scope();
+            let arm_res = (|| -> Result<(), EmitError> {
+                match kind {
+                    EnumArmKind::Variant { tag, binding, .. } => {
+                        self.push(&format!("if {}.tag == {} {{", temp, tag));
+                        self.indent += 1;
+                        if let Some(b) = binding {
+                            self.shadow_local_name(b);
+                        }
+                        if let Some(g) = &arm.guard {
+                            let guard_reads = binding
+                                .as_deref()
+                                .is_some_and(|b| b != "_" && crate::rangebind::expr_reads(g, b));
+                            if guard_reads {
+                                if let Some(b) = binding {
+                                    self.push(&format!("{} := {}.v{}", b, temp, tag));
+                                }
+                            }
+                            self.hoist_tries_expr(g)?;
+                            let gt = self.emit_expr(g, 0)?;
+                            self.push(&format!("if {} {{", gt));
+                            self.indent += 1;
+                            self.push(&format!("{} = true", matched_temp));
+                            if !guard_reads {
+                                if let Some(b) = binding {
+                                    if b != "_" && crate::rangebind::body_reads(&arm.body, b) {
+                                        self.push(&format!("{} := {}.v{}", b, temp, tag));
+                                    }
+                                }
+                            }
+                            self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                            self.indent -= 1;
+                            self.push("}");
+                        } else {
+                            self.push(&format!("{} = true", matched_temp));
+                            if let Some(b) = binding {
+                                if b != "_" && crate::rangebind::body_reads(&arm.body, b) {
+                                    self.push(&format!("{} := {}.v{}", b, temp, tag));
+                                }
+                            }
+                            self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                        }
+                        self.indent -= 1;
+                        self.push("}");
+                    }
+                    EnumArmKind::Wildcard => {
+                        if let Some(g) = &arm.guard {
+                            self.hoist_tries_expr(g)?;
+                            let gt = self.emit_expr(g, 0)?;
+                            self.push(&format!("if {} {{", gt));
+                            self.indent += 1;
+                            self.push(&format!("{} = true", matched_temp));
+                            self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                            self.indent -= 1;
+                            self.push("}");
+                        } else {
+                            self.push(&format!("{} = true", matched_temp));
+                            self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            self.restore_scope(saved_scope);
+            if i > 0 {
+                self.indent -= 1;
+                self.push("}");
+            }
+            arm_res?;
+        }
+        Ok(())
+    }
+
     fn emit_match(&mut self, subject: &Expr, arms: &[MatchArm]) -> Result<(), EmitError> {
+        if arms
+            .iter()
+            .any(|a| self.resolve_enum_match_pattern(&a.pattern).is_some())
+        {
+            return self.emit_enum_match(subject, arms);
+        }
         enum ArmKind {
             Some(String),
             NoneArm,

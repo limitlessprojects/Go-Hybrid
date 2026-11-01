@@ -490,9 +490,12 @@ impl<'a> Checker<'a> {
                         if Self::base_named_type_str(name) == "some"
                             && self.lookup_binding(st, name).is_none()
                             && self.lookup_binding(st, Self::base_named_type_str(name)).is_none()
-                ) =>
+                ) || self.resolve_enum_payload_variant_callee(st, callee).is_some() =>
             {
                 self.classify_composite(st, expr, args.iter().map(|a| &a.value))
+            }
+            Expr::Field { .. } if self.resolve_enum_unit_variant(st, expr).is_some() => {
+                Outcome::Ok
             }
             // field/index/slice reads: classify the read's shape, but honor
             // immutable roots when the resulting value is a value copy (views
@@ -530,6 +533,14 @@ impl<'a> Checker<'a> {
 
     fn classify_ident(&self, st: &FnState, name: &str) -> Outcome {
         let Some(b) = self.lookup_binding(st, name) else {
+            if !self.fns.contains_key(name)
+                && self
+                    .enum_variants
+                    .values()
+                    .any(|vs| vs.iter().any(|(v, p)| v == name && p.is_none()))
+            {
+                return Outcome::Ok;
+            }
             // FAIL-CLOSED (O4.9): a name that does not resolve cannot be
             // proven safe — it used to pass silently; now it is HYB-E3005
             // unless the site is `managed`.
