@@ -6418,17 +6418,81 @@ impl<'a> Checker<'a> {
         self.scan_block_const_writes(st, body, false);
     }
 
+    fn merge_post_closure_const_state(
+        merged: &mut FnState,
+        post_st: &FnState,
+        overwritten: &HashSet<(usize, String)>,
+    ) {
+        let is_overwritten = |st: &FnState, name: &str| -> bool {
+            match st.lookup_depth(name) {
+                Some(d) => overwritten.contains(&(d, name.to_string())),
+                None => false,
+            }
+        };
+        for (k, pb) in &post_st.env {
+            if !merged.scopes.iter().any(|s| s.contains_key(k)) {
+                if let Some(mb) = merged.env.get_mut(k) {
+                    if pb.immutable {
+                        mb.immutable = true;
+                    }
+                    if mb.non_owned_origin.is_none() && pb.non_owned_origin.is_some() {
+                        mb.non_owned_origin = pb.non_owned_origin.clone();
+                    }
+                }
+            }
+        }
+        for (depth, scope) in post_st.scopes.iter().enumerate() {
+            if depth < merged.scopes.len() {
+                for (k, pb) in scope {
+                    if !overwritten.contains(&(depth + 1, k.clone())) {
+                        if let Some(mb) = merged.scopes[depth].get_mut(k) {
+                            if pb.immutable {
+                                mb.immutable = true;
+                            }
+                            if mb.non_owned_origin.is_none() && pb.non_owned_origin.is_some() {
+                                mb.non_owned_origin = pb.non_owned_origin.clone();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (k, v) in &post_st.aliases {
+            if !is_overwritten(merged, k) && !is_overwritten(merged, v) {
+                merged.aliases.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        for (k, peers) in &post_st.may_share {
+            if !is_overwritten(merged, k) {
+                for p in peers {
+                    if !is_overwritten(merged, p) {
+                        merged.share_edge(k, p);
+                    }
+                }
+            }
+        }
+    }
+
     fn scan_block_const_writes(&mut self, st: &FnState, body: &Block, check_writes: bool) {
         let mut cst = st.clone();
         let flat = walk::flatten_with_results(body, &cst.named_results);
         cst.last_use = flat.last_use.clone();
+        let mut pending_closures: Vec<(&Expr, FnState, HashSet<(usize, String)>)> = Vec::new();
         for (stmt, idx) in &flat.stmts {
             let idx = *idx;
             if let Some(evs) = flat.events.get(&idx) {
                 for ev in evs {
                     match ev {
                         walk::ScopeEvent::Push => cst.scope_push(),
-                        walk::ScopeEvent::Pop => cst.scope_pop(),
+                        walk::ScopeEvent::Pop => {
+                            for (_, snap, ov) in pending_closures.iter_mut() {
+                                Self::merge_post_closure_const_state(snap, &cst, ov);
+                            }
+                            cst.scope_pop();
+                            for (_, snap, ov) in pending_closures.iter_mut() {
+                                Self::merge_post_closure_const_state(snap, &cst, ov);
+                            }
+                        }
                         walk::ScopeEvent::SelectRecv { names, chan } => {
                             let elem = match self.shape_of_expr(&cst, chan) {
                                 TypeShape::Chan(e) => *e,
@@ -6495,27 +6559,29 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            if check_writes {
-                let mut calls = Vec::new();
-                if let Stmt::For {
-                    kind: hy_syntax::ForKind::Iterate { expr, .. },
-                    ..
-                } = stmt
-                {
-                    walk::expr_calls(expr, &mut calls);
-                } else {
-                    walk::own_calls(stmt, &mut calls);
-                }
-                for cr in &calls {
+            let mut calls = Vec::new();
+            if let Stmt::For {
+                kind: hy_syntax::ForKind::Iterate { expr, .. },
+                ..
+            } = stmt
+            {
+                walk::expr_calls(expr, &mut calls);
+            } else {
+                walk::own_calls(stmt, &mut calls);
+            }
+            for cr in &calls {
+                if check_writes {
                     self.check_delete_const(&cst, cr, &HashSet::new());
                     self.check_call_const_writes(&cst, cr, &HashSet::new());
-                    if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
-                        if name == "copy" {
-                            self.record_copy_may_share(&mut cst, cr);
-                        }
-                    }
-                    self.record_callee_param_stores(&mut cst, cr);
                 }
+                if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
+                    if name == "copy" {
+                        self.record_copy_may_share(&mut cst, cr);
+                    }
+                }
+                self.record_callee_param_stores(&mut cst, cr);
+            }
+            if check_writes {
                 if let Stmt::Task { callee, args, span } = stmt {
                     let cr = CallRef {
                         callee,
@@ -6701,6 +6767,25 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
 
+            if let Stmt::Local(l) = stmt {
+                let depth = cst.scopes.len();
+                for name in &l.names {
+                    if name != "_" {
+                        for (_, snap, ov) in pending_closures.iter_mut() {
+                            if depth == 0 {
+                                if snap.env.contains_key(name) {
+                                    ov.insert((0, name.clone()));
+                                }
+                            } else if depth <= snap.scopes.len()
+                                && snap.scopes[depth - 1].contains_key(name)
+                            {
+                                ov.insert((depth, name.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+
             let mut fnlits = Vec::new();
             walk::own_fnlits(stmt, &mut fnlits);
             for flit in fnlits {
@@ -6737,8 +6822,23 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                self.scan_closure_body(&mut merged, flit, &HashSet::new());
+                pending_closures.push((flit, merged, HashSet::new()));
             }
+        }
+        while !cst.scopes.is_empty() {
+            for (_, snap, ov) in pending_closures.iter_mut() {
+                Self::merge_post_closure_const_state(snap, &cst, ov);
+            }
+            cst.scope_pop();
+            for (_, snap, ov) in pending_closures.iter_mut() {
+                Self::merge_post_closure_const_state(snap, &cst, ov);
+            }
+        }
+        for (_, snap, ov) in pending_closures.iter_mut() {
+            Self::merge_post_closure_const_state(snap, &cst, ov);
+        }
+        for (flit, mut merged, _) in pending_closures {
+            self.scan_closure_body(&mut merged, flit, &HashSet::new());
         }
     }
 
@@ -9145,5 +9245,114 @@ fn main() {
             "expected HYB-E3103 for parenthesized &(x) stored in struct field"
         );
     }
+
+    #[test]
+    fn closure_const_writes_via_block_scoped_callee_store_copy_and_post_rebind() {
+        let src_callee_store = "\
+const shared = map[string]int{\"k\": 0}
+
+fn store_into(dst []map[string]int, m map[string]int) {
+    dst[0] = m
 }
 
+fn worker(id int) {
+    if true {
+        dst := make([]map[string]int, 1)
+        store_into(dst, shared)
+        f := fn() {
+            dst[0][\"k\"] = id
+        }
+        f()
+    }
+}
+";
+        assert!(
+            check_codes(src_callee_store).iter().any(|c| c == "HYB-E3006"),
+            "expected HYB-E3006 for closure mutating const map through block-scoped callee parameter store"
+        );
+
+        let src_copy = "\
+const shared = []map[string]int{map[string]int{\"k\": 0}}
+
+fn worker(id int) {
+    if true {
+        dst := make([]map[string]int, 1)
+        copy(dst, shared)
+        f := fn() {
+            dst[0][\"k\"] = id
+        }
+        f()
+    }
+}
+";
+        assert!(
+            check_codes(src_copy).iter().any(|c| c == "HYB-E3006"),
+            "expected HYB-E3006 for closure mutating const map through block-scoped copy()"
+        );
+
+        let src_post_rebind = "\
+const shared = map[string]int{\"k\": 0}
+
+fn worker(id int) {
+    if true {
+        var m map[string]int
+        f := fn() {
+            m[\"k\"] = id
+        }
+        m = shared
+        f()
+    }
+}
+";
+        assert!(
+            check_codes(src_post_rebind).iter().any(|c| c == "HYB-E3006"),
+            "expected HYB-E3006 for closure mutating block-scoped variable rebound to const after closure definition"
+        );
+
+        let src_outer_closure_post_rebind = "\
+const shared = map[string]int{\"k\": 0}
+
+fn worker(id int) {
+    outer := fn() {
+        var m map[string]int
+        inner := fn() {
+            m[\"k\"] = id
+        }
+        m = shared
+        inner()
+    }
+    outer()
+}
+";
+        assert!(
+            check_codes(src_outer_closure_post_rebind).iter().any(|c| c == "HYB-E3006"),
+            "expected HYB-E3006 for nested closure mutating outer-closure local rebound to const after inner closure definition"
+        );
+
+        let src_clean = "\
+const shared = map[string]int{\"k\": 0}
+
+fn store_into(dst []map[string]int, m map[string]int) {
+    dst[0] = m
+}
+
+fn worker(id int) int {
+    if true {
+        dst := make([]map[string]int, 1)
+        local_map := map[string]int{\"k\": 1}
+        store_into(dst, local_map)
+        f := fn() {
+            dst[0][\"k\"] = id
+        }
+        f()
+        return dst[0][\"k\"] + shared[\"k\"]
+    }
+    return 0
+}
+";
+        assert!(
+            check_codes(src_clean).is_empty(),
+            "expected 0 diagnostics for closure mutating non-const map via store_into while only reading const"
+        );
+    }
+}
