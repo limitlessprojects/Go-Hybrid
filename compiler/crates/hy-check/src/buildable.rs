@@ -90,6 +90,10 @@ pub(crate) enum OpKind {
     /// declaration is out of reach). The count is what closes the
     /// closure/method-value arity bypass (#577 C9).
     Fn(Vec<OpKind>, Option<usize>),
+    /// #2823 — `option[T]` carries its payload kind. `Unknown` here would be
+    /// fail-open in every operand guard, so `op + 1`, `takes_int(op)` and
+    /// `var s string = op.unwrap()` all passed and failed `go build`.
+    Option(Box<OpKind>),
     Void,
 }
 
@@ -114,6 +118,7 @@ impl OpKind {
             OpKind::Struct(None) => "struct".to_string(),
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
             OpKind::Fn(..) => "fn".to_string(),
+            OpKind::Option(e) => format!("option[{}]", e.label()),
             OpKind::Void => "void".to_string(),
         }
     }
@@ -167,6 +172,10 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         }
         (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
         (Pointer(a), Pointer(b)) => kinds_conflict(a, b),
+        // #2823: an option only satisfies an option (with a compatible
+        // payload); every other pairing falls through to the mismatch arm, so
+        // `op + 1` and `takes_int(op)` are refused exactly as Go refuses them.
+        (Option(a), Option(b)) => kinds_conflict(a, b),
         // Fn kinds only carry results here, so a result match is not proof of
         // a signature match; stay permissive.
         (Fn(..), Fn(..)) => false,
@@ -208,6 +217,20 @@ fn canonical_numeric_name(name: &str) -> Option<&'static str> {
         "float64" | "f64" => "float64",
         _ => return None,
     })
+}
+
+/// #2771 — `[3]int` yes; `[]int` (slice), `[N]int` (non-constant length), and
+/// named types no — so only genuinely sized arrays are compared.
+fn is_sized_array_spelling(s: &str) -> bool {
+    let t = s.trim();
+    if !t.starts_with('[') {
+        return false;
+    }
+    let Some(close) = t.find(']') else {
+        return false;
+    };
+    let head = &t[1..close];
+    !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
@@ -401,6 +424,10 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // A fn kind only carries results here, so it is not evidence about
         // members either way.
         OpKind::Fn(..) => false,
+        // #2823: an option's members stay fail-open — member-name checking on
+        // `option[T]` is a separate concern (#1671), and this pass only needs
+        // the payload kind for operand/argument/initializer checks.
+        OpKind::Option(_) => false,
     }
 }
 
@@ -801,6 +828,31 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2771 — the declared Go spelling of a value whose type carries detail
+    /// that `OpKind` drops, notably an array's length (`[3]int` vs `[4]int`).
+    /// Only identifiers bound with an explicit type name are known; everything
+    /// else (literals, conversions, calls) fails open.
+    fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.lookup_type_name(name),
+            _ => None,
+        }
+    }
+
+    /// #2771 — the declared Go spelling of a simple local assignment target.
+    fn place_type_name(&self, p: &Place) -> Option<String> {
+        match &p.kind {
+            PlaceKind::Ident(n) => self.lookup_type_name(n),
+            _ => None,
+        }
+    }
+
+    /// #2771 — two KNOWN and DIFFERENT sized-array spellings. Slices, named
+    /// types and unparsed lengths fail open so aliases never false-reject.
+    fn sized_array_names_differ(&self, a: Option<&str>, b: Option<&str>) -> bool {
+        matches!((a, b), (Some(x), Some(y))
+            if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
+    }
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
@@ -1377,7 +1429,15 @@ impl<'a> Collector<'a> {
                     (self.scalar_of_ty(t), self.typed_value_scalar(&l.values[0])),
                     (Some(w), Some(v)) if w != v
                 );
-                if kinds_conflict(&want, &vk) || int_float_conflict || scalar_mismatch {
+                // #2771: `var c [4]int = a` where `a` is a `[3]int`.
+                if kinds_conflict(&want, &vk)
+                    || int_float_conflict
+                    || scalar_mismatch
+                    || self.sized_array_names_differ(
+                        Some(t.render().as_str()),
+                        self.typed_value_type_name(&l.values[0]).as_deref(),
+                    )
+                {
                     self.emit_e1002(
                         l.span,
                         format!(
@@ -1401,7 +1461,15 @@ impl<'a> Collector<'a> {
                         (self.scalar_of_ty(t), self.typed_value_scalar(v)),
                         (Some(w), Some(g)) if w != g
                     );
-                    if kinds_conflict(&want, &vk) || int_float_conflict || scalar_mismatch {
+                    // #2771: sized-array length must match the declared type.
+                    if kinds_conflict(&want, &vk)
+                        || int_float_conflict
+                        || scalar_mismatch
+                        || self.sized_array_names_differ(
+                            Some(t.render().as_str()),
+                            self.typed_value_type_name(v).as_deref(),
+                        )
+                    {
                         self.emit_e1002(
                             l.span,
                             format!(
@@ -2582,7 +2650,7 @@ impl<'a> Collector<'a> {
             TypeExpr::Chan { elem, .. } => {
                 OpKind::Chan(Box::new(self.kind_of_ty(elem, depth + 1)))
             }
-            TypeExpr::Option { .. } => OpKind::Unknown,
+            TypeExpr::Option { elem, .. } => OpKind::Option(Box::new(self.kind_of_ty(elem, depth + 1))),
             TypeExpr::Fn { params, results, .. } => OpKind::Fn(
                 results
                     .iter()
@@ -2678,7 +2746,9 @@ impl<'a> Collector<'a> {
             TypeExpr::Chan { elem, .. } => {
                 OpKind::Chan(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
             }
-            TypeExpr::Option { .. } => OpKind::Unknown,
+            TypeExpr::Option { elem, .. } => {
+                OpKind::Option(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
+            }
             TypeExpr::Fn { results, .. } => OpKind::Fn(
                 results
                     .iter()
@@ -2901,6 +2971,18 @@ impl<'a> Collector<'a> {
                         }
                     }
                 }
+                // A method expression (`g := pt.get`) names the method through
+                // its TYPE, so the receiver becomes the first parameter: the
+                // function value takes `params + 1` arguments.
+                if let Some(m) = self.method_expr_decl(base, name) {
+                    return OpKind::Fn(
+                        m.results
+                            .iter()
+                            .map(|r| self.kind_of_ty(&r.ty, 0))
+                            .collect(),
+                        Some(m.params.len() + 1),
+                    );
+                }
                 OpKind::Unknown
             }
             Expr::StructLit { ty, .. } => ty
@@ -2975,6 +3057,14 @@ impl<'a> Collector<'a> {
                     "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
                     "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
                     "recover" => return Some(vec![OpKind::Interface]),
+                    // #2823: `some(v)` produces `option[kind(v)]`.
+                    "some" if !self.ck.fns.contains_key("some") => {
+                        let payload = args
+                            .first()
+                            .map(|a| self.kind_of_expr(&a.value))
+                            .unwrap_or(OpKind::Unknown);
+                        return Some(vec![OpKind::Option(Box::new(payload))]);
+                    }
                     _ => {}
                 }
                 let conv = self.kind_of_named(name, 0);
@@ -2994,6 +3084,20 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
+                // #2823: the option payload methods carry a real result kind —
+                // `unwrap()` / `or(d)` yield the payload, `is_some()` /
+                // `is_none()` yield `bool`. Member lookup on an option stays
+                // fail-open otherwise (that is #1671's territory).
+                if let OpKind::Option(elem) = &bk {
+                    match name.as_str() {
+                        "unwrap" if args.is_empty() => return Some(vec![(**elem).clone()]),
+                        "or" if args.len() == 1 => return Some(vec![(**elem).clone()]),
+                        "is_some" | "is_none" if args.is_empty() => {
+                            return Some(vec![OpKind::Bool])
+                        }
+                        _ => {}
+                    }
+                }
                 if name == "pop" && args.is_empty() {
                     if let OpKind::Slice(elem) = bk {
                         return Some(vec![*elem]);
@@ -3207,6 +3311,53 @@ impl<'a> Collector<'a> {
     /// while a builtin name (`len`, `append`, `make`, ...) is not a type and
     /// resolves to `Unknown`, so builtins keep their own arity rules
     /// (`builtins.rs`, `HYB-E2005`) and user functions keep `check_user_fn_arity`.
+    /// #2811 — the element spelling of a slice TYPE NAME (alias resolution
+    /// included), e.g. `my_int64_slice` → `int64`. `None` when the name does
+    /// not resolve to a slice type, which fails open.
+    fn named_slice_element_name(&self, name: &str) -> Option<String> {
+        let base = Checker::base_named_type_str(name);
+        let ty = self.ck.type_aliases.get(base)?;
+        match self.ck.resolve_type_alias(ty) {
+            hy_syntax::TypeExpr::Slice { elem, .. } => Some(elem.render()),
+            _ => None,
+        }
+    }
+
+    /// #2811 — a `string`↔slice conversion whose element is a KNOWN numeric
+    /// type other than `byte`/`rune`. Go's conversion rules admit only
+    /// `[]byte`/`[]uint8` and `[]rune`/`[]int32`; `OpKind::Int` collapses every
+    /// integer width, so `string([]int64)` and `my_int64_slice(s)` passed the
+    /// kind check and failed `go build` (`cannot convert ... to type string`).
+    ///
+    /// Only a KNOWN numeric spelling that is not `uint8`/`int32` counts: a
+    /// user type, an alias of an alias or an unresolved spelling fails open,
+    /// and the non-`Int` element kinds (`[]string`, `[]bool`, `[]float64`) are
+    /// already rejected by `conversion_kinds_conflict`.
+    fn string_slice_conversion_element_mismatch(
+        &self,
+        name: &str,
+        target: &OpKind,
+        arg: &Expr,
+        arg_kind: &OpKind,
+    ) -> bool {
+        let elem = if matches!(target, OpKind::Str) {
+            // `string(xs)` — the OPERAND carries the slice spelling.
+            if !matches!(arg_kind, OpKind::Slice(_) | OpKind::Array(_)) {
+                return false;
+            }
+            self.slice_element_type_name(arg)
+        } else if matches!(arg_kind, OpKind::Str) && matches!(target, OpKind::Slice(_)) {
+            // `T(s)` where `T` names a slice type.
+            self.named_slice_element_name(name)
+        } else {
+            return false;
+        };
+        matches!(
+            elem.as_deref().and_then(canonical_numeric_name),
+            Some(x) if x != "uint8" && x != "int32"
+        )
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -3228,7 +3379,10 @@ impl<'a> Collector<'a> {
         let arg = &args[0].value;
         self.check_single_value_position(arg, "a type conversion", /*binding_position=*/ false);
         let arg_k = self.kind_of_expr(arg);
-        if conversion_kinds_conflict(&k, &arg_k) {
+        // #2811: `string`↔slice conversions are restricted to byte/rune
+        // elements; `OpKind::Int` cannot tell `int64` from `uint8`.
+        let element_mismatch = self.string_slice_conversion_element_mismatch(name, &k, arg, &arg_k);
+        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch {
             let note = if matches!(k, OpKind::Struct(_)) {
                 "structs cannot be instantiated via function-call conversions; write a struct literal like `T{...}` instead"
             } else {
@@ -3549,6 +3703,82 @@ impl<'a> Collector<'a> {
 
     /// #577 C9 — method calls (`x.bump(k)`) declare their receiver
     /// separately, so the parameter count is the declared one.
+    /// `pt.get` where `pt` is a type name (not a local) that declares a
+    /// non-generic VALUE-receiver method `get`: a Go method expression whose
+    /// function value takes the receiver as its first argument. Pointer
+    /// receivers (`(*pt).get`) and generic methods fail open.
+    fn method_expr_decl(&self, base: &Expr, name: &str) -> Option<&'a FnDecl> {
+        let Expr::Ident { name: tn, .. } = unwrap_parens(base) else {
+            return None;
+        };
+        if self.lookup_kind(tn).is_some() || self.scopes.iter().any(|s| s.contains_key(tn)) {
+            return None;
+        }
+        let m: &'a FnDecl = *self.ck.method_decls.get(&(tn.clone(), name.to_string()))?;
+        if !m.type_params.is_empty() || m.receiver.as_ref().is_some_and(|r| r.is_pointer) {
+            return None;
+        }
+        Some(m)
+    }
+
+    /// #2834: a method-expression call `pt.get(recv, args...)` was
+    /// never checked (the type-name base has no kind, so every method/field
+    /// check failed open): `pt.get(1)` and `pt.get()` passed `hyb check` and
+    /// failed `go build` (`cannot use 1 ... as pt value in argument to
+    /// pt.get` / `not enough arguments in call to pt.get`). The receiver is
+    /// argument 0, the declared parameters follow.
+    fn check_method_expr_call(
+        &mut self,
+        base: &Expr,
+        name: &str,
+        m: &'a FnDecl,
+        args: &[CallArg],
+        span: Span,
+    ) {
+        let tn = base.render();
+        if args.iter().any(|a| a.spread) || self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        let want = m.params.len() + 1;
+        let got = args.len();
+        if got != want {
+            self.emit_e1002(
+                span,
+                format!(
+                    "method expression `{}.{}` takes {} argument{} (the receiver, then the method's parameters) but is called with {} — Go refuses `{} arguments in call to {}.{}` (HYB-E1002)",
+                    tn,
+                    name,
+                    want,
+                    if want == 1 { "" } else { "s" },
+                    got,
+                    if got < want { "not enough" } else { "too many" },
+                    tn,
+                    name
+                ),
+                "a method expression `T.m` is a function whose first argument is the receiver: call it as `T.m(recv, args...)`, or call the method on a value: `recv.m(args...)`",
+            );
+            return;
+        }
+        let recv_kind = OpKind::Struct(Some(tn.clone()));
+        let recv = &args[0].value;
+        let got_kind = self.kind_of_expr(recv);
+        if kinds_conflict(&recv_kind, &got_kind) {
+            self.emit_e1002(
+                recv.span(),
+                format!(
+                    "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — the first argument of a method expression is the receiver (HYB-E1002)",
+                    recv.render(),
+                    got_kind.label(),
+                    tn,
+                    tn,
+                    name
+                ),
+                "pass a receiver value of the method's type as the first argument",
+            );
+        }
+        self.check_method_arg_types(&recv_kind, name, &args[1..]);
+    }
+
     fn check_method_arity(&mut self, bk: &OpKind, name: &str, args: &[CallArg], span: Span) {
         // #880: a generic receiver carries its type arguments (`cache[int]`,
         // `*lru_cache[k, v]`) while `method_decls` is keyed by the *base*
@@ -3647,7 +3877,14 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
-            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
+            if kinds_conflict(&want, &got)
+                || int_to_float_conflict
+                || scalar_mismatch
+                || self.sized_array_names_differ(
+                    Some(p.ty.render().as_str()),
+                    self.typed_value_type_name(&a.value).as_deref(),
+                )
+            {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -3695,7 +3932,14 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
-            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
+            if kinds_conflict(&want, &got)
+                || int_to_float_conflict
+                || scalar_mismatch
+                || self.sized_array_names_differ(
+                    Some(p.ty.render().as_str()),
+                    self.typed_value_type_name(&a.value).as_deref(),
+                )
+            {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -4382,7 +4626,14 @@ impl<'a> Collector<'a> {
                         || (lk == OpKind::Int
                             && rk == OpKind::Float
                             && !self.is_untyped_int_const(lhs));
-                    if equality_kinds_conflict(&lk, &rk) || int_float_conflict || self.scalar_conflict(lhs, rhs) {
+                    if equality_kinds_conflict(&lk, &rk)
+                        || int_float_conflict
+                        || self.scalar_conflict(lhs, rhs)
+                        || self.sized_array_names_differ(
+                            self.typed_value_type_name(lhs).as_deref(),
+                            self.typed_value_type_name(rhs).as_deref(),
+                        )
+                    {
                         self.emit_e1002(
                             span,
                             format!(
@@ -4605,7 +4856,15 @@ impl<'a> Collector<'a> {
                         (self.place_scalar(target), self.typed_value_scalar(&values[0])),
                         (Some(t), Some(v)) if t != v
                     );
-                    if !is_loan_shape && (conflict || scalar_mismatch) {
+                    // #2771: `b = a` between a `[4]int` and a `[3]int`.
+                    if !is_loan_shape
+                        && (conflict
+                            || scalar_mismatch
+                            || self.sized_array_names_differ(
+                                self.place_type_name(target).as_deref(),
+                                self.typed_value_type_name(&values[0]).as_deref(),
+                            ))
+                    {
                         self.emit_e1002(
                             span,
                             format!(
@@ -5713,6 +5972,10 @@ impl<'a> Collector<'a> {
                         let assoc_key = format!("{}.{}", pkg, head);
                         self.check_fn_type_arg_arity(&assoc_key, name, span);
                     }
+                }
+                if let Some(m) = self.method_expr_decl(base, name) {
+                    self.check_method_expr_call(base, name, m, args, span);
+                    return;
                 }
                 let bk = self.kind_of_expr(base);
                 // A method has no field entry, so resolve it before the field

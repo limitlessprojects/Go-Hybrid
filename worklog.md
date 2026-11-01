@@ -1186,3 +1186,34 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All three landings: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted.
 - Suite trajectory: 277 -> 281. Final main ce59b7f6, tree clean.
 - NEXT TICK QUEUE: #2831 (await rework — evidence reply has exact recipes) -> fresh wave in scan order: #2830 (Dimany4 bitwise/compound) -> #2838 (option payload carry) -> #2818 (string/slice conversions) -> #2779 (array length mismatch) -> #2835 (method expressions) -> #2837 (T22 indirect callees) -> #2841 (channel direction) -> #2839 (T22 loop back-edges, fixes #2309) -> #2836 (capture move-freeze) -> #2723 (mixed int types) -> #2824 (behind 14, needs rebase) -> #2815 (W-2475 falsification spike, score 6) -> #2670/#2593/#2677/#2517 (await rebase) -> #2581/#2622 (await fixes) -> wave tail.
+
+## Session 45 — 2026-11-01 night III (tick 487193: 7 landed, 1 conflict reply; GitHub core rate limit hit mid-tick)
+
+- Sandbox recycled (25th; rustup + go1.26.9 reinstalled, go.tgz cache hit; target cold, warmed in one slice). Baseline c403585c (own session-44, no parallel race). Scan BLOCKED: token burned 5000/hr core budget mid-scan (retries + session overlap); core 0/5000 until 13:11:32 UTC. Pivoted to git-only workflow: verify_pr.sh + diff/author via FETCH_HEAD + head-commit subjects for fixes-lines — no REST needed until replies.
+- LANDED (session-44 queue order; all replies posted after comments endpoint let them through — issue numbers verified from local head-commit subjects):
+  da28e526 Merge PR #2838 (Dimany4, fixes #2823) — OpKind::Option(Box<OpKind>) payload carriage + some(v) inference; operands/args/initializers reject; members stay fail-open (#1671). 282 suites. Supersedes competitor #2824.
+  c81de7ba Merge PR #2818 (Dimany4, fixes #2811) — string/slice conversions admit only []byte|[]rune; named_slice_element_name + canonical_numeric_name, fail-open on unknown spellings. 283 suites.
+  697e7b6c Merge PR #2779 (Dimany4, fixes #2771) — array length mismatch on declared spellings; is_sized_array_spelling digit-[N]T only; fail-open elsewhere. 284 suites.
+  ab6e594b Merge PR #2835 (nyxlabs29-cyber, fixes #2834) — method-expression calls: receiver as arg 0, params+1 arity, arg types; pointer/generic fail open. 285 suites.
+  987f2e35 Merge PR #2837 (aswadi, fixes #2267) — T22 const-write on indirect callees, struct-field fn ptrs, *[]T pop receivers. 287 suites.
+  850debff Merge PR #2841 (aswadi, fixes #1358 + #2840) — channel direction across option.or(), *[N]T pointers (index/close/assign/slice/range), multi-return fn fields. IN-MERGE FIXUP (disclosed): fixture `f fn() (int, <-chan int)` -> `f fn() int <-chan int` (fn-type literals take space-separated bare results; fixture died at parse). 288 suites.
+  18c8d3b9 Merge PR #2839 (aswadi, fixes #2309) — T22 const aliases across loop back-edges: replay_const_backedge fixpoint from end-of-iteration state; dedup by span; accept+reject matrices. 290 suites.
+- CONFLICT (rebase ask): #2830 (Dimany4, modulo/bitwise/compound vs #2795+#2720 regions) — reply posted with keep-both guidance (reuse landed scalar_names_conflict; shift exemption matches #2720).
+- All seven: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted.
+- Suite trajectory: 281 -> 290. Final main 18c8d3b9, tree clean.
+- NOTE: approve step (CI unblock) deferred — core limit 0 until 13:11:32 UTC; comments endpoint worked throughout (different bucket), so replies all landed.
+- NEXT TICK QUEUE: #2836 (capture move-freeze) -> #2723 (mixed int types) -> #2824 (behind, superseded by #2838 — redirect reply) -> #2815 (W-2475 spike) -> approve carry-over if still pending -> #2830 (await rebase) -> #2831 (await rework) -> wave tail #2670/#2593/#2677/#2517/#2581/#2622 -> #1811.
+
+## Session 46 — 2026-11-01 night IV (tick 487193: 5 landed, incl. #2831 rework; hex-audit false-alarm documented)
+
+- No recycle (toolchain + warm target survived). Baseline b3f9d61e (own session-45). Core rate window refreshed at 13:11:32 UTC after the session-45 exhaustion; scan OK, approve 12/12 (4902 remaining). Fresh wave: 12 score-9 candidates (carelessdept x3, aswadi x2, nyxlabs29-cyber x2, Dimany4 x3, ket4min-susan) + #2831 rework at Pareto #4.
+- LANDED (rework first, then Pareto top-down):
+  cd649532 Merge PR #2831 rework (aswadi, fixes #1991) — all gate-fail shapes closed: Index-shape typeargs re-associated via assoc_index_type_arg ((box.new[int])(v) mangles correctly), stmt.rs hoist_tries_call peel_parens (root cause 5), compiled tests. 292 suites.
+  6393055e Merge PR #2814 (carelessdept, fixes #2809) — shepherd cmd_probe NameError (free 'r' on unmatched diff) + TypeError (CompletedProcess subscript); pytest 17 in worktree. 292 suites.
+  68611af0 Merge PR #2888 (carelessdept, fixes #1103) — triage collect(): thread-safe mb_cache for shared merge_base compares + head==main_sha short-circuit; pytest 4. 292 suites. Directly cuts scan API burn.
+  f2d7301e Merge PR #2850 (carelessdept, fixes #2848) — nil in len/cap/delete/min/max + non-numeric literals in real/imag/complex reject HYB-E2005. 294 suites.
+  43030723 Merge PR #2893 (aswadi, fixes #1343) — string-index, paren map-projection, call-rvalue loans reject HYB-E2010 (unwrap_parens + Map/Str shapes). 296 suites.
+- FALSE-ALARM FORENSICS (documented): #2888's mb_cache[merge_base] lines APPEARED mangled in tool output (rg/repr/cat-v/ast-segment all showed mb_cacheerge_base]; only od -c showed the [). Byte-level hex audit (6d 62 5f ... 5b 6d 65) proved the file correct — the rendering layer eats literal [m sequences in contiguous output; od's per-byte spacing survives it. Rule reaffirmed: never gate-fail on suspicious brackets without a hex audit. AST + pytest were authoritative.
+- All five: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted.
+- Suite trajectory: 290 -> 296. Final main 43030723, tree clean.
+- NEXT TICK QUEUE: #2868 (typed int width through reads) -> #2846 (closure/fn-param call args) -> #2871 (const conversion matrix) -> #2878 (slice conversion element scalars) -> #2882 (shadowed E11/E4/E6 try contexts) -> #2864 (field/index assignment widths) -> #2786 (transitive multi-return pairs) -> #2836/#2723 (carry-over) -> #2824 (superseded by #2838, redirect reply owed) -> #2815 (W-2475 spike) -> #2830 (await rebase) -> wave tail.
