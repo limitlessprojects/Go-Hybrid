@@ -1868,6 +1868,9 @@ impl<'a> Checker<'a> {
                     || matches!(unwrap_parens(value), Expr::Move { .. })
                 {
                     self.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                    if matches!(l.kind, LocalKind::Const) && name != "_" {
+                        st.env_define_local_const(name, value.clone());
+                    }
                     if let Some(b) = st.env_lookup_mut(name) {
                         if let Some(origin) = moved_non_owned {
                             b.non_owned_origin = Some(origin);
@@ -1945,6 +1948,9 @@ impl<'a> Checker<'a> {
                     None
                 };
                 self.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                if matches!(l.kind, LocalKind::Const) && name != "_" {
+                    st.env_define_local_const(name, value.clone());
+                }
                 if rhs_slot_loan {
                     if let Some(b) = st.env_lookup_mut(name) {
                         b.slot_loan = true;

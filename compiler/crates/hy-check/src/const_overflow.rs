@@ -1197,6 +1197,12 @@ pub(crate) fn const_int_fold_with(
         } => ConstFold::Val(*c as i128),
         Expr::Ident { name, .. } => {
             if let Some(st) = st {
+                if let Some(local_v) = st.local_const_lookup(name) {
+                    if depth < 16 {
+                        return const_int_fold_with(local_v, consts, depth + 1, Some(st));
+                    }
+                    return ConstFold::NotConst;
+                }
                 if st.env_lookup(name).is_some() {
                     return ConstFold::NotConst;
                 }
@@ -1262,7 +1268,7 @@ pub(crate) fn const_int_fold_with(
 /// The width is recovered from the range itself, so this needs no second
 /// table of type widths: `u8` is `0..=255`, so the span is 255 and the width
 /// is 8 bits; `i64` is `-2^63..=2^63-1`, span `2^64-1`, width 64.
-fn wrap_into(v: i128, lo: i128, hi: i128) -> i128 {
+pub(crate) fn wrap_into(v: i128, lo: i128, hi: i128) -> i128 {
     let span = hi.wrapping_sub(lo);
     // `span + 1` is 2^bits; its trailing-zero count IS the width.
     let bits = (span as u128).wrapping_add(1).trailing_zeros();
@@ -1390,19 +1396,50 @@ pub(crate) fn const_int_value(e: &Expr) -> Option<i128> {
     }
 }
 
-/// Fold a float constant expression (literals, unary `-`, parens) — the
+pub(crate) fn parse_float_lit(s: &str) -> Option<f64> {
+    let clean: String = s.chars().filter(|c| *c != '_').collect();
+    if let Ok(f) = clean.parse::<f64>() {
+        return Some(f);
+    }
+    let rest = clean.strip_prefix("0x").or_else(|| clean.strip_prefix("0X"))?;
+    let (mant, exp_str) = rest.split_once(['p', 'P'])?;
+    let exp: i32 = exp_str.parse().ok()?;
+    let (int_part, frac_part) = mant.split_once('.').unwrap_or((mant, ""));
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    let mut val = 0.0_f64;
+    for c in int_part.chars() {
+        val = val * 16.0 + (c.to_digit(16)? as f64);
+    }
+    for (i, c) in frac_part.chars().enumerate() {
+        val += (c.to_digit(16)? as f64) * 16.0_f64.powi(-((i as i32) + 1));
+    }
+    Some(val * 2.0_f64.powi(exp))
+}
+
+/// Fold a float constant expression (literals, unary `-`, parens, float conversions) — the
 /// `var x int = 2.5` truncation site (issue #201-B).
 pub(crate) fn const_float_value(e: &Expr) -> Option<f64> {
     match unwrap_parens(e) {
         Expr::Lit {
             kind: LitKind::Float(s),
             ..
-        } => s.replace('_', "").parse::<f64>().ok(),
+        } => parse_float_lit(s),
         Expr::Unary {
             op: UnOp::Neg,
             operand,
             ..
         } => const_float_value(operand).map(|v| -v),
+        Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
+            let Expr::Ident { name, .. } = unwrap_parens(callee) else { return None };
+            let (is_f32, arg) = (is_float_type(name)?, &args[0].value);
+            let f = const_float_value(arg).or_else(|| match const_int_fold(arg) {
+                ConstFold::Val(v) => Some(v as f64),
+                _ => None,
+            })?;
+            Some(if is_f32 { (f as f32) as f64 } else { f })
+        }
         _ => None,
     }
 }
@@ -1418,17 +1455,14 @@ pub(crate) fn const_float_fold_with(
         Expr::Lit {
             kind: LitKind::Float(s),
             ..
-        } => {
-            let clean: String = s.chars().filter(|c| *c != '_').collect();
-            clean.parse::<f64>().ok()
-        }
+        } => parse_float_lit(s),
         Expr::Lit {
             kind: LitKind::Int(s),
             ..
         } => match parse_int_lit(s) {
             Some(ConstInt::Value(v)) => Some(v as f64),
             Some(ConstInt::PosOverflow | ConstInt::NegOverflow) => Some(huge_int_as_f64(s)),
-            None => s.replace('_', "").parse::<f64>().ok(),
+            None => parse_float_lit(s),
         },
         Expr::Lit {
             kind: LitKind::Char(c),
@@ -1436,6 +1470,12 @@ pub(crate) fn const_float_fold_with(
         } => Some(*c as u32 as f64),
         Expr::Ident { name, .. } => {
             if let Some(st) = st {
+                if let Some(local_v) = st.local_const_lookup(name) {
+                    if depth < 16 {
+                        return const_float_fold_with(local_v, consts, depth + 1, Some(st));
+                    }
+                    return None;
+                }
                 if st.env_lookup(name).is_some() {
                     return None;
                 }
@@ -1468,6 +1508,33 @@ pub(crate) fn const_float_fold_with(
                 }
                 _ => None,
             }
+        }
+        Expr::Call { callee, args, .. } => {
+            if depth >= 16 || args.len() != 1 || args[0].spread {
+                return None;
+            }
+            let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+                return None;
+            };
+            if st.is_some_and(|s| s.env_lookup(name).is_some()) || consts.contains_key(name) {
+                return None;
+            }
+            if let Some(is_f32) = is_float_type(name) {
+                let arg = &args[0].value;
+                let f = match const_int_fold_with(arg, consts, depth + 1, st) {
+                    ConstFold::Val(v) => v as f64,
+                    _ => const_float_fold_with(arg, consts, depth + 1, st)?,
+                };
+                return Some(if is_f32 { (f as f32) as f64 } else { f });
+            }
+            if let Some((lo, hi)) = fixed_width_int_range(name) {
+                if let ConstFold::Val(v) =
+                    const_int_fold_with(&args[0].value, consts, depth + 1, st)
+                {
+                    return Some(wrap_into(v, lo, hi) as f64);
+                }
+            }
+            None
         }
         _ => None,
     }
