@@ -167,9 +167,13 @@ type int_chan = chan int
 type int_arr = [2]int
 
 fn main() {
-    // 1. byte/rune slice to string
-    bs := []int{65, 66}
+    // 1. byte/rune slice to string. (`[]int` is NOT convertible to `string`
+    //    in Go — only `[]byte`/`[]uint8` and `[]rune`/`[]int32` are; see
+    //    #2811, which this suite's reject block now covers.)
+    bs := []byte{65, 66}
     _ = string(bs)
+    rs := []rune{65}
+    _ = string(rs)
 
     // 2. int code point to string
     _ = string(65)

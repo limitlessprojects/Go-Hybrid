@@ -719,6 +719,7 @@ impl Emitter {
             let text = self.emit_expr(e, 0)?;
             let temp = self.next_temp("hyT");
             self.push(&format!("{} := {}", temp, text));
+            self.expr_temps.insert(Self::expr_key(inner), temp.clone());
             self.expr_temps.insert(Self::expr_key(e), temp);
         }
         Ok(())
@@ -727,9 +728,7 @@ impl Emitter {
     fn hoist_tries_call(&mut self, callee: &Expr, args: &[CallArg]) -> Result<(), EmitError> {
         let any_arg_has_try = args.iter().any(|a| Self::expr_has_hoistable_try(&a.value));
         if any_arg_has_try {
-            let mut inner = callee;
-            while let Expr::Paren { inner: p, .. } = inner { inner = p; }
-            match inner {
+            match Self::peel_parens(callee) {
                 Expr::Field { base, .. } => self.hoist_order_before_try(base)?,
                 Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => {
                     self.hoist_tries_expr(callee)?
@@ -1201,6 +1200,9 @@ impl Emitter {
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
         let e = Self::peel_parens(e);
+        if matches!(e, Expr::MapLit { .. }) {
+            return BindingKind::Map;
+        }
         if let Expr::StructLit { ty: Some(t), .. } = e {
             if let Some(kind) = self.binding_kind_of_ty(t) {
                 return kind;
@@ -1261,6 +1263,16 @@ impl Emitter {
                 {
                     return BindingKind::Chan;
                 }
+                if matches!(
+                    &first.value,
+                    Expr::MapLit { .. }
+                        | Expr::StructLit {
+                            ty: Some(TypeExpr::Map { .. }),
+                            ..
+                        }
+                ) {
+                    return BindingKind::Map;
+                }
             }
             return BindingKind::Plain;
         }
@@ -1278,6 +1290,21 @@ impl Emitter {
             Expr::Paren { inner, .. } => self.is_channel_expr(inner),
             Expr::Call { .. } | Expr::Try { .. } => {
                 self.binding_kind_of(e) == BindingKind::Chan
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether an expression evaluates to a map (`map[K]V` local/param,
+    /// map literal, `make(map…)` or a call whose result is a map). Single-var
+    /// `for k in m` binds the key (SPEC LX13, #2945).
+    fn is_map_expr(&self, e: &Expr) -> bool {
+        match Self::peel_parens(e) {
+            Expr::Ident { name, .. } => {
+                matches!(self.bindings.get(name), Some(BindingKind::Map))
+            }
+            e @ (Expr::Call { .. } | Expr::Try { .. } | Expr::StructLit { .. } | Expr::MapLit { .. }) => {
+                self.binding_kind_of(e) == BindingKind::Map
             }
             _ => false,
         }
@@ -2090,7 +2117,9 @@ impl Emitter {
                             // maps) or the value (channels) — hence the Chan
                             // hint check.
                             let over_chan = self.is_channel_expr(expr);
-                            if over_chan {
+                            // SPEC LX13: single-var range over a map binds
+                            // the KEY (#2945) — Go's own single-var form.
+                            if over_chan || self.is_map_expr(expr) {
                                 self.shadow_local_names(vars);
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {

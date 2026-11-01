@@ -2753,6 +2753,21 @@ impl<'a> Checker<'a> {
         );
     }
 
+    fn resolve_array_or_ptr_array_elem(
+        &self,
+        ty: &hy_syntax::TypeExpr,
+    ) -> Option<hy_syntax::TypeExpr> {
+        use hy_syntax::TypeExpr;
+        match self.resolve_type_alias(ty) {
+            TypeExpr::Array { elem, .. } => Some(*elem),
+            TypeExpr::Pointer { to, .. } => match self.resolve_type_alias(&to) {
+                TypeExpr::Array { elem, .. } => Some(*elem),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn iterate_var_dir_tys(
         &self,
         expr: &Expr,
@@ -2763,16 +2778,16 @@ impl<'a> Checker<'a> {
         let Some(ty) = self.dir_ty_of_expr(expr, env) else {
             return vec![None; n_vars.max(1)];
         };
+        if let Some(elem) = self.resolve_array_or_ptr_array_elem(&ty) {
+            let e = Some(elem);
+            return if n_vars >= 2 {
+                vec![None, e]
+            } else {
+                vec![e]
+            };
+        }
         match self.resolve_type_alias(&ty) {
-            TypeExpr::Chan { elem, .. } => {
-                let e = Some(*elem);
-                if n_vars >= 2 {
-                    vec![None, e]
-                } else {
-                    vec![e]
-                }
-            }
-            TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+            TypeExpr::Chan { elem, .. } | TypeExpr::Slice { elem, .. } => {
                 let e = Some(*elem);
                 if n_vars >= 2 {
                     vec![None, e]
@@ -2865,6 +2880,19 @@ impl<'a> Checker<'a> {
                 }
                 let base_ty = self.dir_ty_of_expr(base, env)?;
                 let resolved_base = self.resolve_type_alias(&base_ty);
+                let has_user_method = Self::base_named_type(&resolved_base)
+                    .or_else(|| Self::base_named_type(&base_ty))
+                    .map(|rb| self.method_decls.contains_key(&(rb, head.to_string())))
+                    .unwrap_or(false);
+                if head == "or" && args.len() == 1 && !has_user_method {
+                    if let TypeExpr::Option { elem, .. } = &resolved_base {
+                        return Some(vec![hy_syntax::Param {
+                            name: "default".to_string(),
+                            ty: (**elem).clone(),
+                            span: callee.span(),
+                        }]);
+                    }
+                }
                 let recv_base = Self::base_named_type(&resolved_base)
                     .or_else(|| Self::base_named_type(&base_ty))?;
                 if recv_base == "set" && matches!(head, "insert" | "contains" | "remove") {
@@ -2998,22 +3026,36 @@ impl<'a> Checker<'a> {
                         }
                     }
                     let base_ty = self.dir_ty_of_expr(base, env)?;
-                    let recv_base = Self::base_named_type(&self.resolve_type_alias(&base_ty))
-                        .or_else(|| Self::base_named_type(&base_ty))?;
-                    let m = self
-                        .method_decls
-                        .get(&(recv_base, head.to_string()))
-                        .or_else(|| {
-                            Self::base_named_type(&base_ty)
-                                .and_then(|raw| self.method_decls.get(&(raw, head.to_string())))
-                        })?;
-                    let subst = self.fn_subst_for_call(m, name, Some(&base_ty), args, env, true);
-                    Some(
-                        m.results
-                            .iter()
-                            .map(|r| Self::substitute_type_params(&r.ty, &subst))
-                            .collect(),
-                    )
+                    let resolved_base = self.resolve_type_alias(&base_ty);
+                    if let Some(recv_base) = Self::base_named_type(&resolved_base)
+                        .or_else(|| Self::base_named_type(&base_ty))
+                    {
+                        if let Some(m) = self
+                            .method_decls
+                            .get(&(recv_base, head.to_string()))
+                            .or_else(|| {
+                                Self::base_named_type(&base_ty)
+                                    .and_then(|raw| self.method_decls.get(&(raw, head.to_string())))
+                            })
+                        {
+                            let subst =
+                                self.fn_subst_for_call(m, name, Some(&base_ty), args, env, true);
+                            return Some(
+                                m.results
+                                    .iter()
+                                    .map(|r| Self::substitute_type_params(&r.ty, &subst))
+                                    .collect(),
+                            );
+                        }
+                    }
+                    if let Some(fields) = self.struct_fields_for_type(&base_ty) {
+                        if let Some((_, fty)) = fields.iter().find(|(n, _)| n == name) {
+                            if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(fty) {
+                                return Some(results);
+                            }
+                        }
+                    }
+                    None
                 }
                 other => {
                     let callee_ty = self.dir_ty_of_expr(other, env)?;
@@ -3052,10 +3094,11 @@ impl<'a> Checker<'a> {
             }
             PlaceKind::Index { base, .. } => {
                 let base_ty = self.dir_ty_of_place(base, env)?;
+                if let Some(elem) = self.resolve_array_or_ptr_array_elem(&base_ty) {
+                    return Some(elem);
+                }
                 match self.resolve_type_alias(&base_ty) {
-                    TypeExpr::Slice { elem, .. }
-                    | TypeExpr::Array { elem, .. }
-                    | TypeExpr::Map { value: elem, .. } => Some(*elem),
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Map { value: elem, .. } => Some(*elem),
                     _ => None,
                 }
             }
@@ -3099,19 +3142,24 @@ impl<'a> Checker<'a> {
             }
             Expr::Index { base, .. } => {
                 let base_ty = self.dir_ty_of_expr(base, env)?;
+                if let Some(elem) = self.resolve_array_or_ptr_array_elem(&base_ty) {
+                    return Some(elem);
+                }
                 match self.resolve_type_alias(&base_ty) {
-                    TypeExpr::Slice { elem, .. }
-                    | TypeExpr::Array { elem, .. }
-                    | TypeExpr::Map { value: elem, .. } => Some(*elem),
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Map { value: elem, .. } => Some(*elem),
                     _ => None,
                 }
             }
             Expr::Slice { base, span, .. } => {
                 let base_ty = self.dir_ty_of_expr(base, env)?;
+                if let Some(elem) = self.resolve_array_or_ptr_array_elem(&base_ty) {
+                    return Some(TypeExpr::Slice {
+                        elem: Box::new(elem),
+                        span: *span,
+                    });
+                }
                 match self.resolve_type_alias(&base_ty) {
-                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
-                        Some(TypeExpr::Slice { elem, span: *span })
-                    }
+                    TypeExpr::Slice { elem, .. } => Some(TypeExpr::Slice { elem, span: *span }),
                     _ => None,
                 }
             }
@@ -3268,12 +3316,22 @@ impl<'a> Checker<'a> {
                     }
                     let base_ty = self.dir_ty_of_expr(base, env)?;
                     let resolved_base = self.resolve_type_alias(&base_ty);
-                    if head == "pop" && args.is_empty() {
+                    let has_user_method = Self::base_named_type(&resolved_base)
+                        .or_else(|| Self::base_named_type(&base_ty))
+                        .map(|rb| self.method_decls.contains_key(&(rb, head.to_string())))
+                        .unwrap_or(false);
+                    if head == "pop" && args.is_empty() && !has_user_method {
                         if let TypeExpr::Slice { elem, .. } = resolved_base {
                             return Some(*elem);
                         }
                     }
-                    if (head == "unwrap" && args.is_empty()) || (head == "or" && args.len() == 1) { if let TypeExpr::Option { elem, .. } = resolved_base { return Some(*elem); } }
+                    if ((head == "unwrap" && args.is_empty()) || (head == "or" && args.len() == 1))
+                        && !has_user_method
+                    {
+                        if let TypeExpr::Option { elem, .. } = resolved_base {
+                            return Some(*elem);
+                        }
+                    }
                     let recv_base = Self::base_named_type(&resolved_base)
                         .or_else(|| Self::base_named_type(&base_ty))?;
                     if let Some(m) = self
