@@ -3104,12 +3104,18 @@ impl<'a> Collector<'a> {
                     }
                 }
                 let head = Checker::base_named_type_str(name);
-                if let Some(sname) = self.struct_base_name(&bk) {
+                if let Some(full_name) = self.struct_name(&bk) {
+                    let sname = Checker::base_named_type_str(&full_name).to_string();
                     if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
+                        // A method on `Container[int]` returns its own `T`
+                        // instantiated as `int`; without the receiver's map the
+                        // result stayed Unknown and `var s string = c.take()`
+                        // passed (#1959).
+                        let subst = self.struct_type_arg_map(&full_name);
                         return Some(
                             m.results
                                 .iter()
-                                .map(|r| self.kind_of_ty(&r.ty, 0))
+                                .map(|r| self.kind_of_ty_with_subst(&r.ty, &subst, 0))
                                 .collect(),
                         );
                     }
@@ -3916,8 +3922,13 @@ impl<'a> Collector<'a> {
         if m.params.len() != args.len() {
             return;
         }
+        // Receiver type arguments instantiate the method's `T` parameters;
+        // without them every `T` stayed Unknown and `c.put("hello")` on a
+        // `Container[int]` was accepted (#1959).
+        let full_name = self.struct_name(bk).unwrap_or_default();
+        let subst = self.struct_type_arg_map(&full_name);
         for (p, a) in m.params.iter().zip(args.iter()) {
-            let want = self.kind_of_ty(&p.ty, 0);
+            let want = self.kind_of_ty_with_subst(&p.ty, &subst, 0);
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
                 if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
