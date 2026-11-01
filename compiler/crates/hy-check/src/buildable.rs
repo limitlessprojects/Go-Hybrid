@@ -730,6 +730,8 @@ struct Collector<'a> {
     kind_scopes: Vec<HashMap<String, OpKind>>,
     /// Parallel lexical scope stack tracking declared concrete type names (#2738).
     type_name_scopes: Vec<HashMap<String, String>>,
+    /// Parallel lexical scope stack tracking declared TypeExprs (#2870).
+    type_expr_scopes: Vec<HashMap<String, TypeExpr>>,
     /// `set[T]` bindings -> their element type text (`"int"`), scoped like
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
@@ -810,6 +812,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
             type_name_scopes: Vec::new(),
+            type_expr_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
@@ -881,6 +884,7 @@ impl<'a> Collector<'a> {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
         self.type_name_scopes.push(HashMap::new());
+        self.type_expr_scopes.push(HashMap::new());
         self.scalar_scopes.push(HashMap::new());
         self.container_elem_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
@@ -891,6 +895,7 @@ impl<'a> Collector<'a> {
         self.scopes.pop();
         self.kind_scopes.pop();
         self.type_name_scopes.pop();
+        self.type_expr_scopes.pop();
         self.scalar_scopes.pop();
         self.container_elem_scopes.pop();
         self.set_elem_scopes.pop();
@@ -907,6 +912,23 @@ impl<'a> Collector<'a> {
 
     fn lookup_type_name(&self, name: &str) -> Option<String> {
         for layer in self.type_name_scopes.iter().rev() {
+            if let Some(t) = layer.get(name) {
+                return Some(t.clone());
+            }
+        }
+        None
+    }
+
+    fn bind_type_expr(&mut self, name: &str, ty: TypeExpr) {
+        if name != "_" {
+            if let Some(top) = self.type_expr_scopes.last_mut() {
+                top.insert(name.to_string(), ty);
+            }
+        }
+    }
+
+    fn lookup_type_expr(&self, name: &str) -> Option<TypeExpr> {
+        for layer in self.type_expr_scopes.iter().rev() {
             if let Some(t) = layer.get(name) {
                 return Some(t.clone());
             }
@@ -1982,6 +2004,7 @@ impl<'a> Collector<'a> {
             self.set_container_elem_scalar(&p.name, ces);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
             self.bind_type_name(&p.name, p.ty.render());
+            self.bind_type_expr(&p.name, p.ty.clone());
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -1993,6 +2016,7 @@ impl<'a> Collector<'a> {
                 let ces = self.container_elem_scalar_of_ty(&r.ty);
                 self.set_container_elem_scalar(rname, ces);
                 self.bind_type_name(rname, r.ty.render());
+                self.bind_type_expr(rname, r.ty.clone());
             }
         }
         for r in &f.results {
@@ -2211,6 +2235,7 @@ impl<'a> Collector<'a> {
             let tname = t.render();
             for name in &l.names {
                 self.bind_type_name(name, tname.clone());
+                self.bind_type_expr(name, t.clone());
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
@@ -2222,6 +2247,11 @@ impl<'a> Collector<'a> {
                     self.bind_type_name(name, format!("[]{}", elem));
                 } else if let Some(tp) = self.expr_type_param(val) {
                     self.bind_type_name(name, tp);
+                }
+                if let Expr::Ident { name: src, .. } = unwrap_parens(val) {
+                    if let Some(ty) = self.lookup_type_expr(src) {
+                        self.bind_type_expr(name, ty);
+                    }
                 }
             }
         }
@@ -3118,6 +3148,7 @@ impl<'a> Collector<'a> {
                     self.set_container_elem_scalar(&p.name, ces);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
                     self.bind_type_name(&p.name, p.ty.render());
+                    self.bind_type_expr(&p.name, p.ty.clone());
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -3129,6 +3160,7 @@ impl<'a> Collector<'a> {
                         let ces = self.container_elem_scalar_of_ty(&r.ty);
                         self.set_container_elem_scalar(rname, ces);
                         self.bind_type_name(rname, r.ty.render());
+                        self.bind_type_expr(rname, r.ty.clone());
                     }
                 }
                 for r in results {
@@ -4536,6 +4568,117 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2870 — canonical underlying representation of a TypeExpr for conversion compatibility.
+    fn type_expr_underlying_key(&self, ty: &TypeExpr) -> String {
+        let resolved = self.ck.resolve_type_alias(ty);
+        match &resolved {
+            TypeExpr::Named { name, .. } => {
+                let base = Checker::base_named_type_str(name);
+                if let Some(alias) = self.ck.type_aliases.get(base) {
+                    return self.type_expr_underlying_key(alias);
+                }
+                if let Some(canon) = canonical_numeric_name(name) {
+                    canon.to_string()
+                } else {
+                    name.clone()
+                }
+            }
+            TypeExpr::Pointer { to, .. } => {
+                format!("*{}", self.type_expr_underlying_key(to))
+            }
+            TypeExpr::Slice { elem, .. } => {
+                format!("[]{}", self.type_expr_underlying_key(elem))
+            }
+            TypeExpr::Array { len, elem, .. } => {
+                let len_str = len.as_ref().map(|l| l.render()).unwrap_or_else(|| "...".to_string());
+                format!("[{}]{}", len_str, self.type_expr_underlying_key(elem))
+            }
+            TypeExpr::Map { key, value, .. } => {
+                format!(
+                    "map[{}]{}",
+                    self.type_expr_underlying_key(key),
+                    self.type_expr_underlying_key(value)
+                )
+            }
+            TypeExpr::Chan { elem, .. } => {
+                format!("chan {}", self.type_expr_underlying_key(elem))
+            }
+            TypeExpr::Option { elem, .. } => {
+                format!("option[{}]", self.type_expr_underlying_key(elem))
+            }
+            TypeExpr::Fn { params, results, .. } => {
+                let ps = params
+                    .iter()
+                    .map(|p| self.type_expr_underlying_key(&p.ty))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let rs = results
+                    .iter()
+                    .map(|r| self.type_expr_underlying_key(r))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("fn({}) ({})", ps, rs)
+            }
+        }
+    }
+
+    /// #2870 — canonical underlying type key for a named type.
+    fn underlying_type_key_of_named(&self, name: &str) -> Option<String> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            return Some(self.type_expr_underlying_key(ty));
+        }
+        if let Some(canon) = canonical_numeric_name(base) {
+            return Some(canon.to_string());
+        }
+        if self.ck.structs.contains_key(base) {
+            return Some(base.to_string());
+        }
+        match base {
+            "string" | "bool" | "any" | "error" => Some(base.to_string()),
+            _ => None,
+        }
+    }
+
+    /// #2870 — canonical underlying type key for an expression operand.
+    fn underlying_type_key_of_expr(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(ty) = self.lookup_type_expr(name) {
+                    return Some(self.type_expr_underlying_key(&ty));
+                }
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(key) = self.underlying_type_key_of_named(&tname) {
+                        return Some(key);
+                    }
+                }
+                None
+            }
+            Expr::Move { operand, .. } => self.underlying_type_key_of_expr(operand),
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => self.underlying_type_key_of_expr(operand).map(|k| format!("*{}", k)),
+            Expr::Call { callee, args: _, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if let Some(key) = self.underlying_type_key_of_named(name) {
+                        return Some(key);
+                    }
+                    if let Some(f) = self.ck.fns.get(name.as_str()) {
+                        if f.results.len() == 1 {
+                            return Some(self.type_expr_underlying_key(&f.results[0].ty));
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -4587,7 +4730,19 @@ impl<'a> Collector<'a> {
         // #2811: `string`↔slice conversions are restricted to byte/rune
         // elements; `OpKind::Int` cannot tell `int64` from `uint8`.
         let element_mismatch = self.string_slice_conversion_element_mismatch(name, &k, arg, &arg_k);
-        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch {
+        // #2870 / #2866: map, channel, and pointer type conversions require identical underlying types.
+        let target_key = self.underlying_type_key_of_named(name);
+        let arg_key = self.underlying_type_key_of_expr(arg);
+        let underlying_mismatch = match (&target_key, &arg_key) {
+            (Some(tk), Some(ak)) => {
+                let both_maps = tk.starts_with("map[") && ak.starts_with("map[");
+                let both_chans = tk.starts_with("chan ") && ak.starts_with("chan ");
+                let both_ptrs = tk.starts_with('*') && ak.starts_with('*');
+                (both_maps || both_chans || both_ptrs) && tk != ak
+            }
+            _ => false,
+        };
+        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch || underlying_mismatch {
             let note = if matches!(k, OpKind::Struct(_)) {
                 "structs cannot be instantiated via function-call conversions; write a struct literal like `T{...}` instead"
             } else {
