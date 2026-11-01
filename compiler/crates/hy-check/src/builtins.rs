@@ -414,6 +414,15 @@ impl<'a> Checker<'a> {
                         span,
                         "`min` requires at least 1 argument, found 0 (HYB-E2005)".to_string(),
                     );
+                } else {
+                    for a in args {
+                        if matches!(unwrap_parens(&a.value), Expr::Lit { kind: LitKind::Nil, .. }) {
+                            self.emit_builtin(
+                                span,
+                                "use of untyped nil in argument to `min` (HYB-E2005)".to_string(),
+                            );
+                        }
+                    }
                 }
             }
             "max" => {
@@ -422,6 +431,15 @@ impl<'a> Checker<'a> {
                         span,
                         "`max` requires at least 1 argument, found 0 (HYB-E2005)".to_string(),
                     );
+                } else {
+                    for a in args {
+                        if matches!(unwrap_parens(&a.value), Expr::Lit { kind: LitKind::Nil, .. }) {
+                            self.emit_builtin(
+                                span,
+                                "use of untyped nil in argument to `max` (HYB-E2005)".to_string(),
+                            );
+                        }
+                    }
                 }
             }
             "real" => {
@@ -433,6 +451,22 @@ impl<'a> Checker<'a> {
                             args.len()
                         ),
                     );
+                } else {
+                    let arg = unwrap_parens(&args[0].value);
+                    if is_string_literal(arg)
+                        || matches!(
+                            arg,
+                            Expr::Lit {
+                                kind: LitKind::Bool(_) | LitKind::Nil,
+                                ..
+                            }
+                        )
+                    {
+                        self.emit_builtin(
+                            span,
+                            "`real` argument must be a complex value or numeric literal (HYB-E2005)".to_string(),
+                        );
+                    }
                 }
             }
             "imag" => {
@@ -444,6 +478,22 @@ impl<'a> Checker<'a> {
                             args.len()
                         ),
                     );
+                } else {
+                    let arg = unwrap_parens(&args[0].value);
+                    if is_string_literal(arg)
+                        || matches!(
+                            arg,
+                            Expr::Lit {
+                                kind: LitKind::Bool(_) | LitKind::Nil,
+                                ..
+                            }
+                        )
+                    {
+                        self.emit_builtin(
+                            span,
+                            "`imag` argument must be a complex value or numeric literal (HYB-E2005)".to_string(),
+                        );
+                    }
                 }
             }
             "complex" => {
@@ -452,6 +502,38 @@ impl<'a> Checker<'a> {
                         span,
                         format!(
                             "`complex` requires exactly 2 arguments (real, imag), found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                } else {
+                    for (i, a) in args.iter().enumerate() {
+                        let arg = unwrap_parens(&a.value);
+                        if is_string_literal(arg)
+                            || matches!(
+                                arg,
+                                Expr::Lit {
+                                    kind: LitKind::Bool(_) | LitKind::Nil,
+                                    ..
+                                }
+                            )
+                        {
+                            self.emit_builtin(
+                                span,
+                                format!(
+                                    "`complex` argument {} cannot be string, bool, or nil (HYB-E2005)",
+                                    i + 1
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+            "append" => {
+                if args.len() < 2 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`append` requires at least 2 arguments (slice, elements...), found {} (HYB-E2005)",
                             args.len()
                         ),
                     );
