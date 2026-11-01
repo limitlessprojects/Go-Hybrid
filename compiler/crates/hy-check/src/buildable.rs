@@ -3117,6 +3117,16 @@ impl<'a> Collector<'a> {
             );
             return;
         }
+        // A positional return list is a sequence of single-value slots:
+        // `return two_ints(), "x"` is Go's multi-value-in-single-value
+        // context, and `report_return_conflict` would otherwise read the
+        // call's first result (#1852). The one-value form is a legal Go
+        // multi-value return and was handled above.
+        if values.len() > 1 {
+            for v in values {
+                self.check_single_value_position(v, "a return value", /*binding_position=*/ false);
+            }
+        }
         for (v, w) in values.iter().zip(want.iter()) {
             let got = self.kind_of_expr(v);
             self.report_return_conflict(v, &got, w, v.span());
