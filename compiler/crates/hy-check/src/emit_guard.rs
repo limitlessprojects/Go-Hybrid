@@ -323,13 +323,20 @@ impl<'a> Checker<'a> {
                                     TypeShape::Chan(e) => *e,
                                     _ => TypeShape::Unknown,
                                 };
+                                let elem_ty = self.chan_elem_ty(st, chan);
                                 for (i, n) in names.iter().enumerate() {
-                                    let shape = if i == 0 {
-                                        elem.clone()
+                                    let (shape, ty) = if i == 0 {
+                                        (elem.clone(), elem_ty.clone())
                                     } else {
-                                        TypeShape::Primitive
+                                        (
+                                            TypeShape::Primitive,
+                                            Some(TypeExpr::Named {
+                                                name: "bool".to_string(),
+                                                span: chan.span(),
+                                            }),
+                                        )
                                     };
-                                    self.define_binding(st, n, shape, None, false, false, false);
+                                    self.define_binding(st, n, shape, ty, false, false, false);
                                 }
                             }
                         }
