@@ -633,6 +633,10 @@ pub struct Emitter {
     /// var → (shape-known dotted type, is_pointer): `var hits atomic.int64`
     /// / `hits *atomic.int64` — the MethodFunc receiver's address-of form.
     var_ty: BTreeMap<String, (String, bool)>,
+    /// var → its DECLARED `option[T]` spelling (`var o option[int] = none`).
+    /// The zero value of that type is `none`, and a later `o = none` has no
+    /// other evidence to lower against.
+    local_option_ty: BTreeMap<String, String>,
     /// Variables known to hold a pointer type in the current function frame.
     pointer_vars: BTreeSet<String>,
     /// Local/parameter/receiver/result names bound in the current function frame.
@@ -651,6 +655,7 @@ pub(crate) struct ScopeSnapshot {
     var_ty: BTreeMap<String, (String, bool)>,
     var_struct: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
+    local_option_ty: BTreeMap<String, String>,
 }
 
 impl Emitter {
@@ -685,6 +690,7 @@ impl Emitter {
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
+            local_option_ty: BTreeMap::new(),
             pointer_vars: BTreeSet::new(),
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
@@ -705,6 +711,7 @@ impl Emitter {
             var_ty: self.var_ty.clone(),
             var_struct: self.var_struct.clone(),
             pointer_vars: self.pointer_vars.clone(),
+            local_option_ty: self.local_option_ty.clone(),
         }
     }
 
@@ -714,6 +721,7 @@ impl Emitter {
         self.var_ty = saved.var_ty;
         self.var_struct = saved.var_struct;
         self.pointer_vars = saved.pointer_vars;
+        self.local_option_ty = saved.local_option_ty;
     }
 
     pub(crate) fn shadow_local_name(&mut self, name: &str) {
@@ -1355,6 +1363,7 @@ impl Emitter {
         self.var_struct.clear();
         self.closure_shapes.clear();
         self.var_ty.clear();
+        self.local_option_ty.clear();
         self.pointer_vars.clear();
         self.local_vars.clear();
         self.temp_n = 0;
