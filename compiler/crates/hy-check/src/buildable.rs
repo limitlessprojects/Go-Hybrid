@@ -215,6 +215,8 @@ fn canonical_numeric_name(name: &str) -> Option<&'static str> {
         "uintptr" => "uintptr",
         "float32" | "f32" => "float32",
         "float64" | "f64" => "float64",
+        "complex64" | "c64" => "complex64",
+        "complex128" | "c128" => "complex128",
         _ => return None,
     })
 }
@@ -932,6 +934,25 @@ impl<'a> Collector<'a> {
                 .find_map(|a| self.typed_value_scalar(&a.value));
             return Some(vec![res_scalar]);
         }
+        if name == "complex" && args.len() == 2 {
+            let s0 = self.typed_value_scalar(&args[0].value);
+            let s1 = self.typed_value_scalar(&args[1].value);
+            let res = match (s0, s1) {
+                (Some("float32"), _) | (_, Some("float32")) => Some("complex64"),
+                (Some("float64"), _) | (_, Some("float64")) => Some("complex128"),
+                _ => None,
+            };
+            return Some(vec![res]);
+        }
+        if (name == "real" || name == "imag") && args.len() == 1 {
+            let s = self.typed_value_scalar(&args[0].value);
+            let res = match s {
+                Some("complex64") => Some("float32"),
+                Some("complex128") => Some("float64"),
+                _ => None,
+            };
+            return Some(vec![res]);
+        }
         if args.len() == 1
             && !self.ck.structs.contains_key(name.as_str())
             && !self.ck.enums.contains_key(name.as_str())
@@ -1025,6 +1046,28 @@ impl<'a> Collector<'a> {
                 } => Some("float64"),
                 _ => self.typed_value_scalar(operand),
             },
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "complex" && args.len() == 2 {
+                        let s0 = self.typed_value_scalar(&args[0].value);
+                        let s1 = self.typed_value_scalar(&args[1].value);
+                        match (s0, s1) {
+                            (Some("float32"), _) | (_, Some("float32")) => return Some("complex64"),
+                            (Some("float64"), _) | (_, Some("float64")) => return Some("complex128"),
+                            _ => return Some("complex128"),
+                        }
+                    }
+                    if (name == "real" || name == "imag") && args.len() == 1 {
+                        let s = self.typed_value_scalar(&args[0].value);
+                        match s {
+                            Some("complex64") => return Some("float32"),
+                            Some("complex128") => return Some("float64"),
+                            _ => return Some("float64"),
+                        }
+                    }
+                }
+                self.typed_value_scalar(e)
+            }
             other => self.typed_value_scalar(other),
         }
     }
@@ -5503,6 +5546,60 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn is_untyped_float_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Float(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        let d = &self.defines[*id];
+                        if d.kind == LocalKind::Const && d.is_untyped {
+                            return self.lookup_kind(name) == Some(OpKind::Float);
+                        }
+                        return false;
+                    }
+                }
+                if self.file_untyped_consts.contains(name) {
+                    return self.file_consts.get(name) == Some(&OpKind::Float);
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg) && self.is_untyped_float_const(operand)
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div
+                ) && (self.is_untyped_float_const(lhs) || self.is_untyped_float_const(rhs))
+                    && (self.is_untyped_float_const(lhs) || self.is_untyped_int_const(lhs))
+                    && (self.is_untyped_float_const(rhs) || self.is_untyped_int_const(rhs))
+            }
+            _ => false,
+        }
+    }
+
+    fn is_untyped_numeric_const(&self, expr: &Expr) -> bool {
+        self.is_untyped_int_const(expr) || self.is_untyped_float_const(expr)
+    }
+
+    fn is_complex_expr(&self, op: &Expr) -> bool {
+        if matches!(self.typed_value_scalar(op), Some("complex64" | "complex128")) {
+            return true;
+        }
+        if let Expr::Call { callee, .. } = unwrap_parens(op) {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                if name == "complex" {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn is_non_const_local(&self, name: &str) -> bool {
         for layer in self.scopes.iter().rev() {
             if let Some(entry) = layer.get(name) {
@@ -6329,7 +6426,7 @@ impl<'a> Collector<'a> {
         // spread argument is legal.
         if matches!(
             name,
-            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
+            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy" | "complex" | "real" | "imag"
         ) && args.iter().any(|a| a.spread)
         {
             self.emit_e1002(
@@ -6614,6 +6711,95 @@ impl<'a> Collector<'a> {
                             ak.label()
                         ),
                         "`clear` requires a slice or map operand",
+                    );
+                }
+            }
+            "complex" => {
+                if args.len() != 2 {
+                    return; // arity handled by builtins.rs
+                }
+                for arg in args {
+                    let k = self.kind_of_expr(&arg.value);
+                    let is_float_kind = k == OpKind::Float;
+                    let is_untyped_num = self.is_untyped_numeric_const(&arg.value);
+                    let is_unknown = k == OpKind::Unknown && !matches!(
+                        self.typed_value_scalar(&arg.value),
+                        Some("int" | "int8" | "int16" | "int32" | "int64" | "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr")
+                    );
+                    if !is_float_kind && !is_untyped_num && !is_unknown {
+                        let label = self.typed_value_scalar(&arg.value).map(|s| s.to_string()).unwrap_or_else(|| k.label());
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "invalid argument `{}` (type `{}`) for `complex`: expected floating-point (HYB-E2005)",
+                                arg.value.render(),
+                                label
+                            ),
+                            "arguments to `complex` must have floating-point type (`float32` or `float64`)",
+                        );
+                        return;
+                    }
+                }
+                let s0 = self.typed_value_scalar(&args[0].value);
+                let s1 = self.typed_value_scalar(&args[1].value);
+                if let (Some(a), Some(b)) = (s0, s1) {
+                    if a != b {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "mismatched types `{}` and `{}` in `complex` (HYB-E1002)",
+                                a, b
+                            ),
+                            "arguments to `complex` must have matching floating-point types",
+                        );
+                    }
+                }
+            }
+            "real" | "imag" => {
+                if args.len() != 1 {
+                    return; // arity handled by builtins.rs
+                }
+                let op = &args[0].value;
+                let ak = self.kind_of_expr(op);
+                let scalar = self.typed_value_scalar(op);
+                let is_complex = self.is_complex_expr(op);
+                let is_untyped_num = self.is_untyped_numeric_const(op);
+                if is_complex || is_untyped_num {
+                    return;
+                }
+                let is_invalid = match ak {
+                    OpKind::Unknown => matches!(
+                        scalar,
+                        Some(
+                            "int" | "int8" | "int16" | "int32" | "int64" | "uint" | "uint8"
+                                | "uint16" | "uint32" | "uint64" | "uintptr" | "float32"
+                                | "float64"
+                        )
+                    ),
+                    OpKind::Int
+                    | OpKind::Float
+                    | OpKind::Bool
+                    | OpKind::Str
+                    | OpKind::Slice(_)
+                    | OpKind::Array(_)
+                    | OpKind::Map(_, _)
+                    | OpKind::Chan(_)
+                    | OpKind::Struct(_)
+                    | OpKind::Pointer(_)
+                    | OpKind::Interface
+                    | OpKind::Fn(..) => true,
+                    _ => false,
+                };
+                if is_invalid {
+                    let label = scalar.map(|s| s.to_string()).unwrap_or_else(|| ak.label());
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type `{}`) for `{name}`: expected complex type (HYB-E2005)",
+                            op.render(),
+                            label
+                        ),
+                        "`real` and `imag` require an argument of complex type (`complex64` or `complex128`)",
                     );
                 }
             }
