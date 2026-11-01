@@ -1507,6 +1507,27 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Expr::Call { callee, .. } = unwrap_parens(val) {
+                    // #2884: `src := mk64()` — the bound name has no declared
+                    // type text, and the call's kind collapses the width, so
+                    // record the callee's single SLICE result type. That is what
+                    // lets a later `append(dst_int32, src...)` see `[]int64`.
+                    if let Expr::Ident { name: callee_name, .. } = unwrap_parens(callee) {
+                        let head = Checker::base_named_type_str(callee_name).to_string();
+                        if let Some(f) = self
+                            .ck
+                            .fns
+                            .get(callee_name.as_str())
+                            .or_else(|| self.ck.fns.get(&head))
+                        {
+                            if f.type_params.is_empty() && f.results.len() == 1 {
+                                let text = f.results[0].ty.render();
+                                if text.starts_with("[]") {
+                                    self.bind_type_name(name, text);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -4177,6 +4198,44 @@ impl<'a> Collector<'a> {
             .and_then(canonical_numeric_name)
     }
 
+    /// #2884 — the canonical element scalar of a slice VALUE inside
+    /// `append(dst, src...)`.
+    ///
+    /// `slice_element_type_name` reads the declared element text of a name
+    /// (`var src []int64`), which is where the width survives without an
+    /// `OpKind` that collapses it. A value bound to a CALL (`src := mk64()`)
+    /// has no such text, so its callee's declared single result type is read
+    /// instead — the shape the issue reports. Everything else fails open.
+    fn append_elem_scalar_of_expr(&self, e: &Expr) -> Option<&'static str> {
+        if let Some(text) = self.slice_element_type_name(e) {
+            if let Some(scalar) = canonical_numeric_name(&text) {
+                return Some(scalar);
+            }
+        }
+        let Expr::Call { callee, .. } = unwrap_parens(e) else {
+            return None;
+        };
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+            return None;
+        };
+        let head = Checker::base_named_type_str(name);
+        let f = self
+            .ck
+            .fns
+            .get(name.as_str())
+            .or_else(|| self.ck.fns.get(head))?;
+        if !f.type_params.is_empty() || f.results.len() != 1 {
+            return None;
+        }
+        let TypeExpr::Slice { elem, .. } = &f.results[0].ty else {
+            return None;
+        };
+        let TypeExpr::Named { name, .. } = &**elem else {
+            return None;
+        };
+        canonical_numeric_name(name)
+    }
+
     fn check_append_elements(&mut self, args: &[CallArg]) {
         let Some(first) = args.first() else { return };
         let elem = match self.kind_of_expr(&first.value) {
@@ -4204,7 +4263,22 @@ impl<'a> Collector<'a> {
                         let kind_mismatch = elem != *extra_elem
                             && !matches!(elem, OpKind::Unknown)
                             && !matches!(*extra_elem, OpKind::Unknown);
-                        if kinds_conflict(&elem, &extra_elem) || kind_mismatch || ty_mismatch {
+                        // #2884: the declared-text comparison above cannot see a
+                        // value bound to a CALL (`src := mk64()`), which is how
+                        // `append(dst_int32, src_int64...)` escaped. The callee's
+                        // result type carries that scalar.
+                        let scalar_mismatch = matches!(
+                            (
+                                self.append_elem_scalar_of_expr(&first.value),
+                                self.append_elem_scalar_of_expr(&extra.value)
+                            ),
+                            (Some(d), Some(s)) if d != s
+                        );
+                        if kinds_conflict(&elem, &extra_elem)
+                            || kind_mismatch
+                            || ty_mismatch
+                            || scalar_mismatch
+                        {
                             let (d_label, s_label) = match (dst_elem_ty, src_elem_ty) {
                                 (Some(d), Some(s)) => (format!("[]{}", d), format!("[]{}", s)),
                                 _ => (
