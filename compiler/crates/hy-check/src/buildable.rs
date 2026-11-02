@@ -3126,7 +3126,7 @@ impl<'a> Collector<'a> {
                         return Some(vec![first]);
                     }
                     "make" => return Some(vec![self.make_kind(args)]),
-                    "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
+                    "new" => return Some(vec![OpKind::Pointer(Box::new(self.new_elem_kind(args)))]),
                     "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
                     "recover" => return Some(vec![OpKind::Interface]),
                     "min" | "max" => {
@@ -3218,6 +3218,25 @@ impl<'a> Collector<'a> {
                 Box::new(self.kind_of_ty(value, 0)),
             ),
             Expr::Ident { name, .. } => self.kind_of_named(name, 0),
+            _ => OpKind::Unknown,
+        }
+    }
+
+    fn new_elem_kind(&self, args: &[CallArg]) -> OpKind {
+        let Some(first) = args.first() else {
+            return OpKind::Unknown;
+        };
+        let bare = unwrap_parens(&first.value);
+        match bare {
+            Expr::Ident { name, .. } => self.kind_of_type_str(name, 0),
+            Expr::SliceLit { elem: Some(t), .. } if bare.as_array_lit().is_none() => {
+                OpKind::Slice(Box::new(self.kind_of_ty(t, 0)))
+            }
+            Expr::MapLit { key, value, .. } => OpKind::Map(
+                Box::new(self.kind_of_ty(key, 0)),
+                Box::new(self.kind_of_ty(value, 0)),
+            ),
+            Expr::StructLit { ty: Some(t), .. } => self.kind_of_ty(t, 0),
             _ => OpKind::Unknown,
         }
     }
