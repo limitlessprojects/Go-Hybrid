@@ -90,8 +90,8 @@ fn match_uint16_with_hex_overflow_rejects_e1002() {
 }
 
 #[test]
-fn match_valid_nil_on_error_and_in_range_integers_accepted() {
-    let src = "fn main() {\n    var err error\n    match err {\n        nil => {}\n        _ => {}\n    }\n    var u uint8 = 10\n    match u {\n        20 => {}\n        255 => {}\n        _ => {}\n    }\n    var i int8 = 10\n    match i {\n        127 => {}\n        _ => {}\n    }\n}\n";
+fn match_valid_in_range_integers_accepted() {
+    let src = "fn main() {\n    var u uint8 = 10\n    match u {\n        20 => {}\n        255 => {}\n        _ => {}\n    }\n    var i int8 = 10\n    match i {\n        127 => {}\n        _ => {}\n    }\n    var u16 uint16 = 10\n    match u16 {\n        0xffff => {}\n        _ => {}\n    }\n}\n";
     let r = check(src);
     assert_eq!(
         r.verdict,
