@@ -235,3 +235,37 @@ We are **working on a Discord**; it will be linked here the day it opens.
 Until then [Discussions](https://github.com/limitlessprojects/Go-Hybrid/discussions)
 is the town hall: questions, ideas, show-and-tell, and bounty talk all land
 there, and we answer every thread.
+
+## Payout rails, dates, and fees (plan of record — 2026-10-24)
+
+Contributors asked for this in writing (discussion #295), so here it is.
+
+**Fees: none, ever.** Participation costs nothing at any stage — no
+registration, platform, verification, deposit, or prize-claim fee. Any party
+asking contributors to pay to claim a bounty under this program's name is not
+us; report it and we will flag it publicly.
+
+**Amounts are USD-denominated** as listed in the tables above. They are not
+converted or re-denominated at payout.
+
+**Payout rail.** The leading candidate — driven by what contributors here have
+actually asked for — is **USDC on Base to a self-custody wallet address you
+control**. The final rail decision will be posted **in writing in discussion
+#295 before the 2026-11-01 review window opens**, and this section will be
+updated the moment it is confirmed. If you need a different rail for the
+ladder tiers, say so in #295 before that date; we are reading it.
+
+**Identity and tax documents.** Nothing is required to *submit* work. A rail
+may impose its own requirements at payout time (for fiat rails, that usually
+means KYC and tax paperwork); whatever applies will be stated in the rail
+confirmation. Stablecoin self-custody has no identity requirement from us.
+
+**Dates.** Triage is continuous — do not hold work waiting for rails. The
+M1 wildcard verdict window opens **2026-11-01 00:00 UTC** (22 pre-registered
+slots, discussion #365); verdicts post there, and payout preparation starts
+after the last verdict of the window, per the published window rules.
+
+**Eligibility is merit-based and location-agnostic** for submission and
+review. Payout works wherever the confirmed rail works; if your jurisdiction
+blocks the confirmed rail, contact us in #295 and we will work out an
+alternative case by case.

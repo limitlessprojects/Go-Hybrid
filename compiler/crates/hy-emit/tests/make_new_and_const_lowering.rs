@@ -26,7 +26,9 @@ fn emit_new_slice_chan_and_spec_primitive() {
     .expect("must emit");
     assert!(go.contains("new([]int)"), "got:\n{}", go);
     assert!(!go.contains("new([]int{})"), "got:\n{}", go);
-    assert!(go.contains("new(str_map)"), "got:\n{}", go);
+    // SPEC N5 (#1615): a map alias behind parentheses is still a zero map —
+    // allocate it so the first write cannot panic on a nil map.
+    assert!(go.contains("pm := &str_map{}"), "got:\n{}", go);
     assert!(go.contains("new(chan int)"), "got:\n{}", go);
     assert!(go.contains("new(uint8)"), "got:\n{}", go);
 }
@@ -58,4 +60,12 @@ fn emit_parenthesized_composite_const_rewritten_to_var() {
         "expected var local_arr =, got:\n{}",
         go
     );
+}
+
+#[test]
+fn emit_new_array_preserves_array_type() {
+    let go = emit("fn main() {\n    p1 := new([4]u8{})\n    p2 := new(([4]u8{}))\n    fmt.println(p1, p2)\n}\n")
+        .expect("must emit");
+    assert!(go.contains("new([4]uint8)"), "got:\n{}", go);
+    assert!(!go.contains("new([][4]uint8)"), "got:\n{}", go);
 }
