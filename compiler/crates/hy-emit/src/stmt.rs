@@ -704,6 +704,27 @@ impl Emitter {
         }
     }
 
+    /// #3116 - true when evaluating this expression can OBSERVE state that a
+    /// following hoisted `?` call may change. A literal never can; anything
+    /// that reads a variable, field, index, or slice can.
+    pub(crate) fn expr_needs_order_pin(e: &Expr) -> bool {
+        match e {
+            Expr::Paren { inner, .. } => Self::expr_needs_order_pin(inner),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Expr(x) => Self::expr_needs_order_pin(x),
+                InterpPart::Lit(_) => false,
+            }),
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::expr_needs_order_pin(lhs) || Self::expr_needs_order_pin(rhs)
+            }
+            Expr::Unary { operand, .. } | Expr::AddrOf { operand, .. } => {
+                Self::expr_needs_order_pin(operand)
+            }
+            Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => true,
+            _ => false,
+        }
+    }
+
     /// Preserve left-to-right operand evaluation order when a later sibling
     /// operand contains a hoisted `?`.
     fn hoist_order_before_try(&mut self, e: &Expr) -> Result<(), EmitError> {
@@ -715,7 +736,7 @@ impl Emitter {
         {
             return Ok(());
         }
-        if Self::expr_has_call_or_recv(inner) {
+        if Self::expr_has_call_or_recv(inner) || Self::expr_needs_order_pin(inner) {
             let text = self.emit_expr(e, 0)?;
             let temp = self.next_temp("hyT");
             self.push(&format!("{} := {}", temp, text));

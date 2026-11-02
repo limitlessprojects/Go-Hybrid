@@ -3119,3 +3119,43 @@ fn utf8_byte_escapes_emit_exact_utf8_strings_issue_1199() {
         go
     );
 }
+
+// ---------------------------------------------------------------------------
+// #3116 - a later ? must not hoist above an earlier operand that READS state
+// ---------------------------------------------------------------------------
+
+fn emit3116(src: &str) -> String {
+    let file = parse_file("t.hy", src).expect("parse");
+    emit_go(&file).expect("emit")
+}
+
+fn assert_pinned_before(go: &str, pin: &str, call: &str, what: &str) {
+    let ti = go.find(pin);
+    let ci = go.find(call);
+    assert!(ti.is_some() && ci.is_some(), "{}: missing {:?} or {:?} in {} ", what, pin, call, go);
+    assert!(ti.unwrap() < ci.unwrap(), "{}: {:?} must precede {:?} in {}", what, pin, call, go);
+}
+
+#[test]
+fn issue3116_pins_field_read_before_later_try() {
+    let go = emit3116("struct state { value bool }\n\nfn flip(s *state) (int, error) {\n    s.value = false\n    return 1, nil\n}\n\nfn observe(b bool, n int) { fmt.println(b, n) }\n\nfn main() {\n    s := state{value: true}\n    observe(s.value && true, flip(&s)?)\n}\n");
+    assert_pinned_before(&go, "hyT0 := s.value && true", "hyT1, hyErr2 := flip(", "field read");
+}
+
+#[test]
+fn issue3116_pins_index_read_before_later_try() {
+    let go = emit3116("fn take(n int, xs *[]int) (int, error) {\n    return 1, nil\n}\n\nfn observe(a int, b int) { fmt.println(a, b) }\n\nfn main() {\n    xs := []int{1, 2}\n    observe(xs[0], take(1, &xs)?)\n}\n");
+    assert_pinned_before(&go, "hyT0 := xs[0]", "hyT1, hyErr2 := take(", "index read");
+}
+
+#[test]
+fn issue3116_does_not_pin_bare_identifier() {
+    let go = emit3116("fn main() {\n    var names []string\n    names = append(names, \"a\")\n    _ = names\n}\n");
+    assert!(go.contains("append(names,"), "bare identifier must not be pinned: {}", go);
+}
+
+#[test]
+fn issue3116_does_not_pin_literal() {
+    let go = emit3116("fn f(a int, b int) (int, error) {\n    return 0, nil\n}\n\nfn observe(a int, b int) { fmt.println(a, b) }\n\nfn main() {\n    observe(7, f(1, 2)?)\n}\n");
+    assert!(go.contains("observe(7, hyT"), "literal stays in place: {}", go);
+}
