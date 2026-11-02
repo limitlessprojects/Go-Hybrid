@@ -13,7 +13,7 @@ use crate::const_overflow::{const_int_fold_with, ConstFold};
 use crate::model::{unwrap_parens, Checker, FnState};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{ChanDir, Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 impl<'a> Checker<'a> {
     /// Pass-B entry: HYB-E2001 on `defer` + HYB-E2005 on builtin calls.
@@ -211,10 +211,6 @@ impl<'a> Checker<'a> {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                     self.check_builtin_call(name, args, *span);
                 }
-                // W-016 M3: a closure that writes a captured binding and is
-                // passed to a foreign Go call is the A5 escape perimeter
-                // (HYB-E3013, SPEC §8.5 C9).
-                self.check_escape_site(st, callee, args, *span);
             }
             Expr::Binary { lhs, rhs, .. } => {
                 self.check_expr_builtin_args(st, lhs);
@@ -650,18 +646,18 @@ impl<'a> Checker<'a> {
         );
     }
 
-    /// W-016 M3 — the A5 Go-escape check-site (`HYB-E3013`).
+    /// A5/O5.3 foreign callback escape checks, without an API database.
     ///
     /// Closed-world rule (SPEC-LANGUAGE §8.5 C9): no curated Go API database is
     /// consulted. The site fires when BOTH hold:
     ///   1. the callee is `<pkg>.<fn>` (`<pkg>` imported) or a method on a
     ///      foreign opaque/handle receiver from an imported package, and
-    ///   2. an argument is a `fn(...) { ... }` literal (or named/aliased
-    ///      closure binding) whose body writes or mutates a captured binding.
-    /// A site inside `managed(...)` is the declared escape hatch and is allowed.
-    fn check_escape_site(
+    ///   2. an argument is a closure whose body writes or reads a captured
+    ///      mutable binding. Writes reject; reads freeze later caller writes.
+    /// `managed(...)` is the declared escape hatch.
+    pub(crate) fn check_escape_site(
         &mut self,
-        st: &FnState,
+        st: &mut FnState,
         callee: &Expr,
         args: &[hy_syntax::CallArg],
         span: Span,
@@ -669,28 +665,176 @@ impl<'a> Checker<'a> {
         if self.in_managed() || !self.is_foreign_escape_callee(st, callee) {
             return;
         }
-        let Some(name) = args
+        if let Some(name) = args
             .iter()
             .find_map(|a| self.arg_closure_captured_write(st, &a.value))
-        else {
+        {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E3013",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "closure writes the captured binding `{name}` and is passed to a foreign Go call — the escape must be explicit (HYB-E3013)"
+                    ),
+                )
+                .with_notes(vec![
+                    "SPEC-LANGUAGE §8.5 C9: a closure that writes a captured mutable binding and \
+                     escapes into foreign Go code must take `managed(\"...\", \"interop\")` at the call \
+                     site, or the capture must be `const`/non-`may_share`"
+                        .to_string(),
+                ]),
+            );
+            return;
+        }
+
+        for arg in args {
+            for name in self.arg_closure_captured_reads(st, &arg.value) {
+                let Some(binding) = self.lookup_binding(st, &name) else {
+                    continue;
+                };
+                if binding.immutable || !self.shape_may_share(&binding.shape) {
+                    continue;
+                }
+                for member in crate::freeze::storage_component(st, &name) {
+                    if let Some(depth) = st.lookup_depth(&member) {
+                        st.escape_frozen.entry((member, depth)).or_insert(span);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn check_escape_frozen_writes(
+        &mut self,
+        st: &FnState,
+        uses: &[crate::walk::Use],
+    ) {
+        for usage in uses.iter().filter(|usage| usage.is_write) {
+            self.check_escape_frozen_mutation(st, &usage.name, usage.span);
+        }
+    }
+
+    pub(crate) fn check_escape_frozen_mutation(
+        &mut self,
+        st: &FnState,
+        name: &str,
+        span: Span,
+    ) {
+        let component = crate::freeze::storage_component(st, name);
+        let frozen = component.into_iter().find_map(|member| {
+            let depth = st.lookup_depth(&member)?;
+            st.escape_frozen
+                .get(&(member.clone(), depth))
+                .map(|site| (member, *site))
+        });
+        let Some((frozen_name, site)) = frozen else {
             return;
         };
         self.diags.push(
             Diagnostic::error(
-                "HYB-E3013",
+                "HYB-E3014",
                 self.path.clone(),
                 span,
                 format!(
-                    "closure writes the captured binding `{name}` and is passed to a foreign Go call — the escape must be explicit (HYB-E3013)"
+                    "`{name}` is mutated after a read-only capture escaped to foreign Go code (HYB-E3014)"
                 ),
             )
-            .with_notes(vec![
-                "SPEC-LANGUAGE §8.5 C9: a closure that writes a captured mutable binding and \
-                 escapes into foreign Go code must take `managed(\"...\", \"interop\")` at the call \
-                 site, or the capture must be `const`/non-`may_share`"
-                    .to_string(),
-            ]),
+            .with_notes(vec![format!(
+                "the foreign callback captured `{frozen_name}` at {}:{}; reads remain allowed, but mutation of the binding or a may-share alias is frozen (O5.3)",
+                site.start.line, site.start.col
+            )]),
         );
+    }
+
+    fn arg_closure_captured_reads(&self, st: &FnState, arg: &Expr) -> HashSet<String> {
+        match unwrap_parens(arg) {
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => self.closure_reads_captured(st, params, results, body),
+            Expr::Ident { name, .. } => {
+                let resolved = crate::freeze::resolve_alias(st, name);
+                st.closure_defs
+                    .get(name.as_str())
+                    .or_else(|| st.closure_defs.get(&resolved))
+                    .map(|(params, results, body)| {
+                        self.closure_reads_captured(st, params, results, body)
+                    })
+                    .unwrap_or_default()
+            }
+            _ => HashSet::new(),
+        }
+    }
+
+    fn closure_reads_captured(
+        &self,
+        st: &FnState,
+        params: &[hy_syntax::Param],
+        results: &[hy_syntax::FnResult],
+        body: &hy_syntax::Block,
+    ) -> HashSet<String> {
+        let mut scopes = vec![params
+            .iter()
+            .map(|p| p.name.clone())
+            .chain(results.iter().filter_map(|r| r.name.clone()))
+            .collect::<HashSet<_>>()];
+        let flat = crate::walk::flatten(body);
+        let mut captured = HashSet::new();
+        for (stmt, idx) in &flat.stmts {
+            if let Some(events) = flat.events.get(idx) {
+                for event in events {
+                    match event {
+                        crate::walk::ScopeEvent::Push => {
+                            scopes.push(scopes.last().cloned().unwrap_or_default());
+                        }
+                        crate::walk::ScopeEvent::Pop if scopes.len() > 1 => {
+                            scopes.pop();
+                        }
+                        crate::walk::ScopeEvent::SelectRecv { names, .. } => {
+                            scopes.last_mut().unwrap().extend(names.iter().cloned());
+                        }
+                        crate::walk::ScopeEvent::MatchBind { name, .. } => {
+                            scopes.last_mut().unwrap().insert((*name).to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut uses = Vec::new();
+            crate::walk::own_uses(stmt, &mut uses);
+            for usage in uses.into_iter().filter(|usage| !usage.is_write) {
+                if scopes.iter().any(|scope| scope.contains(&usage.name)) {
+                    continue;
+                }
+                if self
+                    .lookup_binding(st, &usage.name)
+                    .is_some_and(|binding| {
+                        !binding.immutable && self.shape_may_share(&binding.shape)
+                    })
+                {
+                    captured.insert(usage.name);
+                }
+            }
+            match stmt {
+                Stmt::Local(local) => {
+                    scopes.last_mut().unwrap().extend(local.names.iter().cloned());
+                }
+                Stmt::For { kind, .. } => match kind {
+                    ForKind::Range { var, .. } => {
+                        scopes.last_mut().unwrap().insert(var.clone());
+                    }
+                    ForKind::Iterate { vars, .. } => {
+                        scopes.last_mut().unwrap().extend(vars.iter().cloned());
+                    }
+                    ForKind::While { .. } | ForKind::Infinite => {}
+                },
+                _ => {}
+            }
+        }
+        captured
     }
 
     fn is_foreign_escape_callee(&self, st: &FnState, callee: &Expr) -> bool {

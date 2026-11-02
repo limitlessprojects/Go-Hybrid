@@ -460,6 +460,22 @@
       "tier0_rule_id": "A5"
     },
     {
+      "code": "HYB-E3014",
+      "name": "go-escape-captured-read-mutation",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "captured mutable binding is changed after a foreign callback escape",
+      "summary": "A read-only callback capture of mutable shared storage is allowed, but after the callback escapes to foreign Go code the caller may not mutate that binding or a may-share alias. This escape-freeze rule (O5.3) prevents the callback's asynchronous reads from racing with later caller writes without a curated Go API database.",
+      "fixits": [
+        "move the mutation before the callback escape",
+        "use an explicit managed(\"why\", \"interop\") block when synchronization is provided outside the checker",
+        "capture an immutable value or an independent copy instead of shared mutable storage"
+      ],
+      "example": "m := map[string]int{\"k\": 1}\nhttp.handle_func(\"/\", fn() { _ = m[\"k\"] })\nm[\"k\"] = 2   // reject: HYB-E3014",
+      "rule": "A5",
+      "tier0_rule_id": "A5"
+    },
+    {
       "code": "HYB-E3101",
       "name": "handle-loan-conflict",
       "category": "ownership-loans",
