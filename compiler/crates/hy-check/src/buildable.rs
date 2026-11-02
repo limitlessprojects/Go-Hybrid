@@ -518,6 +518,9 @@ struct Collector<'a> {
     copy_var_scopes: Vec<HashSet<String>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
+    /// #3107 — file-level consts declared with a predeclared numeric type
+    /// (`const k i8 = 3`) -> that type. Untyped consts are absent.
+    file_const_scalars: HashMap<String, &'static str>,
     file_untyped_consts: HashSet<String>,
     /// Result kinds of the function whose body is currently being walked
     /// (#577 C9/C10). Empty for a fn declared with no results — which is also
@@ -580,6 +583,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             set_elem_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
+            file_const_scalars: HashMap::new(),
             file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
             fn_type_params: HashSet::new(),
@@ -603,6 +607,9 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                     .map(|t| c.kind_of_ty(t, 0))
                     .unwrap_or_else(|| c.kind_of_expr(&cd.value));
                 c.file_consts.insert(cd.name.clone(), k);
+                if let Some(s) = cd.ty.as_ref().and_then(|t| c.scalar_of_ty(t)) {
+                    c.file_const_scalars.insert(cd.name.clone(), s);
+                }
                 if cd.ty.is_none() {
                     c.file_untyped_consts.insert(cd.name.clone());
                 }
@@ -884,7 +891,41 @@ impl<'a> Collector<'a> {
     fn value_type_text(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
         match bare {
-            Expr::Ident { name, .. } => self.lookup_vtext(name),
+            Expr::Ident { name, .. } => {
+                if self
+                    .vtext_scopes
+                    .iter()
+                    .any(|l| l.contains_key(name.as_str()))
+                    || self.scopes.iter().any(|l| l.contains_key(name.as_str()))
+                {
+                    return self.lookup_vtext(name);
+                }
+                // #3107 — a top-level non-generic one-result function used
+                // as a value (`f := get`).
+                let fd = self.ck.fns.get(name.as_str())?;
+                if fd.receiver.is_some() || !fd.type_params.is_empty() || fd.results.len() != 1 {
+                    return None;
+                }
+                Some(format!("func->{}", fd.results[0].ty.render()))
+            }
+            // #3107 — a method value on a non-generic struct (`f := a.get`).
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let sn = self.struct_base_name(&bk)?;
+                if self
+                    .ck
+                    .struct_type_params
+                    .get(sn.as_str())
+                    .is_some_and(|tp| !tp.is_empty())
+                {
+                    return None;
+                }
+                let m = self.ck.method_decls.get(&(sn, name.clone()))?;
+                if !m.type_params.is_empty() || m.results.len() != 1 {
+                    return None;
+                }
+                Some(format!("func->{}", m.results[0].ty.render()))
+            }
             Expr::SliceLit { elem: Some(t), .. } => {
                 if let Some((_, _, arr)) = bare.as_array_lit() {
                     Some(arr.render())
@@ -1111,6 +1152,13 @@ impl<'a> Collector<'a> {
             }
             return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
         }
+        // #3107 — `len`, `cap` and `copy` always yield a typed `int` (even
+        // `len` of a const string or an array is a constant OF TYPE int).
+        if ((name == "len" || name == "cap") && args.len() == 1)
+            || (name == "copy" && args.len() == 2)
+        {
+            return Some(vec![canonical_numeric_name("int")]);
+        }
         if name == "min" || name == "max" {
             let res_scalar = args
                 .iter()
@@ -1134,7 +1182,20 @@ impl<'a> Collector<'a> {
     /// they are deliberately `None` here.
     fn typed_value_scalar(&self, e: &Expr) -> Option<&'static str> {
         match unwrap_parens(e) {
-            Expr::Ident { name, .. } => self.lookup_scalar(name),
+            Expr::Ident { name, .. } => self.lookup_scalar(name).or_else(|| {
+                // #3107 — a typed file-level const keeps its declared width
+                // unless a local binding shadows it.
+                if self.scopes.iter().any(|l| l.contains_key(name.as_str()))
+                    || self
+                        .scalar_scopes
+                        .iter()
+                        .any(|l| l.contains_key(name.as_str()))
+                {
+                    None
+                } else {
+                    self.file_const_scalars.get(name.as_str()).copied()
+                }
+            }),
             // Typed arithmetic keeps its operand type: in any program that
             // builds, both operands share one type or one is an untyped
             // constant, so the typed side names the result type. A shift's
