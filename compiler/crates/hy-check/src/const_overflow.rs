@@ -880,6 +880,40 @@ impl<'a> Checker<'a> {
                     self.emit_conv_kind_error(target, c, arg, span)
                 }
             },
+            "complex64" | "complex128" | "c64" | "c128" => match c {
+                ConvConst::Float(f) | ConvConst::Huge { f, .. } => {
+                    let overflows = !f.is_finite()
+                        || (matches!(target, "complex64" | "c64") && f.abs() > f32::MAX as f64);
+                    if overflows {
+                        self.emit_const_conversion_error(
+                            span,
+                            format!(
+                                "constant `{}` overflows `{}` in a conversion (HYB-E6006)",
+                                arg.render(),
+                                target
+                            ),
+                            vec![
+                                format!(
+                                    "why: Go rejects `{}({})` at compile time (`constant ... overflows {}`), so an accepted Hybrid program would emit unbuildable Go (issue #228)",
+                                    target,
+                                    arg.render(),
+                                    target
+                                ),
+                                format!(
+                                    "fix: use a constant within `{}` range, or widen the target type to `complex128`",
+                                    target
+                                ),
+                            ],
+                        );
+                    }
+                }
+                ConvConst::Int(_) | ConvConst::Char(_) => {
+                    // Numeric integers and rune constants convert legally to complex in Go (imag part is 0).
+                }
+                ConvConst::Str | ConvConst::Bool | ConvConst::Nil => {
+                    self.emit_conv_kind_error(target, c, arg, span);
+                }
+            },
             _ => {}
         }
     }
@@ -1040,7 +1074,18 @@ fn huge_int_as_f64(s: &str) -> f64 {
 /// True when `name` is a built-in conversion target of `Type(const)` calls.
 fn is_conversion_target(name: &str) -> bool {
     fixed_width_int_range(name).is_some()
-        || matches!(name, "f32" | "f64" | "float32" | "float64" | "string")
+        || matches!(
+            name,
+            "f32"
+                | "f64"
+                | "float32"
+                | "float64"
+                | "string"
+                | "complex64"
+                | "complex128"
+                | "c64"
+                | "c128"
+        )
 }
 
 /// Targets the emitter's SPEC X4 fold skips (`bits >= 64`) — constants here
