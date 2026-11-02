@@ -1624,8 +1624,10 @@ impl<'a> Collector<'a> {
         if let Some(ty) = &l.ty {
             return vec![self.kind_of_ty(ty, 0); n];
         }
-        if n == 2 && l.values.len() == 1 {
-            return self.multi_value_kinds(&l.values[0]);
+        if n >= 2 && l.values.len() == 1 {
+            let mut mv = self.multi_value_kinds(&l.values[0]);
+            mv.resize(n, OpKind::Unknown);
+            return mv;
         }
         if n == l.values.len() {
             return l.values.iter().map(|v| self.kind_of_expr(v)).collect();
@@ -1638,7 +1640,8 @@ impl<'a> Collector<'a> {
             Expr::Move { operand, .. } => self.multi_value_kinds(operand),
             Expr::Index { base, .. } => match self.kind_of_expr(base) {
                 OpKind::Map(_, v) => vec![*v, OpKind::Bool],
-                _ => vec![OpKind::Unknown, OpKind::Bool],
+                OpKind::Unknown => vec![OpKind::Unknown, OpKind::Bool],
+                _ => vec![OpKind::Unknown, OpKind::Unknown],
             },
             Expr::Receive { chan, .. } => match self.kind_of_expr(chan) {
                 OpKind::Chan(elem) => vec![*elem, OpKind::Bool],
@@ -1647,7 +1650,7 @@ impl<'a> Collector<'a> {
             Expr::Call { callee, args, .. } => {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() >= 2 {
-                        return vec![res[0].clone(), res[1].clone()];
+                        return res;
                     }
                 }
                 vec![OpKind::Unknown, OpKind::Unknown]
@@ -3932,7 +3935,26 @@ impl<'a> Collector<'a> {
         if !f.type_params.is_empty() {
             return;
         }
-        if self.multi_value_arg_count(args).is_some() {
+        if let Some(n) = self.multi_value_arg_count(args) {
+            if f.params.len() == n {
+                let got_kinds = self.multi_value_kinds(&args[0].value);
+                for (p, got) in f.params.iter().zip(got_kinds.iter()) {
+                    let want = self.kind_of_ty(&p.ty, 0);
+                    if kinds_conflict(&want, got) {
+                        self.emit_e1002(
+                            args[0].value.span(),
+                            format!(
+                                "cannot use `{}` result of type `{}` as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                                args[0].value.render(),
+                                got.label(),
+                                want.label(),
+                                name
+                            ),
+                            "argument types must match declared parameter types",
+                        );
+                    }
+                }
+            }
             return;
         }
         if f.params.len() != args.len() {
@@ -5017,6 +5039,26 @@ impl<'a> Collector<'a> {
                             ),
                             "bind one name per value, or use a source that yields one value per target",
                         );
+                    } else {
+                        let got_kinds = self.multi_value_kinds(&values[0]);
+                        if got_kinds.len() == targets.len() {
+                            for (t, vk) in targets.iter().zip(got_kinds.iter()) {
+                                let tpk = self.kind_of_place(t);
+                                if kinds_conflict(&tpk, vk) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "cannot assign a value of type `{}` to `{}` (type `{}`) in multi-value assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                            vk.label(),
+                                            t.render(),
+                                            tpk.label(),
+                                            tpk.label()
+                                        ),
+                                        "each target's declared type is fixed; write an explicit conversion when a conversion is intended",
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
