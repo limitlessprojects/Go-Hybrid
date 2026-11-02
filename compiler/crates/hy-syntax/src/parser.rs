@@ -2028,6 +2028,21 @@ impl Parser {
                 let saved_pos = self.pos;
                 let saved_diags = self.diags.len();
                 if let Ok(inner_elem) = self.parse_type() {
+                    // `[N]T(x)` array type conversion: the call postfix is
+                    // parsed by the caller, as for `[]T(x)`.
+                    if self.at_punct("(") {
+                        let ty_span = self.span_from(start);
+                        let len_expr = items.pop().expect("single array length expr");
+                        return Ok(Expr::SliceLit {
+                            elem: Some(Box::new(TypeExpr::Array {
+                                len: Some(Box::new(len_expr)),
+                                elem: Box::new(inner_elem),
+                                span: ty_span,
+                            })),
+                            items: Vec::new(),
+                            span: ty_span,
+                        });
+                    }
                     if self.at_punct("{") {
                         let ty_span = self.span_from(start);
                         let len_expr = items.pop().expect("single array length expr");
