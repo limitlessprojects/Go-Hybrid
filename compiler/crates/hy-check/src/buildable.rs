@@ -873,7 +873,11 @@ impl<'a> Collector<'a> {
     /// Only identifiers bound with an explicit type name are known; everything
     /// else (literals, conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
-        match unwrap_parens(e) {
+        let bare = unwrap_parens(e);
+        if let Some((_, _, array_ty)) = bare.as_array_lit() {
+            return Some(array_ty.render());
+        }
+        match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             _ => None,
         }
@@ -883,6 +887,30 @@ impl<'a> Collector<'a> {
     fn place_type_name(&self, p: &Place) -> Option<String> {
         match &p.kind {
             PlaceKind::Ident(n) => self.lookup_type_name(n),
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                let sname = self.struct_base_name(&bk)?;
+                let declared = self.ck.structs.get(&sname)?;
+                let (_, fty) = declared.iter().find(|(n, _)| n == name)?;
+                Some(fty.render())
+            }
+            PlaceKind::Index { base, .. } => {
+                if let Some(base_tname) = self.place_type_name(base) {
+                    let s = base_tname.trim();
+                    if let Some(elem) = s.strip_prefix("[]") {
+                        return Some(elem.trim().to_string());
+                    }
+                    if s.starts_with('[') {
+                        if let Some(close) = s.find(']') {
+                            let elem = s[close + 1..].trim();
+                            if !elem.is_empty() {
+                                return Some(elem.to_string());
+                            }
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -3363,19 +3391,27 @@ impl<'a> Collector<'a> {
                     // `float32`) — Go refuses that in a struct literal.
                     let scalar_mismatch =
                         self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
+                    let array_mismatch = self.sized_array_names_differ(
+                        Some(&fty.render()),
+                        self.typed_value_type_name(&f.value).as_deref(),
+                    );
                     let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
                         || kinds_conflict(&want, &got)
-                        || scalar_mismatch;
+                        || scalar_mismatch
+                        || array_mismatch;
                     if conflict {
+                        let got_label = self
+                            .typed_value_type_name(&f.value)
+                            .unwrap_or_else(|| got.label().to_string());
                         self.emit_e1002(
                             f.value.span(),
                             format!(
                                 "cannot use a value of type `{}` for field `{}` of `{}` (declared `{}`) — Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
-                                got.label(),
+                                got_label,
                                 f.name,
                                 full_name,
-                                want.label(),
-                                want.label()
+                                fty.render(),
+                                fty.render()
                             ),
                             "the field's declared type is fixed; write an explicit conversion when a conversion is intended",
                         );
@@ -5000,14 +5036,20 @@ impl<'a> Collector<'a> {
                                 self.typed_value_type_name(&values[0]).as_deref(),
                             ))
                     {
+                        let got_label = self
+                            .typed_value_type_name(&values[0])
+                            .unwrap_or_else(|| vk.label().to_string());
+                        let target_label = self
+                            .place_type_name(target)
+                            .unwrap_or_else(|| tk.label().to_string());
                         self.emit_e1002(
                             span,
                             format!(
                                 "cannot assign a value of type `{}` to `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
-                                vk.label(),
+                                got_label,
                                 target.render(),
-                                tk.label(),
-                                tk.label()
+                                target_label,
+                                target_label
                             ),
                             "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
                         );
