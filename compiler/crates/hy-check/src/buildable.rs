@@ -547,6 +547,8 @@ struct Collector<'a> {
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
     select_depth: usize,
+    /// Lexical nesting depth within `managed` blocks (O6.1).
+    managed_depth: usize,
     defines: Vec<Define>,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
@@ -583,6 +585,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_result_scalars: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
+            managed_depth: 0,
             defines: Vec::new(),
             roots: HashSet::new(),
             diags: Vec::new(),
@@ -1435,9 +1438,11 @@ impl<'a> Collector<'a> {
         );
         let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
         let outer_select = std::mem::replace(&mut self.select_depth, 0);
+        let outer_managed = std::mem::replace(&mut self.managed_depth, 0);
         self.block_stmts(body);
         self.loop_depth = outer_loop;
         self.select_depth = outer_select;
+        self.managed_depth = outer_managed;
         self.fn_results = outer;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
@@ -1892,7 +1897,11 @@ impl<'a> Collector<'a> {
                     _ => {}
                 }
             }
-            Stmt::Managed { body, .. } => self.block_scoped(body),
+            Stmt::Managed { body, .. } => {
+                self.managed_depth += 1;
+                self.block_scoped(body);
+                self.managed_depth -= 1;
+            }
             Stmt::Match { subject, arms, .. } => {
                 self.expr(subject);
                 let subject_kind = self.kind_of_expr(subject);
@@ -2425,9 +2434,11 @@ impl<'a> Collector<'a> {
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
                 let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
                 let outer_select = std::mem::replace(&mut self.select_depth, 0);
+                let outer_managed = std::mem::replace(&mut self.managed_depth, 0);
                 self.block_stmts(body);
                 self.loop_depth = outer_loop;
                 self.select_depth = outer_select;
+                self.managed_depth = outer_managed;
                 self.fn_results = outer;
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
@@ -3643,6 +3654,9 @@ impl<'a> Collector<'a> {
     /// must supply a value matching the channel's element type. Go refuses
     /// mismatched scalar widths and sized-array lengths.
     fn check_channel_send(&mut self, chan: &Expr, value: &Expr, span: Span) {
+        if self.managed_depth > 0 {
+            return;
+        }
         let ck = self.kind_of_expr(chan);
         let vk = self.kind_of_expr(value);
         let elem_kind = match ck {

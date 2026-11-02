@@ -127,3 +127,18 @@ fn main() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+#[test]
+fn chan_send_inside_managed_block_is_permitted() {
+    let src = r#"
+fn main() {
+    var ch chan int32
+    var x int64 = 42
+    managed("interop", "interop") {
+        ch <- x
+    }
+}
+"#;
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Accept);
+}
