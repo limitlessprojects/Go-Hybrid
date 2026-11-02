@@ -239,7 +239,7 @@ impl<'a> Checker<'a> {
                 for (i, v) in values.iter().enumerate() {
                     if let Some(res_ty) = st.result_types.get(i) {
                         let resolved_ty = self.resolve_type_alias(res_ty);
-                        self.check_const_overflow_init("return statement", &resolved_ty, v, None);
+                        self.check_const_overflow_init("return statement", &resolved_ty, v, Some(st));
                     }
                     self.check_expr_emit_guard(st, v);
                 }
@@ -471,25 +471,20 @@ impl<'a> Checker<'a> {
             Expr::StructLit { ty, fields, .. } => {
                 if let Some(t) = ty {
                     self.check_type_expr_with_state(Some(st), t);
-                }
-                if let Some(TypeExpr::Named { name, .. }) = ty {
-                    let mut sname = name.clone();
-                    while let Some(TypeExpr::Named { name: target, .. }) =
-                        self.type_aliases.get(&sname)
-                    {
-                        sname = target.clone();
-                    }
-                    if let Some(struct_fields) = self.structs.get(&sname).cloned() {
-                        for f in fields {
-                            if let Some((_, f_ty)) =
-                                struct_fields.iter().find(|(fname, _)| fname == &f.name)
-                            {
-                                self.check_const_overflow_init(
-                                    &format!("{}.{}", sname, f.name),
-                                    f_ty,
-                                    &f.value,
-                                    None,
-                                );
+                    if let TypeExpr::Named { name: sname, .. } = self.resolve_type_alias(t) {
+                        let base_sname = Self::base_named_type_str(&sname);
+                        if let Some(struct_fields) = self.struct_fields_for_sname(&sname) {
+                            for f in fields {
+                                if let Some((_, f_ty)) =
+                                    struct_fields.iter().find(|(fname, _)| fname == &f.name)
+                                {
+                                    self.check_const_overflow_init(
+                                        &format!("{}.{}", base_sname, f.name),
+                                        f_ty,
+                                        &f.value,
+                                        Some(st),
+                                    );
+                                }
                             }
                         }
                     }
@@ -510,7 +505,7 @@ impl<'a> Checker<'a> {
                     let elem_ty = *elem_ty.clone();
                     let resolved_elem = self.resolve_type_alias(&elem_ty);
                     for i in items {
-                        self.check_const_overflow_init("slice literal element", &elem_ty, i, None);
+                        self.check_const_overflow_init("slice literal element", &elem_ty, i, Some(st));
                         if let Expr::SliceLit {
                             elem: None,
                             items: sub_items,
@@ -544,8 +539,8 @@ impl<'a> Checker<'a> {
                 let val_ty = *value.clone();
                 self.check_map_literal_duplicate_keys(entries, Some(st));
                 for (k, v) in entries {
-                    self.check_const_overflow_init("map literal key", &key_ty, k, None);
-                    self.check_const_overflow_init("map literal value", &val_ty, v, None);
+                    self.check_const_overflow_init("map literal key", &key_ty, k, Some(st));
+                    self.check_const_overflow_init("map literal value", &val_ty, v, Some(st));
                     self.check_expr_emit_guard(st, k);
                     self.check_expr_emit_guard(st, v);
                 }
@@ -659,7 +654,9 @@ impl<'a> Checker<'a> {
                         decl.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect()
                     })
                 } else if let Some(b) = self.lookup_binding(st, name) {
-                    if let Some(TypeExpr::Fn { params, .. }) = &b.ty {
+                    if let Some(TypeExpr::Fn { params, .. }) =
+                        b.ty.as_ref().map(|t| self.resolve_type_alias(t))
+                    {
                         Some(params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
                     } else {
                         None
@@ -730,7 +727,7 @@ impl<'a> Checker<'a> {
                         &format!("parameter `{}`", p_name),
                         &resolved_ty,
                         &a.value,
-                        None,
+                        Some(st),
                     );
                 }
             }
@@ -1041,7 +1038,30 @@ impl<'a> Checker<'a> {
                     self.check_type_expr_with_state(st, r);
                 }
             }
-            TypeExpr::Named { .. } => {}
+            TypeExpr::Named { name, span } => {
+                if let Some(st) = st {
+                    for tok in name.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.') {
+                        if !tok.is_empty() && st.env_lookup(tok).is_some() {
+                            let msg = format!(
+                                "type `{}` is shadowed by local value `{}` in this scope ? Go rejects `{tok} (variable) is not a type` (HYB-E1002)",
+                                name, tok
+                            );
+                            self.diags.push(
+                                Diagnostic::error("HYB-E1002", self.path.clone(), *span, msg)
+                                    .with_notes(vec![
+                                        format!(
+                                            "why: Go resolves `{tok}` to the in-scope local or parameter rather than the type, so the emitted program fails `go build` (GUARANTEES Row 13)"
+                                        ),
+                                        format!(
+                                            "fix: rename the local binding `{tok}` so it does not shadow the type name"
+                                        ),
+                                    ]),
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 
