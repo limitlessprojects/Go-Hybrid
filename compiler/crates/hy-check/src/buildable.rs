@@ -548,7 +548,16 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // `option[T]`; Go converts it to nothing but itself or an interface
         // (`u8(op)`, `float64(op)`, `string(op)` fail `go build` with
         // `cannot convert op (variable of struct type option[int])`).
-        (Option(_), Option(_)) => false,
+        // Conversely, Go forbids converting non-structs to `option[T]`
+        // (`opt_i(42)`, `opt_s("hi")`), and converting between option types
+        // requires compatible payload kinds.
+        (Option(a), Option(b)) => {
+            if matches!(**a, Unknown) || matches!(**b, Unknown) {
+                false
+            } else {
+                a != b
+            }
+        }
         (_, Option(_)) => true,
         (Option(_), other) if !matches!(other, Unknown | Option(_)) => true,
 
@@ -3586,6 +3595,9 @@ impl<'a> Collector<'a> {
             return OpKind::Unknown;
         }
         let name = name.trim();
+        if let Some(rest) = name.strip_prefix("option[").and_then(|r| r.strip_suffix(']')) {
+            return OpKind::Option(Box::new(self.kind_of_type_str(rest, depth + 1)));
+        }
         let base = Checker::base_named_type_str(name);
         if self.ck.structs.contains_key(base) || self.ck.struct_type_params.contains_key(base) {
             return OpKind::Struct(Some(name.to_string()));
@@ -4509,6 +4521,79 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #3357 — payload type name of an option type alias or direct `option[T]` spelling.
+    fn named_option_payload_name(&self, name: &str) -> Option<String> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            match self.ck.resolve_type_alias(ty) {
+                hy_syntax::TypeExpr::Option { elem, .. } => Some(elem.render()),
+                _ => None,
+            }
+        } else if base.starts_with("option[") && base.ends_with(']') {
+            Some(base["option[".len()..base.len() - 1].to_string())
+        } else {
+            None
+        }
+    }
+
+    /// #3357 — payload type of an option-typed expression.
+    fn option_payload_type_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                self.named_option_payload_name(&tn)
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "some" {
+                        if let Some(first) = args.first() {
+                            if let Some(s) = self.typed_value_scalar(&first.value) {
+                                return Some(s.to_string());
+                            }
+                            if let Expr::Ident { name: arg_name, .. } = unwrap_parens(&first.value) {
+                                if let Some(tn) = self.lookup_type_name(arg_name) {
+                                    return Some(tn);
+                                }
+                            }
+                            if let Some((_, _, arr_ty)) = unwrap_parens(&first.value).as_array_lit() {
+                                return Some(self.ck.resolve_type_alias(arr_ty).render());
+                            }
+                        }
+                    } else if let Some(payload) = self.named_option_payload_name(name) {
+                        return Some(payload);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// #3357 — two KNOWN and incompatible option payload types.
+    fn option_payload_types_conflict(&self, target_name: &str, arg: &Expr) -> bool {
+        let Some(t_payload) = self.named_option_payload_name(target_name) else {
+            return false;
+        };
+        let Some(a_payload) = self.option_payload_type_of_expr(arg) else {
+            return false;
+        };
+        let t_trim = t_payload.trim();
+        let a_trim = a_payload.trim();
+        if t_trim == a_trim {
+            return false;
+        }
+        if let (Some(t_num), Some(a_num)) = (
+            canonical_numeric_name(t_trim),
+            canonical_numeric_name(a_trim),
+        ) {
+            return t_num != a_num;
+        }
+        if (t_trim.starts_with('[') && a_trim.starts_with('[')) || t_trim != a_trim {
+            return true;
+        }
+        false
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -4560,7 +4645,9 @@ impl<'a> Collector<'a> {
         // #2811: `string`↔slice conversions are restricted to byte/rune
         // elements; `OpKind::Int` cannot tell `int64` from `uint8`.
         let element_mismatch = self.string_slice_conversion_element_mismatch(name, &k, arg, &arg_k);
-        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch {
+        let option_payload_mismatch = matches!(k, OpKind::Option(_))
+            && self.option_payload_types_conflict(name, arg);
+        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch || option_payload_mismatch {
             let note = if matches!(k, OpKind::Struct(_)) {
                 "structs cannot be instantiated via function-call conversions; write a struct literal like `T{...}` instead"
             } else {
