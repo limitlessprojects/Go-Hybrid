@@ -159,6 +159,29 @@ class UnsupportedExampleTests(unittest.TestCase):
                     self.assertIn(f"PASS {STD_EXAMPLE}", result.stdout)
 
 
+    def test_existing_numeric_example_requires_an_oracle(self):
+        # An existing numeric example cannot pass without an acceptance oracle.
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp)
+            (fixture / "tools").mkdir()
+            runner = fixture / "tools" / "run_examples.sh"
+            shutil.copyfile(ROOT / "tools" / "run_examples.sh", runner)
+            example = fixture / "examples" / "11"
+            example.mkdir(parents=True)
+            (example / "program.hy").write_text("fn main() {}\n", encoding="utf-8")
+            builder = fixture / "builder"
+            builder.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            builder.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(runner), "11"],
+                env={**os.environ, "HYB_BIN": str(builder)},
+                capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("FAIL 11 (unsupported acceptance example", result.stdout)
+            self.assertIn("examples: FAILURES", result.stdout)
+            self.assertNotIn("examples: ALL PASS", result.stdout)
+
+
 class StandardExampleExitTests(unittest.TestCase):
     # Reuse the shared fake-builder fixture without re-running the base
     # class's example-10 scenarios under this example's name.
