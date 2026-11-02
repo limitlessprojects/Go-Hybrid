@@ -13,7 +13,7 @@ use crate::const_overflow::{const_int_fold_with, ConstFold};
 use crate::model::{unwrap_parens, Checker, FnState};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{ChanDir, Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 impl<'a> Checker<'a> {
     /// Pass-B entry: HYB-E2001 on `defer` + HYB-E2005 on builtin calls.
@@ -666,24 +666,42 @@ impl<'a> Checker<'a> {
         args: &[hy_syntax::CallArg],
         span: Span,
     ) {
-        if self.in_managed() || !self.is_foreign_escape_callee(st, callee) {
+        if self.in_managed() {
             return;
         }
-        let Some(name) = args
-            .iter()
-            .find_map(|a| self.arg_closure_captured_write(st, &a.value))
-        else {
-            return;
+        let message = if self.is_foreign_escape_callee(st, callee) {
+            let Some(name) = args
+                .iter()
+                .find_map(|a| self.arg_closure_captured_write(st, &a.value))
+            else {
+                return;
+            };
+            format!(
+                "closure writes the captured binding `{name}` and is passed to a foreign Go call — the escape must be explicit (HYB-E3013)"
+            )
+        } else {
+            // A closure handed to a USER fn/method whose parameter reaches a
+            // foreign Go call (`fn later(f fn()) { time.after_func(0, f) }`)
+            // escapes exactly as if it were passed to that call directly —
+            // the wrapper must not launder the C9 check-site away.
+            let Some((callee_name, decl)) = self.user_callee_decl(st, callee) else {
+                return;
+            };
+            let Some(name) = args.iter().enumerate().find_map(|(i, a)| {
+                let p = decl.params.get(i)?;
+                if !self.param_reaches_foreign_escape(decl, &p.name, 0) {
+                    return None;
+                }
+                self.arg_closure_captured_write(st, &a.value)
+            }) else {
+                return;
+            };
+            format!(
+                "closure writes the captured binding `{name}` and is passed to `{callee_name}`, which hands it to a foreign Go call — the escape must be explicit (HYB-E3013)"
+            )
         };
         self.diags.push(
-            Diagnostic::error(
-                "HYB-E3013",
-                self.path.clone(),
-                span,
-                format!(
-                    "closure writes the captured binding `{name}` and is passed to a foreign Go call — the escape must be explicit (HYB-E3013)"
-                ),
-            )
+            Diagnostic::error("HYB-E3013", self.path.clone(), span, message)
             .with_notes(vec![
                 "SPEC-LANGUAGE §8.5 C9: a closure that writes a captured mutable binding and \
                  escapes into foreign Go code must take `managed(\"...\", \"interop\")` at the call \
@@ -1112,6 +1130,135 @@ impl<'a> Checker<'a> {
         };
         let base_ty = Self::base_named_type_str(&s).to_string();
         self.method_decls.get(&(base_ty, name.to_string())).copied()
+    }
+}
+
+impl<'a> Checker<'a> {
+    /// A call's callee resolved to a user-declared top-level fn (not
+    /// shadowed by a local) or a user method on a struct-typed receiver.
+    fn user_callee_decl(&self, st: &FnState, callee: &Expr) -> Option<(String, &'a hy_syntax::FnDecl)> {
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } if self.lookup_binding(st, name).is_none() => {
+                self.fns.get(name.as_str()).map(|d| (name.clone(), *d))
+            }
+            Expr::Field { base, name, .. } => {
+                let mut recv = self.shape_of_expr(st, base);
+                while let crate::model::TypeShape::Pointer(inner) = recv {
+                    recv = *inner;
+                }
+                let crate::model::TypeShape::Struct(Some(s)) = recv else {
+                    return None;
+                };
+                let base_ty = Self::base_named_type_str(&s).to_string();
+                self.method_decls
+                    .get(&(base_ty, name.clone()))
+                    .map(|d| (name.clone(), *d))
+            }
+            _ => None,
+        }
+    }
+
+    /// Does the fn-typed parameter `param` of `decl` reach a foreign Go
+    /// call as an argument (directly, through a local alias, or through
+    /// another user fn's parameter that does — depth-bounded, fail closed)
+    /// OUTSIDE a `managed` block? A foreign call is a call through a
+    /// package qualifier that no parameter/receiver/local of `decl` shadows,
+    /// or a method call on a parameter/receiver whose declared type is a
+    /// package-qualified (Go-side) type.
+    pub(crate) fn param_reaches_foreign_escape(
+        &self,
+        decl: &hy_syntax::FnDecl,
+        param: &str,
+        depth: usize,
+    ) -> bool {
+        if depth > 3 {
+            return true;
+        }
+        let Some(body) = &decl.body else {
+            return false;
+        };
+        let mut typed: HashMap<&str, &hy_syntax::TypeExpr> =
+            decl.params.iter().map(|p| (p.name.as_str(), &p.ty)).collect();
+        if let Some(r) = &decl.receiver {
+            typed.insert(r.name.as_str(), &r.ty);
+        }
+        let flat = crate::walk::flatten(body);
+        let mut locals: HashSet<String> = HashSet::new();
+        let mut aliases: HashSet<String> = [param.to_string()].into_iter().collect();
+        for (stmt, idx) in &flat.stmts {
+            let mut calls = Vec::new();
+            crate::walk::own_calls(stmt, &mut calls);
+            for cr in &calls {
+                let passes: Vec<usize> = cr
+                    .args
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| {
+                        matches!(unwrap_parens(&a.value), Expr::Ident { name, .. } if aliases.contains(name.as_str()))
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                if passes.is_empty() {
+                    continue;
+                }
+                match unwrap_parens(cr.callee) {
+                    Expr::Field { base, .. } => {
+                        let foreign = match unwrap_parens(base) {
+                            Expr::Ident { name, .. } => {
+                                if let Some(ty) = typed.get(name.as_str()) {
+                                    type_is_foreign(ty)
+                                } else {
+                                    !locals.contains(name.as_str())
+                                        && self.packages.contains(name.as_str())
+                                }
+                            }
+                            _ => false,
+                        };
+                        if foreign && !flat.in_managed(*idx) {
+                            return true;
+                        }
+                    }
+                    Expr::Ident { name, .. }
+                        if !typed.contains_key(name.as_str()) && !locals.contains(name.as_str()) =>
+                    {
+                        if let Some(inner) = self.fns.get(name.as_str()) {
+                            for i in &passes {
+                                let Some(p) = inner.params.get(*i) else {
+                                    return true; // variadic / arity mismatch: fail closed
+                                };
+                                if !std::ptr::eq(*inner, decl)
+                                    && self.param_reaches_foreign_escape(inner, &p.name, depth + 1)
+                                    && !flat.in_managed(*idx)
+                                {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Stmt::Local(l) = stmt {
+                for (i, n) in l.names.iter().enumerate() {
+                    locals.insert(n.clone());
+                    let v = l.values.get(i).or_else(|| l.values.first());
+                    if matches!(v.map(unwrap_parens), Some(Expr::Ident { name, .. }) if aliases.contains(name.as_str())) {
+                        aliases.insert(n.clone());
+                    } else {
+                        aliases.remove(n.as_str());
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
+fn type_is_foreign(ty: &hy_syntax::TypeExpr) -> bool {
+    match ty {
+        hy_syntax::TypeExpr::Named { name, .. } => name.contains('.'),
+        hy_syntax::TypeExpr::Pointer { to, .. } => type_is_foreign(to),
+        _ => false,
     }
 }
 

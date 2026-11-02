@@ -1338,6 +1338,11 @@ to, a pointer-receiver user method whose body stores through its
 receiver, a call to another local closure that writes a capture, and an
 inline closure-factory argument whose returned closure writes a factory
 parameter (corpus `a5-escape-interproc-write-reject.hy`).
+"Passed to a foreign call" includes passing it to a Hybrid fn or method
+whose fn-typed parameter itself reaches a foreign call outside `managed`
+(directly, through a local alias, or through another such wrapper —
+depth-bounded, fail closed); the diagnostic fires at the wrapper's call
+site (corpus `a5-escape-via-user-fn-param-reject.hy`).
 
 **Decision: fourth check-site class (D5 promoted, W-016 M2).**
 
