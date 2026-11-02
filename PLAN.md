@@ -1,5 +1,10 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — logical expressions before hoisted `?` (2026-11-02)
+
+- Base `b0651f1`: include binary `&&`/`||` in ordered-expression detection so a later hoisted `?` cannot change an earlier logical result. Keep closure bodies unevaluated; reuse the existing snapshot mechanism and rename its predicate at all callers. E3b clarified; checker verdicts unchanged.
+- Eight real CLI check/build/run tests: initial `935611a` Windows/Linux baseline 6 wrong-output failures + 2 passing controls, patched 8/8. Fresh `b0651f1` Linux baseline reproduces all six failures, patched 8/8; workspace 2473/0 failed/0 ignored, corpus 130/130, differential 42/42 build/run + 88/88 reject, examples/managed gate/pins/cargo check/focused format/35 CI Python suites pass. Hosted CI, review and any award remain pending.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - `hyb generate` excludes sibling filenames reported by `go list -e -find -json .` as `IgnoredGoFiles`, once per directory and invocation. Modern/legacy constraints, platform suffixes and `GOFLAGS` tags use Go's own selection; existing production-package conflict checks remain. This is CLI tooling correctness, not a language/checker soundness change; PR #1900's separate dot/underscore-prefix fix is untouched.

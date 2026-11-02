@@ -1016,7 +1016,9 @@ appear nested inside a larger expression (`append(names, u.string("k")?)`,
 the binding form before the statement: `t, hy_err := u.string("k")` +
 propagation, then `t` substitutes at the use site. Unique temps keep nesting
 sound; hoists happen in evaluation order and never inside a closure literal
-(the closure hoists its own). Where the propagation cannot land (no error
+(the closure hoists its own). Earlier binary logical operations (`&&`,
+`||`) are evaluated before a later hoisted call, even when their operands
+contain no calls or receives. Their operands still short-circuit. Where the propagation cannot land (no error
 result, not main, not an E11 handler), it is a compile error — never a
 silent swallow.
 
