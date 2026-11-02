@@ -233,6 +233,26 @@ fn is_sized_array_spelling(s: &str) -> bool {
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
+/// #3255 — Extracts element type from `[N]T` array spelling.
+fn array_elem_type_name_from_str(s: &str) -> Option<String> {
+    let t = s.trim();
+    if !t.starts_with('[') {
+        return None;
+    }
+    let close = t.find(']')?;
+    let head = &t[1..close];
+    if head.is_empty() || !head.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(t[close + 1..].trim().to_string())
+}
+
+/// #3255 — Extracts element type from `[]T` slice spelling.
+fn slice_elem_type_name_from_str(s: &str) -> Option<String> {
+    let rest = s.trim().strip_prefix("[]")?;
+    Some(rest.trim().to_string())
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -874,9 +894,73 @@ impl<'a> Collector<'a> {
     /// else (literals, conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         match unwrap_parens(e) {
-            Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                if let Some(underlying) = self.underlying_type_spelling(&tn) {
+                    Some(underlying)
+                } else {
+                    Some(tn)
+                }
+            }
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
             _ => None,
         }
+    }
+
+    /// #3255 — Resolves underlying type of a type alias.
+    fn underlying_type_spelling(&self, name: &str) -> Option<String> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            Some(self.ck.resolve_type_alias(ty).render())
+        } else {
+            None
+        }
+    }
+
+    /// #3255 — Extracts canonical numeric element scalar from slice or array type spelling.
+    fn elem_scalar_from_type_str(&self, s: &str) -> Option<&'static str> {
+        if let Some(elem) = slice_elem_type_name_from_str(s) {
+            return canonical_numeric_name(&elem);
+        }
+        if let Some(elem) = array_elem_type_name_from_str(s) {
+            return canonical_numeric_name(&elem);
+        }
+        None
+    }
+
+    /// #3255 — Extracts canonical numeric element scalar from a slice or array expression.
+    fn expr_composite_elem_scalar(&self, e: &Expr) -> Option<&'static str> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                let underlying = self.underlying_type_spelling(&tn).unwrap_or(tn);
+                self.elem_scalar_from_type_str(&underlying)
+            }
+            Expr::SliceLit { elem: Some(t), .. } => {
+                let resolved = self.ck.resolve_type_alias(t);
+                match &resolved {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => self.scalar_of_ty(elem),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// #3255 — Detects numeric scalar mismatch between composite element types.
+    fn composite_elem_scalar_mismatch(&self, declared_ty: &TypeExpr, val_expr: &Expr) -> bool {
+        let resolved = self.ck.resolve_type_alias(declared_ty);
+        let want_scalar = match &resolved {
+            TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => self.scalar_of_ty(elem),
+            _ => None,
+        };
+        let Some(want) = want_scalar else {
+            return false;
+        };
+        let Some(got) = self.expr_composite_elem_scalar(val_expr) else {
+            return false;
+        };
+        want != got
     }
 
     /// #2771 — the declared Go spelling of a simple local assignment target.
@@ -3373,9 +3457,18 @@ impl<'a> Collector<'a> {
                     // `float32`) — Go refuses that in a struct literal.
                     let scalar_mismatch =
                         self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
+                    // #3255: array length or element scalar mismatch in struct literals.
+                    let resolved_fty = self.ck.resolve_type_alias(fty);
+                    let array_dim_mismatch = self.sized_array_names_differ(
+                        Some(resolved_fty.render().as_str()),
+                        self.typed_value_type_name(&f.value).as_deref(),
+                    );
+                    let elem_scalar_mismatch = self.composite_elem_scalar_mismatch(&resolved_fty, &f.value);
                     let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
                         || kinds_conflict(&want, &got)
-                        || scalar_mismatch;
+                        || scalar_mismatch
+                        || array_dim_mismatch
+                        || elem_scalar_mismatch;
                     if conflict {
                         self.emit_e1002(
                             f.value.span(),
@@ -5716,10 +5809,16 @@ impl<'a> Collector<'a> {
             // or slice literal`).
             let scalar_mismatch = self
                 .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            // #3255: array length or element scalar mismatch in array literals.
+            let array_dim_mismatch = self.sized_array_names_differ(
+                Some(resolved_ty.render().as_str()),
+                self.typed_value_type_name(item).as_deref(),
+            );
+            let elem_scalar_mismatch = self.composite_elem_scalar_mismatch(&resolved_ty, item);
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch {
+            if ik == expected && !scalar_mismatch && !array_dim_mismatch && !elem_scalar_mismatch {
                 continue;
             }
             let is_untyped_int_to_float = expected == OpKind::Float
@@ -5727,7 +5826,9 @@ impl<'a> Collector<'a> {
                 && self.is_untyped_int_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
-                || scalar_mismatch;
+                || scalar_mismatch
+                || array_dim_mismatch
+                || elem_scalar_mismatch;
             if !conflict {
                 continue;
             }
@@ -5792,10 +5893,16 @@ impl<'a> Collector<'a> {
             // #2788: same width-collapse escape as the array arm above.
             let scalar_mismatch = self
                 .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            // #3255: array length or element scalar mismatch in slice literals.
+            let array_dim_mismatch = self.sized_array_names_differ(
+                Some(resolved_ty.render().as_str()),
+                self.typed_value_type_name(item).as_deref(),
+            );
+            let elem_scalar_mismatch = self.composite_elem_scalar_mismatch(&resolved_ty, item);
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch {
+            if ik == expected && !scalar_mismatch && !array_dim_mismatch && !elem_scalar_mismatch {
                 continue;
             }
             if expected == OpKind::Float
@@ -5809,7 +5916,9 @@ impl<'a> Collector<'a> {
                 && self.is_untyped_int_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
-                || scalar_mismatch;
+                || scalar_mismatch
+                || array_dim_mismatch
+                || elem_scalar_mismatch;
             if !conflict {
                 continue;
             }
@@ -5919,12 +6028,20 @@ impl<'a> Collector<'a> {
                 // #2788: a typed key of another concrete numeric width.
                 let scalar_mismatch = self
                     .scalar_names_conflict(self.scalar_of_ty(&resolved_key), self.typed_value_scalar(k));
+                // #3255: array length or element scalar mismatch in map literal keys.
+                let key_array_dim_mismatch = self.sized_array_names_differ(
+                    Some(resolved_key.render().as_str()),
+                    self.typed_value_type_name(k).as_deref(),
+                );
+                let key_elem_scalar_mismatch = self.composite_elem_scalar_mismatch(&resolved_key, k);
                 let is_untyped_int_to_float = exp_key == OpKind::Float
                     && kk == OpKind::Int
                     && self.is_untyped_int_const(k);
                 let conflict = (exp_key == OpKind::Float && kk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_key, &kk)
-                    || scalar_mismatch;
+                    || scalar_mismatch
+                    || key_array_dim_mismatch
+                    || key_elem_scalar_mismatch;
                 if kk != OpKind::Unknown && conflict {
                     self.emit_e1002(
                         k.span(),
@@ -5947,12 +6064,20 @@ impl<'a> Collector<'a> {
                 // #2788: a typed value of another concrete numeric width.
                 let scalar_mismatch = self
                     .scalar_names_conflict(self.scalar_of_ty(&resolved_val), self.typed_value_scalar(v));
+                // #3255: array length or element scalar mismatch in map literal values.
+                let val_array_dim_mismatch = self.sized_array_names_differ(
+                    Some(resolved_val.render().as_str()),
+                    self.typed_value_type_name(v).as_deref(),
+                );
+                let val_elem_scalar_mismatch = self.composite_elem_scalar_mismatch(&resolved_val, v);
                 let is_untyped_int_to_float = exp_val == OpKind::Float
                     && vk == OpKind::Int
                     && self.is_untyped_int_const(v);
                 let conflict = (exp_val == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_val, &vk)
-                    || scalar_mismatch;
+                    || scalar_mismatch
+                    || val_array_dim_mismatch
+                    || val_elem_scalar_mismatch;
                 if vk != OpKind::Unknown && conflict {
                     self.emit_e1002(
                         v.span(),
