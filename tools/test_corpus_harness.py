@@ -190,6 +190,35 @@ class CheckerEnvelopeCliTests(unittest.TestCase):
                                 "diagnostics": [], "version": 1, "future": {}})
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
+    def test_unknown_or_missing_diagnostic_severity_fails_closed(self):
+        diagnostics = [{}] + [
+            {"severity": severity, "code": "HYB-E3001"}
+            for severity in (None, False, 0, "", "Error", "fatal", [], {})
+        ]
+        for diagnostic in diagnostics:
+            with self.subTest(diagnostic=diagnostic):
+                self.assert_invalid({
+                    "summary": {"verdict": "accept", "errors": 0, "warnings": 0},
+                    "diagnostics": [diagnostic],
+                })
+
+    def test_note_diagnostic_is_valid_and_does_not_count_as_a_warning(self):
+        run = self.run_payload({
+            "summary": {"verdict": "accept", "errors": 0, "warnings": 0},
+            "diagnostics": [{"severity": "note", "message": "additional context"}],
+        })
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("verdict agreement: 1/1", run.stdout)
+
+    def test_invalid_severity_after_a_matching_reject_still_fails(self):
+        self.assert_invalid({
+            "summary": {"verdict": "reject", "errors": 1, "warnings": 0},
+            "diagnostics": [
+                {"severity": "error", "tier0_rule": "A1c"},
+                {"severity": "fatal", "code": "HYB-E3001"},
+            ],
+        }, expected="REJECT A1c", status=1)
+
 
 class ManagedReportCliTests(unittest.TestCase):
     """Exercise managed aggregation through the actual harness subprocess."""
@@ -231,6 +260,20 @@ class ManagedReportCliTests(unittest.TestCase):
             if report_managed:
                 command.append("--report-managed")
             return subprocess.run(command, capture_output=True, text=True, timeout=10)
+
+    def test_invalid_diagnostic_severity_does_not_skip_later_cases(self):
+        invalid = {"summary": {"verdict": "accept", "errors": 0, "warnings": 0},
+                   "diagnostics": [{"severity": "fatal"}]}
+        valid = {"summary": {"verdict": "accept", "errors": 0, "warnings": 0},
+                 "diagnostics": []}
+        run = self.run_cases([("ACCEPT", invalid, 0), ("ACCEPT", valid, 0)],
+                             report_managed=False)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("harness-error", run.stdout)
+        self.assertIn("diagnostics[0]", run.stdout)
+        self.assertIn("02-example.hy", run.stdout)
+        self.assertIn("verdict agreement: 1/2", run.stdout)
+        self.assertNotIn("Traceback", run.stderr)
 
     def assert_invalid_report(self, managed):
         run = self.run_cases([("ACCEPT", self.accept_payload(managed), 0)])
