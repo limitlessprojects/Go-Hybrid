@@ -152,6 +152,30 @@ class WorkloadShapeTests(unittest.TestCase):
         for name in GENERATED:
             self.assertTrue((self.workloads / name).exists())
 
+    def test_crlf_drift_fails_check_without_repair(self):
+        target = self.workloads / "go/main.go"
+        target.write_bytes(target.read_bytes().replace(b"\n", b"\r\n"))
+        result = self.assert_check_preserves_tree(1)
+        self.assertIn("go/main.go", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_invalid_utf8_fails_check_without_traceback(self):
+        target = self.workloads / "hy/load.hy"
+        target.write_bytes(b"\xff\xfe\x00\x01\x80")
+        result = self.assert_check_preserves_tree(1)
+        self.assertIn("hy/load.hy", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_generation_recreates_missing_parent_directories(self):
+        import shutil
+        for subdir in ("go", "rust/src", "hy"):
+            shutil.rmtree(self.workloads / subdir, ignore_errors=True)
+        result = self.run_shape()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        for name in GENERATED:
+            self.assertTrue((self.workloads / name).is_file())
+
 
 if __name__ == "__main__":
     unittest.main()
