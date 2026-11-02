@@ -27,6 +27,7 @@ case "$INSTALL_DIR" in
     /*) ;;
     *) INSTALL_DIR="$PWD/$INSTALL_DIR" ;;
 esac
+case "$BIN_DIR" in /*) ;; *) BIN_DIR="$PWD/$BIN_DIR" ;; esac
 
 # --- platform ---
 OS="$(uname -s)"
