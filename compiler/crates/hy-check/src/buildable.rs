@@ -697,6 +697,42 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #3136: Resolves the element type text when indexing a slice, array, or map.
+    fn index_element_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(elem) = tname.strip_prefix("[]") {
+                        return Some(elem.to_string());
+                    }
+                    if tname.starts_with('[') {
+                        if let Some(close) = tname.find(']') {
+                            return Some(tname[close + 1..].trim().to_string());
+                        }
+                    }
+                    if let Some(rest) = tname.strip_prefix("map[") {
+                        let mut depth = 1;
+                        for (i, c) in rest.char_indices() {
+                            if c == '[' {
+                                depth += 1;
+                            } else if c == ']' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    return Some(rest[i + 1..].trim().to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
+            Expr::MapLit { value, .. } => Some(value.render()),
+            _ => self.slice_element_type_name(e),
+        }
+    }
+
     /// A name that shadows checked defines but is not itself checked.
     fn exempt(&mut self, name: &str) {
         if name != "_" {
@@ -864,6 +900,51 @@ impl<'a> Collector<'a> {
     fn place_scalar(&self, p: &Place) -> Option<&'static str> {
         match &p.kind {
             PlaceKind::Ident(n) => self.lookup_scalar(n),
+            PlaceKind::Index { base, .. } => {
+                let PlaceKind::Ident(n) = &base.kind else {
+                    return None;
+                };
+                let tname = self.lookup_type_name(n)?;
+                let elem_str = if let Some(elem) = tname.strip_prefix("[]") {
+                    elem.to_string()
+                } else if tname.starts_with('[') {
+                    let close = tname.find(']')?;
+                    tname[close + 1..].trim().to_string()
+                } else if let Some(rest) = tname.strip_prefix("map[") {
+                    let mut depth = 1;
+                    let mut found = None;
+                    for (i, c) in rest.char_indices() {
+                        if c == '[' {
+                            depth += 1;
+                        } else if c == ']' {
+                            depth -= 1;
+                            if depth == 0 {
+                                found = Some(rest[i + 1..].trim().to_string());
+                                break;
+                            }
+                        }
+                    }
+                    found?
+                } else {
+                    return None;
+                };
+                canonical_numeric_name(&elem_str)
+            }
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                let (_, ty) = fields.iter().find(|(n, _)| n == name)?;
+                let subst = self.struct_type_arg_map(&full_name);
+                let ty_name = match ty {
+                    TypeExpr::Named { name: tname, .. } => {
+                        subst.get(tname).cloned().unwrap_or_else(|| tname.clone())
+                    }
+                    _ => ty.render(),
+                };
+                canonical_numeric_name(&ty_name)
+            }
             _ => None,
         }
     }
@@ -984,6 +1065,27 @@ impl<'a> Collector<'a> {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
             },
+            // #3136: indexed slice/array/map elements carry concrete scalar widths.
+            Expr::Index { base, .. } => {
+                let elem_str = self.index_element_type_name(base)?;
+                canonical_numeric_name(&elem_str)
+            }
+            // #3136: struct field reads evaluate to the field's declared scalar width.
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                let (_, ty) = fields.iter().find(|(n, _)| n == name)?;
+                let subst = self.struct_type_arg_map(&full_name);
+                let ty_name = match ty {
+                    TypeExpr::Named { name: tname, .. } => {
+                        subst.get(tname).cloned().unwrap_or_else(|| tname.clone())
+                    }
+                    _ => ty.render(),
+                };
+                canonical_numeric_name(&ty_name)
+            }
             _ => None,
         }
     }
