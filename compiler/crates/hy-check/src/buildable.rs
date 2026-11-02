@@ -6341,12 +6341,11 @@ impl<'a> Collector<'a> {
         if is_lowered {
             return;
         }
-        let is_option_or_set_method = match bk {
+        let is_option_method = match bk {
             OpKind::Option(_) => matches!(name, "is_some" | "is_none" | "unwrap" | "unwrap_or" | "expect"),
-            OpKind::Set(_) => matches!(name, "insert" | "contains" | "remove" | "len" | "clear"),
             _ => false,
         };
-        if is_option_or_set_method {
+        if is_option_method {
             return;
         }
 
