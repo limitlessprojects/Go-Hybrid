@@ -1368,3 +1368,53 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 318 -> 319. Final main 464a2022, tree clean.
 - NEXT TICK QUEUE: #3204 (emit closure slot-loan lifetime) -> #3196 (fn lit scalar widths) -> #2982 (any as concrete) -> #3182 (some() arity) -> #3176 (option payload width) -> #3184 (string byte naming) -> #2948 -> #2977 -> #1811 (7.7d) -> #2863 -> #3207 -> #2517 -> tail.
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978.
+
+## Session 61 — 2026-11-02 23:10 tick (2 landed: #3302, #3191; #1710 superseded reply; scan recovered)
+
+- Recycle + restore. Cold build 1 slice. scan OK this time (recovered from 3-tick crash streak); approve 22/22 (4978 remaining). Big new wave: Pareto head now #1710/#3302/#3191/#3190/#1818/#3303/#3300/#1663/#3299/#3296/#3291/#3169.
+- LANDED:
+  46059b6b Merge PR #3302 (urielit1313-creator, fixes #3301) — try_context: array-length slot walks with Ctx::NoErrorResult so [v?]T rejects HYB-E2011 in all 5 contexts; elem keeps outer ctx. New try_context_array_len_3301 suite. 320 suites.
+  77183364 Merge PR #3191 (aswadi, fixes #3021) — hyrt FFI hardening: sha3 isize::MAX guard + null/0 fast path, next_gen wrap MAX-1, HyStr isize cap + try_from clamp, json_get_array validates handle before key decode. New slice_and_handle_3021 suite. 321 suites.
+- REPLIES:
+  #1710 (gorky117-cell, fixes #1707) — superseded-by-#3167: verified its fixtures PASS on main by applying patch to scratch tree + running const_conversion (all green). Redirect posted. (8.1d-old land candidate cleared.)
+- Suite trajectory: 319 -> 320 -> 321. Final main 77183364, tree clean.
+- DUP WATCH: #3303 (james-kkc) also fixes #3301 — now overlaps landed #3302; review residual next tick. #3145 vs #3153; #2982 vs #2976 vs #2978.
+- NEXT TICK QUEUE: #3190 (hy-diag severity coherence) -> #3300 (error OpKind) -> #3299 (multi-value call arg widths) -> #3296 (map key width) -> #3291 (E1002 width messages) -> #3169 (hy-emit closure error-tail, 7 files) -> #1818 (pointer/array conversions, 7.4d) -> #1663 (install symlinks, 8.3d) -> #3204 (recheck head) -> old tail (#2982/#3182/#3176/#3184/#2948/#2977/#1811/#2863/#3207/#2517).
+
+## Session 62 — 2026-11-03 02:10 tick (1 landed: #3190; #3303 superseded; #3204 blocker reply; #3300 round-1 gate-fail)
+
+- Recycle + restore (go tarball cache EVAPORATED — re-downloaded go1.26.9 and backfilled cache; rustup fresh 1.99.0). scan: first attempt killed by my own 240s cap at 560/913 (exit code was pipe-masked — trap noted: check PIPESTATUS, not $?); honest re-run crashed RemoteDisconnected (4th crash in 6 ticks — cap-or-skip policy stands). approve 27/27 (4973 remaining).
+- LANDED:
+  c9aea77c Merge PR #3190 (aswadi, fixes #3024) — hy-diag: error/warning route through one build() so assert_severity_code_coherence covers warnings + bare "E8001" codes (canonicalized via Registry lookup); Registry::lookup stops stripping repeated "HYB-" (HYB-HYB-E3003 -> None), name match ASCII case-insensitive; Span::to min/max covers inverted spans; Pos derives Ord. In-merge fixup (credited, inside merge): trailing newline for coherence_lookup_span_3024.rs. ALL-GREEN vs 88e75e6d. NOTE: verify printed "320 suites ok" on PR head vs 321 recorded for main last tick — counter discrepancy flagged, not gate-relevant.
+- REPLIES:
+  #3204 (fixes #3194) — head ref GONE from remote (ls-remote + fetch both fail for refs/pull/3204/head); blocker reply: cannot verify what cannot be fetched; asked author to re-push fd4d2c18 or newer; stays open, no silent close. issuecomment-6584932466.
+  #3303 (fixes #3301) — superseded by landed #3302 (46059b6b): src hunk identical (Ctx::Ok -> NoErrorResult("array length") in walk_type Array arm; only guard-name differs); all 5 of its fixtures verified PASSING on main via probe suite (5/5). Redirect posted. DUP WATCH #3303 CLOSED. issuecomment-6584978002.
+  #3300 (fixes #3064) — round-1 GATE FAIL, two harness defects evidenced: (1) checker() = CARGO_MANIFEST_DIR/../../target/debug/hyb never exists under external CARGO_TARGET_DIR battery -> 4x NotFound at :27:72; (2) check() temp dir keyed by process::id() only -> parallel tests clobber same case.hy; PROOF: all-error control rejected with a diagnostic naming `take_int` — a program a different test wrote. Checker logic itself verified sound: with hyb present + --test-threads=1, 4/4 pass (OpKind::Error resolution + fail-open arms close the hole, no false rejects). Fix offered: (a) in-process check_file harness (preferred), (b) CARGO_TARGET_DIR fallback + unique per-call temp dir. issuecomment-6585159035.
+- Suite trajectory: 321 -> 322 nominal (verify printed 320 on PR head; discrepancy noted above). Final main c9aea77c, tree clean.
+- NEXT TICK QUEUE: #3300 round-2 if author fixes harness -> #3299 (multi-value call arg widths) -> #3296 (map key width) -> #3291 (E1002 width messages) -> #3169 (hy-emit closure error-tail, 7 files) -> #1818 (pointer/array conversions, 7.4d) -> #1663 (install symlinks, 8.3d) -> #3204 (recheck head) -> old tail (#2982/#3182/#3176/#3184/#2948/#2977/#1811/#2863/#3207/#2517).
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978.
+
+## Session 63/64 — 2026-11-03 03:10 tick (sandbox down, zero ops) + 04:10 tick (3 landed: #3325, #3204, #3340)
+
+- 03:10 tick: sandbox failed to start entirely — no env, no pull, no scan, no replies. Zero-ops tick, queue untouched.
+- 04:10: recycle + restore (go tarball re-downloaded + cache backfilled AGAIN; CARGO_TARGET_DIR gone -> cold rebuild in one call). scan OK (REAL_EXIT=0 this time); approve 32/32 (4968 remaining). New wave Pareto head: #3325/#3340/#3338/#3214/#3226/#3245/#3204-BACK/#3299/#3296/#3346/#3347/#3308. #3300 still behind 3 — author has not fixed the harness yet.
+- LANDED:
+  d5c80034 Merge PR #3325 (dextermos-dev, fixes #3323) — is_builtin_error_type resolves type alias before Named("error") match; `type failure = error` + deep chains satisfy E4 ?-propagation; alias-to-int still HYB-E2011. ALL-GREEN vs 421ae80f.
+  8006d368 Merge PR #3204 round-2 (nyxlabs29-cyber, fixes #3194) — author re-pushed fd4d2c18 -> 40ef60ef after the head-missing blocker reply. emit_local_in_seq registers closure-bound FnLits mentioning active slot loans in loan_aliases; store-back deferred past the closure's last call (for row 11 11). Real go run behavioral suite (for/if/block, slice/array/map, twice, direct control). ALL-GREEN vs d5c80034, 321 suites.
+  9bbb0825 Merge PR #3340 (Shokun123, fixes #3339) — specialized_brain fails closed: accept controls must exist+be non-empty at HEAD, nonpositive rounds abort, anchor-rot/smoke-fail propose no diff; new test_author_repro_verdict suite. ALL-GREEN vs 8006d368. MERGE-COMMIT TYPO DISCLOSED: message says "fixes #3319", correct reference is #3339 (PR reply carries the written correction; main never force-pushed).
+- Suite trajectory: 321 -> 322 (#3325) -> 323 (#3204) nominal (verify printed 320/321 on PR heads). Final main 9bbb0825, tree clean.
+- DUP WATCH NEW: #3346 vs #3347 (both fix #3330, untyped slice literal non-literal heads) — compare before landing either.
+- NEXT TICK QUEUE: #3338 (tools/job fail-closed twin) -> #3214 (chan directions) -> #3226 (TypeExpr array-len walks) -> #3245 (E3104 array lengths) -> #3299 -> #3296 -> #3346/#3347 dup-check -> #3308 -> #3169 -> #1818 -> #1663 -> old tail.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978.
+
+## Session 65 — 2026-11-03 06:10 tick (4 landed: #3338, #3214, #3226, #3245)
+
+- Recycle + restore (go tarball + cache re-downloaded AGAIN; CARGO_TARGET_DIR gone -> cold rebuild one call). scan OK (REAL_EXIT=0, 2nd tick running); approve 19/19 (4981 remaining). Pareto: #3169 first (deferred — 6 files, needs more budget), then Shokun123 tools flood (#3384/#3389/#3362/#3393 pending).
+- LANDED:
+  e5a7e9fd Merge PR #3338 (Shokun123, fixes #3337) — tools/job fail-closed: job.json object+non-empty "job" field, polling keeps going on CLI error text, artifact names reject path traversal + destination containment check. New test_job_cli suite. ALL-GREEN vs a28ea1e3.
+  9b98eefa Merge PR #3214 (phatloi0010, fixes #3213) — sendability: copy(dst,src) checks src vs dst slice elem (alias-resolved); Fn-Fn type-param inference recurses params/results; single-var map range binds KEY (Go semantics, was value); set[T] iteration binds elem. New sendability_copy_fn_infer_and_map_set_iter suite. ALL-GREEN vs e5a7e9fd, 322 suites.
+  fe58270b Merge PR #3226 (phatloi0010, fixes #3225) — walk.rs walk_type_len_exprs: expr_uses/expr_calls/expr_fnlits descend TypeExpr array-length positions of decls + struct/slice/map lits. New walk_type_expr_uses_calls_and_fnlits suite. ALL-GREEN vs 9b98eefa, 323 suites.
+  7e0a1688 Merge PR #3245 (phatloi0010, fixes #3244) — addr_loan loan-projection checks descend TypeExpr positions (decl types, return types, lit annotations, fnlit sigs); map slot-loan init/rebind only when rooted at place path. New addr_loan_type_return_and_rvalue_map suite. ALL-GREEN vs fe58270b, 324 suites.
+- Suite trajectory: 321 -> 322 -> 323 -> 324. Final main 7e0a1688, tree clean.
+- NEXT TICK QUEUE: #3169 (hy-emit closure error-tail, 6 files — budget it first) -> #3299 -> #3296 -> #3347 (dup-check vs #3346 which dropped off Pareto) -> #3308 -> #3384 -> #3389 -> #3362 -> #3393 -> old tail (#2982/#3182/#3176/#3184/#2948/#2977/#1811/#2863/#3207/#2517). #3300 still behind — awaiting harness fix.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
