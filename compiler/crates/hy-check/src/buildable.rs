@@ -547,6 +547,8 @@ struct Collector<'a> {
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
     select_depth: usize,
+    /// Lexical nesting depth within `managed` blocks (O6.1).
+    managed_depth: usize,
     defines: Vec<Define>,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
@@ -583,6 +585,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_result_scalars: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
+            managed_depth: 0,
             defines: Vec::new(),
             roots: HashSet::new(),
             diags: Vec::new(),
@@ -695,6 +698,46 @@ impl<'a> Collector<'a> {
             }
             _ => None,
         }
+    }
+
+    fn chan_element_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(elem) = tname.strip_prefix("chan ") {
+                        return Some(elem.trim().to_string());
+                    }
+                    if let Some(elem) = tname.strip_prefix("<-chan ") {
+                        return Some(elem.trim().to_string());
+                    }
+                    if let Some(elem) = tname.strip_prefix("chan<- ") {
+                        return Some(elem.trim().to_string());
+                    }
+                }
+                None
+            }
+            Expr::StructLit {
+                ty: Some(TypeExpr::Chan { elem, .. }),
+                ..
+            } => Some(elem.render()),
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.chan_element_type_name(&first.value);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn chan_element_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let name = self.chan_element_type_name(e)?;
+        canonical_numeric_name(&name)
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -873,9 +916,16 @@ impl<'a> Collector<'a> {
     /// Only identifiers bound with an explicit type name are known; everything
     /// else (literals, conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
-        match unwrap_parens(e) {
+        let bare = unwrap_parens(e);
+        match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
-            _ => None,
+            Expr::Receive { chan, .. } => self.chan_element_type_name(chan),
+            _ => {
+                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                    return Some(arr_ty.render());
+                }
+                None
+            }
         }
     }
 
@@ -984,6 +1034,7 @@ impl<'a> Collector<'a> {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
             },
+            Expr::Receive { chan, .. } => self.chan_element_scalar(chan),
             _ => None,
         }
     }
@@ -1080,6 +1131,11 @@ impl<'a> Collector<'a> {
                     if rs.len() == n {
                         return rs;
                     }
+                }
+            }
+            if let Expr::Receive { chan, .. } = unwrap_parens(&l.values[0]) {
+                if n == 2 {
+                    return vec![self.chan_element_scalar(chan), None];
                 }
             }
         }
@@ -1382,9 +1438,11 @@ impl<'a> Collector<'a> {
         );
         let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
         let outer_select = std::mem::replace(&mut self.select_depth, 0);
+        let outer_managed = std::mem::replace(&mut self.managed_depth, 0);
         self.block_stmts(body);
         self.loop_depth = outer_loop;
         self.select_depth = outer_select;
+        self.managed_depth = outer_managed;
         self.fn_results = outer;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
@@ -1710,12 +1768,13 @@ impl<'a> Collector<'a> {
                 self.check_assign_operands(targets, *op, values, *span);
             }
             Stmt::Expr { expr, .. } => self.expr(expr),
-            Stmt::Send { chan, value, .. } => {
+            Stmt::Send { chan, value, span, .. } => {
                 self.expr(chan);
                 // #887: the sent value is a single-value position. A void call
                 // or a multi-value call here passed the checker and emitted
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
+                self.check_channel_send(chan, value, *span);
                 self.expr(value);
             }
             Stmt::If {
@@ -1852,7 +1911,11 @@ impl<'a> Collector<'a> {
                     _ => {}
                 }
             }
-            Stmt::Managed { body, .. } => self.block_scoped(body),
+            Stmt::Managed { body, .. } => {
+                self.managed_depth += 1;
+                self.block_scoped(body);
+                self.managed_depth -= 1;
+            }
             Stmt::Match { subject, arms, .. } => {
                 self.expr(subject);
                 let subject_kind = self.kind_of_expr(subject);
@@ -1936,9 +1999,10 @@ impl<'a> Collector<'a> {
                     self.push_scope();
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
-                    // #887: a channel send in a select arm is also a single-value
-                    // position.
-                    self.check_single_value_position(value, "a channel send", false);
+                            // #887: a channel send in a select arm is also a single-value
+                            // position.
+                            self.check_single_value_position(value, "a channel send", false);
+                            self.check_channel_send(chan, value, chan.span());
                             self.expr(chan);
                             self.expr(value);
                         }
@@ -2389,9 +2453,11 @@ impl<'a> Collector<'a> {
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
                 let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
                 let outer_select = std::mem::replace(&mut self.select_depth, 0);
+                let outer_managed = std::mem::replace(&mut self.managed_depth, 0);
                 self.block_stmts(body);
                 self.loop_depth = outer_loop;
                 self.select_depth = outer_select;
+                self.managed_depth = outer_managed;
                 self.fn_results = outer;
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
@@ -3600,6 +3666,55 @@ impl<'a> Collector<'a> {
                 );
             }
             None => {}
+        }
+    }
+
+    /// #3172 — a channel send statement (`ch <- x`) or select arm (`ch <- x:`)
+    /// must supply a value matching the channel's element type. Go refuses
+    /// mismatched scalar widths and sized-array lengths.
+    fn check_channel_send(&mut self, chan: &Expr, value: &Expr, span: Span) {
+        if self.managed_depth > 0 {
+            return;
+        }
+        let ck = self.kind_of_expr(chan);
+        let vk = self.kind_of_expr(value);
+        let elem_kind = match ck {
+            OpKind::Chan(e) => *e,
+            _ => OpKind::Unknown,
+        };
+        let int_to_float = elem_kind == OpKind::Float
+            && vk == OpKind::Int
+            && !self.is_untyped_int_const(value);
+        let conflict = (elem_kind == OpKind::Float && vk == OpKind::Int && int_to_float)
+            || (!matches!(elem_kind, OpKind::Unknown) && kinds_conflict(&elem_kind, &vk));
+        let scalar_mismatch = matches!(
+            (self.chan_element_scalar(chan), self.typed_value_scalar(value)),
+            (Some(c), Some(v)) if c != v
+        );
+        let chan_elem_name = self.chan_element_type_name(chan);
+        let val_type_name = self.typed_value_type_name(value);
+        let array_mismatch = self.sized_array_names_differ(
+            chan_elem_name.as_deref(),
+            val_type_name.as_deref(),
+        );
+
+        if conflict || scalar_mismatch || array_mismatch {
+            let elem_label = chan_elem_name
+                .clone()
+                .unwrap_or_else(|| elem_kind.label().to_string());
+            let val_label = val_type_name
+                .unwrap_or_else(|| vk.label().to_string());
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `{}` (type `{}`) as `{}` value in send to channel — Go refuses `cannot use ... as {} value in send to channel` (HYB-E1002)",
+                    value.render(),
+                    val_label,
+                    elem_label,
+                    elem_label,
+                ),
+                "the channel element type is fixed; send a value of matching type or write an explicit conversion",
+            );
         }
     }
 
