@@ -1469,8 +1469,10 @@ impl<'a> Collector<'a> {
         // #682 U8: `a := v()` where `v` produces no value. Only the
         // single-name/single-value shape is checked; `a, b := f()` is a legal
         // multi-value binding and is handled by `infer_local_kinds`.
-        if l.names.len() == 1 && l.values.len() == 1 {
-            self.check_single_value_position(&l.values[0], "a binding", /*binding_position=*/ true);
+        if (l.names.len() == 1 && l.values.len() == 1) || l.values.len() > 1 {
+            for v in &l.values {
+                self.check_single_value_position(v, "a binding", /*binding_position=*/ true);
+            }
         }
         // Binding-count guards: a declaration whose value count cannot
         // match its names fails go build with `assignment mismatch`.
@@ -1726,8 +1728,10 @@ impl<'a> Collector<'a> {
                 // multi-name form (`a, b = f()`) is a legal multi-value
                 // assignment, so only the single-target/single-value shape is
                 // checked here.
-                if targets.len() == 1 && values.len() == 1 {
-                    self.check_single_value_position(&values[0], "an assignment", /*binding_position=*/ true);
+                if (targets.len() == 1 && values.len() == 1) || values.len() > 1 {
+                    for v in values {
+                        self.check_single_value_position(v, "an assignment", /*binding_position=*/ true);
+                    }
                 }
                 self.check_assign_operands(targets, *op, values, *span);
             }
@@ -1779,12 +1783,19 @@ impl<'a> Collector<'a> {
                     }
                     ForKind::Iterate { vars, expr } => {
                         self.check_repeated_bindings(vars, *span);
+                        self.check_single_value_position(expr, "a for-range expression", false);
                         self.expr(expr);
                         let iter_kinds = self.iterate_var_kinds(expr, vars.len());
+                        // #3065 / SPEC LX13: a string ranges over runes, so
+                        // the element binding (the last var) is exactly
+                        // `rune` (= int32), not an untyped int; the width
+                        // checks then catch `var b byte = c` and `n + c`.
+                        let str_elem = matches!(self.kind_of_expr(expr), OpKind::Str)
+                            .then(|| vars.len().saturating_sub(1));
                         // Unread iterate bindings are lowered to `_` at
                         // emission (issue #139); write-only ones still
                         // reject as unused (PR #536).
-                        for (v, k) in vars.iter().zip(iter_kinds) {
+                        for (vi, (v, k)) in vars.iter().zip(iter_kinds).enumerate() {
                             self.define_elidable(v, *span);
                             // #1480: a struct/array element binding is a
                             // per-iteration copy at emission (`for _, x :=
@@ -1800,6 +1811,9 @@ impl<'a> Collector<'a> {
                                 }
                             }
                             self.bind_kind(v, k);
+                            if str_elem == Some(vi) {
+                                self.set_scalar(v, Some("int32"));
+                            }
                         }
                     }
                     ForKind::Infinite => {}
@@ -1857,6 +1871,9 @@ impl<'a> Collector<'a> {
                         let bk = self.kind_of_expr(base);
                         self.check_method_arity(&bk, name, args, *span);
                         self.check_method_arg_types(&bk, name, args);
+                    }
+                    Expr::FnLit { params, .. } => {
+                        self.check_fn_lit_call(params, args, callee, *span);
                     }
                     _ => {}
                 }
@@ -2175,10 +2192,14 @@ impl<'a> Collector<'a> {
             }
             Expr::Move { operand, .. } => self.expr(operand),
             Expr::Try { operand, .. } => self.expr(operand),
-            Expr::Receive { chan, .. } => self.expr(chan),
+            Expr::Receive { chan, .. } => {
+                self.check_single_value_position(chan, "a receive operation", false);
+                self.expr(chan);
+            }
             Expr::Index {
                 base, index, span, ..
             } => {
+                self.check_single_value_position(base, "an index operand", false);
                 self.expr(base);
                 self.expr(index);
                 let bk = self.kind_of_expr(base);
@@ -2188,6 +2209,7 @@ impl<'a> Collector<'a> {
             Expr::Slice {
                 base, lo, hi, span, ..
             } => {
+                self.check_single_value_position(base, "a slice operand", false);
                 self.expr(base);
                 if let Some(x) = lo {
                     self.expr(x);
@@ -4081,6 +4103,39 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_fn_lit_call(&mut self, params: &[Param], args: &[CallArg], callee: &Expr, span: Span) {
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        let want = params.len();
+        let got = args.len();
+        if want != got {
+            self.report_local_arity(&callee.render(), want, got, span);
+            return;
+        }
+        for (p, a) in params.iter().zip(args.iter()) {
+            let want = self.kind_of_ty(&p.ty, 0);
+            let got = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = &want {
+                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            if kinds_conflict(&want, &got) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to func literal (HYB-E1002)",
+                        a.value.render(),
+                        got.label(),
+                        want.label()
+                    ),
+                    "argument types must match closure parameter types",
+                );
+            }
+        }
+    }
+
     /// #577 C10 — a `return` must supply the enclosing function's result
     /// list: the same number of values, each assignable to its result type.
     /// Go refuses the emitted statement otherwise (Row 13).
@@ -4157,6 +4212,7 @@ impl<'a> Collector<'a> {
                 && ((nv == 0 && self.fn_results_all_named) || self.fn_results_error_tail);
             if short_ok {
                 for (i, (v, w)) in values.iter().zip(want.iter()).enumerate() {
+                    self.check_single_value_position(v, "a return statement", false);
                     let got = self.kind_of_expr(v);
                     if !self.report_return_conflict(v, &got, w, v.span()) {
                         let got_s = self.typed_value_scalar(v);
@@ -4188,6 +4244,7 @@ impl<'a> Collector<'a> {
             return;
         }
         for (i, (v, w)) in values.iter().zip(want.iter()).enumerate() {
+            self.check_single_value_position(v, "a return statement", false);
             let got = self.kind_of_expr(v);
             if !self.report_return_conflict(v, &got, w, v.span()) {
                 let got_s = self.typed_value_scalar(v);
@@ -4506,6 +4563,7 @@ impl<'a> Collector<'a> {
 
     /// Family A (#425): `if cond` and `for cond` require a boolean condition.
     fn check_bool_condition(&mut self, cond: &Expr, construct: &str) {
+        self.check_single_value_position(cond, "a boolean condition", false);
         let k = self.kind_of_expr(cond);
         if !matches!(k, OpKind::Unknown | OpKind::Bool) {
             self.emit_e1002(
@@ -6212,6 +6270,9 @@ impl<'a> Collector<'a> {
                     self.check_method_arg_types(&bk, name, args);
                 }
             }
+            Expr::FnLit { params, .. } => {
+                self.check_fn_lit_call(params, args, callee, span);
+            }
             _ => {
                 let ck = self.kind_of_expr(bare);
                 if !matches!(ck, OpKind::Unknown | OpKind::Fn(..)) {
@@ -6329,6 +6390,31 @@ impl<'a> Collector<'a> {
                                 "call it through the collection index instead: `for i in 0..len(xs) { xs[i].method() }`, or iterate a slice of pointers and call through the pointer",
                             );
                         }
+                    }
+                }
+            }
+        } else if let Expr::Ident { name: tn, .. } = unwrap_parens(base) {
+            // #3142: Go §Method expressions: the method set of a defined type T
+            // contains only methods declared with value receiver T. A method
+            // declared with receiver `*T` requires a pointer receiver (`(*T).m`);
+            // referencing or calling it as `T.m` is rejected by Go (`invalid method
+            // expression T.m (needs pointer receiver (*T).m)`).
+            if self.lookup_kind(tn).is_none() && !self.scopes.iter().any(|s| s.contains_key(tn)) {
+                let base_sn = Checker::base_named_type_str(tn);
+                if let Some(m) = self
+                    .ck
+                    .method_decls
+                    .get(&(base_sn.to_string(), head.to_string()))
+                {
+                    if m.receiver.as_ref().is_some_and(|r| r.is_pointer) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid method expression `{}.{}` — `{}` has a pointer receiver `*{}`; Go refuses `invalid method expression {}.{} (needs pointer receiver (*{}).{})` (HYB-E1002)",
+                                tn, name, name, tn, tn, name, tn, name
+                            ),
+                            "a method with a pointer receiver cannot be called or bound as a value-type method expression: call it on an addressable value or pointer",
+                        );
                     }
                 }
             }
