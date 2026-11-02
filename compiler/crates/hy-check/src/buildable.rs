@@ -833,11 +833,65 @@ impl<'a> Collector<'a> {
         None
     }
 
+    fn resolve_type_spelling(&self, spelling: &str) -> String {
+        let mut curr = spelling.trim().to_string();
+        for _ in 0..16 {
+            if let Some(target) = self.ck.type_aliases.get(curr.as_str()) {
+                curr = target.render();
+            } else {
+                break;
+            }
+        }
+        curr
+    }
+
+    fn copy_slice_elements_conflict(&self, dst_elem_raw: &str, src_elem_raw: &str) -> bool {
+        let d = self.resolve_type_spelling(dst_elem_raw);
+        let s = self.resolve_type_spelling(src_elem_raw);
+
+        if d == s {
+            return false;
+        }
+
+        // Slices (nested slices):
+        if d.starts_with("[]") || s.starts_with("[]") {
+            if let (Some(d_inner), Some(s_inner)) = (d.strip_prefix("[]"), s.strip_prefix("[]")) {
+                return self.copy_slice_elements_conflict(d_inner, s_inner);
+            }
+            return true;
+        }
+
+        // Fixed-size arrays:
+        if is_sized_array_spelling(&d) || is_sized_array_spelling(&s) {
+            if is_sized_array_spelling(&d) && is_sized_array_spelling(&s) {
+                let close_d = d.find(']').unwrap();
+                let close_s = s.find(']').unwrap();
+                let dim_d = &d[1..close_d];
+                let dim_s = &s[1..close_s];
+                if dim_d != dim_s {
+                    return true;
+                }
+                let elem_d = d[close_d + 1..].trim();
+                let elem_s = s[close_s + 1..].trim();
+                return self.copy_slice_elements_conflict(elem_d, elem_s);
+            }
+            return true;
+        }
+
+        // Numerical scalars:
+        match (canonical_numeric_name(&d), canonical_numeric_name(&s)) {
+            (Some(d_num), Some(s_num)) => d_num != s_num,
+            (Some(_), None) | (None, Some(_)) => true,
+            (None, None) => d.trim() != s.trim(),
+        }
+    }
+
     fn slice_element_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
         match bare {
             Expr::Ident { name, .. } => {
-                if let Some(tname) = self.lookup_type_name(name) {
+                if let Some(raw_tname) = self.lookup_type_name(name) {
+                    let tname = self.resolve_type_spelling(&raw_tname);
                     if let Some(elem) = tname.strip_prefix("[]") {
                         return Some(elem.to_string());
                     }
@@ -845,6 +899,38 @@ impl<'a> Collector<'a> {
                         if let Some(close) = elem.find(']') {
                             return Some(elem[close + 1..].to_string());
                         }
+                    }
+                }
+                let resolved = self.resolve_type_spelling(name);
+                if let Some(elem) = resolved.strip_prefix("[]") {
+                    return Some(elem.to_string());
+                }
+                None
+            }
+            Expr::Move { operand, .. } => self.slice_element_type_name(operand),
+            Expr::SliceLit { elem: Some(t), .. } if bare.as_array_lit().is_none() => Some(t.render()),
+            Expr::Slice { base, .. } => {
+                if let Some(elem) = self.slice_element_type_name(base) {
+                    return Some(elem);
+                }
+                let bare_base = unwrap_parens(base);
+                if let Expr::Ident { name, .. } = bare_base {
+                    if let Some(raw_tname) = self.lookup_type_name(name) {
+                        let tname = self.resolve_type_spelling(&raw_tname);
+                        if is_sized_array_spelling(&tname) {
+                            if let Some(close) = tname.find(']') {
+                                return Some(tname[close + 1..].trim().to_string());
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Index { base, .. } => {
+                if let Some(inner) = self.slice_element_type_name(base) {
+                    let resolved = self.resolve_type_spelling(&inner);
+                    if let Some(elem) = resolved.strip_prefix("[]") {
+                        return Some(elem.to_string());
                     }
                 }
                 None
@@ -869,7 +955,6 @@ impl<'a> Collector<'a> {
                     }
                 }
             }
-            Expr::Slice { base, .. } => self.slice_element_type_name(base),
             Expr::Call { callee, args, .. } => {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                     if name == "make" {
@@ -2023,7 +2108,10 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                let bare_val = unwrap_parens(val);
+                if let Some((_, _, arr_ty)) = bare_val.as_array_lit() {
+                    self.bind_type_name(name, arr_ty.render());
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
                 }
             }
@@ -7859,19 +7947,16 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        let dst_elem_ty = self.slice_element_type_name(dst_arg);
-                        let src_elem_ty = self.slice_element_type_name(src_arg);
-                        let elem_ty_conflict = match (&dst_elem_ty, &src_elem_ty) {
-                            (Some(d), Some(s)) => {
-                                let cd = canonical_numeric_name(d).unwrap_or(d.as_str());
-                                let cs = canonical_numeric_name(s).unwrap_or(s.as_str());
-                                cd != cs
-                            }
+                        let elem_conflict = copy_element_kinds_conflict(dst_elem, src_elem);
+                        let dst_ty = self.slice_element_type_name(dst_arg);
+                        let src_ty = self.slice_element_type_name(src_arg);
+                        let detail_conflict = match (&dst_ty, &src_ty) {
+                            (Some(d), Some(s)) => self.copy_slice_elements_conflict(d, s),
                             _ => false,
                         };
-                        if copy_element_kinds_conflict(dst_elem, src_elem) || elem_ty_conflict {
-                            let d_label = dst_elem_ty.unwrap_or_else(|| dst_elem.label().to_string());
-                            let s_label = src_elem_ty.unwrap_or_else(|| src_elem.label().to_string());
+                        if elem_conflict || detail_conflict {
+                            let d_label = dst_ty.unwrap_or_else(|| dst_elem.label().to_string());
+                            let s_label = src_ty.unwrap_or_else(|| src_elem.label().to_string());
                             self.emit_e1002(
                                 span,
                                 format!(
@@ -7886,7 +7971,9 @@ impl<'a> Collector<'a> {
                     (OpKind::Slice(dst_elem), OpKind::Str) => {
                         let dst_elem_ty = self.slice_element_type_name(dst_arg);
                         let is_byte = dst_elem_ty.as_deref().map_or(false, |t| {
-                            matches!(crate::const_overflow::canonical_int_type_name(t), "uint8")
+                            let resolved = self.resolve_type_spelling(t);
+                            canonical_numeric_name(&resolved) == Some("uint8")
+                                || matches!(crate::const_overflow::canonical_int_type_name(&resolved), "uint8")
                         });
                         let is_unknown = matches!(**dst_elem, OpKind::Unknown) && dst_elem_ty.is_none();
                         if !is_byte && !is_unknown {
