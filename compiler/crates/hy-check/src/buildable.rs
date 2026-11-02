@@ -1443,8 +1443,10 @@ impl<'a> Collector<'a> {
         // #682 U8: `a := v()` where `v` produces no value. Only the
         // single-name/single-value shape is checked; `a, b := f()` is a legal
         // multi-value binding and is handled by `infer_local_kinds`.
-        if l.names.len() == 1 && l.values.len() == 1 {
-            self.check_single_value_position(&l.values[0], "a binding", /*binding_position=*/ true);
+        if (l.names.len() == 1 && l.values.len() == 1) || l.values.len() > 1 {
+            for v in &l.values {
+                self.check_single_value_position(v, "a binding", /*binding_position=*/ true);
+            }
         }
         // Binding-count guards: a declaration whose value count cannot
         // match its names fails go build with `assignment mismatch`.
@@ -1700,8 +1702,10 @@ impl<'a> Collector<'a> {
                 // multi-name form (`a, b = f()`) is a legal multi-value
                 // assignment, so only the single-target/single-value shape is
                 // checked here.
-                if targets.len() == 1 && values.len() == 1 {
-                    self.check_single_value_position(&values[0], "an assignment", /*binding_position=*/ true);
+                if (targets.len() == 1 && values.len() == 1) || values.len() > 1 {
+                    for v in values {
+                        self.check_single_value_position(v, "an assignment", /*binding_position=*/ true);
+                    }
                 }
                 self.check_assign_operands(targets, *op, values, *span);
             }
@@ -1753,6 +1757,7 @@ impl<'a> Collector<'a> {
                     }
                     ForKind::Iterate { vars, expr } => {
                         self.check_repeated_bindings(vars, *span);
+                        self.check_single_value_position(expr, "a for-range expression", false);
                         self.expr(expr);
                         let iter_kinds = self.iterate_var_kinds(expr, vars.len());
                         // Unread iterate bindings are lowered to `_` at
@@ -2152,10 +2157,14 @@ impl<'a> Collector<'a> {
             }
             Expr::Move { operand, .. } => self.expr(operand),
             Expr::Try { operand, .. } => self.expr(operand),
-            Expr::Receive { chan, .. } => self.expr(chan),
+            Expr::Receive { chan, .. } => {
+                self.check_single_value_position(chan, "a receive operation", false);
+                self.expr(chan);
+            }
             Expr::Index {
                 base, index, span, ..
             } => {
+                self.check_single_value_position(base, "an index operand", false);
                 self.expr(base);
                 self.expr(index);
                 let bk = self.kind_of_expr(base);
@@ -2165,6 +2174,7 @@ impl<'a> Collector<'a> {
             Expr::Slice {
                 base, lo, hi, span, ..
             } => {
+                self.check_single_value_position(base, "a slice operand", false);
                 self.expr(base);
                 if let Some(x) = lo {
                     self.expr(x);
@@ -4167,6 +4177,7 @@ impl<'a> Collector<'a> {
                 && ((nv == 0 && self.fn_results_all_named) || self.fn_results_error_tail);
             if short_ok {
                 for (i, (v, w)) in values.iter().zip(want.iter()).enumerate() {
+                    self.check_single_value_position(v, "a return statement", false);
                     let got = self.kind_of_expr(v);
                     if !self.report_return_conflict(v, &got, w, v.span()) {
                         let got_s = self.typed_value_scalar(v);
@@ -4198,6 +4209,7 @@ impl<'a> Collector<'a> {
             return;
         }
         for (i, (v, w)) in values.iter().zip(want.iter()).enumerate() {
+            self.check_single_value_position(v, "a return statement", false);
             let got = self.kind_of_expr(v);
             if !self.report_return_conflict(v, &got, w, v.span()) {
                 let got_s = self.typed_value_scalar(v);
@@ -4516,6 +4528,7 @@ impl<'a> Collector<'a> {
 
     /// Family A (#425): `if cond` and `for cond` require a boolean condition.
     fn check_bool_condition(&mut self, cond: &Expr, construct: &str) {
+        self.check_single_value_position(cond, "a boolean condition", false);
         let k = self.kind_of_expr(cond);
         if !matches!(k, OpKind::Unknown | OpKind::Bool) {
             self.emit_e1002(
