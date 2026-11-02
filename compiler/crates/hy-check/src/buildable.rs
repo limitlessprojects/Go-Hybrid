@@ -675,9 +675,13 @@ impl<'a> Collector<'a> {
         match bare {
             Expr::Ident { name, .. } => {
                 if let Some(tname) = self.lookup_type_name(name) {
-                    if let Some(elem) = tname.strip_prefix("[]") {
+                    let resolved = self.underlying_type_spelling(&tname).unwrap_or(tname);
+                    if let Some(elem) = resolved.strip_prefix("[]") {
                         return Some(elem.to_string());
                     }
+                }
+                if let Some(elem) = name.strip_prefix("[]") {
+                    return Some(elem.to_string());
                 }
                 None
             }
@@ -695,6 +699,19 @@ impl<'a> Collector<'a> {
             }
             _ => None,
         }
+    }
+
+    fn underlying_type_spelling(&self, name: &str) -> Option<String> {
+        let mut cur = name.trim().to_string();
+        for _ in 0..8 {
+            let base = Checker::base_named_type_str(&cur);
+            if let Some(target) = self.ck.type_aliases.get(base) {
+                cur = target.render();
+            } else {
+                return Some(cur);
+            }
+        }
+        Some(cur)
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -6719,25 +6736,68 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if copy_element_kinds_conflict(dst_elem, src_elem) {
+                        let dst_elem_ty = self.slice_element_type_name(dst_arg);
+                        let src_elem_ty = self.slice_element_type_name(src_arg);
+
+                        let scalar_mismatch = match (&dst_elem_ty, &src_elem_ty) {
+                            (Some(d), Some(s)) => {
+                                let d_num = canonical_numeric_name(d);
+                                let s_num = canonical_numeric_name(s);
+                                matches!((d_num, s_num), (Some(dn), Some(sn)) if dn != sn)
+                            }
+                            _ => false,
+                        };
+
+                        let array_mismatch = match (&dst_elem_ty, &src_elem_ty) {
+                            (Some(d), Some(s)) if is_sized_array_spelling(d) && is_sized_array_spelling(s) => {
+                                d != s
+                            }
+                            _ => false,
+                        };
+
+                        let nested_slice_mismatch = match (&dst_elem_ty, &src_elem_ty) {
+                            (Some(d), Some(s)) if d.starts_with("[]") && s.starts_with("[]") => {
+                                let d_inner = canonical_numeric_name(d[2..].trim());
+                                let s_inner = canonical_numeric_name(s[2..].trim());
+                                matches!((d_inner, s_inner), (Some(di), Some(si)) if di != si)
+                            }
+                            _ => false,
+                        };
+
+                        if copy_element_kinds_conflict(dst_elem, src_elem)
+                            || scalar_mismatch
+                            || array_mismatch
+                            || nested_slice_mismatch
+                        {
+                            let default_dst = dst_elem.label();
+                            let default_src = src_elem.label();
+                            let dst_label = dst_elem_ty.as_deref().unwrap_or(&default_dst);
+                            let src_label = src_elem_ty.as_deref().unwrap_or(&default_src);
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "arguments to `copy` have different element types: `{}` and `{}` (HYB-E1002)",
-                                    dst_elem.label(),
-                                    src_elem.label()
+                                    dst_label,
+                                    src_label,
                                 ),
                                 "arguments to `copy` must have identical element types",
                             );
                         }
                     }
                     (OpKind::Slice(dst_elem), OpKind::Str) => {
-                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                        let dst_elem_ty = self.slice_element_type_name(dst_arg);
+                        let is_non_byte_int = match &dst_elem_ty {
+                            Some(d) => canonical_numeric_name(d).map_or(false, |num| num != "uint8"),
+                            None => false,
+                        };
+                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) || is_non_byte_int {
+                            let default_dst = dst_elem.label();
+                            let label = dst_elem_ty.as_deref().unwrap_or(&default_dst);
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "cannot copy string into slice with element type `{}` (HYB-E1002)",
-                                    dst_elem.label()
+                                    label
                                 ),
                                 "copying from a string requires a byte slice destination (`[]byte`)",
                             );
