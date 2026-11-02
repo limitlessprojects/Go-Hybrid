@@ -1056,6 +1056,17 @@ impl Emitter {
             }
         }
 
+        // `[N]T(s)` — slice-to-array conversion.
+        if let Some((_, _, arr_ty)) = callee.as_array_lit() {
+            if matches!(callee, Expr::SliceLit { items, .. } if items.is_empty()) {
+                let mut parts = Vec::new();
+                for a in args {
+                    parts.push(self.emit_call_arg(a)?);
+                }
+                return Ok(format!("{}({})", self.type_text(arr_ty), parts.join(", ")));
+            }
+        }
+
         // --- everything else: callee(args...) ---
         // An addressable argument auto-addresses at a pointer param (Batch
         // I, corpus 09: `scale_then_register(e, …)` with `e *env` — Go's
