@@ -6735,27 +6735,57 @@ impl<'a> Collector<'a> {
                     return;
                 }
 
+                // #3242: OpKind collapses every integer width into Int and
+                // every fixed-size array into Array, so the kind comparison
+                // above cannot see `copy([]int32, []int64)` or
+                // `copy([][2]int, [][3]int)`. Compare the declared element
+                // SPELLINGS too; each side fails open when unknown, so a
+                // named or unresolved element never false-rejects.
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if copy_element_kinds_conflict(dst_elem, src_elem) {
+                        let kind_conflict = copy_element_kinds_conflict(dst_elem, src_elem);
+                        let dst_name = self.slice_element_type_name(dst_arg);
+                        let src_name = self.slice_element_type_name(src_arg);
+                        let scalar_conflict = self.scalar_names_conflict(
+                            dst_name.as_deref().and_then(canonical_numeric_name),
+                            src_name.as_deref().and_then(canonical_numeric_name),
+                        );
+                        let size_conflict = self
+                            .sized_array_names_differ(dst_name.as_deref(), src_name.as_deref());
+                        if kind_conflict || scalar_conflict || size_conflict {
+                            let (dl, sl) = match (&dst_name, &src_name) {
+                                (Some(d), Some(s)) => (d.clone(), s.clone()),
+                                _ => (dst_elem.label(), src_elem.label()),
+                            };
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "arguments to `copy` have different element types: `{}` and `{}` (HYB-E1002)",
-                                    dst_elem.label(),
-                                    src_elem.label()
+                                    dl, sl
                                 ),
                                 "arguments to `copy` must have identical element types",
                             );
                         }
                     }
                     (OpKind::Slice(dst_elem), OpKind::Str) => {
-                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                        // #3242: Go requires a byte destination. OpKind::Int
+                        // covers int/int32/int64 alike, so the kind test alone
+                        // let `copy([]int, "s")` through; check the declared
+                        // spelling when it is known.
+                        let dst_name = self.slice_element_type_name(dst_arg);
+                        let canon = dst_name.as_deref().and_then(canonical_numeric_name);
+                        let known_non_byte = canon.map(|c| c != "uint8").unwrap_or(false);
+                        let kind_needs_byte =
+                            !matches!(**dst_elem, OpKind::Unknown | OpKind::Int);
+                        if kind_needs_byte || known_non_byte {
+                            let label = dst_name
+                                .clone()
+                                .unwrap_or_else(|| dst_elem.label().to_string());
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "cannot copy string into slice with element type `{}` (HYB-E1002)",
-                                    dst_elem.label()
+                                    label
                                 ),
                                 "copying from a string requires a byte slice destination (`[]byte`)",
                             );
