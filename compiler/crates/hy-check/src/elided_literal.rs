@@ -20,14 +20,14 @@
 
 use crate::model::Checker;
 use hy_diag::Diagnostic;
-use hy_syntax::{Block, Decl, Expr, ForKind, InterpPart, Place, PlaceKind, SelectArmKind, Stmt};
+use hy_syntax::{Block, Decl, Expr, ForKind, InterpPart, Place, PlaceKind, SelectArmKind, Stmt, TypeExpr};
 
 /// Whether the expression sits in a composite element slot, where the
 /// emitter inherits the head from the enclosing literal's type.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Slot {
+#[derive(Clone, Copy)]
+enum Slot<'a> {
     Free,
-    Element,
+    Element(&'a TypeExpr),
 }
 
 impl<'a> Checker<'a> {
@@ -155,12 +155,14 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn elided_expr(&mut self, e: &Expr, slot: Slot) {
+    fn elided_expr(&mut self, e: &Expr, slot: Slot<'_>) {
         match e {
             // `emit_expr_exp` peels parentheses before filling the head.
             Expr::Paren { inner, .. } => self.elided_expr(inner, slot),
             Expr::StructLit { ty, fields, span } => {
-                if ty.is_none() && slot == Slot::Free {
+                if ty.is_none()
+                    && !matches!(slot, Slot::Element(t) if self.is_elided_struct_target(t, fields.is_empty()))
+                {
                     self.push_elided_diag(*span);
                 }
                 // Field values are emitted without an expected type.
@@ -171,10 +173,17 @@ impl<'a> Checker<'a> {
             Expr::SliceLit { elem, items, .. } => {
                 // A typed slice/array literal hands its items the element
                 // type; an untyped `[...]` does so only when it itself sits
-                // in an element slot (`emit_expr_exp` recursion). Otherwise
-                // its items are emitted with no expected type.
-                let item_slot = if elem.is_some() || slot == Slot::Element {
-                    Slot::Element
+                // in a slice/array element slot (`emit_expr_exp` recursion).
+                let resolved = match slot {
+                    Slot::Element(t) => Some(self.resolve_type_alias(t)),
+                    Slot::Free => None,
+                };
+                let item_slot = if let Some((_, inner, _)) = e.as_array_lit() {
+                    Slot::Element(inner)
+                } else if let Some(t) = elem.as_deref() {
+                    Slot::Element(t)
+                } else if let Some(TypeExpr::Slice { elem: inner, .. } | TypeExpr::Array { elem: inner, .. }) = &resolved {
+                    Slot::Element(inner)
                 } else {
                     Slot::Free
                 };
@@ -182,10 +191,10 @@ impl<'a> Checker<'a> {
                     self.elided_expr(i, item_slot);
                 }
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit { key, value, entries, .. } => {
                 for (k, v) in entries {
-                    self.elided_expr(k, Slot::Element);
-                    self.elided_expr(v, Slot::Element);
+                    self.elided_expr(k, Slot::Element(key));
+                    self.elided_expr(v, Slot::Element(value));
                 }
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
@@ -226,6 +235,22 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::FnLit { body, .. } => self.elided_block(body),
+        }
+    }
+
+    fn is_elided_struct_target(&self, ty: &TypeExpr, empty: bool) -> bool {
+        let resolved = self.resolve_type_alias(ty);
+        let inner = match &resolved {
+            TypeExpr::Pointer { to, .. } => self.resolve_type_alias(to),
+            other => other.clone(),
+        };
+        match &inner {
+            TypeExpr::Named { name, .. } => {
+                let base = Self::base_named_type_str(name);
+                self.structs.contains_key(base) || self.struct_type_params.contains_key(base)
+            }
+            TypeExpr::Slice { .. } | TypeExpr::Array { .. } | TypeExpr::Map { .. } => empty,
+            _ => false,
         }
     }
 
