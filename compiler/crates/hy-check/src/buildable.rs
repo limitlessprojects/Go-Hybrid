@@ -2760,6 +2760,16 @@ impl<'a> Collector<'a> {
             return OpKind::Unknown;
         }
         let name = name.trim();
+        if name.starts_with('*')
+            || name.starts_with("[]")
+            || name.starts_with("chan ")
+            || name.starts_with("<-chan ")
+            || name.starts_with("chan<- ")
+            || name.starts_with("map[")
+            || (name.starts_with("option[") && name.ends_with(']'))
+        {
+            return self.kind_of_type_str(name, depth);
+        }
         let base = Checker::base_named_type_str(name);
         if self.ck.structs.contains_key(base) || self.ck.struct_type_params.contains_key(base) {
             return OpKind::Struct(Some(name.to_string()));
@@ -3460,6 +3470,74 @@ impl<'a> Collector<'a> {
         )
     }
 
+    /// #3369 — element type name of a channel type alias or direct channel spelling.
+    fn named_channel_elem_name(&self, name: &str) -> Option<String> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            match self.ck.resolve_type_alias(ty) {
+                hy_syntax::TypeExpr::Chan { elem, .. } => Some(elem.render()),
+                _ => None,
+            }
+        } else if let Some(rest) = base
+            .strip_prefix("<-chan ")
+            .or_else(|| base.strip_prefix("chan<- "))
+            .or_else(|| base.strip_prefix("chan "))
+        {
+            Some(rest.trim().to_string())
+        } else {
+            None
+        }
+    }
+
+    /// #3369 — element type of a channel-typed expression.
+    fn channel_elem_type_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                self.named_channel_elem_name(&tn)
+            }
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if let Some(elem) = self.named_channel_elem_name(name) {
+                        return Some(elem);
+                    }
+                    if let Some(f) = self.ck.fns.get(name.as_str()) {
+                        if f.results.len() == 1 {
+                            return self.named_channel_elem_name(&f.results[0].ty.render());
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// #3369 — two KNOWN and incompatible channel element types.
+    fn channel_elem_types_conflict(&self, target_name: &str, arg: &Expr) -> bool {
+        let Some(t_elem) = self.named_channel_elem_name(target_name) else {
+            return false;
+        };
+        let Some(a_elem) = self.channel_elem_type_of_expr(arg) else {
+            return false;
+        };
+        let t_trim = t_elem.trim();
+        let a_trim = a_elem.trim();
+        if t_trim == a_trim {
+            return false;
+        }
+        if let (Some(t_num), Some(a_num)) = (
+            canonical_numeric_name(t_trim),
+            canonical_numeric_name(a_trim),
+        ) {
+            return t_num != a_num;
+        }
+        if (t_trim.starts_with('[') && a_trim.starts_with('[')) || t_trim != a_trim {
+            return true;
+        }
+        false
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -3484,7 +3562,9 @@ impl<'a> Collector<'a> {
         // #2811: `string`↔slice conversions are restricted to byte/rune
         // elements; `OpKind::Int` cannot tell `int64` from `uint8`.
         let element_mismatch = self.string_slice_conversion_element_mismatch(name, &k, arg, &arg_k);
-        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch {
+        let channel_elem_mismatch = matches!(k, OpKind::Chan(_))
+            && self.channel_elem_types_conflict(name, arg);
+        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch || channel_elem_mismatch {
             let note = if matches!(k, OpKind::Struct(_)) {
                 "structs cannot be instantiated via function-call conversions; write a struct literal like `T{...}` instead"
             } else {
