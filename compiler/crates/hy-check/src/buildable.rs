@@ -7559,9 +7559,25 @@ impl<'a> Collector<'a> {
     /// parameter count for all three callee shapes, because `kind_of_ty` reads
     /// it straight off the `TypeExpr::Fn`.
     fn check_fn_value_arity(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
-        let OpKind::Fn(_, Some(want)) = self.kind_of_expr(callee) else {
+        let OpKind::Fn(_, Some(param_kinds)) = self.kind_of_expr(callee) else {
             return;
         };
+        // #2901 — the `OpKind::Fn` parameter slot is the list of parameter
+        // kinds (main's multi-result refactor); arity is its length.
+        let want = param_kinds.len();
+        // #2901 follow-up: a slice CONSTANT's element spelling
+        // (`const fns = []fn(){...}`) is not a trustworthy arity source —
+        // main's T23 multi-value rule owns that fixture, and an arity E1002
+        // here would be a second diagnostic on the same call.
+        if let Expr::Index { base, .. } = unwrap_parens(callee) {
+            if let Expr::Ident { name, .. } = unwrap_parens(base) {
+                if self.file_consts.contains_key(name.as_str())
+                    || self.file_untyped_consts.contains(name.as_str())
+                {
+                    return;
+                }
+            }
+        }
         if want != args.len() && self.multi_value_arg_count(args).is_none() {
             self.report_local_arity(&callee.render(), want, args.len(), span);
         }
