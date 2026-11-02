@@ -1038,7 +1038,30 @@ impl<'a> Checker<'a> {
                     self.check_type_expr_with_state(st, r);
                 }
             }
-            TypeExpr::Named { .. } => {}
+            TypeExpr::Named { name, span } => {
+                if let Some(st) = st {
+                    for tok in name.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.') {
+                        if !tok.is_empty() && st.env_lookup(tok).is_some() {
+                            let msg = format!(
+                                "type `{}` is shadowed by local value `{}` in this scope ? Go rejects `{tok} (variable) is not a type` (HYB-E1002)",
+                                name, tok
+                            );
+                            self.diags.push(
+                                Diagnostic::error("HYB-E1002", self.path.clone(), *span, msg)
+                                    .with_notes(vec![
+                                        format!(
+                                            "why: Go resolves `{tok}` to the in-scope local or parameter rather than the type, so the emitted program fails `go build` (GUARANTEES Row 13)"
+                                        ),
+                                        format!(
+                                            "fix: rename the local binding `{tok}` so it does not shadow the type name"
+                                        ),
+                                    ]),
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 
