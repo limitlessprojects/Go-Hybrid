@@ -2242,8 +2242,30 @@ impl<'a> Collector<'a> {
                 );
                 if type_first_arg {
                     if let Some(first_arg) = args.first() {
-                        if let Expr::Ident { name, span } = unwrap_parens(&first_arg.value) {
-                            self.check_named_type_instantiation(name, *span);
+                        // #3248: the expression walk below skips this argument,
+                        // so the type it carries must still go through the
+                        // declared-position walker (`ty()`) explicitly — that
+                        // is where map-key comparability is enforced. Without
+                        // this, `make(chan map[[]int]int, 1)` slipped an
+                        // unhashable map key past the checker inside a
+                        // chan/slice/array wrapper.
+                        match unwrap_parens(&first_arg.value) {
+                            Expr::Ident { name, span } => {
+                                self.check_named_type_instantiation(name, *span);
+                            }
+                            // Type-as-value encodings: `chan T` / `<-chan T`
+                            // arrive as an empty StructLit carrying the type,
+                            // `[]T` / `[N]T` as a SliceLit carrying the element.
+                            Expr::StructLit { ty: Some(t), .. } => self.ty(t),
+                            Expr::SliceLit { elem: Some(t), .. } => self.ty(t),
+                            Expr::MapLit {
+                                key, value, span, ..
+                            } => {
+                                self.check_map_key_comparable(key, *span);
+                                self.ty(key);
+                                self.ty(value);
+                            }
+                            _ => {}
                         }
                     }
                 }
