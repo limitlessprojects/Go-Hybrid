@@ -265,5 +265,9 @@ class LauncherRuntimeTests(unittest.TestCase):
             r = subprocess.run(["sh", str(ROOT / "install.sh")], env={**os.environ, "HYB_VERSION": bad}, capture_output=True, text=True, timeout=5)
             self.assertEqual(r.returncode, 2)
 
+    def test_relative_bin_dir_resolves_against_pwd(self):
+        r = subprocess.run(["sh", str(ROOT / "install.sh")], env={**self.env, "HYB_BIN_DIR": "rel-bin"}, cwd=self.root, capture_output=True, text=True, timeout=15)
+        self.assertIn(f'export PATH="{self.root}/rel-bin:$PATH"', r.stdout)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
