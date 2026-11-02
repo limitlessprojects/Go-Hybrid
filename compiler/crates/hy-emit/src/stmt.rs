@@ -397,6 +397,18 @@ impl Emitter {
                         }
                     }
                 }
+                for (idx, v) in l.values.iter().enumerate() {
+                    if let Some(name) = l.names.get(idx) {
+                        if name != "_" {
+                            for loan_root in self.closure_captured_loans(v) {
+                                self.loan_aliases
+                                    .entry(loan_root)
+                                    .or_default()
+                                    .insert(name.clone());
+                            }
+                        }
+                    }
+                }
                 // Typed var decls carry receiver knowledge (Batch I):
                 // `var hits atomic.int64` → shape-known, not a pointer.
                 if let Some(t) = &l.ty {
@@ -528,6 +540,18 @@ impl Emitter {
                     .or_default()
                     .insert(alias_name);
             }
+            for (idx, v) in l.values.iter().enumerate() {
+                if let Some(name) = l.names.get(idx) {
+                    if name != "_" {
+                        for loan_root in self.closure_captured_loans(v) {
+                            self.loan_aliases
+                                .entry(loan_root)
+                                .or_default()
+                                .insert(name.clone());
+                        }
+                    }
+                }
+            }
             self.push(&format!(
                 "{} := {}",
                 l.names.join(", "),
@@ -576,6 +600,18 @@ impl Emitter {
                 .entry(loan_root)
                 .or_default()
                 .insert(alias_name);
+        }
+        for (idx, v) in l.values.iter().enumerate() {
+            if let Some(name) = l.names.get(idx) {
+                if name != "_" {
+                    for loan_root in self.closure_captured_loans(v) {
+                        self.loan_aliases
+                            .entry(loan_root)
+                            .or_default()
+                            .insert(name.clone());
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1454,6 +1490,18 @@ impl Emitter {
                     .or_default()
                     .insert(alias_name);
             }
+            for (idx, v) in values.iter().enumerate() {
+                if let Some(name) = names.get(idx) {
+                    if name != "_" {
+                        for loan_root in self.closure_captured_loans(v) {
+                            self.loan_aliases
+                                .entry(loan_root)
+                                .or_default()
+                                .insert(name.clone());
+                        }
+                    }
+                }
+            }
             self.push(&format!("{} = {}", names.join(", "), rhs_texts.join(", ")));
             if let Some(frame) = self.loan_frames.last_mut() {
                 frame.extend(new_loans);
@@ -1479,7 +1527,7 @@ impl Emitter {
                 .enumerate()
                 .map(|(i, v)| alias_assigns[i].is_some() || self.expr_is_pointer(v))
                 .collect();
-            for ((t, is_ptr), alias) in targets.iter().zip(ptr_flags).zip(alias_assigns.iter()) {
+            for (((t, is_ptr), alias), val) in targets.iter().zip(ptr_flags).zip(alias_assigns.iter()).zip(values.iter()) {
                 if let PlaceKind::Ident(name) = &t.kind {
                     if name != "_" {
                         for aliases in self.loan_aliases.values_mut() {
@@ -1488,6 +1536,12 @@ impl Emitter {
                         if let Some((loan_root, _)) = alias {
                             self.loan_aliases
                                 .entry(loan_root.clone())
+                                .or_default()
+                                .insert(name.clone());
+                        }
+                        for loan_root in self.closure_captured_loans(val) {
+                            self.loan_aliases
+                                .entry(loan_root)
                                 .or_default()
                                 .insert(name.clone());
                         }
@@ -2895,6 +2949,44 @@ impl Emitter {
             }
         }
         None
+    }
+
+    fn closure_captured_loans(&self, expr: &Expr) -> Vec<String> {
+        let mut e = expr;
+        while let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = e {
+            e = inner;
+        }
+        if !matches!(e, Expr::FnLit { .. }) {
+            return Vec::new();
+        }
+        let mut captured = Vec::new();
+        let is_active_loan = |loan_name: &str| {
+            !loan_name.is_empty()
+                && self
+                    .loan_frames
+                    .iter()
+                    .any(|frame| frame.iter().any(|(n, _)| n == loan_name))
+        };
+        for frame in &self.loan_frames {
+            for (loan_name, _) in frame {
+                if !loan_name.is_empty()
+                    && Self::expr_mentions_ident(e, loan_name)
+                    && !captured.contains(loan_name)
+                {
+                    captured.push(loan_name.clone());
+                }
+            }
+        }
+        for (loan_root, aliases) in &self.loan_aliases {
+            if is_active_loan(loan_root)
+                && (aliases.iter().any(|a| Self::expr_mentions_ident(e, a))
+                    || Self::expr_mentions_ident(e, loan_root))
+                && !captured.contains(loan_root)
+            {
+                captured.push(loan_root.clone());
+            }
+        }
+        captured
     }
 
     /// Emits the read-place and store-back-place for an O8 slot loan `&operand`
