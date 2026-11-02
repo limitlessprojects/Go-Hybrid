@@ -1301,3 +1301,16 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All three: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
 - Suite trajectory: 309 -> 310 -> 311 -> 312. Final main 7e2cb776, tree clean.
 - NEXT TICK QUEUE: #3156 (untyped nil conditions) -> #3143 (nil match patterns / out-of-range int patterns) -> #3145 (copy() scalar mismatches) -> #3153 (copy() non-byte string, CHECK DUP vs #3145 — both gorky/Dimank92 same shape) -> #2948 (out-of-range const conversions) -> #2977 (typed const short defines) -> #1811 (complex builtins in const init, 7.1d old) -> #3133 (variadic spread position/count) -> #2868 (typed int width through reads, 0.8d) -> re-scan for tail.
+
+## Session 55 — 2026-11-02 16:10 tick (1 landed, 1 gate-fail w/ evidence; full-rate window, fresh scan)
+
+- Recycle + restore (rust/go reinstalled; tarball re-cached as go-1.26.9.tar.gz). scan OK (4980 remaining), approve 20/20. New aswadi wave at Pareto top.
+- LANDED:
+  d30ea65c Merge PR #3178 (aswadi, fixes #3029) — emit_guard Named-type tokens checked vs in-scope local bindings via env_lookup → HYB-E1002 (shadowed builtin int/bool, param named int, struct shadowed by own value). New shadowed_type_name_3029 suite. 313 suites.
+  9951544e Merge PR #3167 (aswadi, fixes #1682+#1707+#1770+#1828) — const_overflow: array-lit conv of const args emits conv-kind error directly; c64/c128/complex64/complex128 join float arms (f32 range); bool only from Bool consts. All 8 fixtures cross-validated vs real go1.26.9 (const string->array NEVER legal, even len==N). New const_conv_targets_1682 suite. 314 suites.
+- GATE FAIL (evidence posted, not landed):
+  #3187 (aswadi, fixes #3019) — render/root_ident/as_array_lit changes are good, but PR's own test r1 expects HYB-E3012 while pipeline correctly emits HYB-E1002 (struct-level instantiation mismatch; sendability doesn't descend into fn-type param channels inside generic type args). Suggested: point assertion at E1002 (1-line) or extend sendability. Reply: issuecomment-6572529764.
+- All landed PRs: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT.
+- Suite trajectory: 312 -> 313 -> 314. Final main 9951544e, tree clean.
+- NEXT TICK QUEUE: #3165 (buildable void/multi-value in single-value positions) -> #3173 (elided struct lit interface/non-slice; supersedes old #3101?) -> #3185 (TypeExpr array lengths in composite/fn lits) -> #3069 (string for-in rune, 0.6d) -> #2982 (any as concrete, fixes #2962; check vs #2976/#2978 dup) -> #3182 (some() arity/variadic spread) -> #3176 (option payload numeric width) -> #3184 (string byte names string not map) -> #2948 (out-of-range const conv) -> #2977 -> #1811 (7.2d old) -> #2868 -> tail.
+- DUP WATCH: #3050 vs landed #3178 (both fixes #3029, +245 vs +39) — review next tick, likely superseded reply. #3145 vs #3153 (copy() same shape). #2982 vs #2976 vs #2978 (any/concrete).
