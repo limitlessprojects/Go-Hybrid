@@ -6306,6 +6306,31 @@ impl<'a> Collector<'a> {
                     }
                 }
             }
+        } else if let Expr::Ident { name: tn, .. } = unwrap_parens(base) {
+            // #3142: Go §Method expressions: the method set of a defined type T
+            // contains only methods declared with value receiver T. A method
+            // declared with receiver `*T` requires a pointer receiver (`(*T).m`);
+            // referencing or calling it as `T.m` is rejected by Go (`invalid method
+            // expression T.m (needs pointer receiver (*T).m)`).
+            if self.lookup_kind(tn).is_none() && !self.scopes.iter().any(|s| s.contains_key(tn)) {
+                let base_sn = Checker::base_named_type_str(tn);
+                if let Some(m) = self
+                    .ck
+                    .method_decls
+                    .get(&(base_sn.to_string(), head.to_string()))
+                {
+                    if m.receiver.as_ref().is_some_and(|r| r.is_pointer) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid method expression `{}.{}` — `{}` has a pointer receiver `*{}`; Go refuses `invalid method expression {}.{} (needs pointer receiver (*{}).{})` (HYB-E1002)",
+                                tn, name, name, tn, tn, name, tn, name
+                            ),
+                            "a method with a pointer receiver cannot be called or bound as a value-type method expression: call it on an addressable value or pointer",
+                        );
+                    }
+                }
+            }
         }
     }
 
