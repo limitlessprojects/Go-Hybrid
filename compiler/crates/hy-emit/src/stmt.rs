@@ -287,6 +287,10 @@ impl Emitter {
                                     )));
                                 }
                             };
+                            let recv_ty = self.expr_ty(chan).and_then(|t| match self.resolve_type_alias(&t) {
+                                TypeExpr::Chan { elem, .. } => Some((**elem).clone()),
+                                _ => None,
+                            });
                             self.shadow_local_names(names);
                             self.push(&head);
                             // Go's case clause shares ONE lexical scope with
@@ -324,6 +328,9 @@ impl Emitter {
                                 if !bound.contains(&n.as_str()) {
                                     self.local_vars.remove(n);
                                 }
+                            }
+                            if let (Some(n0), Some(ety)) = (names.first(), recv_ty.as_ref()) {
+                                self.bind_typed_local(n0, ety);
                             }
                             wrap = Self::case_body_redefines_binding(&arm.body.stmts, &bound);
                         }
@@ -523,8 +530,8 @@ impl Emitter {
                             }
                         }
                     }
-                    if l.names.len() == 1 && l.names[0] != "_" {
-                        self.register_var_ty(&l.names[0], t);
+                    for n in &l.names {
+                        self.register_var_ty(n, t);
                     }
                 }
                 return Ok(());
@@ -1281,30 +1288,43 @@ impl Emitter {
 
     /// Binding hints from the defining values (see `BindingKind`).
     fn hint_from_values(&mut self, names: &[String], values: &[Expr]) {
-        let single_hint = if names.len() == 1 && values.len() == 1 && names[0] != "_" {
-            Some(self.binding_kind_of(&values[0]))
-        } else {
-            None
-        };
-        let ptr_flags: Vec<bool> = if names.len() == values.len() {
-            values.iter().map(|v| self.expr_is_pointer(v)).collect()
-        } else {
-            Vec::new()
-        };
-        self.shadow_local_names(names);
-        if let Some(kind) = single_hint {
-            if kind != BindingKind::Plain {
-                self.bindings.insert(names[0].clone(), kind);
+        let mut inferred = vec![None; names.len()];
+        if names.len() == values.len() {
+            for (slot, (name, v)) in inferred.iter_mut().zip(names.iter().zip(values.iter())) {
+                if name != "_" {
+                    *slot = Some((
+                        self.binding_kind_of(v),
+                        self.expr_ty(v),
+                        self.expr_is_pointer(v),
+                        self.user_struct_name_of(v).map(str::to_string),
+                    ));
+                }
             }
-            if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first() {
-                self.register_var_ty(&names[0], t);
-            } else if let Some(sn) = self.user_struct_name_of(&values[0]).map(str::to_string) {
-                self.var_struct.insert(names[0].clone(), sn);
+        } else if names.len() == 2 && values.len() == 1 && names[0] != "_" {
+            let v0 = Self::peel_parens(&values[0]);
+            if matches!(v0, Expr::Index { .. } | Expr::Receive { .. } | Expr::Call { .. } | Expr::Try { .. }) {
+                inferred[0] = Some((
+                    self.binding_kind_of(v0),
+                    self.expr_ty(v0),
+                    self.expr_is_pointer(v0),
+                    self.user_struct_name_of(v0).map(str::to_string),
+                ));
             }
         }
-        for (name, is_ptr) in names.iter().zip(ptr_flags) {
-            if name != "_" && is_ptr {
-                self.pointer_vars.insert(name.clone());
+        self.shadow_local_names(names);
+        for (name, info) in names.iter().zip(inferred) {
+            if let Some((kind, ty, is_ptr, struct_name)) = info {
+                if kind != BindingKind::Plain {
+                    self.bindings.insert(name.clone(), kind);
+                }
+                if is_ptr || ty.as_ref().is_some_and(|t| self.is_pointer_ty(t)) {
+                    self.pointer_vars.insert(name.clone());
+                }
+                if let Some(t) = ty {
+                    self.register_var_ty(name, &t);
+                } else if let Some(sn) = struct_name {
+                    self.var_struct.insert(name.clone(), sn);
+                }
             }
         }
     }
@@ -1313,15 +1333,19 @@ impl Emitter {
         let e = Self::peel_parens(e);
         if let Expr::Move { operand, .. } | Expr::AddrOf { operand, .. } | Expr::Unary { op: UnOp::Addr, operand, .. } = e { return self.binding_kind_of(operand); }
         if let Expr::Ident { name, .. } = e {
-            return self.bindings.get(name).copied().unwrap_or(BindingKind::Plain);
+            if let Some(&kind) = self.bindings.get(name) {
+                return kind;
+            }
         }
         if let Expr::Field { base, name, .. } = e {
-            return self
+            if let Some(kind) = self
                 .user_struct_name_of(base)
-                .and_then(|sn| self.n5_structs.get(sn))
+                .and_then(|sn| self.struct_decl_fields.get(sn))
                 .and_then(|fs| fs.iter().find(|f| &f.name == name))
                 .and_then(|f| self.binding_kind_of_ty(&f.ty))
-                .unwrap_or(BindingKind::Plain);
+            {
+                return kind;
+            }
         }
         if matches!(e, Expr::MapLit { .. }) {
             return BindingKind::Map;
@@ -1333,11 +1357,11 @@ impl Emitter {
         }
         let (call, args) = match e {
             Expr::Try { operand, .. } => match Self::peel_parens(operand) {
-                Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
-                _ => return BindingKind::Plain,
+                Expr::Call { callee, args, .. } => (Self::peel_parens(callee), args.as_slice()),
+                _ => return self.expr_ty(e).and_then(|t| self.binding_kind_of_ty(&t)).unwrap_or(BindingKind::Plain),
             },
-            Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
-            _ => return BindingKind::Plain,
+            Expr::Call { callee, args, .. } => (Self::peel_parens(callee), args.as_slice()),
+            _ => return self.expr_ty(e).and_then(|t| self.binding_kind_of_ty(&t)).unwrap_or(BindingKind::Plain),
         };
         if let Expr::Field { base, name, .. } = call {
             if let Expr::Ident { name: pkg, .. } = base.as_ref() {
@@ -1393,7 +1417,7 @@ impl Emitter {
         // Only classify as Chan if the first argument is a channel type.
         // make([]T, n) (SliceLit) and make(map[K]V) (MapLit) must remain Plain
         // so single-var range binds elements/keys rather than channel values.
-        if matches!(Self::peel_parens(call), Expr::Ident { name, .. } if (name == "make" || name == "new") && !self.local_vars.contains(name.as_str()) && !self.fn_shapes.contains_key(name.as_str())) {
+        if matches!(call, Expr::Ident { name, .. } if (name == "make" || name == "new") && !self.local_vars.contains(name.as_str()) && !self.fn_shapes.contains_key(name.as_str())) {
             return match args.first().map(|a| Self::peel_parens(&a.value)) {
                 Some(Expr::Ident { name, span }) => self
                     .binding_kind_of_ty(&TypeExpr::Named { name: name.clone(), span: *span })
@@ -1408,7 +1432,9 @@ impl Emitter {
                 None => BindingKind::Plain,
             };
         }
-        BindingKind::Plain
+        self.expr_ty(e)
+            .and_then(|ty| self.binding_kind_of_ty(&ty))
+            .unwrap_or(BindingKind::Plain)
     }
 
     /// Whether an expression evaluates to a channel type (param, typed local,
@@ -1429,6 +1455,37 @@ impl Emitter {
     /// Go iterate over the underlying map (`s.m`).
     pub(crate) fn is_set_expr(&self, e: &Expr) -> bool {
         self.binding_kind_of(e) == BindingKind::Set
+    }
+
+    fn bind_typed_local(&mut self, name: &str, ty: &TypeExpr) {
+        if name == "_" || !self.local_vars.contains(name) {
+            return;
+        }
+        if let Some(kind) = self.binding_kind_of_ty(ty) {
+            self.bindings.insert(name.to_string(), kind);
+        }
+        if self.is_pointer_ty(ty) {
+            self.pointer_vars.insert(name.to_string());
+        }
+        self.register_var_ty(name, ty);
+    }
+
+    fn bind_iter_var_tys(&mut self, vars: &[String], iter_ty: Option<TypeExpr>) {
+        let Some(ty) = iter_ty else { return };
+        let tys: Vec<Option<TypeExpr>> = match self.resolve_indexable_ty(&ty) {
+            TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } | TypeExpr::Chan { elem, .. } => {
+                if vars.len() >= 2 { vec![None, Some((**elem).clone())] } else { vec![Some((**elem).clone())] }
+            }
+            TypeExpr::Map { key, value, .. } => {
+                if vars.len() >= 2 { vec![Some((**key).clone()), Some((**value).clone())] } else { vec![Some((**key).clone())] }
+            }
+            _ => return,
+        };
+        for (v, ty) in vars.iter().zip(tys) {
+            if let Some(ty) = ty {
+                self.bind_typed_local(v, &ty);
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1950,8 +2007,8 @@ impl Emitter {
                             }
                         }
                     }
-                    if l.names.len() == 1 && l.names[0] != "_" {
-                        self.register_var_ty(&l.names[0], t);
+                    for n in &l.names {
+                        self.register_var_ty(n, t);
                     }
                 }
                 let names = l.names.join(", ");
@@ -2200,6 +2257,7 @@ impl Emitter {
                 // the try before the loop (Batch G).
                 self.hoist_tries_expr(expr)?;
                 let e = self.emit_expr(expr, 0)?;
+                let iter_ty = self.expr_ty(expr);
                 let core = match vars.len() {
                     1 => {
                         // `for _ in ch` drains without binding (corpus 17);
@@ -2231,6 +2289,7 @@ impl Emitter {
                             // the KEY (#2945) — Go's own single-var form.
                             if over_chan || self.is_map_expr(expr) {
                                 self.shadow_local_names(vars);
+                                self.bind_iter_var_tys(vars, iter_ty);
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {
                                 // A rust-handle slice (ForeignTy binding)
@@ -2248,6 +2307,7 @@ impl Emitter {
                                     _ => None,
                                 });
                                 self.shadow_local_names(vars);
+                                self.bind_iter_var_tys(vars, iter_ty);
                                 if let Some(t) = elem_ty {
                                     self.bindings
                                         .insert(vars[0].clone(), BindingKind::ForeignTy(t));
@@ -2287,6 +2347,7 @@ impl Emitter {
                             self.local_vars.remove(&vars[1]);
                             "_".to_string()
                         };
+                        self.bind_iter_var_tys(vars, iter_ty);
                         if a == "_" && c == "_" {
                             format!("for range {} {{", e)
                         } else {
@@ -2542,6 +2603,10 @@ impl Emitter {
         }
 
         self.hoist_tries_expr(subject)?;
+        let opt_elem_ty = self.expr_ty(subject).and_then(|t| match self.resolve_type_alias(&t) {
+            TypeExpr::Option { elem, .. } => Some((**elem).clone()),
+            _ => None,
+        });
         let temp = self.next_temp("hyMatch");
         let s = self.emit_expr(subject, 0)?;
         self.push(&format!("{} := {}", temp, s));
@@ -2618,7 +2683,7 @@ impl Emitter {
                 self.push(&format!("if {} {{", cond));
                 self.indent += 1;
                 let saved = self.save_scope();
-                if let Some(b) = bind { self.shadow_local_name(b); }
+                if let Some(b) = bind { self.shadow_local_name(b); if let Some(ety) = &opt_elem_ty { self.bind_typed_local(b, ety); } }
                 let res = (|| -> Result<(), EmitError> {
                     if let Some(g) = &arm.guard {
                         let greads = bind.is_some_and(|b| b != "_" && crate::rangebind::expr_reads(g, b));
@@ -2705,6 +2770,7 @@ impl Emitter {
             for (binding, arm) in reachable_some_arms.iter() {
                 let saved_scope = self.save_scope();
                 self.shadow_local_name(binding);
+                if let Some(ety) = &opt_elem_ty { self.bind_typed_local(binding, ety); }
                 let arm_res = (|| -> Result<bool, EmitError> {
                     match &arm.guard {
                         Some(g) => {
@@ -2806,6 +2872,7 @@ impl Emitter {
                 self.indent += 1;
                 let saved_scope = self.save_scope();
                 self.shadow_local_name(binding);
+                if let Some(ety) = &opt_elem_ty { self.bind_typed_local(binding, ety); }
                 let arm_res = (|| -> Result<(), EmitError> {
                     match &arm.guard {
                         Some(g) => {
@@ -2909,6 +2976,7 @@ impl Emitter {
                 }
                 let saved_scope = self.save_scope();
                 self.shadow_local_name(binding);
+                if let Some(ety) = &opt_elem_ty { self.bind_typed_local(binding, ety); }
                 let arm_res = (|| -> Result<(), EmitError> {
                     let g = arm.guard.as_ref().unwrap();
                     let guard_reads =

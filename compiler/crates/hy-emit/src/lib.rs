@@ -666,6 +666,10 @@ pub struct Emitter {
     /// and user type alias → its target, for zero values that allocate.
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
     n5_aliases: BTreeMap<String, TypeExpr>,
+    struct_decl_fields: BTreeMap<String, Vec<FieldDecl>>,
+    fn_result_tys: BTreeMap<String, TypeExpr>,
+    const_expr_tys: BTreeMap<String, TypeExpr>,
+    var_expr_ty: BTreeMap<String, TypeExpr>,
 }
 
 pub(crate) struct ScopeSnapshot {
@@ -673,6 +677,7 @@ pub(crate) struct ScopeSnapshot {
     bindings: BTreeMap<String, BindingKind>,
     var_ty: BTreeMap<String, (String, bool)>,
     var_struct: BTreeMap<String, String>,
+    var_expr_ty: BTreeMap<String, TypeExpr>,
     pointer_vars: BTreeSet<String>,
     loan_aliases: BTreeMap<String, BTreeSet<String>>,
 }
@@ -717,6 +722,10 @@ impl Emitter {
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
+            struct_decl_fields: BTreeMap::new(),
+            fn_result_tys: BTreeMap::new(),
+            const_expr_tys: BTreeMap::new(),
+            var_expr_ty: BTreeMap::new(),
         }
     }
 
@@ -730,6 +739,7 @@ impl Emitter {
             bindings: self.bindings.clone(),
             var_ty: self.var_ty.clone(),
             var_struct: self.var_struct.clone(),
+            var_expr_ty: self.var_expr_ty.clone(),
             pointer_vars: self.pointer_vars.clone(),
             loan_aliases: self.loan_aliases.clone(),
         }
@@ -740,6 +750,7 @@ impl Emitter {
         self.bindings = saved.bindings;
         self.var_ty = saved.var_ty;
         self.var_struct = saved.var_struct;
+        self.var_expr_ty = saved.var_expr_ty;
         self.pointer_vars = saved.pointer_vars;
         self.loan_aliases = saved.loan_aliases;
     }
@@ -750,6 +761,7 @@ impl Emitter {
             self.bindings.remove(name);
             self.var_ty.remove(name);
             self.var_struct.remove(name);
+            self.var_expr_ty.remove(name);
             self.pointer_vars.remove(name);
             self.loan_aliases.remove(name);
             for aliases in self.loan_aliases.values_mut() {
@@ -771,6 +783,29 @@ impl Emitter {
             }
         }
         ty
+    }
+
+    pub(crate) fn peel_pointers_and_aliases<'a>(&'a self, mut ty: &'a TypeExpr) -> &'a TypeExpr {
+        let mut seen = BTreeSet::new();
+        loop {
+            match ty {
+                TypeExpr::Named { name, .. } if seen.insert(name.as_str()) => {
+                    let Some(target) = self.n5_aliases.get(name) else { break };
+                    ty = target;
+                }
+                TypeExpr::Pointer { to, .. } => ty = to,
+                _ => break,
+            }
+        }
+        ty
+    }
+    pub(crate) fn resolve_indexable_ty<'a>(&'a self, ty: &'a TypeExpr) -> &'a TypeExpr {
+        let resolved = self.resolve_type_alias(ty);
+        if let TypeExpr::Pointer { to, .. } = resolved {
+            let inner = self.resolve_type_alias(to);
+            if matches!(inner, TypeExpr::Array { .. }) { return inner; }
+        }
+        resolved
     }
 
     pub(crate) fn is_pointer_ty(&self, ty: &TypeExpr) -> bool {
@@ -834,6 +869,10 @@ impl Emitter {
                 _ => None,
             })
             .collect();
+        self.struct_decl_fields = file.decls.iter().filter_map(|d| match d {
+            Decl::Struct(s) => Some((s.name.clone(), s.fields.clone())),
+            _ => None,
+        }).collect();
         self.n5_structs = file
             .decls
             .iter()
@@ -880,6 +919,18 @@ impl Emitter {
                 Some((key, ret_sn))
             })
             .collect();
+        self.fn_result_tys = file.fns().filter(|f| result_shape(&f.results).0 >= 1).filter_map(|f| {
+            let k = match &f.receiver { Some(r) => format!("{}.{}", self.struct_head_of(&r.ty)?, f.name), None => f.name.clone() };
+            Some((k, f.results[0].ty.clone()))
+        }).collect();
+        self.const_expr_tys.clear();
+        for d in &file.decls {
+            if let Decl::Const(c) = d {
+                if let Some(ty) = c.ty.clone().or_else(|| self.expr_ty(&c.value)) {
+                    self.const_expr_tys.insert(c.name.clone(), ty);
+                }
+            }
+        }
         self.fn_shapes = file
             .fns()
             .map(|f| {
@@ -1414,6 +1465,7 @@ impl Emitter {
     fn emit_fn(&mut self, f: &FnDecl) -> Result<(), EmitError> {
         self.bindings.clear();
         self.var_struct.clear();
+        self.var_expr_ty.clear();
         self.closure_shapes.clear();
         self.var_ty.clear();
         self.pointer_vars.clear();
@@ -1514,7 +1566,8 @@ impl Emitter {
                 self.bindings.insert(recv.name.clone(), kind);
             }
             self.register_var_ty(&recv.name, &recv.ty);
-            if recv.is_pointer {
+            if recv.is_pointer && recv.name != "_" {
+                self.var_expr_ty.insert(recv.name.clone(), TypeExpr::Pointer { to: Box::new(recv.ty.clone()), span: recv.ty.span() });
                 if let Some((_, ptr)) = self.var_ty.get_mut(&recv.name) {
                     *ptr = true;
                 }
@@ -1746,7 +1799,71 @@ impl Emitter {
     /// dotted (`atomic.int64`) lands in var_ty with its pointer-ness; one
     /// whose type is a user struct (`pool_stats`, value or pointer) lands
     /// in var_struct — `stats.mu.lock()` types through struct_fields.
+    pub(crate) fn make_arg_ty(&self, arg: &Expr) -> Option<TypeExpr> {
+        let arg = Self::peel_parens(arg);
+        match arg {
+            Expr::StructLit { ty: Some(t), fields, .. } if fields.is_empty() => Some(t.clone()),
+            Expr::SliceLit { elem: Some(t), items, span } if items.is_empty() => arg.as_array_lit().map(|(_, _, arr_ty)| arr_ty.clone()).or_else(|| Some(TypeExpr::Slice { elem: t.clone(), span: *span })),
+            Expr::MapLit { key, value, entries, span } if entries.is_empty() => Some(TypeExpr::Map { key: key.clone(), value: value.clone(), span: *span }),
+            Expr::Ident { name, span } if !self.local_vars.contains(name) => Some(TypeExpr::Named { name: name.clone(), span: *span }),
+            _ => None,
+        }
+    }
+    pub(crate) fn expr_ty(&self, e: &Expr) -> Option<TypeExpr> {
+        let peeled = Self::peel_parens(e);
+        match peeled {
+            Expr::Ident { name, .. } => self.var_expr_ty.get(name).cloned().or_else(|| (!self.local_vars.contains(name)).then(|| self.const_expr_tys.get(name).cloned()).flatten()),
+            Expr::Move { operand, .. } | Expr::Try { operand, .. } => self.expr_ty(operand),
+            Expr::AddrOf { operand, span } | Expr::Unary { op: UnOp::Addr, operand, span } => self.expr_ty(operand).map(|to| TypeExpr::Pointer { to: Box::new(to), span: *span }),
+            Expr::MapLit { key, value, span, .. } => Some(TypeExpr::Map { key: key.clone(), value: value.clone(), span: *span }),
+            Expr::StructLit { ty: Some(t), .. } => Some(t.clone()),
+            Expr::SliceLit { elem: Some(el), span, .. } => peeled.as_array_lit().map(|(_, _, arr_ty)| arr_ty.clone()).or_else(|| Some(TypeExpr::Slice { elem: el.clone(), span: *span })),
+            Expr::FnLit { params, results, span, .. } => Some(TypeExpr::Fn { params: params.clone(), results: results.iter().map(|r| r.ty.clone()).collect(), span: *span }),
+            Expr::Field { base, name, .. } => self.struct_decl_fields.get(&self.struct_head_of(&self.expr_ty(base)?)?)?.iter().find(|f| f.name == *name).map(|f| f.ty.clone()),
+            Expr::Index { base, .. } => match self.resolve_indexable_ty(&self.expr_ty(base)?) {
+                TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some((**elem).clone()),
+                TypeExpr::Map { value, .. } => Some((**value).clone()),
+                _ => None,
+            },
+            Expr::Slice { base, span, .. } => match self.resolve_indexable_ty(&self.expr_ty(base)?) {
+                TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(TypeExpr::Slice { elem: elem.clone(), span: *span }),
+                _ => None,
+            },
+            Expr::Receive { chan, .. } => match self.resolve_type_alias(&self.expr_ty(chan)?) { TypeExpr::Chan { elem, .. } => Some((**elem).clone()), _ => None },
+            Expr::Call { callee, args, span } => {
+                match Self::peel_parens(callee) {
+                    Expr::Ident { name, span: id_span } if !self.local_vars.contains(name) => {
+                        if name == "make" && !self.fn_shapes.contains_key("make") { return args.first().and_then(|a| self.make_arg_ty(&a.value)); }
+                        if name == "new" && args.len() == 1 && !self.fn_shapes.contains_key("new") { return self.make_arg_ty(&args[0].value).map(|to| TypeExpr::Pointer { span: to.span(), to: Box::new(to) }); }
+                        if name == "some" && args.len() == 1 && !self.fn_shapes.contains_key("some") { return self.expr_ty(&args[0].value).map(|el| TypeExpr::Option { elem: Box::new(el), span: *span }); }
+                        if args.len() == 1 && self.n5_aliases.contains_key(name) { return Some(TypeExpr::Named { name: name.clone(), span: *id_span }); }
+                        if let Some(t) = self.fn_result_tys.get(name.split('[').next().unwrap_or(name)) { return Some(t.clone()); }
+                    }
+                    Expr::Field { base, name, .. } => if let Some(bty) = self.expr_ty(base) {
+                        if (name == "unwrap" && args.is_empty()) || (name == "or" && args.len() == 1) {
+                            if let TypeExpr::Option { elem, .. } = self.resolve_type_alias(&bty) { return Some((**elem).clone()); }
+                        }
+                        if let Some(sname) = self.struct_head_of(&bty) {
+                            if let Some(t) = self.fn_result_tys.get(&format!("{sname}.{name}")) { return Some(t.clone()); }
+                        }
+                    },
+                    _ => {}
+                }
+                match self.resolve_type_alias(&self.expr_ty(callee)?) {
+                    TypeExpr::Fn { results, .. } if !results.is_empty() && !(results.len() == 1 && matches!(&results[0], TypeExpr::Named { name, .. } if name == "error")) => Some(results[0].clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+    fn struct_head_of(&self, ty: &TypeExpr) -> Option<String> {
+        match self.peel_pointers_and_aliases(ty) { TypeExpr::Named { name, .. } => Some(name.split('[').next().unwrap_or(name).to_string()), _ => None }
+    }
     fn register_var_ty(&mut self, name: &str, ty: &TypeExpr) {
+        if name != "_" && !matches!(ty, TypeExpr::Named { name: n, .. } if n.is_empty()) {
+            self.var_expr_ty.insert(name.to_string(), ty.clone());
+        }
         let (base, ptr) = match self.resolve_type_alias(ty) {
             TypeExpr::Pointer { to, .. } => (base_ty_name(self.resolve_type_alias(to)), true),
             t => (base_ty_name(t), false),
@@ -1768,17 +1885,14 @@ impl Emitter {
     /// table knows gives ForeignTy(key) — members resolve field-vs-method;
     /// any other dotted type stays generic Foreign.
     fn binding_kind_of_ty(&self, t: &TypeExpr) -> Option<BindingKind> {
-        let t = match self.resolve_type_alias(t) {
-            TypeExpr::Pointer { to, .. } => self.resolve_type_alias(to),
-            other => other,
-        };
+        let t = self.resolve_type_alias(t);
         if matches!(t, TypeExpr::Chan { .. }) {
             return Some(BindingKind::Chan);
         }
         if matches!(t, TypeExpr::Map { .. }) {
             return Some(BindingKind::Map);
         }
-        let Some(base) = base_ty_name(t) else { return None };
+        let Some(base) = base_ty_name(self.peel_pointers_and_aliases(t)) else { return None };
         let name = base.as_str();
         if name.starts_with("set[") || name == "set" {
             return Some(BindingKind::Set);
@@ -2135,34 +2249,24 @@ impl Emitter {
             }
             return;
         }
-        if let Some(open) = name.find('[') {
-            if open > 0 && name.ends_with(']') {
-                let inner = &name[open + 1..name.len() - 1];
-                for arg in Self::split_top_level_type_args(inner) {
-                    Self::collect_key_params_in_name(arg, param_names, out);
-                }
-                return;
+        if let Some(open) = name.find('[').filter(|&o| o > 0 && name.ends_with(']')) {
+            for arg in Self::split_top_level_type_args(&name[open + 1..name.len() - 1]) {
+                Self::collect_key_params_in_name(arg, param_names, out);
             }
+            return;
         }
-        if param_names.contains(name) {
-            out.insert(name.to_string());
-        }
+        if param_names.contains(name) { out.insert(name.to_string()); }
     }
 
-    fn collect_comparable_in_folded_name(
-        name: &str,
-        param_names: &BTreeSet<String>,
-        out: &mut BTreeSet<String>,
-    ) {
+    fn collect_comparable_in_folded_name(name: &str, param_names: &BTreeSet<String>, out: &mut BTreeSet<String>) {
         let name = name.trim();
         for prefix in ["*", "[]", "[...]", "<-chan ", "chan<- ", "chan "] {
             if let Some(rest) = name.strip_prefix(prefix) {
-                Self::collect_comparable_in_folded_name(rest, param_names, out);
-                return;
+                return Self::collect_comparable_in_folded_name(rest, param_names, out);
             }
         }
         if let Some(rest) = name.strip_prefix("map[") {
-            if let Some((k_s, v_s)) = Self::split_bracket_prefix(rest) {
+            if let Some((k_s, v_s)) = Self::split_delim_prefix(rest, '[', ']') {
                 Self::collect_key_params_in_name(k_s, param_names, out);
                 Self::collect_comparable_in_folded_name(k_s, param_names, out);
                 Self::collect_comparable_in_folded_name(v_s, param_names, out);
@@ -2170,13 +2274,13 @@ impl Emitter {
             return;
         }
         if let Some(rest) = name.strip_prefix('[') {
-            if let Some((_, elem_s)) = Self::split_bracket_prefix(rest) {
+            if let Some((_, elem_s)) = Self::split_delim_prefix(rest, '[', ']') {
                 Self::collect_comparable_in_folded_name(elem_s, param_names, out);
             }
             return;
         }
         if let Some(rest) = name.strip_prefix("fn(") {
-            if let Some((params_s, tail_s)) = Self::split_paren_prefix(rest) {
+            if let Some((params_s, tail_s)) = Self::split_delim_prefix(rest, '(', ')') {
                 for p in Self::split_top_level_type_args(params_s) {
                     Self::collect_comparable_in_folded_name(p, param_names, out);
                 }
@@ -2191,73 +2295,41 @@ impl Emitter {
             }
             return;
         }
-        if let Some(open) = name.find('[') {
-            if open > 0 && name.ends_with(']') {
-                let head = name[..open].trim();
-                let inner = &name[open + 1..name.len() - 1];
-                if head == "set" {
-                    Self::collect_key_params_in_name(inner, param_names, out);
-                }
-                for arg in Self::split_top_level_type_args(inner) {
-                    Self::collect_comparable_in_folded_name(arg, param_names, out);
-                }
+        if let Some(open) = name.find('[').filter(|&o| o > 0 && name.ends_with(']')) {
+            let inner = &name[open + 1..name.len() - 1];
+            if name[..open].trim() == "set" { Self::collect_key_params_in_name(inner, param_names, out); }
+            for arg in Self::split_top_level_type_args(inner) {
+                Self::collect_comparable_in_folded_name(arg, param_names, out);
             }
         }
     }
 
-    fn split_paren_prefix(s: &str) -> Option<(&str, &str)> {
-        let mut depth = 1usize;
-        for (i, ch) in s.char_indices() {
-            match ch {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some((&s[..i], &s[i + 1..]));
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
+    fn split_paren_prefix(s: &str) -> Option<(&str, &str)> { Self::split_delim_prefix(s, '(', ')') }
+    fn split_bracket_prefix(s: &str) -> Option<(&str, &str)> { Self::split_delim_prefix(s, '[', ']') }
 
-    fn split_bracket_prefix(s: &str) -> Option<(&str, &str)> {
+    fn split_delim_prefix(s: &str, open_ch: char, close_ch: char) -> Option<(&str, &str)> {
         let mut depth = 1usize;
         for (i, ch) in s.char_indices() {
-            match ch {
-                '[' => depth += 1,
-                ']' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some((&s[..i], &s[i + 1..]));
-                    }
-                }
-                _ => {}
+            if ch == open_ch { depth += 1; } else if ch == close_ch {
+                depth -= 1;
+                if depth == 0 { return Some((&s[..i], &s[i + 1..])); }
             }
         }
         None
     }
 
     pub(crate) fn split_top_level_type_args(s: &str) -> Vec<&str> {
-        let mut out = Vec::new();
-        let mut depth = 0usize;
-        let mut start = 0usize;
+        let (mut out, mut depth, mut start) = (Vec::new(), 0usize, 0usize);
         for (i, ch) in s.char_indices() {
             match ch {
                 '[' | '(' => depth += 1,
                 ']' | ')' => depth = depth.saturating_sub(1),
-                ',' if depth == 0 => {
-                    out.push(s[start..i].trim());
-                    start = i + 1;
-                }
+                ',' if depth == 0 => { out.push(s[start..i].trim()); start = i + 1; }
                 _ => {}
             }
         }
         let tail = s[start..].trim();
-        if !tail.is_empty() {
-            out.push(tail);
-        }
+        if !tail.is_empty() { out.push(tail); }
         out
     }
 

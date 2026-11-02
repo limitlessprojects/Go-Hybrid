@@ -960,19 +960,17 @@ impl<'a> Checker<'a> {
                 if let hy_syntax::Stmt::For { kind, .. } = stmt {
                     match kind {
                         hy_syntax::ForKind::Iterate { vars, expr, .. } => {
-                            let elem = match self.shape_of_expr(&replay_st, expr) {
-                                crate::model::TypeShape::Slice(e) | crate::model::TypeShape::Array(e) => *e,
-                                crate::model::TypeShape::Chan(e) => *e,
-                                crate::model::TypeShape::Map(_, v) => *v,
-                                _ => crate::model::TypeShape::Unknown,
-                            };
-                            for (idx_var, v) in vars.iter().enumerate() {
-                                let shape = if idx_var == 0 && vars.len() > 1 {
-                                    crate::model::TypeShape::Primitive
-                                } else {
-                                    elem.clone()
-                                };
+                            let is_chan = matches!(
+                                self.shape_of_expr(&replay_st, expr),
+                                crate::model::TypeShape::Chan(_)
+                            );
+                            let shapes = self.iterate_var_shapes(&replay_st, expr, vars.len());
+                            for (v, shape) in vars.iter().zip(shapes) {
+                                let may_share = self.shape_may_share(&shape);
                                 self.define_binding(&mut replay_st, v, shape, None, false, managed, false);
+                                if !is_chan && may_share {
+                                    self.record_may_share(&mut replay_st, v, expr);
+                                }
                             }
                         }
                         hy_syntax::ForKind::Range { var, .. } => {

@@ -620,10 +620,11 @@ impl<'a> Checker<'a> {
             TypeShape::BorrowHandle(_) => vec![s.clone()],
             TypeShape::Slice(e) | TypeShape::Array(e) | TypeShape::Chan(e) => one((**e).clone()),
             TypeShape::Map(k, v) => {
+                // SPEC LX13: single-var `for k in m` binds the KEY (#2945).
                 if n_vars >= 2 {
                     vec![(**k).clone(), (**v).clone()]
                 } else {
-                    vec![(**v).clone()]
+                    vec![(**k).clone()]
                 }
             }
             TypeShape::Struct(Some(n)) if n == "set" || n.starts_with("set[") => {
