@@ -233,6 +233,54 @@ fn is_sized_array_spelling(s: &str) -> bool {
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
+fn map_type_parts(s: &str) -> Option<(&str, &str)> {
+    let inner = s.strip_prefix("map[")?;
+    let mut depth = 1usize;
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    let value = inner[i + 1..].trim();
+                    return (!value.is_empty()).then_some((inner[..i].trim(), value));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn array_type_parts(s: &str) -> Option<(&str, &str)> {
+    let inner = s.strip_prefix('[')?;
+    let mut depth = 1usize;
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    let elem = inner[i + 1..].trim();
+                    return (!elem.is_empty()).then_some((inner[..i].trim(), elem));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn channel_element_type(s: &str) -> Option<&str> {
+    if let Some(elem) = s.strip_prefix("<-chan ") {
+        Some(elem.trim())
+    } else if let Some(elem) = s.strip_prefix("chan<- ") {
+        Some(elem.trim())
+    } else {
+        s.strip_prefix("chan ").map(str::trim)
+    }
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -893,6 +941,78 @@ impl<'a> Collector<'a> {
         matches!((a, b), (Some(x), Some(y))
             if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
     }
+
+    /// #3398 — `OpKind` erases numeric widths inside container types.
+    fn assignment_container_types_conflict(
+        &self,
+        target: Option<&str>,
+        value: Option<&str>,
+    ) -> bool {
+        let (Some(target), Some(value)) = (target, value) else {
+            return false;
+        };
+        self.assignment_type_names_conflict(target, value, 0)
+    }
+
+    fn assignment_type_names_conflict(&self, target: &str, value: &str, depth: usize) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        let target = target.trim();
+        let value = value.trim();
+        if target == value {
+            return false;
+        }
+        if self.fn_type_params.contains(target) || self.fn_type_params.contains(value) {
+            return false;
+        }
+
+        let target_alias = self.ck.type_aliases.get(target).map(TypeExpr::render);
+        let value_alias = self.ck.type_aliases.get(value).map(TypeExpr::render);
+        if target_alias.is_some() || value_alias.is_some() {
+            let target = target_alias.as_deref().unwrap_or(target);
+            let value = value_alias.as_deref().unwrap_or(value);
+            return self.assignment_type_names_conflict(target, value, depth + 1);
+        }
+
+        if let (Some(target_elem), Some(value_elem)) =
+            (target.strip_prefix('*'), value.strip_prefix('*'))
+        {
+            return self.assignment_type_names_conflict(target_elem, value_elem, depth + 1);
+        }
+        if let (Some(target_elem), Some(value_elem)) =
+            (target.strip_prefix("[]"), value.strip_prefix("[]"))
+        {
+            return self.assignment_type_names_conflict(target_elem, value_elem, depth + 1);
+        }
+        if let (Some((target_key, target_value)), Some((value_key, value_value))) =
+            (map_type_parts(target), map_type_parts(value))
+        {
+            return self.assignment_type_names_conflict(target_key, value_key, depth + 1)
+                || self.assignment_type_names_conflict(target_value, value_value, depth + 1);
+        }
+        if let (Some((target_len, target_elem)), Some((value_len, value_elem))) =
+            (array_type_parts(target), array_type_parts(value))
+        {
+            let length_conflict = matches!(
+                (target_len.parse::<usize>(), value_len.parse::<usize>()),
+                (Ok(target_len), Ok(value_len)) if target_len != value_len
+            );
+            return length_conflict
+                || self.assignment_type_names_conflict(target_elem, value_elem, depth + 1);
+        }
+        if let (Some(target_elem), Some(value_elem)) =
+            (channel_element_type(target), channel_element_type(value))
+        {
+            return self.assignment_type_names_conflict(target_elem, value_elem, depth + 1);
+        }
+
+        matches!(
+            (canonical_numeric_name(target), canonical_numeric_name(value)),
+            (Some(target), Some(value)) if target != value
+        )
+    }
+
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
@@ -5017,6 +5137,10 @@ impl<'a> Collector<'a> {
                     if !is_loan_shape
                         && (conflict
                             || scalar_mismatch
+                            || self.assignment_container_types_conflict(
+                                self.place_type_name(target).as_deref(),
+                                self.typed_value_type_name(&values[0]).as_deref(),
+                            )
                             || self.sized_array_names_differ(
                                 self.place_type_name(target).as_deref(),
                                 self.typed_value_type_name(&values[0]).as_deref(),
@@ -5068,7 +5192,13 @@ impl<'a> Collector<'a> {
                             (self.place_scalar(t), self.typed_value_scalar(v)),
                             (Some(tp), Some(vp)) if tp != vp
                         );
-                        if conflict || scalar_mismatch {
+                        if conflict
+                            || scalar_mismatch
+                            || self.assignment_container_types_conflict(
+                                self.place_type_name(t).as_deref(),
+                                self.typed_value_type_name(v).as_deref(),
+                            )
+                        {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
