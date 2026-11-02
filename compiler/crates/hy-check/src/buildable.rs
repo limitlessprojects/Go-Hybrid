@@ -233,6 +233,34 @@ fn is_sized_array_spelling(s: &str) -> bool {
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
+/// #3261 — Extracts element type from `[]T` slice spelling.
+fn slice_elem_type_name_from_str(s: &str) -> Option<String> {
+    let rest = s.trim().strip_prefix("[]")?;
+    Some(rest.trim().to_string())
+}
+
+/// #3261 — Extracts value type from `map[K]V` mapping spelling.
+fn map_val_type_name_from_str(s: &str) -> Option<String> {
+    let t = s.trim();
+    let rest = t.strip_prefix("map[")?;
+    let close = rest.rfind(']')?;
+    Some(rest[close + 1..].trim().to_string())
+}
+
+/// #3261 — Extracts element type from `[N]T` array spelling.
+fn array_elem_type_name_from_str(s: &str) -> Option<String> {
+    let t = s.trim();
+    if !t.starts_with('[') {
+        return None;
+    }
+    let close = t.find(']')?;
+    let head = &t[1..close];
+    if head.is_empty() || !head.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(t[close + 1..].trim().to_string())
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -859,32 +887,102 @@ impl<'a> Collector<'a> {
         None
     }
 
-    /// #2770 — the canonical numeric spelling of a simple local target, for the
-    /// assignment/argument scalar comparison. Non-ident places fail open.
+    /// #2770 / #3261 — the canonical numeric spelling of an assignment target (ident, index, or field).
     fn place_scalar(&self, p: &Place) -> Option<&'static str> {
         match &p.kind {
             PlaceKind::Ident(n) => self.lookup_scalar(n),
-            _ => None,
+            PlaceKind::Index { base, .. } => {
+                let bk = self.kind_of_place(base);
+                match bk {
+                    OpKind::Str => canonical_numeric_name("byte"),
+                    OpKind::Slice(_) | OpKind::Array(_) => {
+                        let tn = self.place_type_name(base)?;
+                        let underlying = self.underlying_type_spelling(&tn).unwrap_or(tn);
+                        if let Some(elem) = slice_elem_type_name_from_str(&underlying) {
+                            return canonical_numeric_name(&elem);
+                        }
+                        if let Some(elem) = array_elem_type_name_from_str(&underlying) {
+                            return canonical_numeric_name(&elem);
+                        }
+                        None
+                    }
+                    OpKind::Map(_, _) => {
+                        let tn = self.place_type_name(base)?;
+                        let underlying = self.underlying_type_spelling(&tn).unwrap_or(tn);
+                        let val = map_val_type_name_from_str(&underlying)?;
+                        canonical_numeric_name(&val)
+                    }
+                    _ => None,
+                }
+            }
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                let full_name = self.struct_base_name(&bk).or_else(|| self.struct_name(&bk))?;
+                let sname = Checker::base_named_type_str(&full_name).to_string();
+                let declared = self.ck.structs.get(&sname)?;
+                let (_, fty) = declared.iter().find(|(n, _)| n == name)?;
+                self.scalar_of_ty(fty)
+            }
+            PlaceKind::AddrOf { base } => self.place_scalar(base),
         }
     }
 
-    /// #2771 — the declared Go spelling of a value whose type carries detail
+    /// #2771 / #3261 — the declared Go spelling of a value whose type carries detail
     /// that `OpKind` drops, notably an array's length (`[3]int` vs `[4]int`).
-    /// Only identifiers bound with an explicit type name are known; everything
-    /// else (literals, conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         match unwrap_parens(e) {
-            Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                if let Some(underlying) = self.underlying_type_spelling(&tn) {
+                    Some(underlying)
+                } else {
+                    Some(tn)
+                }
+            }
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
             _ => None,
         }
     }
 
-    /// #2771 — the declared Go spelling of a simple local assignment target.
+    /// #2771 / #3261 — the declared Go spelling of an assignment target.
     fn place_type_name(&self, p: &Place) -> Option<String> {
         match &p.kind {
-            PlaceKind::Ident(n) => self.lookup_type_name(n),
+            PlaceKind::Ident(n) => {
+                let tn = self.lookup_type_name(n)?;
+                if let Some(underlying) = self.underlying_type_spelling(&tn) {
+                    Some(underlying)
+                } else {
+                    Some(tn)
+                }
+            }
             _ => None,
         }
+    }
+
+    /// #3261 — Resolves underlying type of a type alias.
+    fn underlying_type_spelling(&self, name: &str) -> Option<String> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            Some(self.ck.resolve_type_alias(ty).render())
+        } else {
+            None
+        }
+    }
+
+    /// #3261 — Checks if slice assignment targets have mismatched element scalar widths.
+    fn place_and_value_elem_scalar_mismatch(&self, p: &Place, v: &Expr) -> bool {
+        let Some(ptn) = self.place_type_name(p) else {
+            return false;
+        };
+        let Some(vtn) = self.typed_value_type_name(v) else {
+            return false;
+        };
+        if let (Some(ps), Some(vs)) = (slice_elem_type_name_from_str(&ptn), slice_elem_type_name_from_str(&vtn)) {
+            if let (Some(psc), Some(vsc)) = (canonical_numeric_name(&ps), canonical_numeric_name(&vs)) {
+                return psc != vsc;
+            }
+        }
+        false
     }
 
     /// #2771 — two KNOWN and DIFFERENT sized-array spellings. Slices, named
@@ -5004,10 +5102,12 @@ impl<'a> Collector<'a> {
                         (self.place_scalar(target), self.typed_value_scalar(&values[0])),
                         (Some(t), Some(v)) if t != v
                     );
-                    // #2771: `b = a` between a `[4]int` and a `[3]int`.
+                    // #2771 / #3261: array length or slice element scalar mismatch.
+                    let elem_scalar_mismatch = self.place_and_value_elem_scalar_mismatch(target, &values[0]);
                     if !is_loan_shape
                         && (conflict
                             || scalar_mismatch
+                            || elem_scalar_mismatch
                             || self.sized_array_names_differ(
                                 self.place_type_name(target).as_deref(),
                                 self.typed_value_type_name(&values[0]).as_deref(),
@@ -5059,7 +5159,15 @@ impl<'a> Collector<'a> {
                             (self.place_scalar(t), self.typed_value_scalar(v)),
                             (Some(tp), Some(vp)) if tp != vp
                         );
-                        if conflict || scalar_mismatch {
+                        let elem_scalar_mismatch = self.place_and_value_elem_scalar_mismatch(t, v);
+                        if conflict
+                            || scalar_mismatch
+                            || elem_scalar_mismatch
+                            || self.sized_array_names_differ(
+                                self.place_type_name(t).as_deref(),
+                                self.typed_value_type_name(v).as_deref(),
+                            )
+                        {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
