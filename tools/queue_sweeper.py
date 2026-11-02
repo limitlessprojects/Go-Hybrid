@@ -135,6 +135,33 @@ def recently_reopened(pr, cutoff):
     print(f"  skipping #{number}: reopen history exceeds {MAX_EVENT_PAGES} pages")
     return None
 
+def still_due_for_close(number, cutoff):
+    """Recheck mutable protection just before writing; unknown state survives.
+
+    Pagination and earlier closures can take time. A label or reopen added
+    after the initial list must not be ignored by the destructive loop.
+    This narrows the snapshot window; GitHub's PATCH is not conditional.
+    """
+    st, current = api(f"/repos/{REPO}/pulls/{number}")
+    if st != 200 or not isinstance(current, dict) or current.get("number") != number:
+        print(f"  skipping #{number}: current PR unavailable (status {st})")
+        return False
+    if current.get("state") != "open" or current.get("merged_at"):
+        print(f"  skipping #{number}: PR is no longer open and unmerged")
+        return False
+    labels = current.get("labels")
+    if not isinstance(labels, list) or any(
+        not isinstance(label, dict) or not isinstance(label.get("name"), str)
+        for label in labels
+    ):
+        print(f"  skipping #{number}: current labels are unverifiable")
+        return False
+    if {label["name"] for label in labels} & PROTECTED_LABELS:
+        print(f"  skipping #{number}: a protected label was added")
+        return False
+    return recently_reopened(current, cutoff) is False
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true")
@@ -186,6 +213,8 @@ def main():
     n = fails = 0
     t0 = time.time()
     for p in due:
+        if not still_due_for_close(p["number"], cutoff):
+            continue
         st, _ = api(f"/repos/{REPO}/pulls/{p['number']}", "PATCH",
                     {"state": "closed", "state_reason": "not_planned"})
         ok = st in (200, 422)
