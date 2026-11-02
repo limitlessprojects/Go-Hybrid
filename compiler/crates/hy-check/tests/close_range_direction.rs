@@ -18,11 +18,18 @@ fn check(src: &str) -> hy_check::CheckResult {
     check_file(&ast)
 }
 
-fn first_code(r: &hy_check::CheckResult) -> Option<String> {
+/// Every error code, in emission order.
+///
+/// The direction check never stands alone: the builtin operand check owns the
+/// same operand and reports first, so asserting the exact sequence pins both
+/// that the fix is present AND that the two diagnostics keep a stable order.
+/// An `any()` assertion would pass even if one of them disappeared.
+fn error_codes(r: &hy_check::CheckResult) -> Vec<String> {
     r.diagnostics
         .iter()
-        .find(|d| d.severity == hy_diag::Severity::Error)
+        .filter(|d| d.severity == hy_diag::Severity::Error)
         .map(|d| d.code.clone())
+        .collect()
 }
 
 #[test]
@@ -35,7 +42,7 @@ fn close_recv_only_rejects_e3009() {
          }",
     );
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
-    assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3009"));
+    assert_eq!(error_codes(&r), ["HYB-E2005", "HYB-E3009"], "{:?}", r.diagnostics);
     assert!(r.diagnostics[0].message.contains("receive-only"));
 }
 
@@ -65,7 +72,7 @@ fn defer_close_recv_only_rejects_e3009() {
          }",
     );
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
-    assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3009"));
+    assert_eq!(error_codes(&r), ["HYB-E2005", "HYB-E3009"], "{:?}", r.diagnostics);
 }
 
 #[test]
@@ -106,7 +113,7 @@ fn range_send_only_rejects_e3009() {
          }",
     );
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
-    assert_eq!(first_code(&r).as_deref(), Some("HYB-E3009"));
+    assert_eq!(error_codes(&r), ["HYB-E3009", "HYB-E2009"], "{:?}", r.diagnostics);
     assert!(r.diagnostics[0].message.contains("send-only"));
 }
 
@@ -157,7 +164,7 @@ fn close_inside_closure_and_struct_field_rejects_e3009() {
          }",
     );
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
-    assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3009"));
+    assert_eq!(error_codes(&r), ["HYB-E2005", "HYB-E3009"], "{:?}", r.diagnostics);
 }
 
 #[test]
@@ -175,7 +182,7 @@ fn range_over_fn_returning_send_only_rejects_e3009() {
          }",
     );
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
-    assert_eq!(first_code(&r).as_deref(), Some("HYB-E3009"));
+    assert_eq!(error_codes(&r), ["HYB-E3009", "HYB-E2009"], "{:?}", r.diagnostics);
 }
 
 #[test]
