@@ -331,6 +331,16 @@ impl<'a> Checker<'a> {
                 for v in values {
                     // LOAN-ESCAPE (O2, also HYB-E3104) already owns a
                     // returned `&m[k]`; recurse for nested borrows only.
+                    // #3228: a closure that escapes through `return` cannot
+                    // have its loan's copy-back run after the writes it
+                    // performs, because the caller runs it later. Rejecting
+                    // the escape is the only sound answer; the fix-it names
+                    // the two shapes that keep working.
+                    //
+                    // Order matters: this runs on the ORIGINAL operand, before
+                    // main's `as_addr_of` unwrapping, so the capture walk sees
+                    // the expression the user wrote.
+                    self.check_escaping_closure_captures_loan(st, v);
                     let e = as_addr_of(unwrap_parens(v))
                         .filter(|_| self.map_slot_borrow_span(st, v).is_some())
                         .unwrap_or(v);
@@ -899,5 +909,77 @@ fn main() {
             "got {:?}",
             loop_codes
         );
+    }
+}
+
+
+impl<'a> Checker<'a> {
+    /// #3228: reject a `return` of a function literal that captures a live
+    /// slot loan.
+    ///
+    /// The loan lowers to copy-out now and store-back when its window ends. A
+    /// closure that escapes through `return` runs after that store-back, so
+    /// every write it makes through the loan lands on a dead copy. No
+    /// emit-time placement fixes this: the write happens after the frame is
+    /// gone.
+    pub(crate) fn check_escaping_closure_captures_loan(&mut self, st: &FnState, value: &Expr) {
+        let Some(body) = closure_body_of(value) else {
+            return;
+        };
+        // Captures of this literal, with the literal's own params and named
+        // results treated as bound (they shadow an outer loan of the same
+        // name, the same rule expr-level capture tests use).
+        let mut bound: std::collections::HashSet<String> = match unwrap_parens(value) {
+            Expr::FnLit { params, results, .. } => {
+                let mut b: std::collections::HashSet<String> =
+                    params.iter().map(|p| p.name.clone()).collect();
+                b.extend(results.iter().filter_map(|r| r.name.clone()));
+                b
+            }
+            _ => std::collections::HashSet::new(),
+        };
+        let mut captured: Vec<String> = Vec::new();
+        crate::loans::collect_capture_idents_block(body, &mut bound, &mut captured);
+
+        let live: Vec<String> = st
+            .all_slot_loan_names()
+            .into_iter()
+            .filter(|n| !n.is_empty() && captured.iter().any(|c| c == n))
+            .collect();
+
+        for name in live {
+            if self
+                .diags
+                .iter()
+                .any(|x| x.severity == hy_diag::Severity::Error && x.span == value.span())
+            {
+                continue;
+            }
+            let msg = format!(
+                "the returned closure captures the live slot loan `{name}`, whose copy-back runs before the caller can run it"
+            );
+            let mut d = Diagnostic::error("HYB-E3104", self.path.clone(), value.span(), msg)
+                .with_notes(vec![
+                    format!(
+                        "`{name}` lowers to copy-out now and store-back when its window ends; a closure that escapes through `return` runs after that store-back, so every write it makes through `{name}` lands on a dead copy"
+                    ),
+                    "returning the loan itself is already rejected (O2); returning a closure that captures it reaches the same bug by another route".to_string(),
+                ]);
+            d.fixits = vec![FixIt {
+                description: format!(
+                    "return the index or key and write through the container in the caller, or pass the container to the closure instead of capturing `{name}`"
+                ),
+                replacement: None,
+            }];
+            self.diags.push(d);
+        }
+    }
+}
+
+/// Body of a function literal reached directly or behind parentheses.
+fn closure_body_of(e: &Expr) -> Option<&hy_syntax::Block> {
+    match unwrap_parens(e) {
+        Expr::FnLit { body, .. } => Some(body),
+        _ => None,
     }
 }
