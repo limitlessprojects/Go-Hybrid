@@ -501,6 +501,11 @@ struct Collector<'a> {
     kind_scopes: Vec<HashMap<String, OpKind>>,
     /// Parallel lexical scope stack tracking declared concrete type names (#2738).
     type_name_scopes: Vec<HashMap<String, String>>,
+    /// #3102 — the declared/inferred type text of a binding (`[]i8`,
+    /// `map[string]int8`, `chan u16`, or `func->int8` for a local bound to a
+    /// one-result fn literal), scoped like `scalar_scopes`: every rebinding
+    /// resets it to `None` so an outer text never leaks into a shadow.
+    vtext_scopes: Vec<HashMap<String, Option<String>>>,
     /// `set[T]` bindings -> their element type text (`"int"`), scoped like
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
@@ -571,6 +576,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
             type_name_scopes: Vec::new(),
+            vtext_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
@@ -639,6 +645,7 @@ impl<'a> Collector<'a> {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
         self.type_name_scopes.push(HashMap::new());
+        self.vtext_scopes.push(HashMap::new());
         self.scalar_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
@@ -648,6 +655,7 @@ impl<'a> Collector<'a> {
         self.scopes.pop();
         self.kind_scopes.pop();
         self.type_name_scopes.pop();
+        self.vtext_scopes.pop();
         self.scalar_scopes.pop();
         self.set_elem_scopes.pop();
         self.copy_var_scopes.pop();
@@ -714,6 +722,9 @@ impl<'a> Collector<'a> {
             // #1031: every binding shadows an outer exact numeric type until
             // `set_scalar` proves otherwise.
             if let Some(top) = self.scalar_scopes.last_mut() {
+                top.insert(name.to_string(), None);
+            }
+            if let Some(top) = self.vtext_scopes.last_mut() {
                 top.insert(name.to_string(), None);
             }
             // Every (re)binding shadows an outer set binding; callers that
@@ -847,6 +858,141 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #3102 — record the type text of a binding `bind_kind` just made.
+    fn set_vtext(&mut self, name: &str, text: Option<String>) {
+        if name != "_" {
+            if let Some(top) = self.vtext_scopes.last_mut() {
+                top.insert(name.to_string(), text);
+            }
+        }
+    }
+
+    /// #3102 — the type text of the innermost binding of `name`, if known.
+    fn lookup_vtext(&self, name: &str) -> Option<String> {
+        for layer in self.vtext_scopes.iter().rev() {
+            if let Some(t) = layer.get(name) {
+                return t.clone();
+            }
+        }
+        None
+    }
+
+    /// #3102 — the type text of a value whose type is spelled at its source:
+    /// a local with recorded text, a typed slice/array/map literal, `make(T,
+    /// …)`, a `chan T` type-as-value, or a one-result fn literal. Anything
+    /// else fails open.
+    fn value_type_text(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => self.lookup_vtext(name),
+            Expr::SliceLit { elem: Some(t), .. } => {
+                if let Some((_, _, arr)) = bare.as_array_lit() {
+                    Some(arr.render())
+                } else {
+                    Some(format!("[]{}", t.render()))
+                }
+            }
+            Expr::MapLit { key, value, .. } => {
+                Some(format!("map[{}]{}", key.render(), value.render()))
+            }
+            Expr::StructLit {
+                ty: Some(t),
+                fields,
+                ..
+            } if fields.is_empty() => {
+                let r = t.render();
+                if r.starts_with("chan ") || r.starts_with("<-chan ") {
+                    Some(r)
+                } else {
+                    None
+                }
+            }
+            Expr::Call { callee, args, .. } => match unwrap_parens(callee) {
+                Expr::Ident { name, .. }
+                    if name == "make"
+                        && !self.scopes.iter().any(|l| l.contains_key("make")) =>
+                {
+                    args.first().and_then(|a| self.value_type_text(&a.value))
+                }
+                _ => None,
+            },
+            Expr::FnLit { results, .. } if results.len() == 1 => {
+                Some(format!("func->{}", results[0].ty.render()))
+            }
+            _ => None,
+        }
+    }
+
+    /// #3102 — the exact predeclared numeric type a type text names. A
+    /// user-declared struct/enum/alias of that name fails open.
+    fn scalar_of_type_text(&self, t: &str) -> Option<&'static str> {
+        let t = t.trim();
+        if self.ck.structs.contains_key(t)
+            || self.ck.enums.contains_key(t)
+            || self.ck.type_aliases.contains_key(t)
+        {
+            return None;
+        }
+        canonical_numeric_name(t)
+    }
+
+    /// #3102 — the exact numeric types of `for … in expr` bindings over a
+    /// typed slice/array (`x` / `i, x`: element) or map (`k` / `k, v`). Index
+    /// bindings and anything without a known type text stay `None`.
+    fn iterate_var_scalars(&self, expr: &Expr, n: usize) -> Vec<Option<&'static str>> {
+        let mut out = vec![None; n];
+        let Some(text) = self.value_type_text(expr) else {
+            return out;
+        };
+        let text = text.trim();
+        if let Some(rest) = text.strip_prefix("map[") {
+            let mut depth = 1usize;
+            let mut close = None;
+            for (i, ch) in rest.char_indices() {
+                match ch {
+                    '[' => depth += 1,
+                    ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(c) = close {
+                let (k, v) = (&rest[..c], &rest[c + 1..]);
+                if n >= 1 {
+                    out[0] = self.scalar_of_type_text(k);
+                }
+                if n == 2 {
+                    out[1] = self.scalar_of_type_text(v);
+                }
+            }
+        } else if let Some(rest) = text.strip_prefix('[') {
+            if let Some(c) = rest.find(']') {
+                let elem = self.scalar_of_type_text(&rest[c + 1..]);
+                if n == 1 {
+                    out[0] = elem;
+                } else if n == 2 {
+                    out[1] = elem;
+                }
+            }
+        }
+        out
+    }
+
+    /// #3102 — the exact numeric element type of a receive `<-c` on a local
+    /// whose type text is `chan T` / `<-chan T`.
+    fn receive_scalar(&self, chan: &Expr) -> Option<&'static str> {
+        let text = self.value_type_text(chan)?;
+        let elem = text
+            .strip_prefix("<-chan ")
+            .or_else(|| text.strip_prefix("chan "))?;
+        self.scalar_of_type_text(elem)
+    }
+
     /// #1031 — the exact numeric type of a binding, if provably typed. A name
     /// that is not a binding (e.g. a file-level const, which may be untyped)
     /// stays `None`.
@@ -917,15 +1063,39 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-            return None;
+        let name = match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => name,
+            // #3102 — a method call on a non-generic struct receiver takes
+            // the method's declared result types.
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let sn = self.struct_base_name(&bk)?;
+                if self
+                    .ck
+                    .struct_type_params
+                    .get(sn.as_str())
+                    .is_some_and(|tp| !tp.is_empty())
+                {
+                    return None;
+                }
+                let m = self.ck.method_decls.get(&(sn, name.clone()))?;
+                if !m.type_params.is_empty() {
+                    return None;
+                }
+                return Some(m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+            }
+            _ => return None,
         };
         if self
             .scopes
             .iter()
             .any(|layer| layer.contains_key(name.as_str()))
         {
-            return None;
+            // #3102 — a local bound to a one-result fn literal returns that
+            // literal's declared result type.
+            let text = self.lookup_vtext(name)?;
+            let r = text.strip_prefix("func->")?;
+            return Some(vec![self.scalar_of_type_text(r)]);
         }
         if let Some(fd) = self.ck.fns.get(name.as_str()) {
             if fd.receiver.is_some() || !fd.type_params.is_empty() {
@@ -984,6 +1154,7 @@ impl<'a> Collector<'a> {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
             },
+            Expr::Receive { chan, .. } => self.receive_scalar(chan),
             _ => None,
         }
     }
@@ -1354,6 +1525,7 @@ impl<'a> Collector<'a> {
             self.set_scalar(&p.name, ps);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
             self.bind_type_name(&p.name, p.ty.render());
+            self.set_vtext(&p.name, Some(p.ty.render()));
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -1569,8 +1741,21 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        for (((name, kind), scalar), set_elem) in
-            l.names.iter().zip(kinds).zip(scalars).zip(set_elems)
+        // #3102 — the type text each fresh binding takes.
+        let vtexts: Vec<Option<String>> = (0..l.names.len())
+            .map(|i| match (&l.ty, l.values.len() == l.names.len()) {
+                (Some(t), _) => Some(t.render()),
+                (None, true) => self.value_type_text(&l.values[i]),
+                _ => None,
+            })
+            .collect();
+        for ((((name, kind), scalar), set_elem), vtext) in l
+            .names
+            .iter()
+            .zip(kinds)
+            .zip(scalars)
+            .zip(set_elems)
+            .zip(vtexts)
         {
             // #1031: a same-scope `:=` re-define keeps the EXISTING variable
             // (and its type) in Go, so only a fresh binding takes the
@@ -1582,6 +1767,7 @@ impl<'a> Collector<'a> {
             self.bind_kind(name, kind);
             if fresh || l.ty.is_some() {
                 self.set_scalar(name, scalar);
+                self.set_vtext(name, vtext);
             }
             self.bind_set_elem(name, set_elem);
             if !track_read {
@@ -1766,10 +1952,13 @@ impl<'a> Collector<'a> {
                         // checks then catch `var b byte = c` and `n + c`.
                         let str_elem = matches!(self.kind_of_expr(expr), OpKind::Str)
                             .then(|| vars.len().saturating_sub(1));
+                        let iter_scalars = self.iterate_var_scalars(expr, vars.len());
                         // Unread iterate bindings are lowered to `_` at
                         // emission (issue #139); write-only ones still
                         // reject as unused (PR #536).
-                        for (vi, (v, k)) in vars.iter().zip(iter_kinds).enumerate() {
+                        for (vi, ((v, k), sc)) in
+                            vars.iter().zip(iter_kinds).zip(iter_scalars).enumerate()
+                        {
                             self.define_elidable(v, *span);
                             // #1480: a struct/array element binding is a
                             // per-iteration copy at emission (`for _, x :=
@@ -1787,6 +1976,8 @@ impl<'a> Collector<'a> {
                             self.bind_kind(v, k);
                             if str_elem == Some(vi) {
                                 self.set_scalar(v, Some("int32"));
+                            } else {
+                                self.set_scalar(v, sc);
                             }
                         }
                     }
@@ -2355,6 +2546,7 @@ impl<'a> Collector<'a> {
                     self.set_scalar(&p.name, ps);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
                     self.bind_type_name(&p.name, p.ty.render());
+                    self.set_vtext(&p.name, Some(p.ty.render()));
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
