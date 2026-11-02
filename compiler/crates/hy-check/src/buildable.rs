@@ -6348,7 +6348,21 @@ impl<'a> Collector<'a> {
         // spread argument is legal.
         if matches!(
             name,
-            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
+            "len"
+                | "cap"
+                | "close"
+                | "delete"
+                | "min"
+                | "max"
+                | "clear"
+                | "copy"
+                | "panic"
+                | "print"
+                | "println"
+                | "real"
+                | "imag"
+                | "complex"
+                | "new"
         ) && args.iter().any(|a| a.spread)
         {
             self.emit_e1002(
