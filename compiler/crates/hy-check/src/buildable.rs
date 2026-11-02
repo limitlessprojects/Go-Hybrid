@@ -1832,6 +1832,9 @@ impl<'a> Collector<'a> {
                         self.check_method_arity(&bk, name, args, *span);
                         self.check_method_arg_types(&bk, name, args);
                     }
+                    Expr::FnLit { params, .. } => {
+                        self.check_fn_lit_call(params, args, callee, *span);
+                    }
                     _ => {}
                 }
             }
@@ -4056,6 +4059,39 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_fn_lit_call(&mut self, params: &[Param], args: &[CallArg], callee: &Expr, span: Span) {
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        let want = params.len();
+        let got = args.len();
+        if want != got {
+            self.report_local_arity(&callee.render(), want, got, span);
+            return;
+        }
+        for (p, a) in params.iter().zip(args.iter()) {
+            let want = self.kind_of_ty(&p.ty, 0);
+            let got = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = &want {
+                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            if kinds_conflict(&want, &got) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to func literal (HYB-E1002)",
+                        a.value.render(),
+                        got.label(),
+                        want.label()
+                    ),
+                    "argument types must match closure parameter types",
+                );
+            }
+        }
+    }
+
     /// #577 C10 — a `return` must supply the enclosing function's result
     /// list: the same number of values, each assignable to its result type.
     /// Go refuses the emitted statement otherwise (Row 13).
@@ -6187,6 +6223,9 @@ impl<'a> Collector<'a> {
                     self.check_method_arg_types(&bk, name, args);
                 }
             }
+            Expr::FnLit { params, .. } => {
+                self.check_fn_lit_call(params, args, callee, span);
+            }
             _ => {
                 let ck = self.kind_of_expr(bare);
                 if !matches!(ck, OpKind::Unknown | OpKind::Fn(..)) {
@@ -6304,6 +6343,31 @@ impl<'a> Collector<'a> {
                                 "call it through the collection index instead: `for i in 0..len(xs) { xs[i].method() }`, or iterate a slice of pointers and call through the pointer",
                             );
                         }
+                    }
+                }
+            }
+        } else if let Expr::Ident { name: tn, .. } = unwrap_parens(base) {
+            // #3142: Go §Method expressions: the method set of a defined type T
+            // contains only methods declared with value receiver T. A method
+            // declared with receiver `*T` requires a pointer receiver (`(*T).m`);
+            // referencing or calling it as `T.m` is rejected by Go (`invalid method
+            // expression T.m (needs pointer receiver (*T).m)`).
+            if self.lookup_kind(tn).is_none() && !self.scopes.iter().any(|s| s.contains_key(tn)) {
+                let base_sn = Checker::base_named_type_str(tn);
+                if let Some(m) = self
+                    .ck
+                    .method_decls
+                    .get(&(base_sn.to_string(), head.to_string()))
+                {
+                    if m.receiver.as_ref().is_some_and(|r| r.is_pointer) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid method expression `{}.{}` — `{}` has a pointer receiver `*{}`; Go refuses `invalid method expression {}.{} (needs pointer receiver (*{}).{})` (HYB-E1002)",
+                                tn, name, name, tn, tn, name, tn, name
+                            ),
+                            "a method with a pointer receiver cannot be called or bound as a value-type method expression: call it on an addressable value or pointer",
+                        );
                     }
                 }
             }
