@@ -804,6 +804,21 @@ impl Emitter {
         e
     }
 
+    fn assoc_index_type_arg(e: &Expr) -> Option<String> {
+        match Self::unwrap_parens(e) {
+            Expr::Ident { name, .. } => Some(name.clone()),
+            Expr::Field { base, name, .. } => {
+                Self::assoc_index_type_arg(base).map(|b| format!("{b}.{name}"))
+            }
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                ..
+            } if items.is_empty() => Some(format!("[]{}", t.render())),
+            _ => None,
+        }
+    }
+
     /// A selector's base never needs parentheses when its inner expression is
     /// itself a primary expression: `(hits).add(1)` and `(mux).handle(...)`
     /// are the same accesses as `hits.add(1)` / `mux.Handle(...)`. For
@@ -838,9 +853,10 @@ impl Emitter {
 
     pub(crate) fn emit_call(
         &mut self,
-        callee: &Expr,
+        raw_callee: &Expr,
         args: &[CallArg],
     ) -> Result<String, EmitError> {
+        let callee = Self::unwrap_parens(raw_callee);
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
         if matches!(callee, Expr::Ident { name, .. } if name == "make") {
             return self.emit_make(args);
@@ -923,13 +939,32 @@ impl Emitter {
 
         // --- associated-fn calls: `lru_cache.new[string, int](2)` →
         //     `lru_cache_new[string, int](2)` (Go has no dotted idents) ---
-        if let Expr::Field { base, name, .. } = callee {
-            if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base.as_ref()) {
+        let assoc_field_and_ta: Option<(&Expr, &str, Option<String>)> = match callee {
+            Expr::Field { base, name, .. } => {
+                let (head, ta) = split_type_args(name);
+                Some((base.as_ref(), head, ta.map(str::to_string)))
+            }
+            Expr::Index {
+                base: idx_base,
+                index,
+                ..
+            } => {
+                if let Expr::Field { base, name, .. } = Self::unwrap_parens(idx_base.as_ref()) {
+                    Self::assoc_index_type_arg(index)
+                        .map(|ta| (base.as_ref(), name.as_str(), Some(format!("[{ta}]"))))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((base, head, type_args)) = assoc_field_and_ta {
+            if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base) {
                 if !self.is_unshadowed_pkg_root(root) && !self.bindings.contains_key(root) {
-                    let (head, type_args) = split_type_args(name);
                     let full = format!("{}.{}", root, head);
                     if self.assoc_fns.contains(&full) {
                         let translated_ta = type_args
+                            .as_deref()
                             .map(|ta| self.translate_type_args_suffix(ta))
                             .unwrap_or_default();
                         let mut parts = Vec::new();
@@ -1033,7 +1068,7 @@ impl Emitter {
                 ptr_params = params.iter().map(|p| p.is_some()).collect();
             }
         }
-        let c = self.emit_expr(callee, ATOM)?;
+        let c = self.emit_expr(raw_callee, ATOM)?;
         let mut parts = Vec::new();
         for (i, a) in args.iter().enumerate() {
             let t = self.emit_call_arg(a)?;

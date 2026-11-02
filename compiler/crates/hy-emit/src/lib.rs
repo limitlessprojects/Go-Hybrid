@@ -306,6 +306,9 @@ pub enum BindingKind {
     Chan,
     /// Bound to a set (`set[T]`) — `len(s)` / `delete(s, v)` / `for v in s`.
     Set,
+    /// Bound to a map (`map[K]V` param/local/result or `make(map…)`) —
+    /// single-var `for k in m` ranges the KEY (SPEC LX13, #2945).
+    Map,
     /// Our own struct / plain value — members emit verbatim.
     Plain,
 }
@@ -1732,6 +1735,9 @@ impl Emitter {
     fn binding_kind_of_ty(&self, t: &TypeExpr) -> Option<BindingKind> {
         if matches!(t, TypeExpr::Chan { .. }) {
             return Some(BindingKind::Chan);
+        }
+        if matches!(t, TypeExpr::Map { .. }) {
+            return Some(BindingKind::Map);
         }
         let name = match t {
             TypeExpr::Named { name, .. } => name.as_str(),

@@ -909,6 +909,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 break;
             }
             let (for_idx, loop_end, outer_depth, lbody, pre_moved) = active_loops.pop().unwrap();
+            ck.replay_const_backedge(&st, outer_depth, lbody);
             ck.check_loop_backedge(
                 &st,
                 outer_depth,
