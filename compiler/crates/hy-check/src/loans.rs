@@ -2568,7 +2568,12 @@ impl<'a> Checker<'a> {
                 bound.extend(results.iter().filter_map(|r| r.name.clone()));
                 let mut idents = Vec::new();
                 collect_capture_idents_block(body, &mut bound, &mut idents);
+                let mut captured_move = None;
                 for id in idents {
+                    if captured_move.is_none() {
+                        captured_move =
+                            self.lookup_binding(st, &id).and_then(|b| b.moved.clone());
+                    }
                     if self.binding_may_share(st, &id)
                         || self
                             .lookup_binding(st, &id)
@@ -2576,6 +2581,13 @@ impl<'a> Checker<'a> {
                             .unwrap_or(false)
                     {
                         st.share_edge(name, &id);
+                    }
+                }
+                if let Some(mv) = captured_move {
+                    if let Some(nb) = st.env_lookup_mut(name) {
+                        if nb.moved.is_none() {
+                            nb.moved = Some(mv);
+                        }
                     }
                 }
             }
@@ -3222,7 +3234,14 @@ impl<'a> Checker<'a> {
                     decl.params.iter().map(|p| p.name.clone()).collect();
                 bound.extend(decl.results.iter().filter_map(|r| r.name.clone()));
                 for (i, p) in decl.params.iter().enumerate() {
-                    if let Some(arg) = cr.args.get(i) {
+                    let arg_opt = cr.args.get(i).or_else(|| {
+                        if cr.args.len() == 1 && decl.params.len() > 1 {
+                            cr.args.first()
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(arg) = arg_opt {
                         slots.push((
                             p.name.clone(),
                             self.shape_of_type(&p.ty),
@@ -6849,8 +6868,32 @@ impl<'a> Checker<'a> {
                             None
                         };
                     }
+                    let closure_peers: Vec<String> = if !st.closure_defs.contains_key(name)
+                        && !st.closure_fnlits.contains_key(name)
+                        && !matches!(shape, TypeShape::Closure)
+                    {
+                        st.may_share
+                            .get(name)
+                            .into_iter()
+                            .flatten()
+                            .filter(|c| {
+                                st.closure_defs.contains_key(*c)
+                                    || st.closure_fnlits.contains_key(*c)
+                                    || matches!(
+                                        self.lookup_binding(st, c).map(|b| &b.shape),
+                                        Some(TypeShape::Closure)
+                                    )
+                            })
+                            .cloned()
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     st.aliases.remove(name);
                     st.share_clear(name);
+                    for cp in closure_peers {
+                        st.share_edge(name, &cp);
+                    }
                     if reads_self {
                         if !prior_shadows.is_empty() {
                             st.shadow_links
@@ -6903,6 +6946,9 @@ impl<'a> Checker<'a> {
                     if may_share {
                         self.record_move_const_and_a3_loans(st, name, &values[0], idx);
                     }
+                    st.closure_mutates.remove(name);
+                    st.closure_defs.remove(name);
+                    st.closure_fnlits.remove(name);
                 } else {
                     let root = t.root();
                     if !root.is_empty() && self.binding_may_share(st, root) {
@@ -7099,10 +7145,18 @@ impl<'a> Checker<'a> {
         self.scan_block_const_writes(st, body, false);
     }
 
-    fn scan_block_const_writes(&mut self, st: &FnState, body: &Block, check_writes: bool) {
+    /// Returns the end-of-block state so a loop back-edge replay
+    /// (`replay_const_backedge`, #2309) can feed it to the next iteration.
+    fn scan_block_const_writes(
+        &mut self,
+        st: &FnState,
+        body: &Block,
+        check_writes: bool,
+    ) -> FnState {
         let mut cst = st.clone();
         let flat = walk::flatten_with_results(body, &cst.named_results);
         cst.last_use = flat.last_use.clone();
+        let mut active_loops: Vec<(usize, usize, &Block)> = Vec::new();
         for (stmt, idx) in &flat.stmts {
             let idx = *idx;
             if let Some(evs) = flat.events.get(&idx) {
@@ -7420,7 +7474,82 @@ impl<'a> Checker<'a> {
                 }
                 self.scan_closure_body(&mut merged, flit, &HashSet::new());
             }
+            if let Stmt::For { body: lbody, .. } = stmt {
+                let outer_depth = cst.scopes.len().saturating_sub(1);
+                active_loops.push((flat.loop_end_of(idx), outer_depth, lbody));
+            }
+            while let Some(&(loop_end, outer_depth, lbody)) = active_loops.last() {
+                if loop_end != idx {
+                    break;
+                }
+                active_loops.pop();
+                if check_writes {
+                    self.replay_const_backedge(&cst, outer_depth, lbody);
+                }
+            }
         }
+        cst
+    }
+
+    /// T22 across loop iterations (#2309): a const alias created late in a
+    /// loop body (`t["a"] = i; t = tags`) is live at the top of the next
+    /// iteration, so the write before it lands in the const. The forward
+    /// walk sees each statement once, with the pre-loop state. Replay the
+    /// body along the back-edge, starting from the end-of-iteration state,
+    /// until the set of outer bindings that resolve to a `const` stops
+    /// growing. Writes are judged by the same rule as straight-line code;
+    /// diagnostics already reported at the same span are not repeated.
+    pub(crate) fn replay_const_backedge(&mut self, st: &FnState, outer_depth: usize, body: &Block) {
+        let mut cur = st.clone();
+        while cur.scopes.len() > outer_depth {
+            cur.scope_pop();
+        }
+        let mut carried = self.outer_const_aliases(&cur, body.span);
+        if carried.is_empty() {
+            return;
+        }
+        // Each pass either adds a (binding, const) pair or stops, so this
+        // runs at most (bindings x consts) + 1 times.
+        loop {
+            let n0 = self.diags.len();
+            let mut out = self.scan_block_const_writes(&cur, body, true);
+            let fresh: Vec<Diagnostic> = self.diags.drain(n0..).collect();
+            for d in fresh {
+                let same = |e: &Diagnostic| e.code == d.code && e.span == d.span;
+                if !self.diags.iter().any(same) {
+                    self.diags.push(d);
+                }
+            }
+            while out.scopes.len() > outer_depth {
+                out.scope_pop();
+            }
+            let next = self.outer_const_aliases(&out, body.span);
+            if next.is_subset(&carried) {
+                break;
+            }
+            carried.extend(next);
+            for (name, root) in &carried {
+                out.share_edge(name, root);
+            }
+            cur = out;
+        }
+    }
+
+    /// Outer-visible, non-`const` bindings whose writes resolve to a `const`
+    /// root (`const_write_root`), paired with that root.
+    fn outer_const_aliases(&self, st: &FnState, span: Span) -> HashSet<(String, String)> {
+        st.env
+            .keys()
+            .chain(st.scopes.iter().flat_map(|s| s.keys()))
+            .filter(|n| !self.lookup_binding(st, n).is_some_and(|b| b.immutable))
+            .filter_map(|n| {
+                let p = Place {
+                    kind: PlaceKind::Ident(n.clone()),
+                    span,
+                };
+                self.const_write_root(st, &p).map(|root| (n.clone(), root))
+            })
+            .collect()
     }
 
     /// Scan one closure's body with its own lexical scope and parameters,
@@ -7578,6 +7707,23 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn expr_or_multi_call_may_share(&self, st: &FnState, expr: &Expr) -> bool {
+        let inner = crate::model::unwrap_parens(expr);
+        let sh = self.shape_of_expr(st, inner);
+        if self.shape_may_share(&sh) || matches!(sh, TypeShape::Unknown) {
+            return true;
+        }
+        if let Expr::Call { callee, .. } = inner {
+            if let Some(results) = self.call_result_tys(st, callee) {
+                return results.iter().any(|ty| {
+                    let s = self.shape_of_type(ty);
+                    self.shape_may_share(&s) || matches!(s, TypeShape::Unknown)
+                });
+            }
+        }
+        false
+    }
+
     /// Resolve a call argument expression to a `const` root when the argument
     /// passes mutable reference storage (map, slice, pointer, `&const_val`, or
     /// a struct/array carrying reference fields) backed by that `const` (#188).
@@ -7610,8 +7756,7 @@ impl<'a> Checker<'a> {
             }
             return None;
         }
-        let arg_shape = self.shape_of_expr(st, inner);
-        if !(self.shape_may_share(&arg_shape) || matches!(arg_shape, TypeShape::Unknown)) {
+        if !self.expr_or_multi_call_may_share(st, inner) {
             return None;
         }
         let mut roots = Vec::new();
@@ -7694,17 +7839,26 @@ impl<'a> Checker<'a> {
                         let ptr_recv =
                             r.is_pointer || matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. });
                         let recv_const = if ptr_recv {
-                            base.root_ident()
-                                .filter(|root| !declared.contains(*root))
-                                .and_then(|root| {
-                                    self.const_write_root(
-                                        st,
-                                        &Place {
-                                            kind: PlaceKind::Ident(root.to_string()),
+                            self.const_arg_root(st, base, declared).or_else(|| {
+                                let base_inner = crate::model::unwrap_parens(base);
+                                let mut roots: Vec<String> = Vec::new();
+                                if let Some(root) = base_inner.root_ident() {
+                                    roots.push(root.to_string());
+                                } else {
+                                    collect_ref_roots(base_inner, &mut roots);
+                                    self.collect_callee_const_return_roots(st, base_inner, &mut roots, 0);
+                                }
+                                roots
+                                    .into_iter()
+                                    .filter(|root| !declared.contains(root.as_str()))
+                                    .find_map(|root| {
+                                        let place = Place {
+                                            kind: PlaceKind::Ident(root),
                                             span: base.span(),
-                                        },
-                                    )
-                                })
+                                        };
+                                        self.const_write_root(st, &place)
+                                    })
+                            })
                         } else {
                             self.const_arg_root(st, base, declared)
                         };
@@ -7717,10 +7871,14 @@ impl<'a> Checker<'a> {
                 }
             } else if method_name == "pop"
                 && cr.args.is_empty()
-                && matches!(
+                && (matches!(
                     self.shape_of_expr(st, base),
                     TypeShape::Slice(_) | TypeShape::Unknown
-                )
+                ) || matches!(
+                    self.shape_of_expr(st, base),
+                    TypeShape::Pointer(ref inner)
+                        if matches!(**inner, TypeShape::Slice(_) | TypeShape::Unknown)
+                ))
             {
                 let recv_const = base
                     .root_ident()
@@ -7734,7 +7892,23 @@ impl<'a> Checker<'a> {
                             },
                         )
                     })
-                    .or_else(|| self.const_arg_root(st, base, declared));
+                    .or_else(|| self.const_arg_root(st, base, declared))
+                    .or_else(|| {
+                        let base_inner = crate::model::unwrap_parens(base);
+                        let mut roots: Vec<String> = Vec::new();
+                        collect_ref_roots(base_inner, &mut roots);
+                        self.collect_callee_const_return_roots(st, base_inner, &mut roots, 0);
+                        roots
+                            .into_iter()
+                            .filter(|root| !declared.contains(root.as_str()))
+                            .find_map(|root| {
+                                let place = Place {
+                                    kind: PlaceKind::Ident(root),
+                                    span: base.span(),
+                                };
+                                self.const_write_root(st, &place)
+                            })
+                    });
                 if let Some(const_name) = recv_const {
                     hits.push((const_name, base.span()));
                 }
@@ -7749,34 +7923,51 @@ impl<'a> Checker<'a> {
             let already_ptr = matches!(self.shape_of_expr(st, &a.value), TypeShape::Pointer(_))
                 || as_addr_of(inner).is_some();
 
+            let indirect_callee_effect = |callee_expr: &Expr| -> (bool, bool) {
+                if let Some(hy_syntax::TypeExpr::Fn { params, .. }) =
+                    self.ty_of_expr(st, callee_expr).map(|t| self.resolve_type_alias(&t))
+                {
+                    let is_ptr = params.get(i).is_some_and(|p| {
+                        matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                            || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
+                    });
+                    (is_ptr, true)
+                } else if matches!(self.shape_of_expr(st, callee_expr), TypeShape::Closure) {
+                    (false, true)
+                } else {
+                    (false, false)
+                }
+            };
+
             let (param_is_ptr, mutates) = match callee {
                 Expr::Ident { name, .. } => {
                     if declared.contains(name) {
                         (false, true)
                     } else if let Some(decl) = self.fns.get(name) {
-                        match decl.params.get(i) {
-                            Some(p) => {
-                                let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
-                                    || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
-                                (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
-                            }
-                            None => (false, true),
-                        }
-                    } else if let Some(b) = self.lookup_binding(st, name) {
-                        if let Some(hy_syntax::TypeExpr::Fn { params, .. }) = &b.ty {
-                            match params.get(i) {
+                        if cr.args.len() == 1 && decl.params.len() > 1 {
+                            let is_ptr = decl.params.iter().any(|p| {
+                                matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                    || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
+                            });
+                            let mutates = decl.params.iter().any(|p| {
+                                let ps = self.shape_of_type(&p.ty);
+                                (self.shape_may_share(&ps)
+                                    || matches!(ps, TypeShape::Unknown | TypeShape::Pointer(_)))
+                                    && self.fn_mutates_const_param(decl, &p.name, 0)
+                            });
+                            (is_ptr, mutates)
+                        } else {
+                            match decl.params.get(i) {
                                 Some(p) => {
                                     let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
                                         || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
-                                    (is_ptr, true)
+                                    (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
                                 }
                                 None => (false, true),
                             }
-                        } else if matches!(b.shape, TypeShape::Closure) {
-                            (false, true)
-                        } else {
-                            (false, false)
                         }
+                    } else if self.lookup_binding(st, name).is_some() {
+                        indirect_callee_effect(callee)
                     } else {
                         (false, false)
                     }
@@ -7800,8 +7991,6 @@ impl<'a> Checker<'a> {
                             _ => false,
                         };
                         (false, mutates)
-                    } else if matches!(self.shape_of_expr(st, callee), TypeShape::Closure) {
-                        (false, true)
                     } else {
                         let recv_base = match self.shape_of_expr(st, base) {
                             TypeShape::Struct(Some(s)) => Some(s),
@@ -7811,8 +8000,8 @@ impl<'a> Checker<'a> {
                             },
                             _ => None,
                         };
-                        if let Some(decl) = recv_base.and_then(|rb| {
-                            let rbase = Self::base_named_type_str(&rb).to_string();
+                        if let Some(decl) = recv_base.as_ref().and_then(|rb| {
+                            let rbase = Self::base_named_type_str(rb).to_string();
                             self.method_decls.get(&(rbase, method_name.clone())).copied()
                         }) {
                             match decl.params.get(i) {
@@ -7823,6 +8012,23 @@ impl<'a> Checker<'a> {
                                 }
                                 None => (false, true),
                             }
+                        } else if let Some(field_fn_ptr) = recv_base.as_ref().and_then(|rb| {
+                            self.structs.get(rb).and_then(|fields| {
+                                fields.iter().find(|(fname, _)| fname == method_name).and_then(|(_, fty)| {
+                                    if let hy_syntax::TypeExpr::Fn { params, .. } = fty {
+                                        params.get(i).map(|p| {
+                                            matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                                || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                })
+                            })
+                        }) {
+                            (field_fn_ptr, true)
+                        } else if matches!(self.shape_of_expr(st, callee), TypeShape::Closure) {
+                            indirect_callee_effect(callee)
                         } else {
                             (false, false)
                         }
@@ -7838,20 +8044,32 @@ impl<'a> Checker<'a> {
                     }
                     None => (false, true),
                 },
-                _ => (false, false),
+                Expr::Index { .. } | Expr::Call { .. } | Expr::Unary { .. } => {
+                    let (is_ptr, _) = indirect_callee_effect(callee);
+                    (is_ptr, true)
+                }
+                _ => indirect_callee_effect(callee),
             };
 
             let const_name = self.const_arg_root(st, &a.value, declared).or_else(|| {
                 if param_is_ptr && is_addressable && !already_ptr {
-                    let root = inner.root_ident()?;
-                    if declared.contains(root) {
-                        return None;
+                    let mut roots: Vec<String> = Vec::new();
+                    if let Some(root) = inner.root_ident() {
+                        roots.push(root.to_string());
+                    } else {
+                        collect_ref_roots(inner, &mut roots);
+                        self.collect_callee_const_return_roots(st, inner, &mut roots, 0);
                     }
-                    let place = Place {
-                        kind: PlaceKind::Ident(root.to_string()),
-                        span: a.value.span(),
-                    };
-                    self.const_write_root(st, &place)
+                    roots
+                        .into_iter()
+                        .filter(|root| !declared.contains(root.as_str()))
+                        .find_map(|root| {
+                            let place = Place {
+                                kind: PlaceKind::Ident(root),
+                                span: a.value.span(),
+                            };
+                            self.const_write_root(st, &place)
+                        })
                 } else {
                     None
                 }
@@ -8070,27 +8288,38 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::For { kind, body, .. } => {
-                let mut body_aliases = aliases.clone();
-                match kind {
-                    hy_syntax::ForKind::Iterate { vars, expr } => {
-                        let reaches = Self::expr_reaches_const_aliases(expr, &body_aliases);
-                        for v in vars {
-                            if reaches {
-                                body_aliases.insert(v.clone());
-                            } else {
-                                body_aliases.remove(v);
+                // #2309: an alias made late in the body is live at the top of
+                // the next iteration. Re-walk the body with the union of the
+                // entry and end-of-body alias sets until it stops growing
+                // (the set only grows and is bounded by the body's names).
+                let mut entry = aliases.clone();
+                loop {
+                    let mut body_aliases = entry.clone();
+                    match kind {
+                        hy_syntax::ForKind::Iterate { vars, expr } => {
+                            let reaches = Self::expr_reaches_const_aliases(expr, &body_aliases);
+                            for v in vars {
+                                if reaches {
+                                    body_aliases.insert(v.clone());
+                                } else {
+                                    body_aliases.remove(v);
+                                }
                             }
                         }
+                        hy_syntax::ForKind::Range { var, .. } => {
+                            body_aliases.remove(var);
+                        }
+                        _ => {}
                     }
-                    hy_syntax::ForKind::Range { var, .. } => {
-                        body_aliases.remove(var);
+                    if self.block_mutates_const_param(body, &mut body_aliases, depth) {
+                        return true;
                     }
-                    _ => {}
+                    if body_aliases.is_subset(&entry) {
+                        break;
+                    }
+                    entry.extend(body_aliases);
                 }
-                if self.block_mutates_const_param(body, &mut body_aliases, depth) {
-                    return true;
-                }
-                aliases.extend(body_aliases);
+                aliases.extend(entry);
             }
             Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
                 let mut body_aliases = aliases.clone();
