@@ -105,3 +105,41 @@ fn valid_byte_and_rune_slice_conversions_accept() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Accept, "expected accept, got diagnostics: {:?}", r.diagnostics);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1827: array type conversion element compatibility
+// ---------------------------------------------------------------------------
+
+#[test]
+fn array_conversion_from_incompatible_slice_element_rejects_e1002() {
+    let src = "fn main() {\n    var str_slice []string\n    _ = [4]int(str_slice)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("cannot convert `str_slice` (type `[]string`) to `[4]int`")));
+}
+
+#[test]
+fn array_conversion_from_incompatible_array_element_rejects_e1002() {
+    let src = "fn main() {\n    var str_arr [4]string\n    _ = [4]int(str_arr)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("cannot convert `str_arr` (type `[N]string`) to `[4]int`")));
+}
+
+#[test]
+fn array_conversion_from_non_slice_or_array_rejects_e1002() {
+    let src = "fn main() {\n    x := 42\n    _ = [4]int(x)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("cannot convert `x` (type `int`) to `[4]int`")));
+}
+
+#[test]
+fn array_conversion_from_matching_slice_accepts() {
+    let src = "fn main() {\n    var int_slice []int\n    _ = [4]int(int_slice)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Accept, "expected accept, got diagnostics: {:?}", r.diagnostics);
+}
