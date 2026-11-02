@@ -525,7 +525,7 @@ impl<'a> Checker<'a> {
     /// the loan was never taken from — the emitted Go then either indexes
     /// past the end of the new value
     ///
-    /// ```
+    /// ```text
     /// s := xs[0]        // copy-out
     /// xs = xs[:0]       // re-binding: the loan's index no longer exists
     /// s.replicas = 5
