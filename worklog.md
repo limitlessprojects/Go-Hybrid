@@ -1359,3 +1359,12 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 317 -> 318. Final main eedf1512, tree clean.
 - NEXT TICK QUEUE: #3204 (emit closure slot-loan lifetime) -> #3196 (fn lit scalar widths) -> #2982 (any as concrete) -> #3182 (some() arity) -> #3176 (option payload width) -> #3184 (string byte naming) -> #2948 -> #2977 -> #1811 (7.6d) -> #2863 -> #3207 -> #2517 -> tail. #3185 re-verify if author re-points or sweeps.
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978 (any rejection — #3178 landed for #3029, different issue; any-rejection is #2962).
+
+## Session 60 — 2026-11-02 22:10 tick (1 landed: #3185 round-2)
+
+- Recycle + restore. Cold build 1 slice. scan skipped this tick (3 consecutive RemoteDisconnected crashes — systemic; next tick: try once with shorter cap or skip outright). approve not run (queue empty per head-commit checks).
+- LANDED:
+  464a2022 Merge PR #3185 round-2 (aswadi, fixes #3089) — author re-pointed r1 E3008 -> E2008 per session-59 evidence, rebased onto 6de2bc7f. arith.rs type-walk (Array len/elem, Map k/v, Fn sigs, aliases, enum payloads, local types, composite lits) + recv.rs mirror walk. ALL-GREEN battery vs 6de2bc7f (318 suites). 319 suites.
+- Suite trajectory: 318 -> 319. Final main 464a2022, tree clean.
+- NEXT TICK QUEUE: #3204 (emit closure slot-loan lifetime) -> #3196 (fn lit scalar widths) -> #2982 (any as concrete) -> #3182 (some() arity) -> #3176 (option payload width) -> #3184 (string byte naming) -> #2948 -> #2977 -> #1811 (7.7d) -> #2863 -> #3207 -> #2517 -> tail.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978.
