@@ -233,6 +233,34 @@ fn is_sized_array_spelling(s: &str) -> bool {
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
+/// #3164: extract value type spelling from a `map[K]V` type expression string.
+fn extract_map_val_from_type_str(s: &str) -> Option<String> {
+    let s = s.trim();
+    let rest = s.strip_prefix("map[")?;
+    let mut depth = 1;
+    let mut end_idx = None;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    end_idx = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end_idx?;
+    let val_part = rest[end + 1..].trim();
+    if val_part.is_empty() {
+        None
+    } else {
+        Some(val_part.to_string())
+    }
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -1542,6 +1570,54 @@ impl<'a> Collector<'a> {
                         );
                     }
                 }
+            } else if l.values.len() == 1 && l.names.len() > 1 {
+                let got_kinds = self.multi_value_kinds(&l.values[0]);
+                let got_scalars = self.multi_value_scalars(&l.values[0]);
+                let got_type_names = self.multi_value_type_names(&l.values[0]);
+                if got_kinds.len() == l.names.len() {
+                    for (i, (name, vk)) in l.names.iter().zip(got_kinds.iter()).enumerate() {
+                        let int_float_conflict = (want == OpKind::Float && *vk == OpKind::Int)
+                            || (want == OpKind::Int && *vk == OpKind::Float);
+                        let scalar_mismatch = if i < got_scalars.len() {
+                            matches!(
+                                (self.scalar_of_ty(t), got_scalars[i]),
+                                (Some(w), Some(v)) if w != v
+                            )
+                        } else {
+                            false
+                        };
+                        let array_mismatch = if i < got_type_names.len() {
+                            self.sized_array_names_differ(
+                                Some(t.render().as_str()),
+                                got_type_names[i].as_deref(),
+                            )
+                        } else {
+                            false
+                        };
+                        if kinds_conflict(&want, vk)
+                            || int_float_conflict
+                            || scalar_mismatch
+                            || array_mismatch
+                        {
+                            let (src_label, dst_label) = if scalar_mismatch {
+                                (got_scalars[i].unwrap().to_string(), self.scalar_of_ty(t).unwrap().to_string())
+                            } else {
+                                (vk.label(), want.label())
+                            };
+                            self.emit_e1002(
+                                l.span,
+                                format!(
+                                    "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
+                                    name,
+                                    dst_label,
+                                    src_label,
+                                    dst_label
+                                ),
+                                "the declared type is fixed; write an explicit conversion when a conversion is intended",
+                            );
+                        }
+                    }
+                }
             }
         }
         // Composed resolution (pr-430 x landed pr-475): #475's track_read
@@ -1658,6 +1734,85 @@ impl<'a> Collector<'a> {
                 vec![OpKind::Unknown, OpKind::Unknown]
             }
             _ => vec![OpKind::Unknown, OpKind::Unknown],
+        }
+    }
+
+    /// #3164: exact numeric types of multi-value expressions.
+    fn multi_value_scalars(&self, e: &Expr) -> Vec<Option<&'static str>> {
+        match unwrap_parens(e) {
+            Expr::Move { operand, .. } => self.multi_value_scalars(operand),
+            Expr::Index { base, .. } => {
+                let bk = self.kind_of_expr(base);
+                if !matches!(bk, OpKind::Map(_, _)) {
+                    return Vec::new();
+                }
+                let bare_base = unwrap_parens(base);
+                let val_scalar = match bare_base {
+                    Expr::Ident { name, .. } => {
+                        self.lookup_type_name(name)
+                            .and_then(|t| extract_map_val_from_type_str(&t))
+                            .and_then(|v| canonical_numeric_name(&v))
+                    }
+                    Expr::MapLit { value, .. } => {
+                        canonical_numeric_name(&value.render())
+                    }
+                    _ => None,
+                };
+                vec![val_scalar, Some("bool")]
+            }
+            Expr::Call { callee, args, .. } => {
+                let bare_callee = unwrap_parens(callee);
+                if let Expr::Ident { .. } = bare_callee {
+                    if let Some(rs) = self.call_result_scalars(callee, args) {
+                        if rs.len() >= 2 {
+                            return rs;
+                        }
+                    }
+                } else if let Expr::Field { base, name, .. } = bare_callee {
+                    let bk = self.kind_of_expr(base);
+                    let head = Checker::base_named_type_str(name);
+                    if let Some(sname) = self.struct_base_name(&bk) {
+                        if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
+                            if m.results.len() >= 2 {
+                                return m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+                            }
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// #3164: declared type names of multi-value expressions (for array lengths).
+    fn multi_value_type_names(&self, e: &Expr) -> Vec<Option<String>> {
+        match unwrap_parens(e) {
+            Expr::Move { operand, .. } => self.multi_value_type_names(operand),
+            Expr::Call { callee, .. } => {
+                let bare_callee = unwrap_parens(callee);
+                if let Expr::Ident { name, .. } = bare_callee {
+                    if self.lookup_kind(name).is_none() {
+                        if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                            if fd.receiver.is_none() && fd.type_params.is_empty() && fd.results.len() >= 2 {
+                                return fd.results.iter().map(|r| Some(r.ty.render())).collect();
+                            }
+                        }
+                    }
+                } else if let Expr::Field { base, name, .. } = bare_callee {
+                    let bk = self.kind_of_expr(base);
+                    let head = Checker::base_named_type_str(name);
+                    if let Some(sname) = self.struct_base_name(&bk) {
+                        if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
+                            if m.results.len() >= 2 {
+                                return m.results.iter().map(|r| Some(r.ty.render())).collect();
+                            }
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -5097,19 +5252,52 @@ impl<'a> Collector<'a> {
                             "bind one name per value, or use a source that yields one value per target",
                         );
                     } else {
+                        // Ignore non-map index sources (e.g. slice index in multi-value assign)
+                        // which are already caught by shape guard HYB-E2002.
+                        let is_non_map_index = matches!(unwrap_parens(&values[0]), Expr::Index { base, .. }
+                            if !matches!(self.kind_of_expr(base), OpKind::Map(_, _) | OpKind::Unknown));
                         let got_kinds = self.multi_value_kinds(&values[0]);
-                        if got_kinds.len() == targets.len() {
-                            for (t, vk) in targets.iter().zip(got_kinds.iter()) {
+                        let got_scalars = self.multi_value_scalars(&values[0]);
+                        let got_type_names = self.multi_value_type_names(&values[0]);
+                        if !is_non_map_index && got_kinds.len() == targets.len() {
+                            for (i, (t, vk)) in targets.iter().zip(got_kinds.iter()).enumerate() {
                                 let tpk = self.kind_of_place(t);
-                                if kinds_conflict(&tpk, vk) {
+                                let int_float_conflict = (tpk == OpKind::Float && *vk == OpKind::Int)
+                                    || (tpk == OpKind::Int && *vk == OpKind::Float);
+                                let scalar_mismatch = if i < got_scalars.len() {
+                                    matches!(
+                                        (self.place_scalar(t), got_scalars[i]),
+                                        (Some(tp), Some(vp)) if tp != vp
+                                    )
+                                } else {
+                                    false
+                                };
+                                let array_mismatch = if i < got_type_names.len() {
+                                    self.sized_array_names_differ(
+                                        self.place_type_name(t).as_deref(),
+                                        got_type_names[i].as_deref(),
+                                    )
+                                } else {
+                                    false
+                                };
+                                if kinds_conflict(&tpk, vk)
+                                    || int_float_conflict
+                                    || scalar_mismatch
+                                    || array_mismatch
+                                {
+                                    let (src_label, dst_label) = if scalar_mismatch {
+                                        (got_scalars[i].unwrap().to_string(), self.place_scalar(t).unwrap().to_string())
+                                    } else {
+                                        (vk.label(), tpk.label())
+                                    };
                                     self.emit_e1002(
                                         span,
                                         format!(
                                             "cannot assign a value of type `{}` to `{}` (type `{}`) in multi-value assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
-                                            vk.label(),
+                                            src_label,
                                             t.render(),
-                                            tpk.label(),
-                                            tpk.label()
+                                            dst_label,
+                                            dst_label
                                         ),
                                         "each target's declared type is fixed; write an explicit conversion when a conversion is intended",
                                     );
