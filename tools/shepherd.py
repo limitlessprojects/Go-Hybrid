@@ -443,8 +443,11 @@ def cmd_verify_assert(args):
         print("ASSERT-FAIL: ls-remote failed: %s" % (r.stderr or "")[-200:])
         sys.exit(1)
     main_sha = r.stdout.split()[0]
-    subprocess.run(["git", "-C", repo, "fetch", "-q", "origin", "main"],
-                   capture_output=True, timeout=120)
+    fetched = subprocess.run(["git", "-C", repo, "fetch", "-q", "origin", "main"],
+                             capture_output=True, text=True, timeout=120)
+    if fetched.returncode != 0:
+        print("ASSERT-FAIL: fetch failed: %s" % (fetched.stderr or "")[-200:])
+        sys.exit(1)
     r2 = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor",
                          args.head, "FETCH_HEAD"], capture_output=True)
     if r2.returncode == 0:
@@ -514,9 +517,10 @@ def cmd_probe(args):
             print("  claimed: %s" % rule["claimed"])
             print("  probe:\n```\n%s```\n" % rule["probe"])
         else:
+            last_err = ((r.stderr or "").strip().splitlines() or ["rejected"])[-1][:80]
             print("probe-ok: %s — toolchain still rejects; premise holds (%s)"
-                  % (rule["id"], (r.stderr or "").strip().splitlines()[-1][:80]))
-    if not findings and not any(re.search(r["pattern"], ln) for ln in lines):
+                  % (rule["id"], last_err))
+    if not findings and not any(re.search(p["pattern"], ln) for p in PROBES for ln in lines):
         print("no premise patterns matched in diff")
     step_summary("W6 stale-premise probe: %d finding(s)" % findings)
 
