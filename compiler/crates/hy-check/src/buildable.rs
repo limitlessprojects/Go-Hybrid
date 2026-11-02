@@ -547,6 +547,10 @@ struct Collector<'a> {
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     file_untyped_consts: HashSet<String>,
+    /// File-level typed `const` exact numeric types (#3107).
+    file_const_scalars: HashMap<String, Option<&'static str>>,
+    /// #3107 — parallel scope stack tracking return scalars of local fn-valued variables.
+    fn_var_scalars: Vec<HashMap<String, Vec<Option<&'static str>>>>,
     /// Result kinds of the function whose body is currently being walked
     /// (#577 C9/C10). Empty for a fn declared with no results — which is also
     /// the state outside any body, so `Stmt::Return` can only ever see it
@@ -615,6 +619,8 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
+            file_const_scalars: HashMap::new(),
+            fn_var_scalars: Vec::new(),
             fn_results: Vec::new(),
             fn_type_params: HashSet::new(),
             fn_results_all_named: false,
@@ -639,6 +645,8 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                     .map(|t| c.kind_of_ty(t, 0))
                     .unwrap_or_else(|| c.kind_of_expr(&cd.value));
                 c.file_consts.insert(cd.name.clone(), k);
+                let sc = cd.ty.as_ref().and_then(|t| c.scalar_of_ty(t));
+                c.file_const_scalars.insert(cd.name.clone(), sc);
                 if cd.ty.is_none() {
                     c.file_untyped_consts.insert(cd.name.clone());
                 }
@@ -683,6 +691,7 @@ impl<'a> Collector<'a> {
         self.type_name_scopes.push(HashMap::new());
         self.scalar_scopes.push(HashMap::new());
         self.container_elem_scopes.push(HashMap::new());
+        self.fn_var_scalars.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
     }
@@ -693,6 +702,7 @@ impl<'a> Collector<'a> {
         self.type_name_scopes.pop();
         self.scalar_scopes.pop();
         self.container_elem_scopes.pop();
+        self.fn_var_scalars.pop();
         self.set_elem_scopes.pop();
         self.copy_var_scopes.pop();
     }
@@ -787,6 +797,9 @@ impl<'a> Collector<'a> {
             // #2858: every binding shadows an outer container element scalar.
             if let Some(top) = self.container_elem_scopes.last_mut() {
                 top.insert(name.to_string(), None);
+            }
+            if let Some(top) = self.fn_var_scalars.last_mut() {
+                top.insert(name.to_string(), Vec::new());
             }
             // Every (re)binding shadows an outer set binding; callers that
             // know the new binding is a set record it via bind_set_elem.
@@ -928,6 +941,25 @@ impl<'a> Collector<'a> {
                 return *s;
             }
         }
+        self.file_const_scalars.get(name).copied().flatten()
+    }
+
+    fn bind_fn_var_scalars(&mut self, name: &str, res: Vec<Option<&'static str>>) {
+        if name != "_" {
+            if let Some(top) = self.fn_var_scalars.last_mut() {
+                top.insert(name.to_string(), res);
+            }
+        }
+    }
+
+    fn lookup_fn_var_scalars(&self, name: &str) -> Option<Vec<Option<&'static str>>> {
+        for layer in self.fn_var_scalars.iter().rev() {
+            if let Some(s) = layer.get(name) {
+                if !s.is_empty() {
+                    return Some(s.clone());
+                }
+            }
+        }
         None
     }
 
@@ -950,6 +982,48 @@ impl<'a> Collector<'a> {
         }
         None
     }
+
+
+    fn expr_fn_scalars(&self, e: &Expr) -> Option<Vec<Option<&'static str>>> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(res) = self.lookup_fn_var_scalars(name) {
+                    return Some(res);
+                }
+                if self.scopes.iter().any(|layer| layer.contains_key(name.as_str())) {
+                    return None;
+                }
+                let head = Checker::base_named_type_str(name);
+                if let Some(fd) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                    if fd.receiver.is_none() && fd.type_params.is_empty() {
+                        return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                    }
+                }
+                None
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let head = Checker::base_named_type_str(name);
+                if let Some(sn) = self.struct_base_name(&bk) {
+                    if let Some(m) = self.ck.method_decls.get(&(sn, head.to_string())) {
+                        if m.type_params.is_empty() {
+                            return Some(m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                        }
+                    }
+                }
+                if let Some(m) = self.method_expr_decl(base, name) {
+                    return Some(m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                }
+                None
+            }
+            Expr::FnLit { results, .. } => {
+                Some(results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect())
+            }
+            _ => None,
+        }
+    }
+
 
     /// #2770 — the canonical numeric spelling of a simple local target, for the
     /// assignment/argument scalar comparison. Non-ident places fail open.
@@ -1108,38 +1182,47 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-            return None;
-        };
-        if self
-            .scopes
-            .iter()
-            .any(|layer| layer.contains_key(name.as_str()))
-        {
-            return None;
-        }
-        if let Some(fd) = self.ck.fns.get(name.as_str()) {
-            if fd.receiver.is_some() || !fd.type_params.is_empty() {
-                return None;
+        let bare = unwrap_parens(callee);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(res) = self.lookup_fn_var_scalars(name) {
+                    return Some(res);
+                }
+                if self
+                    .scopes
+                    .iter()
+                    .any(|layer| layer.contains_key(name.as_str()))
+                {
+                    return None;
+                }
+                if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                    if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                        return None;
+                    }
+                    return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                }
+                if name == "len" || name == "cap" || name == "copy" {
+                    return Some(vec![Some("int")]);
+                }
+                if name == "min" || name == "max" {
+                    let res_scalar = args
+                        .iter()
+                        .find_map(|a| self.typed_value_scalar(&a.value));
+                    return Some(vec![res_scalar]);
+                }
+                if args.len() == 1
+                    && !self.ck.structs.contains_key(name.as_str())
+                    && !self.ck.enums.contains_key(name.as_str())
+                    && !self.ck.type_aliases.contains_key(name.as_str())
+                {
+                    if let Some(s) = canonical_numeric_name(name) {
+                        return Some(vec![Some(s)]);
+                    }
+                }
+                None
             }
-            return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+            _ => self.expr_fn_scalars(bare),
         }
-        if name == "min" || name == "max" {
-            let res_scalar = args
-                .iter()
-                .find_map(|a| self.typed_value_scalar(&a.value));
-            return Some(vec![res_scalar]);
-        }
-        if args.len() == 1
-            && !self.ck.structs.contains_key(name.as_str())
-            && !self.ck.enums.contains_key(name.as_str())
-            && !self.ck.type_aliases.contains_key(name.as_str())
-        {
-            if let Some(s) = canonical_numeric_name(name) {
-                return Some(vec![Some(s)]);
-            }
-        }
-        None
     }
 
     /// #1031 — the exact numeric type of a value that is provably TYPED.
@@ -1812,6 +1895,17 @@ impl<'a> Collector<'a> {
                 self.set_container_elem_scalar(name, container_elem_scalar);
             }
             self.bind_set_elem(name, set_elem);
+            if let Some(TypeExpr::Fn { results, .. }) = &l.ty {
+                let res_scalars: Vec<Option<&'static str>> =
+                    results.iter().map(|r| self.scalar_of_ty(r)).collect();
+                self.bind_fn_var_scalars(name, res_scalars);
+            } else if l.values.len() == l.names.len() {
+                if let Some(val) = l.values.get(l.names.iter().position(|n| n == name).unwrap_or(0)) {
+                    if let Some(res) = self.expr_fn_scalars(val) {
+                        self.bind_fn_var_scalars(name, res);
+                    }
+                }
+            }
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -5502,6 +5596,11 @@ impl<'a> Collector<'a> {
             // left to the call-shape rules.
             AssignOp::Assign => {
                 if targets.len() == 1 && values.len() == 1 {
+                    if let PlaceKind::Ident(target_name) = &target.kind {
+                        if let Some(res) = self.expr_fn_scalars(&values[0]) {
+                            self.bind_fn_var_scalars(target_name, res);
+                        }
+                    }
                     // O8 slot-loan (adapted during integration): `q = &m["a"]`
                     // on a value-typed `q` does NOT emit `q = &m["a"]` — the
                     // emitter lowers the loan to `q = m["a"]` plus a store-back
