@@ -1,5 +1,17 @@
 # Hybrid Language: Development Plan
 
+## Contributor experiment — W-002 author clarification (2026-11-02)
+
+- `spikes/w002-author-model/` supplies a bounded executable capture/inference
+  model for #279. Preregistration committed before execution (`eb28990`).
+- Local Python 3.14.7: 20 semantic tests pass; both deliberately weakened
+  mutants are caught; test-registration guard passes. Quick CI runs the model
+  and mutation runner. No production compiler or corpus verdict is changed.
+- The author clarification retains resource identity and lexical loan state,
+  corrects the unqualified graph-deletion/diagnostic-compatibility claims, and
+  distinguishes proposal credit from #1078/#1893's independent implementations.
+  Rust/Go suites and hosted CI are not run here; review/award/payment pending.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - `hyb generate` excludes sibling filenames reported by `go list -e -find -json .` as `IgnoredGoFiles`, once per directory and invocation. Modern/legacy constraints, platform suffixes and `GOFLAGS` tags use Go's own selection; existing production-package conflict checks remain. This is CLI tooling correctness, not a language/checker soundness change; PR #1900's separate dot/underscore-prefix fix is untouched.
