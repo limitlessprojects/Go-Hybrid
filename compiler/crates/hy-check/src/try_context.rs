@@ -24,21 +24,13 @@ use hy_syntax::{
 /// Log entry" — keep in sync with hy-emit's `CONVERSIONS[..].propagate`.
 const E11_PROPAGATING_TARGETS: &[&str] = &["http.handler"];
 
-fn is_builtin_error_type(ck: &Checker<'_>, ty: &TypeExpr) -> bool {
-    if !matches!(ty, TypeExpr::Named { name, .. } if name == "error")
-        || ck.structs.contains_key("error")
-        || ck.struct_type_params.contains_key("error")
-        || ck.enums.contains_key("error")
-    {
-        return false;
-    }
-    ck.type_aliases.get("error").is_none_or(|alias_ty| {
-        matches!(ck.resolve_type_alias(alias_ty), TypeExpr::Named { name, .. } if name == "error")
-    })
+fn is_builtin_error_type(w: &TryWalker<'_, '_>, ty: &TypeExpr) -> bool {
+    matches!(ty, TypeExpr::Named { name, .. } if name == "error")
+        && w.is_unshadowed_pkg_root("error")
 }
 
-fn results_end_in_error(ck: &Checker<'_>, results: &[FnResult]) -> bool {
-    results.last().is_some_and(|r| is_builtin_error_type(ck, &r.ty))
+fn results_end_in_error(w: &TryWalker<'_, '_>, results: &[FnResult]) -> bool {
+    results.last().is_some_and(|r| is_builtin_error_type(w, &r.ty))
 }
 
 fn is_e11_result_type(ck: &Checker<'_>, results: &[FnResult], http_unshadowed: bool) -> bool {
@@ -53,16 +45,20 @@ fn is_e11_result_type(ck: &Checker<'_>, results: &[FnResult], http_unshadowed: b
         )
 }
 
-fn fnlit_has_valid_e11_signature(ck: &Checker<'_>, params: &[Param], results: &[FnResult]) -> bool {
-    if !results.is_empty() || params.len() != 2 || params[0].name == "_" {
+fn fnlit_has_valid_e11_signature(w: &TryWalker<'_, '_>, params: &[Param], results: &[FnResult]) -> bool {
+    if !results.is_empty()
+        || params.len() != 2
+        || params[0].name == "_"
+        || params[0].name == params[1].name
+    {
         return false;
     }
     let w_ok = matches!(&params[0].ty, TypeExpr::Named { name, .. } if name.is_empty())
-        || matches!(ck.resolve_type_alias(&params[0].ty), TypeExpr::Named { name, .. } if name == "http.response_writer");
+        || matches!(w.resolve_unshadowed_alias(&params[0].ty), Some(TypeExpr::Named { name, .. }) if name == "http.response_writer");
     let r_ok = matches!(&params[1].ty, TypeExpr::Named { name, .. } if name.is_empty())
         || matches!(
-            ck.resolve_type_alias(&params[1].ty),
-            TypeExpr::Pointer { to, .. } if matches!(ck.resolve_type_alias(&to), TypeExpr::Named { name, .. } if name == "http.request")
+            w.resolve_unshadowed_alias(&params[1].ty),
+            Some(TypeExpr::Pointer { to, .. }) if matches!(w.resolve_unshadowed_alias(&to), Some(TypeExpr::Named { name, .. }) if name == "http.request")
         );
     w_ok && r_ok
 }
@@ -70,8 +66,10 @@ fn fnlit_has_valid_e11_signature(ck: &Checker<'_>, params: &[Param], results: &[
 /// What the enclosing function or closure offers a `?`.
 #[derive(Clone, Copy)]
 enum Ctx<'a> {
-    /// `main`, an error-result fn/closure, or an E11 handler closure.
+    /// `main` or an error-result fn/closure.
     Ok,
+    /// An E11 `http.handler` closure: writer param name + its param-scope index.
+    E11Handler(&'a str, usize),
     /// No landing spot; the &str names the enclosing callable for the message.
     NoErrorResult(&'a str),
 }
@@ -105,6 +103,33 @@ impl<'a, 'b> TryWalker<'a, 'b> {
             || self.ck.type_aliases.contains_key(pkg)
             || self.ck.file.decls.iter().any(|d| matches!(d, Decl::Const(c) if c.name == pkg))
             || self.scopes.iter().any(|s| s.iter().any(|n| n == pkg)))
+    }
+    fn resolve_unshadowed_alias(&self, ty: &TypeExpr) -> Option<TypeExpr> {
+        let mut cur = ty.clone();
+        for _ in 0..8 {
+            if let TypeExpr::Named { name, .. } = &cur {
+                let base = Checker::base_named_type_str(name);
+                if let Some(target) = self.ck.type_aliases.get(base) {
+                    if self.ck.structs.contains_key(base)
+                        || self.ck.struct_type_params.contains_key(base)
+                        || self.ck.enums.contains_key(base)
+                        || self.ck.fns.contains_key(base)
+                        || self.ck.consts.contains_key(base)
+                        || self.ck.file.decls.iter().any(|d| matches!(d, Decl::Const(c) if c.name == base))
+                        || self.scopes.iter().any(|s| s.iter().any(|n| n == base))
+                    {
+                        return None;
+                    }
+                    cur = target.clone();
+                    continue;
+                }
+                if !self.is_unshadowed_pkg_root(base) {
+                    return None;
+                }
+            }
+            return Some(cur);
+        }
+        None
     }
     fn is_e11_conversion_call(&self, callee: &Expr) -> bool {
         if let Expr::Field { base, name, .. } = callee {
@@ -147,7 +172,10 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
                 f.params.iter().for_each(|p| w.bind_name(&p.name));
                 f.results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| w.bind_name(n));
                 let is_main = f.name == "main" && f.receiver.is_none();
-                let ctx = if is_main || results_end_in_error(w.ck, &f.results) {
+                let main_ok = is_main
+                    && w.is_unshadowed_pkg_root("error")
+                    && ["fmt", "os", "filepath"].iter().all(|pkg| w.is_unshadowed_pkg_root(pkg));
+                let ctx = if main_ok || results_end_in_error(&w, &f.results) {
                     Ctx::Ok
                 } else {
                     Ctx::NoErrorResult(f.name.as_str())
@@ -205,6 +233,14 @@ fn walk_stmt(ck: &mut TryWalker<'_, '_>, s: &Stmt, ctx: Ctx<'_>) {
             };
             if let Some(ty) = &l.ty {
                 walk_type(ck, ty, val_ctx);
+            }
+            if matches!(l.kind, LocalKind::Define | LocalKind::Let) && l.values.len() == 1 {
+                if let Expr::Try { operand, span } = unwrap_parens(&l.values[0]) {
+                    walk_expr(ck, operand, val_ctx);
+                    l.names.iter().for_each(|n| ck.bind_name(n));
+                    check_try_site(ck, *span, val_ctx);
+                    return;
+                }
             }
             l.values.iter().for_each(|v| walk_expr(ck, v, val_ctx));
             l.names.iter().for_each(|n| ck.bind_name(n));
@@ -334,52 +370,67 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
         params.iter().for_each(|p| walk_type(ck, &p.ty, outer_ctx));
         results.iter().for_each(|r| walk_type(ck, &r.ty, outer_ctx));
         // E4: lexical, like `return` — the closure's OWN results decide.
-        let ok = if e11 {
-            fnlit_has_valid_e11_signature(ck.ck, params, results)
-        } else {
-            results_end_in_error(ck.ck, results)
-        };
-        let ctx = if ok {
+        let e11_ok = e11 && fnlit_has_valid_e11_signature(ck, params, results);
+        let err_ok = !e11 && results_end_in_error(ck, results);
+        let saved_return_e11 = std::mem::replace(&mut ck.return_e11, false);
+        let param_scope = ck.scopes.len();
+        ck.push_scope();
+        params.iter().for_each(|p| ck.bind_name(&p.name));
+        results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| ck.bind_name(n));
+        let ctx = if e11_ok {
+            Ctx::E11Handler(params[0].name.as_str(), param_scope)
+        } else if err_ok && results_end_in_error(ck, results) {
             Ctx::Ok
         } else {
             Ctx::NoErrorResult("closure")
         };
-        let saved_return_e11 = std::mem::replace(&mut ck.return_e11, false);
-        ck.push_scope();
-        params.iter().for_each(|p| ck.bind_name(&p.name));
-        results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| ck.bind_name(n));
         walk_block(ck, body, ctx);
         ck.pop_scope();
         ck.return_e11 = saved_return_e11;
     }
 }
 
+fn check_try_site(ck: &mut TryWalker<'_, '_>, span: hy_diag::Span, ctx: Ctx<'_>) {
+    let owner = match ctx {
+        Ctx::Ok => return,
+        Ctx::E11Handler(w_name, param_scope) => {
+            let w_shadowed = ck.scopes[param_scope + 1..]
+                .iter()
+                .any(|s| s.iter().any(|n| n == w_name));
+            if ck.is_unshadowed_pkg_root("http") && !w_shadowed {
+                return;
+            }
+            "closure"
+        }
+        Ctx::NoErrorResult(owner) => owner,
+    };
+    let owner_text = if owner == "closure" {
+        "this closure".to_string()
+    } else {
+        format!("`{}`", owner)
+    };
+    ck.ck.diags.push(
+        Diagnostic::error(
+            "HYB-E2011",
+            ck.ck.path.clone(),
+            span,
+            format!(
+                "`?` needs an `error` result to return through, but {} has none (E4, HYB-E2011)",
+                owner_text
+            ),
+        )
+        .with_notes(vec![
+            "E4: `?` may appear only in a function or closure whose results end in `error`, in `main` (E6 exit contract), or in an `http.handler` closure (E11)".to_string(),
+            "a closure's `?` binds to the closure's own results, never the enclosing function's (lexical, like `return`)".to_string(),
+            "fix: add `error` as the last result and return it, or handle the error in place: `v, err := f()` then `if err != nil { … }`".to_string(),
+        ]),
+    );
+}
+
 fn walk_expr(ck: &mut TryWalker<'_, '_>, e: &Expr, ctx: Ctx<'_>) {
     match e {
         Expr::Try { operand, span } => {
-            if let Ctx::NoErrorResult(owner) = ctx {
-                let owner_text = if owner == "closure" {
-                    "this closure".to_string()
-                } else {
-                    format!("`{}`", owner)
-                };
-                ck.ck.diags.push(
-                    Diagnostic::error(
-                        "HYB-E2011",
-                        ck.ck.path.clone(),
-                        *span,
-                        format!(
-                            "`?` needs an `error` result to return through, but {} has none (E4, HYB-E2011)",
-                            owner_text
-                        ),
-                    )
-                    .with_notes(vec![
-                        "E4: `?` may appear only in a function or closure whose results end in `error`, in `main` (E6 exit contract), or in an `http.handler` closure (E11)".to_string(),
-                        "a closure's `?` binds to the closure's own results, never the enclosing function's (lexical, like `return`)".to_string(),
-                        "fix: add `error` as the last result and return it, or handle the error in place: `v, err := f()` then `if err != nil { … }`".to_string(),
-                    ]),
-                );
-            }
+            check_try_site(ck, *span, ctx);
             walk_expr(ck, operand, ctx);
         }
         Expr::FnLit { .. } => walk_fnlit(ck, e, false, ctx),
