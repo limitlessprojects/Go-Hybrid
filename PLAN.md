@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — Markdown evidence boundary (#3342)
+
+- At main `421ae80`, the explicit-Markdown claims-link guard accepted absolute paths, parent traversal and external symlinks as repository evidence. The focused patch rejects those references while retaining normalized internal paths and internal symlinks. Baseline: expanded 13-test suite has 4 failing subcases. Patched: 13/13 focused and 129/129 adjacent Python tooling tests pass; live evidence/registration/structural checks and diff whitespace check pass. Full compiler, Rust/Go, corpus/differential and hosted CI remain unverified. Submitted with AI assistance for `kalidatuna`; no award or payment claimed.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - `hyb generate` excludes sibling filenames reported by `go list -e -find -json .` as `IgnoredGoFiles`, once per directory and invocation. Modern/legacy constraints, platform suffixes and `GOFLAGS` tags use Go's own selection; existing production-package conflict checks remain. This is CLI tooling correctness, not a language/checker soundness change; PR #1900's separate dot/underscore-prefix fix is untouched.
