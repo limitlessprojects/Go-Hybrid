@@ -9,6 +9,8 @@ claims it for. This tool closes that gap:
 
   * every relative markdown link in the claims table must resolve to a file
     (http(s) links and pure anchors are skipped),
+  * evidence paths must be relative and resolve inside the repository,
+    including when following symlinks,
   * a corpus link followed by `(reject)`, `(accept)` or `(managed)` must point
     at a file whose `EXPECTED-VERDICT` header agrees with the marker,
   * a cited corpus program with no verdict header at all is an error.
@@ -85,6 +87,7 @@ def marker_matches(marker, verdict):
 
 
 def check(root):
+    root = root.resolve()
     claims_file = root / "GUARANTEES.md"
     issues = []
     rows = 0
@@ -105,6 +108,9 @@ def check(root):
             resolved = root / path
             if not resolved.is_file():
                 issues.append({"row": row_number, "kind": "missing", "target": path})
+                continue
+            if Path(path).is_absolute() or not resolved.resolve().is_relative_to(root):
+                issues.append({"row": row_number, "kind": "outside-repository", "target": path})
                 continue
             if resolved.suffix.lower() != ".hy":
                 continue
