@@ -233,6 +233,26 @@ fn is_sized_array_spelling(s: &str) -> bool {
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
+/// #3240 — Extracts the key type spelling from a `map[K]V` type string.
+fn map_key_type_name_from_str(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("map[")?;
+    let mut depth = 0usize;
+    for (i, b) in rest.bytes().enumerate() {
+        match b {
+            b'[' => depth += 1,
+            b']' => {
+                if depth == 0 {
+                    return Some(rest[..i].trim().to_string());
+                } else {
+                    depth -= 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -877,6 +897,12 @@ impl<'a> Collector<'a> {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             _ => None,
         }
+    }
+
+    /// #3240 — Extracts the declared/inferred key type name of a map expression.
+    fn map_key_type_of_expr(&self, e: &Expr) -> Option<String> {
+        let ty_name = self.typed_value_type_name(e)?;
+        map_key_type_name_from_str(&ty_name)
     }
 
     /// #2771 — the declared Go spelling of a simple local assignment target.
@@ -6599,14 +6625,28 @@ impl<'a> Collector<'a> {
                             let int_to_float_conflict = want == OpKind::Float
                                 && got == OpKind::Int
                                 && !self.is_untyped_int_const(key_arg);
-                            if kinds_conflict(&want, &got) || int_to_float_conflict {
+                            let key_ty_name = self.typed_value_type_name(key_arg);
+                            let scalar_mismatch = match (
+                                canonical_numeric_name(&elem),
+                                key_ty_name.as_deref().and_then(canonical_numeric_name),
+                            ) {
+                                (Some(a), Some(b)) => a != b,
+                                _ => false,
+                            };
+                            let array_mismatch = self.sized_array_names_differ(
+                                Some(&elem),
+                                key_ty_name.as_deref(),
+                            );
+                            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch || array_mismatch {
+                                let fallback = got.label();
+                                let got_label = key_ty_name.as_deref().unwrap_or(&fallback);
                                 self.emit_e2005(
                                     span,
                                     format!(
                                         "cannot use `{}` (type `{}`) as element type `{}` in `delete` on `set[{}]` (HYB-E2005)",
                                         key_arg.render(),
-                                        got.label(),
-                                        want.label(),
+                                        got_label,
+                                        elem,
                                         elem
                                     ),
                                     "the second argument to `delete(s, v)` must match the set's element type",
@@ -6619,18 +6659,35 @@ impl<'a> Collector<'a> {
                         let is_untyped_int_to_float = **k_expected == OpKind::Float
                             && kk == OpKind::Int
                             && self.is_untyped_int_const(key_arg);
-                        if **k_expected != OpKind::Unknown
+                        let expected_key_str = self.map_key_type_of_expr(map_arg);
+                        let key_ty_name = self.typed_value_type_name(key_arg);
+                        let scalar_mismatch = match (
+                            expected_key_str.as_deref().and_then(canonical_numeric_name),
+                            key_ty_name.as_deref().and_then(canonical_numeric_name),
+                        ) {
+                            (Some(a), Some(b)) => a != b,
+                            _ => false,
+                        };
+                        let array_mismatch = self.sized_array_names_differ(
+                            expected_key_str.as_deref(),
+                            key_ty_name.as_deref(),
+                        );
+                        let coarse_conflict = **k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
                             && kk != **k_expected
-                            && !is_untyped_int_to_float
-                        {
+                            && !is_untyped_int_to_float;
+                        if coarse_conflict || scalar_mismatch || array_mismatch {
+                            let fallback = k_expected.label();
+                            let want_label = expected_key_str.as_deref().unwrap_or(&fallback);
+                            let fallback_got = kk.label();
+                            let got_label = key_ty_name.as_deref().unwrap_or(&fallback_got);
                             self.emit_e2005(
                                 span,
                                 format!(
                                     "cannot use `{}` (type `{}`) as key type `{}` in `delete` (HYB-E2005)",
                                     key_arg.render(),
-                                    kk.label(),
-                                    k_expected.label()
+                                    got_label,
+                                    want_label
                                 ),
                                 "the second argument to `delete(m, k)` must match the map's key type",
                             );
