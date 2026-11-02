@@ -1079,6 +1079,25 @@ impl Emitter {
                 ptr_params = params.iter().map(|p| p.is_some()).collect();
             }
         }
+        // #2209 - a MethodZero member already carries its own call parens in
+        // field position (`d.milliseconds` -> `d.Milliseconds()`), so the
+        // generic `callee(args)` tail below appends a SECOND pair and emits
+        // `d.Milliseconds()()`. A zero-arg method called with no arguments IS
+        // that member, so return the member spelling once and stop.
+        if args.is_empty() {
+            if let Expr::Field { base, name, .. } = callee {
+                let base = Self::selector_base(base);
+                if let Some(bt) = self.type_of_expr(base) {
+                    if let Some(m) = lookup_member(bt, name) {
+                        if m.kind == MemberKind::MethodZero {
+                            let b = self.emit_expr(base, ATOM)?;
+                            return Ok(format!("{}.{}()", b, m.go));
+                        }
+                    }
+                }
+            }
+        }
+
         let c = self.emit_expr(raw_callee, ATOM)?;
         let mut parts = Vec::new();
         for (i, a) in args.iter().enumerate() {
