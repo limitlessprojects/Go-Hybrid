@@ -111,3 +111,37 @@ fn one_diagnostic_per_misplaced_try_with_e4_note() {
         .unwrap();
     assert!(d.message.contains("`noerr` has none"), "{}", d.message);
 }
+
+#[test]
+fn try_in_array_length_inside_main_rejected() {
+    let r = with_helpers("fn main() {\n    var a [val()?]int\n    _ = a\n}\n");
+    assert_eq!(e2011(&r), 1, "{:?}", r.diagnostics);
+}
+
+#[test]
+fn try_in_array_length_inside_error_result_fn_rejected() {
+    let r = with_helpers(
+        "fn pick() (int, error) {\n    var a [val()?]int\n    _ = a\n    return 0, nil\n}\n\nfn main() {\n    _, _ = pick()\n}\n",
+    );
+    assert_eq!(e2011(&r), 1, "{:?}", r.diagnostics);
+}
+
+#[test]
+fn try_in_array_length_in_closure_param_inside_error_scope_rejected() {
+    let r = with_helpers(
+        "fn outer() error {\n    f := fn(x [val()?]int) int {\n        return 0\n    }\n    _ = f\n    return nil\n}\n\nfn main() {\n    _ = outer()\n}\n",
+    );
+    assert_eq!(e2011(&r), 1, "{:?}", r.diagnostics);
+}
+
+#[test]
+fn try_in_array_length_of_composite_literal_rejected() {
+    let r = with_helpers("fn main() {\n    _ = [val()?]int{1, 2}\n}\n");
+    assert_eq!(e2011(&r), 1, "{:?}", r.diagnostics);
+}
+
+#[test]
+fn constant_array_length_stays_accepted() {
+    let r = with_helpers("fn main() {\n    var a [2]int\n    _ = a\n}\n");
+    assert_eq!(e2011(&r), 0, "{:?}", r.diagnostics);
+}
