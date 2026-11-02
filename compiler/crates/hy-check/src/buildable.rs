@@ -5309,6 +5309,20 @@ impl<'a> Collector<'a> {
 
     /// Family C1 (#425, #708): `base[index]` requires a slice, array, map, or string,
     /// and constant indices on constant strings must satisfy `0 <= index < len(base)`.
+
+    /// #3292: the declared key scalar of a map-typed base, when it is a
+    /// predeclared numeric spelling. Anything else (named type, unresolved)
+    /// gives None and the caller fails open.
+    fn map_key_scalar_name(&self, base: Option<&Expr>) -> Option<&'static str> {
+        let base = base?;
+        let Expr::Ident { name, .. } = unwrap_parens(base) else {
+            return None;
+        };
+        let ty = self.type_name_scopes.iter().rev().find_map(|l| l.get(name))?;
+        let key = ty.strip_prefix("map[")?.split(']').next()?;
+        canonical_numeric_name(key)
+    }
+
     fn check_index_kind(
         &mut self,
         base_str: &str,
@@ -5350,17 +5364,35 @@ impl<'a> Collector<'a> {
                 let is_untyped_int_to_float = **key_kind == OpKind::Float
                     && *ik == OpKind::Int
                     && self.is_untyped_int_const(index);
+                // #3292: `OpKind` collapses every integer width, so a
+                // `map[int32]V` indexed by an `int64` compared equal. Compare
+                // the declared key spelling against the index value's spelling;
+                // either side unresolved fails open so an untyped constant or
+                // a named alias still passes.
+                let key_scalar = self.map_key_scalar_name(base_expr);
+                let idx_scalar = self.typed_value_scalar(index);
+                let width_conflict = matches!((key_scalar, idx_scalar),
+                    (Some(a), Some(b)) if a != b);
                 let conflict = (**key_kind == OpKind::Float && *ik == OpKind::Int && !is_untyped_int_to_float)
-                    || kinds_conflict(key_kind, ik);
+                    || kinds_conflict(key_kind, ik)
+                    || width_conflict;
                 if conflict {
+                    // #3292: prefer the declared spellings over the kind
+                    // labels, which collapse int32/int64 to `int` and make
+                    // the message read as a mismatch between identical types.
+                    let key_label = key_scalar
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| key_kind.label());
+                    let idx_label = idx_scalar
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| ik.label());
                     self.emit_e1002(
                         index.span(),
                         format!(
-                            "cannot use `{}` (type `{}`) as `{}` value in map index on `{}` (HYB-E1002)",
+                            "cannot use `{}` (type `{}`) as `{}` value in map index (HYB-E1002)",
                             index.render(),
-                            ik.label(),
-                            key_kind.label(),
-                            bk.label()
+                            idx_label,
+                            key_label
                         ),
                         "map index expression must match the map's key type",
                     );
@@ -6646,18 +6678,32 @@ impl<'a> Collector<'a> {
                         let is_untyped_int_to_float = **k_expected == OpKind::Float
                             && kk == OpKind::Int
                             && self.is_untyped_int_const(key_arg);
-                        if **k_expected != OpKind::Unknown
+                        // #3292: same width blindness as the index arm --
+                        // `map[int32]V` with an `int64` key both look like
+                        // `OpKind::Int`. Compare the declared spellings too.
+                        let del_key_scalar = self.map_key_scalar_name(Some(map_arg));
+                        let del_arg_scalar = self.typed_value_scalar(key_arg);
+                        let del_width_conflict = matches!(
+                            (del_key_scalar, del_arg_scalar),
+                            (Some(a), Some(b)) if a != b
+                        );
+                        if (**k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
                             && kk != **k_expected
-                            && !is_untyped_int_to_float
+                            && !is_untyped_int_to_float)
+                            || del_width_conflict
                         {
                             self.emit_e2005(
                                 span,
                                 format!(
                                     "cannot use `{}` (type `{}`) as key type `{}` in `delete` (HYB-E2005)",
                                     key_arg.render(),
-                                    kk.label(),
-                                    k_expected.label()
+                                    del_arg_scalar
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_else(|| kk.label()),
+                                    del_key_scalar
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_else(|| k_expected.label())
                                 ),
                                 "the second argument to `delete(m, k)` must match the map's key type",
                             );
