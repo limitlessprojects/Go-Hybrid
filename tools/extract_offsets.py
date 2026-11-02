@@ -18,23 +18,43 @@ import subprocess
 import sys
 
 
+def _parse_dwarf_uint(raw):
+    val = raw.strip()
+    m_op = re.match(
+        r"^\(\s*DW_OP_plus_uconst\s*:\s*(0[xX][0-9a-fA-F]+|\d+)\s*\)$", val
+    )
+    if m_op is not None:
+        val = m_op.group(1)
+    if re.match(r"^0[xX][0-9a-fA-F]+$", val):
+        return int(val, 16)
+    if re.match(r"^\d+$", val):
+        return int(val, 10)
+    return None
+
+
 def main(binpath):
-    proc = subprocess.run(["readelf", "--debug-dump=info", binpath],
-                          capture_output=True, text=True, timeout=600)
+    proc = subprocess.run(
+        ["readelf", "--debug-dump=info", binpath],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=600,
+    )
     if proc.returncode != 0:
-        err = proc.stderr.strip()
+        err = (proc.stderr or "").strip()
         msg = f"readelf failed with exit code {proc.returncode}"
         if err:
             msg += f": {err}"
         print(f"FAILED: {msg}", file=sys.stderr)
         sys.exit(proc.returncode or 1)
 
-    out = proc.stdout
+    out = proc.stdout or ""
 
     dies = []
     cur = None
     for line in out.splitlines():
-        h = re.match(r"\s*<(\d+)><[0-9a-f]+>: Abbrev Number: \d+ \((DW_TAG_\w+)\)", line)
+        h = re.match(r"\s*<(\d+)><[0-9a-fA-F]+>: Abbrev Number: \d+ \((DW_TAG_\w+)\)", line)
         if h:
             cur = {"depth": int(h.group(1)), "tag": h.group(2)}
             dies.append(cur)
@@ -42,27 +62,39 @@ def main(binpath):
         if cur is None:
             continue
         nm = re.search(r"DW_AT_name\s*:\s*(.+?)\s*$", line)
-        off = re.search(r"DW_AT_data_member_location\s*:\s*(\d+)", line)
-        sz = re.search(r"DW_AT_byte_size\s*:\s*(\d+)", line)
+        off = re.search(r"DW_AT_data_member_location\s*:\s*(.+?)\s*$", line)
+        sz = re.search(r"DW_AT_byte_size\s*:\s*(.+?)\s*$", line)
+        decl = re.search(r"DW_AT_declaration\s*:\s*(1|true|yes)\b", line, re.IGNORECASE)
         if nm is not None:
-            cur["name"] = nm.group(1)
+            name_val = nm.group(1)
+            if " : " in name_val:
+                name_val = name_val.split(" : ")[-1].strip()
+            cur["name"] = name_val
         if off is not None:
-            cur["off"] = int(off.group(1))
+            cur["off"] = _parse_dwarf_uint(off.group(1))
         if sz is not None:
-            cur["size"] = int(sz.group(1))
+            cur["size"] = _parse_dwarf_uint(sz.group(1))
+        if decl is not None:
+            cur["decl"] = True
 
     def members_of(struct_name):
+        fallback = (None, None)
         for i, d in enumerate(dies):
             if d["tag"] == "DW_TAG_structure_type" and d.get("name") == struct_name:
+                if d.get("decl"):
+                    continue
                 base = d["depth"]
                 mem = {}
                 for e in dies[i + 1:]:
                     if e["depth"] <= base:
                         break
-                    if e["tag"] == "DW_TAG_member" and "name" in e:
+                    if e["depth"] == base + 1 and e["tag"] == "DW_TAG_member" and "name" in e:
                         mem[e["name"]] = e.get("off")
-                return d.get("size"), mem
-        return None, None
+                if mem:
+                    return d.get("size"), mem
+                if fallback == (None, None):
+                    fallback = (d.get("size"), mem)
+        return fallback
 
     gsize, g = members_of("runtime.g")
     msize, m = members_of("runtime.m")
@@ -73,6 +105,18 @@ def main(binpath):
         if m is None:
             missing_structs.append("runtime.m")
         print(f"FAILED: {' / '.join(missing_structs)} not found in DWARF", file=sys.stderr)
+        sys.exit(1)
+
+    missing_sizes = []
+    if gsize is None:
+        missing_sizes.append("runtime.g")
+    if msize is None:
+        missing_sizes.append("runtime.m")
+    if missing_sizes:
+        print(
+            f"FAILED: missing or invalid DW_AT_byte_size for {' / '.join(missing_sizes)}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     required_g = ("m", "stackguard0", "stack")
