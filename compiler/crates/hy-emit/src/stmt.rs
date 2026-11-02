@@ -325,7 +325,7 @@ impl Emitter {
         for (i, name) in l.names.iter().enumerate() {
             let fnlit = if l.names.len() == l.values.len() {
                 match l.values.get(i).map(Self::peel_parens) {
-                    Some(Expr::FnLit { results, .. }) => Some(super::result_shape(results)),
+                    Some(Expr::FnLit { results, .. }) => Some(self.result_shape(results)),
                     _ => None,
                 }
             } else {
