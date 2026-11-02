@@ -791,22 +791,37 @@ impl Emitter {
             }
         }
         let n_vals = match self.call_results(call) {
-            Some((n, true)) => n,
+            Some((n, true)) => Some(n),
             Some((_, false)) => {
                 return Err(EmitError::unsupported(
                     "`defer f()?` on a call whose results do not end in `error` (E3)",
                 ))
             }
-            // Unknown shape: deferred closers (close/flush/sync) return a
-            // bare error; a wrong guess fails go build, never silently.
-            None => 0,
+            // Unknown shape (a foreign method such as `f.seek(..)` returning
+            // `(int64, error)`): the checker already proved the results end
+            // in `error`, but not how many there are. Go's f(g()) rule binds
+            // ALL of g's results to a variadic parameter, so an inline
+            // `func(...any) error` adapter picks the last one at any arity.
+            None => None,
         };
         let errt = self.next_temp("hyErr");
-        let lhs = std::iter::repeat("_")
-            .take(n_vals)
-            .chain(std::iter::once(errt.as_str()))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let (lhs, call_text) = match n_vals {
+            Some(n) => (
+                std::iter::repeat("_")
+                    .take(n)
+                    .chain(std::iter::once(errt.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                call_text,
+            ),
+            None => (
+                errt.clone(),
+                format!(
+                    "func(hyVs ...any) error {{ hyE, _ := hyVs[len(hyVs)-1].(error); return hyE }}({})",
+                    call_text
+                ),
+            ),
+        };
         self.push("defer func() {");
         self.indent += 1;
         self.push(&format!(
