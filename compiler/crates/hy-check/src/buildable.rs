@@ -873,7 +873,11 @@ impl<'a> Collector<'a> {
     /// Only identifiers bound with an explicit type name are known; everything
     /// else (literals, conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
-        match unwrap_parens(e) {
+        let bare = unwrap_parens(e);
+        if let Some((_, _, array_ty)) = bare.as_array_lit() {
+            return Some(array_ty.render());
+        }
+        match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             _ => None,
         }
@@ -5725,10 +5729,14 @@ impl<'a> Collector<'a> {
             // or slice literal`).
             let scalar_mismatch = self
                 .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            let array_mismatch = self.sized_array_names_differ(
+                Some(&resolved_ty.render()),
+                self.typed_value_type_name(item).as_deref(),
+            );
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch {
+            if ik == expected && !scalar_mismatch && !array_mismatch {
                 continue;
             }
             let is_untyped_int_to_float = expected == OpKind::Float
@@ -5736,16 +5744,20 @@ impl<'a> Collector<'a> {
                 && self.is_untyped_int_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
-                || scalar_mismatch;
+                || scalar_mismatch
+                || array_mismatch;
             if !conflict {
                 continue;
             }
+            let item_label = self
+                .typed_value_type_name(item)
+                .unwrap_or_else(|| ik.label().to_string());
             self.emit_e1002(
                 item.span(),
                 format!(
                     "cannot use `{}` (type `{}`) as `{}` value in array literal (HYB-E1002)",
                     item.render(),
-                    ik.label(),
+                    item_label,
                     elem_ty.render()
                 ),
                 "every element of an array composite literal `[N]T{...}` / `[...]T{...}` must be assignable to the element type `T`",
@@ -5801,16 +5813,14 @@ impl<'a> Collector<'a> {
             // #2788: same width-collapse escape as the array arm above.
             let scalar_mismatch = self
                 .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            let array_mismatch = self.sized_array_names_differ(
+                Some(&resolved_ty.render()),
+                self.typed_value_type_name(item).as_deref(),
+            );
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch {
-                continue;
-            }
-            if expected == OpKind::Float
-                && ik == OpKind::Int
-                && self.is_untyped_int_const(item)
-            {
+            if ik == expected && !scalar_mismatch && !array_mismatch {
                 continue;
             }
             let is_untyped_int_to_float = expected == OpKind::Float
@@ -5818,16 +5828,20 @@ impl<'a> Collector<'a> {
                 && self.is_untyped_int_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
-                || scalar_mismatch;
+                || scalar_mismatch
+                || array_mismatch;
             if !conflict {
                 continue;
             }
+            let item_label = self
+                .typed_value_type_name(item)
+                .unwrap_or_else(|| ik.label().to_string());
             self.emit_e1002(
                 item.span(),
                 format!(
                     "cannot use `{}` (type `{}`) as `{}` value in slice literal (HYB-E1002)",
                     item.render(),
-                    ik.label(),
+                    item_label,
                     elem_ty.render()
                 ),
                 "every element of a slice composite literal `[]T{...}` must be assignable to the element type `T`",
@@ -6077,7 +6091,23 @@ impl<'a> Collector<'a> {
                 // `go build` (`cannot convert ... to type ...`, Row 13 BUILDABLE).
                 if let OpKind::Slice(arg_elem) = &ak {
                     let target_elem = self.kind_of_ty(elem_ty, 0);
-                    if copy_element_kinds_conflict(&target_elem, arg_elem) {
+                    let target_scalar = self.scalar_of_ty(elem_ty);
+                    let arg_scalar = self
+                        .slice_element_type_name(arg)
+                        .as_deref()
+                        .and_then(canonical_numeric_name);
+                    let scalar_mismatch = match (target_scalar, arg_scalar) {
+                        (Some(t), Some(a)) => t != a,
+                        _ => false,
+                    };
+                    let array_mismatch = self.sized_array_names_differ(
+                        Some(&elem_ty.render()),
+                        self.slice_element_type_name(arg).as_deref(),
+                    );
+                    if copy_element_kinds_conflict(&target_elem, arg_elem)
+                        || scalar_mismatch
+                        || array_mismatch
+                    {
                         self.emit_e1002(
                             arg.span(),
                             format!(
@@ -6719,25 +6749,54 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if copy_element_kinds_conflict(dst_elem, src_elem) {
+                        let dst_elem_ty = self.slice_element_type_name(dst_arg);
+                        let src_elem_ty = self.slice_element_type_name(src_arg);
+
+                        let scalar_mismatch = match (
+                            dst_elem_ty.as_deref().and_then(canonical_numeric_name),
+                            src_elem_ty.as_deref().and_then(canonical_numeric_name),
+                        ) {
+                            (Some(d), Some(s)) => d != s,
+                            _ => false,
+                        };
+
+                        let array_mismatch = self.sized_array_names_differ(
+                            dst_elem_ty.as_deref(),
+                            src_elem_ty.as_deref(),
+                        );
+
+                        if copy_element_kinds_conflict(dst_elem, src_elem)
+                            || scalar_mismatch
+                            || array_mismatch
+                        {
+                            let d_label = dst_elem_ty.unwrap_or_else(|| dst_elem.label());
+                            let s_label = src_elem_ty.unwrap_or_else(|| src_elem.label());
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "arguments to `copy` have different element types: `{}` and `{}` (HYB-E1002)",
-                                    dst_elem.label(),
-                                    src_elem.label()
+                                    d_label,
+                                    s_label
                                 ),
                                 "arguments to `copy` must have identical element types",
                             );
                         }
                     }
                     (OpKind::Slice(dst_elem), OpKind::Str) => {
-                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                        let dst_elem_ty = self.slice_element_type_name(dst_arg);
+                        let cannot_be_byte = !matches!(**dst_elem, OpKind::Int | OpKind::Unknown)
+                            || (matches!(**dst_elem, OpKind::Int)
+                                && dst_elem_ty.as_deref().map_or(false, |t| {
+                                    canonical_numeric_name(t).map_or(false, |s| s != "uint8")
+                                }));
+
+                        if cannot_be_byte {
+                            let d_label = dst_elem_ty.unwrap_or_else(|| dst_elem.label());
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "cannot copy string into slice with element type `{}` (HYB-E1002)",
-                                    dst_elem.label()
+                                    d_label
                                 ),
                                 "copying from a string requires a byte slice destination (`[]byte`)",
                             );
