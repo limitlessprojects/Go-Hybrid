@@ -24,7 +24,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// A source position (1-based line/column).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Pos {
     pub line: u32,
     pub col: u32,
@@ -65,8 +65,8 @@ impl Span {
     /// Merge two spans into one covering both.
     pub fn to(self, other: Span) -> Span {
         Span {
-            start: self.start,
-            end: other.end,
+            start: self.start.min(other.start),
+            end: self.end.max(other.end),
         }
     }
 }
@@ -136,9 +136,8 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    /// Convenience constructor: an error diagnostic with the registry's
-    /// fix-its already attached.
-    pub fn error(
+    fn with_severity(
+        severity: Severity,
         code: &str,
         file: impl Into<String>,
         span: Span,
@@ -146,12 +145,14 @@ impl Diagnostic {
     ) -> Self {
         let reg = Registry::global();
         let entry = reg.lookup(code);
+        let canonical = entry
+            .map(|e| e.code.clone())
+            .unwrap_or_else(|| code.to_string());
+        assert_severity_code_coherence(&canonical, severity);
         Diagnostic {
-            code: entry
-                .map(|e| e.code.clone())
-                .unwrap_or_else(|| code.to_string()),
+            code: canonical,
             name: entry.map(|e| e.name.clone()).unwrap_or_default(),
-            severity: Severity::Error,
+            severity,
             file: file.into(),
             span,
             message: message.into(),
@@ -171,6 +172,17 @@ impl Diagnostic {
         }
     }
 
+    /// Convenience constructor: an error diagnostic with the registry's
+    /// fix-its already attached.
+    pub fn error(
+        code: &str,
+        file: impl Into<String>,
+        span: Span,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::with_severity(Severity::Error, code, file, span, message)
+    }
+
     /// A warning diagnostic (lints — E8nnn; can never fail the build).
     pub fn warning(
         code: &str,
@@ -178,9 +190,7 @@ impl Diagnostic {
         span: Span,
         message: impl Into<String>,
     ) -> Self {
-        let mut d = Diagnostic::error(code, file, span, message);
-        d.severity = Severity::Warning;
-        d
+        Self::with_severity(Severity::Warning, code, file, span, message)
     }
 
     pub fn with_notes(mut self, notes: Vec<String>) -> Self {
@@ -349,12 +359,14 @@ impl Registry {
     /// `HYB-E3001`, `E3001`, `3001` (case-insensitive), or machine name.
     pub fn lookup(&self, query: &str) -> Option<&RegistryEntry> {
         let raw = query.trim();
+        if raw.is_empty() {
+            return None;
+        }
         let q = raw.to_ascii_uppercase();
-        let q_short = q.trim_start_matches("HYB-");
         self.data.codes.iter().find(|c| {
-            let short = c.code.trim_start_matches("HYB-"); // "E3003"
-            let digits = short.trim_start_matches('E'); // "3003"
-            c.code == q || short == q_short || digits == q_short || c.name == raw
+            let short = c.code.strip_prefix("HYB-").unwrap_or(&c.code); // "E3003"
+            let digits = short.strip_prefix('E').unwrap_or(short); // "3003"
+            c.code == q || short == q || digits == q || c.name.eq_ignore_ascii_case(raw)
         })
     }
 
@@ -400,7 +412,17 @@ impl Registry {
 /// an error, and a non-`E8nnn` code can never be constructed as a warning.
 /// Runs as a debug assert AND is unit-tested in release (`#[test]`).
 pub fn assert_severity_code_coherence(code: &str, severity: Severity) {
-    let is_lint = code.contains("-E8");
+    let reg = Registry::global();
+    let is_lint = if let Some(entry) = reg.lookup(code) {
+        entry.code.contains("-E8") || entry.severity == "warning"
+    } else {
+        let q = code.trim().to_ascii_uppercase();
+        let short = q.strip_prefix("HYB-").unwrap_or(&q);
+        short.starts_with("E8")
+            || (short.len() == 4
+                && short.starts_with('8')
+                && short.bytes().all(|b| b.is_ascii_digit()))
+    };
     let is_err = severity == Severity::Error;
     debug_assert!(
         !(is_lint && is_err),
