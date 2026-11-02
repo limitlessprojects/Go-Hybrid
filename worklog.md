@@ -1268,3 +1268,14 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All three: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
 - Suite trajectory: 302 -> 303 -> 304. Final main d293c312, tree clean.
 - NEXT TICK QUEUE: #3069 (string for-in element as rune, fixes #3065) -> #3045 (none as option kind) -> #3038 (hybench histogram clamp/overflow) -> #3048 (tools path bounds/anchors) -> #3023 (hy-syntax fn-type render + Paren peel) -> #3043 (managed_ report schemas) -> #2988 (set[T] index/slice/cap reject) -> #3039 (type use shadowed by local value) -> #2923 (loop backedge replay) -> then re-scan for the wave tail.
+
+## Session 52 — 2026-11-02 midday (3 landed; recycle + cold build; scan slow, needed 2nd run)
+
+- Recycle + restore (tarball cache gone again). scan 1st run hit 280s cap mid-scan; re-ran at 400s cap OK. approve 21/21 (4979 remaining).
+- LANDED:
+  133dcb51 Merge PR #2994 (aswadi, fixes #1184) — post-defer watch: dead targets removed (+rebound_self on deferred-name rebind), For/Iterate after defer binds iterate vars via handle_bind with may-share shapes, stmt_moves_watched_binding uses root_ident() so field move-sends caught HYB-E3003. New defer_move_soundness_1184.rs. 305 suites.
+  d3042c3f Merge PR #3097 (gttps, fixes #3096) — addressable.rs: closure_rebinds early-returns DELETED (closure-bound roots no longer bypass addressability), StructLit/SliceLit/Receive struct/array-shaped rvalues unassignable. Branch predated #2994 — kept (defer suite 1 passed). New addressable_rvalue_and_closure_slot.rs. 306 suites.
+  02557ca8 Merge PR #3002 (aswadi, fixes #1178) — loans.rs: forwarded multi-return call results propagate const-mutation, out-param params, slot-loan origins to bound vars. Branch predated #2994/#3097 — kept both (suites 2+1 passed, closure_rebinds still gone). New multi_return_call_forwarding_loans.rs. 307 suites.
+- All three: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
+- Suite trajectory: 304 -> 305 -> 306 -> 307. Final main 02557ca8, tree clean.
+- NEXT TICK QUEUE: #3034 (multi-value assign E1002) -> #3099 (complex const ascriptions) -> #3101 (elided struct lit in interface/non-slice slots) -> #2978 (any as concrete type, fixes #2962) -> #2970 (fn-lit error-tail zero-fill) -> #2934 (builtin range bounds) -> #2942 (foreign shapes multi-return) -> #3069 (string for-in rune, fixes #3065) -> #3103 (AND-list registration) -> #3038/#3048/#3023/#3043/#2988/#3039.
