@@ -1079,3 +1079,9 @@ companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.| local-composite-cha
 
 ### n5-zero-map-allocation-sites (the #645 follow-up, #1206 part 1) — ACCEPT
 `make([]T, n[, c])` elements (and the spare capacity a reslice exposes), `make([]map[K]V, n)` elements, and `[N]T` arrays (var, literal, const length, partial literal) are N5 zero values: their maps allocate, so the first write works instead of panicking `assignment to entry in nil map`. No check-site; ACCEPT with a byte-exact EXPECTED-OUTPUT (`spec_n5_zero_maps.rs` diffs it). Corpus: **130 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 88**.
+
+-------------------------------------------------------------------------------
+
+### a5-escape-interproc-write-reject / a5-escape-interproc-controls-accept (C9 one-call-away writes) — REJECT A5 / ACCEPT
+
+A closure passed to a foreign Go call that writes a captured mutable binding through a top-level fn (`bump(m, k)` storing `m[k]`), a pointer-receiver user method (`c.add(k)` / `s.incr()` — Go auto-addresses the captured struct), another local closure (`inner()`), or an inline closure-factory call (`time.after_func(0, make_cb(m))`) was accepted with 0 diagnostics while `go run -race` on the emitted Go reported WARNING: DATA RACE. The inline-store spelling and the named-closure spellings were already REJECT A5 / HYB-E3013; the C9 walk now consults `fn_mutates_param`, pointer-receiver stores, `closure_mutates` and the factory's parameter mutations, so all spellings agree. The ACCEPT twin pins read-only / by-value / closure-local calls that must keep accepting. No verdict on an existing fixture changes. Corpus: **132 programs — ACCEPT 41 · ACCEPT-MANAGED 2 · REJECT 89**.

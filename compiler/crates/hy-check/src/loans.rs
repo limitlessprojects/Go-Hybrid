@@ -893,7 +893,7 @@ impl<'a> Checker<'a> {
     /// Does `decl` mutate its parameter `param` (map insert/delete — the
     /// only A3 events)? Bounded interprocedural scan, fail-closed past the
     /// depth bound and on unknown callees that receive the parameter (#111).
-    fn fn_mutates_param(&self, decl: &FnDecl, param: &str, depth: usize) -> bool {
+    pub(crate) fn fn_mutates_param(&self, decl: &FnDecl, param: &str, depth: usize) -> bool {
         if depth > 3 {
             return true; // fail closed past the bound
         }
