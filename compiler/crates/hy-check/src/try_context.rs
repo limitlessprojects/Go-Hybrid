@@ -25,7 +25,8 @@ use hy_syntax::{
 const E11_PROPAGATING_TARGETS: &[&str] = &["http.handler"];
 
 fn is_builtin_error_type(ck: &Checker<'_>, ty: &TypeExpr) -> bool {
-    if !matches!(ty, TypeExpr::Named { name, .. } if name == "error")
+    let resolved_ty = ck.resolve_type_alias(ty);
+    if !matches!(&resolved_ty, TypeExpr::Named { name, .. } if name == "error")
         || ck.structs.contains_key("error")
         || ck.struct_type_params.contains_key("error")
         || ck.enums.contains_key("error")
