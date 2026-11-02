@@ -221,6 +221,24 @@ fn canonical_numeric_name(name: &str) -> Option<&'static str> {
 
 /// #2771 — `[3]int` yes; `[]int` (slice), `[N]int` (non-constant length), and
 /// named types no — so only genuinely sized arrays are compared.
+fn strip_outer_bracket_dim(ty_str: &str) -> Option<&str> {
+    if !ty_str.starts_with('[') {
+        return None;
+    }
+    let mut depth = 0;
+    for (i, c) in ty_str.char_indices() {
+        if c == '[' {
+            depth += 1;
+        } else if c == ']' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(&ty_str[i + 1..]);
+            }
+        }
+    }
+    None
+}
+
 fn is_sized_array_spelling(s: &str) -> bool {
     let t = s.trim();
     if !t.starts_with('[') {
@@ -543,6 +561,9 @@ struct Collector<'a> {
     /// signature (`None` = not a predeclared numeric spelling). Swapped
     /// together with `fn_results`.
     fn_result_scalars: Vec<Option<&'static str>>,
+    /// #3206 — exact declared Go type spelling of each result of the enclosing
+    /// signature. Swapped together with `fn_results`.
+    fn_result_type_names: Vec<String>,
     /// Lexical nesting depth within loops (`for` / `loop`).
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
@@ -581,6 +602,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_results_error_tail: false,
             scalar_scopes: Vec::new(),
             fn_result_scalars: Vec::new(),
+            fn_result_type_names: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
             defines: Vec::new(),
@@ -875,6 +897,21 @@ impl<'a> Collector<'a> {
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         match unwrap_parens(e) {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::SliceLit { elem: Some(elem_ty), .. } => Some(elem_ty.render()),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                fields
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, ty)| ty.render())
+            }
+            Expr::Index { base, .. } => {
+                let base_ty = self.typed_value_type_name(base)?;
+                strip_outer_bracket_dim(&base_ty).map(|s| s.to_string())
+            }
             _ => None,
         }
     }
@@ -1372,6 +1409,9 @@ impl<'a> Collector<'a> {
         }
         let result_scalars: Vec<Option<&'static str>> =
             f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+        let result_type_names: Vec<String> =
+            f.results.iter().map(|r| r.ty.render()).collect();
+        let outer_type_names = std::mem::replace(&mut self.fn_result_type_names, result_type_names);
         let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
@@ -1389,6 +1429,7 @@ impl<'a> Collector<'a> {
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
         self.fn_result_scalars = outer_scalars;
+        self.fn_result_type_names = outer_type_names;
         self.fn_type_params = outer_tp;
         self.pop_scope();
     }
@@ -2383,6 +2424,10 @@ impl<'a> Collector<'a> {
                 );
                 let result_scalars: Vec<Option<&'static str>> =
                     results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+                let result_type_names: Vec<String> =
+                    results.iter().map(|r| r.ty.render()).collect();
+                let outer_type_names =
+                    std::mem::replace(&mut self.fn_result_type_names, result_type_names);
                 let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
@@ -2396,6 +2441,7 @@ impl<'a> Collector<'a> {
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
                 self.fn_result_scalars = outer_scalars;
+                self.fn_result_type_names = outer_type_names;
                 self.pop_scope();
             }
             Expr::Paren { inner, .. } => self.expr(inner),
@@ -4191,6 +4237,7 @@ impl<'a> Collector<'a> {
                     if !self.report_return_conflict(v, &got, w, v.span()) {
                         let got_s = self.typed_value_scalar(v);
                         self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                        self.report_array_return_mismatch(v, i, v.span());
                     }
                 }
                 return;
@@ -4223,6 +4270,7 @@ impl<'a> Collector<'a> {
             if !self.report_return_conflict(v, &got, w, v.span()) {
                 let got_s = self.typed_value_scalar(v);
                 self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                self.report_array_return_mismatch(v, i, v.span());
             }
         }
     }
@@ -4260,6 +4308,22 @@ impl<'a> Collector<'a> {
             ),
             "Go has no implicit conversion between typed numeric values; write an explicit conversion (`float64(n)`) when a conversion is intended",
         );
+    }
+
+    fn report_array_return_mismatch(&mut self, val: &Expr, idx: usize, span: Span) {
+        let want_ty = self.fn_result_type_names.get(idx).map(|s| s.as_str());
+        let got_ty = self.typed_value_type_name(val);
+        if self.sized_array_names_differ(want_ty, got_ty.as_deref()) {
+            let want = want_ty.unwrap_or("");
+            let got = got_ty.as_deref().unwrap_or("");
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot return a value of type `{got}` from a function declaring `{want}` — Go refuses `cannot use ... (variable of type {got}) as {want} value in return statement` (HYB-E1002)"
+                ),
+                "a returned value must match its declared result type; fixed-size array lengths must be identical",
+            );
+        }
     }
 
     fn report_return_conflict(&mut self, val: &Expr, got: &OpKind, want: &OpKind, span: Span) -> bool {
@@ -4354,6 +4418,7 @@ impl<'a> Collector<'a> {
                             (Some(d), Some(s)) => {
                                 crate::const_overflow::canonical_int_type_name(d)
                                     != crate::const_overflow::canonical_int_type_name(s)
+                                    || self.sized_array_names_differ(Some(d.as_str()), Some(s.as_str()))
                             }
                             _ => false,
                         };
@@ -4437,18 +4502,23 @@ impl<'a> Collector<'a> {
             let dst_scalar = self.append_dest_scalar(&first.value);
             let got_scalar = self.typed_value_scalar(&extra.value);
             let scalar_mismatch = matches!((dst_scalar, got_scalar), (Some(d), Some(g)) if d != g);
-            if kinds_conflict(&elem, &got) || int_to_float_conflict || scalar_mismatch {
+            let got_ty = self.typed_value_type_name(&extra.value);
+            let array_len_mismatch =
+                self.sized_array_names_differ(dst_elem_ty.as_deref(), got_ty.as_deref());
+            if kinds_conflict(&elem, &got) || int_to_float_conflict || scalar_mismatch || array_len_mismatch {
                 let dst_label = match dst_elem_ty.as_deref() {
                     Some(d) => format!("[]{}", d),
                     None => self.kind_of_expr(&first.value).label().to_string(),
                 };
-                let got_label = match got_scalar {
-                    Some(s) => s.to_string(),
-                    None => got.label().to_string(),
+                let got_label = match (got_scalar, got_ty.as_deref()) {
+                    (Some(s), _) => s.to_string(),
+                    (None, Some(t)) if is_sized_array_spelling(t) => t.to_string(),
+                    _ => got.label().to_string(),
                 };
-                let elem_label = match dst_scalar {
-                    Some(d) => d.to_string(),
-                    None => elem.label().to_string(),
+                let elem_label = match (dst_scalar, dst_elem_ty.as_deref()) {
+                    (Some(d), _) => d.to_string(),
+                    (None, Some(t)) if is_sized_array_spelling(t) => t.to_string(),
+                    _ => elem.label().to_string(),
                 };
                 self.emit_e1002(
                     extra.value.span(),
@@ -5725,10 +5795,15 @@ impl<'a> Collector<'a> {
             // or slice literal`).
             let scalar_mismatch = self
                 .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            let got_ty = self.typed_value_type_name(item);
+            let array_len_mismatch = self.sized_array_names_differ(
+                Some(resolved_ty.render().as_str()),
+                got_ty.as_deref(),
+            );
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch {
+            if ik == expected && !scalar_mismatch && !array_len_mismatch {
                 continue;
             }
             let is_untyped_int_to_float = expected == OpKind::Float
@@ -5736,16 +5811,19 @@ impl<'a> Collector<'a> {
                 && self.is_untyped_int_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
-                || scalar_mismatch;
+                || scalar_mismatch
+                || array_len_mismatch;
             if !conflict {
                 continue;
             }
+            let fallback_label = ik.label();
+            let got_label = got_ty.as_deref().unwrap_or(&fallback_label);
             self.emit_e1002(
                 item.span(),
                 format!(
                     "cannot use `{}` (type `{}`) as `{}` value in array literal (HYB-E1002)",
                     item.render(),
-                    ik.label(),
+                    got_label,
                     elem_ty.render()
                 ),
                 "every element of an array composite literal `[N]T{...}` / `[...]T{...}` must be assignable to the element type `T`",
@@ -5801,10 +5879,15 @@ impl<'a> Collector<'a> {
             // #2788: same width-collapse escape as the array arm above.
             let scalar_mismatch = self
                 .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            let got_ty = self.typed_value_type_name(item);
+            let array_len_mismatch = self.sized_array_names_differ(
+                Some(resolved_ty.render().as_str()),
+                got_ty.as_deref(),
+            );
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch {
+            if ik == expected && !scalar_mismatch && !array_len_mismatch {
                 continue;
             }
             if expected == OpKind::Float
@@ -5818,16 +5901,19 @@ impl<'a> Collector<'a> {
                 && self.is_untyped_int_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
-                || scalar_mismatch;
+                || scalar_mismatch
+                || array_len_mismatch;
             if !conflict {
                 continue;
             }
+            let fallback_label = ik.label();
+            let got_label = got_ty.as_deref().unwrap_or(&fallback_label);
             self.emit_e1002(
                 item.span(),
                 format!(
                     "cannot use `{}` (type `{}`) as `{}` value in slice literal (HYB-E1002)",
                     item.render(),
-                    ik.label(),
+                    got_label,
                     elem_ty.render()
                 ),
                 "every element of a slice composite literal `[]T{...}` must be assignable to the element type `T`",
