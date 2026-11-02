@@ -6140,6 +6140,15 @@ impl<'a> Checker<'a> {
         self.scan_block_const_writes(st, body, false);
     }
 
+    pub(crate) fn check_expr_closure_const_writes(&mut self, st: &FnState, expr: &Expr) {
+        let mut fnlits = Vec::new();
+        walk::expr_fnlits(expr, &mut fnlits);
+        for flit in fnlits {
+            let mut merged = st.clone();
+            self.scan_closure_body(&mut merged, flit, &HashSet::new());
+        }
+    }
+
     fn scan_block_const_writes(&mut self, st: &FnState, body: &Block, check_writes: bool) {
         let mut cst = st.clone();
         let flat = walk::flatten_with_results(body, &cst.named_results);
