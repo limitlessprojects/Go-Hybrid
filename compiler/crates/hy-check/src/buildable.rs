@@ -697,6 +697,49 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #3136 — element type name of a slice or array, including struct fields.
+    fn slice_or_array_element_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if tname.starts_with('[') {
+                        if let Some(rb) = tname.find(']') {
+                            return Some(tname[rb + 1..].trim().to_string());
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                let (_, fty) = fields.iter().find(|(n, _)| n == name)?;
+                match fty {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        Some(elem.render())
+                    }
+                    _ => None,
+                }
+            }
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
+            Expr::Slice { base, .. } => self.slice_or_array_element_type_name(base),
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.slice_or_array_element_type_name(&first.value);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// A name that shadows checked defines but is not itself checked.
     fn exempt(&mut self, name: &str) {
         if name != "_" {
@@ -984,6 +1027,16 @@ impl<'a> Collector<'a> {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
             },
+            // #3136: slice and array index expressions carry the element's concrete scalar width
+            Expr::Index { base, .. } => {
+                let elem_ty = self.slice_or_array_element_type_name(base);
+                elem_ty.as_deref().and_then(canonical_numeric_name)
+            }
+            // #3136: struct field reads carry the field's declared/instantiated scalar width
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                self.struct_field_scalar(&bk, name)
+            }
             _ => None,
         }
     }
@@ -2921,6 +2974,21 @@ impl<'a> Collector<'a> {
             .iter()
             .find(|(n, _)| n == field)
             .map(|(_, ty)| self.kind_of_ty_with_subst(ty, &subst, 0))
+    }
+
+    /// #3136 — the exact numeric scalar of a struct field (including generic substitutions).
+    fn struct_field_scalar(&self, k: &OpKind, field: &str) -> Option<&'static str> {
+        let full_name = self.struct_name(k)?;
+        let base_name = Checker::base_named_type_str(&full_name);
+        let fields = self.ck.structs.get(base_name)?;
+        let subst = self.struct_type_arg_map(&full_name);
+        let (_, fty) = fields.iter().find(|(n, _)| n == field)?;
+        if let TypeExpr::Named { name, .. } = fty {
+            if let Some(concrete) = subst.get(name.as_str()) {
+                return canonical_numeric_name(concrete);
+            }
+        }
+        self.scalar_of_ty(fty)
     }
 
     pub(crate) fn kind_of_expr(&self, e: &Expr) -> OpKind {
