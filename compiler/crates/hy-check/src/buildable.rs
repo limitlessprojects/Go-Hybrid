@@ -897,14 +897,33 @@ impl<'a> Collector<'a> {
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
     fn scalar_of_ty(&self, ty: &TypeExpr) -> Option<&'static str> {
+        self.scalar_of_ty_depth(ty, 0)
+    }
+
+    /// #3125 - a type alias is an alternative SPELLING of its underlying
+    /// type, so `type my_i8 = int8` has width `int8` and must not fail open.
+    /// Previously any name present in `type_aliases` returned `None`, so the
+    /// whole width subsystem went silent for alias-typed bindings and
+    /// `var a my_i8 = 1; var b int64 = a` passed `hyb check` then failed
+    /// `go build` - Row 13 BUILDABLE.
+    ///
+    /// Structs and enums keep returning `None`: their width is not a scalar
+    /// width, and the existing non-alias behaviour for them is unchanged.
+    /// The depth bound makes a self-referential or cyclic alias fail open
+    /// instead of recursing forever.
+    fn scalar_of_ty_depth(&self, ty: &TypeExpr, depth: usize) -> Option<&'static str> {
+        const MAX_ALIAS_DEPTH: usize = 8;
         let TypeExpr::Named { name, .. } = ty else {
             return None;
         };
-        if self.ck.structs.contains_key(name.as_str())
-            || self.ck.enums.contains_key(name.as_str())
-            || self.ck.type_aliases.contains_key(name.as_str())
-        {
+        if self.ck.structs.contains_key(name.as_str()) || self.ck.enums.contains_key(name.as_str()) {
             return None;
+        }
+        if let Some(target) = self.ck.type_aliases.get(name.as_str()) {
+            if depth >= MAX_ALIAS_DEPTH {
+                return None;
+            }
+            return self.scalar_of_ty_depth(target, depth + 1);
         }
         canonical_numeric_name(name)
     }
@@ -1500,9 +1519,9 @@ impl<'a> Collector<'a> {
                         format!(
                             "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
                             l.names[0],
-                            want.label(),
-                            vk.label(),
-                            want.label()
+                            t.render(),
+                            self.typed_value_type_name(&l.values[0]).unwrap_or_else(|| vk.label().to_string()),
+                            t.render()
                         ),
                         "the declared type is fixed; write an explicit conversion when a conversion is intended",
                     );
