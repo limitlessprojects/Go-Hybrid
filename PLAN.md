@@ -1,5 +1,11 @@
 # Hybrid Language: Development Plan
 
+## Contributor: dependency manifest conflict checks (2026-11-02)
+
+- On `88e75e6`, the conflict-marker guard skips `Cargo.lock`, `go.mod` and `go.sum` because their extensions are not in its text allowlist. Add these specific text filenames without widening the extension filter to arbitrary binary lock files.
+- Three CLI regression cases fail before the fix; all 29 focused tests pass after it, including clean manifest and existing binary/unknown-extension controls. Marker and test-registration guards, Python compilation and `git diff --check` pass.
+- Compiler workspace/corpus/differential checks were not run: Go and Cargo are unavailable in this environment. Hosted CI, maintainer review and any bounty award remain pending.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - `hyb generate` excludes sibling filenames reported by `go list -e -find -json .` as `IgnoredGoFiles`, once per directory and invocation. Modern/legacy constraints, platform suffixes and `GOFLAGS` tags use Go's own selection; existing production-package conflict checks remain. This is CLI tooling correctness, not a language/checker soundness change; PR #1900's separate dot/underscore-prefix fix is untouched.
