@@ -5885,6 +5885,21 @@ impl<'a> Collector<'a> {
             return;
         }
         let Some(head) = untyped_slice_head_ty(first) else {
+            // `[x]`, `[f()]`, `[a + b]`, `[s.f]`, `[arr[i]]`: hy-emit's
+            // `infer_slice_head` reads the element type from a basic literal,
+            // a sign, parentheses, or a typed struct literal — nothing else.
+            // A non-literal head used to be skipped here and then refused at
+            // `hyb build` ("untyped slice literal of `x` — spell the element
+            // type"), so `hyb check` accepted a program that could not be
+            // emitted (GUARANTEES Row 13, BUILDABLE).
+            self.emit_e1002(
+                first.span(),
+                format!(
+                    "an untyped slice literal cannot infer its element type from `{}` — the emitter reads it only from a literal or a typed struct literal (HYB-E1002)",
+                    first.render()
+                ),
+                "spell the element type: `[]int{x}`, `[]T{f()}`, `[]T{s.f}`, …",
+            );
             return;
         };
         let head_text = head.render();
