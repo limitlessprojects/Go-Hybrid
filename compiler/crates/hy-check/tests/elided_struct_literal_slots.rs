@@ -58,6 +58,9 @@ fn elided_struct_literal_outside_an_element_slot_rejects() {
         "fn main() { xs := [point{x: 1}, {x: 2}]\n fmt.println(\"{len(xs)}\") }",
         // closure bodies are emitted too
         "fn main() { f := fn() point { return {x: 1} }\n fmt.println(\"{f().x}\") }",
+        "fn main() { xs := []any{{x: 1}}\n fmt.println(\"{len(xs)}\") }",
+        "fn main() { m := map[string]any{\"a\": {x: 1}}\n fmt.println(\"{len(m)}\") }",
+        "fn main() { ps := []point{[{x: 1}]}\n fmt.println(\"{len(ps)}\") }",
     ] {
         assert_rejects(&format!("{POINT}{body}\n"), "type-elided struct literal");
     }
