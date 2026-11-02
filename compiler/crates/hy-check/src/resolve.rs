@@ -155,7 +155,7 @@ impl<'a> Scan<'a> {
         // parameter is a legal spelling there (test
         // resolve_pkg_typeparam_and_self_const, issue #2666 family). Only a bracket
         // on a VALUE head can be an index whose key must resolve (#2423).
-        if self.file_decls.contains(head) {
+        if self.file_decls.contains(head) && !is_predeclared_type_name(head) {
             return;
         }
 
