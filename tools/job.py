@@ -85,8 +85,11 @@ def kaggle_slug():
 # ---------------------------------------------------------------- kaggle tier
 def kaggle_submit(jobdir):
     head = resolve_head()
-    with open(os.path.join(jobdir, "job.json")) as f:
+    job_path = os.path.join(jobdir, "job.json")
+    with open(job_path) as f:
         job = json.load(f)
+    if not isinstance(job, dict) or not isinstance(job.get("job"), str) or not job["job"].strip():
+        sys.exit("{}: invalid job.json: must be an object with non-empty 'job' string".format(job_path))
     job["sha"] = head  # run the code we just pushed
     payload = json.dumps(job, indent=2)
 
@@ -101,7 +104,7 @@ def kaggle_submit(jobdir):
     src = original_script.decode("utf-8")
     if INJECT_MARKER not in src:
         sys.exit("worker/script.py missing inject marker")
-    injected = src.replace(INJECT_MARKER, "JOB_JSON = " + repr(payload))
+    injected = src.replace(INJECT_MARKER, "JOB_JSON = " + repr(payload), 1)
     sidecar = os.path.join(WORKER_DIR, "job.json")
     try:
         with open(sidecar, "rb") as f:
@@ -167,10 +170,13 @@ def kaggle_wait(minutes, slug=None):
     while time.time() < deadline:
         rc, out = sh("{} kernels status {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(slug)), timeout=60)
         polls += 1
-        try:
-            state = out.split('"')[-2].split(".")[-1].upper()  # '"KernelWorkerStatus.RUNNING"'
-        except IndexError:
-            state = "?"  # CLI error text: keep polling, do not trust
+        if rc != 0:
+            state = "?"
+        else:
+            try:
+                state = out.split('"')[-2].split(".")[-1].upper()  # '"KernelWorkerStatus.RUNNING"'
+            except IndexError:
+                state = "?"  # CLI error text: keep polling, do not trust
         print("[poll {}] {}".format(polls, state), flush=True)
         if state in ACTIVE_STATES:
             saw_active = True
@@ -354,6 +360,10 @@ def actions_fetch(run_id, jobdir):
         return 1
     os.makedirs(os.path.join(jobdir, "result"), exist_ok=True)
     for a in arts:
+        name = a.get("name") if isinstance(a, dict) else None
+        if not name or not isinstance(name, str) or "/" in name or "\\" in name or name in (".", ".."):
+            print("actions fetch: unsafe or empty artifact name {!r}".format(name), file=sys.stderr)
+            return 1
         url = a["archive_download_url"]
         dest = os.path.join(jobdir, "result", a["name"] + ".zip")
         req = urllib.request.Request(url)

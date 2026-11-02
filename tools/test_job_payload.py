@@ -157,6 +157,37 @@ class KagglePayloadTests(unittest.TestCase):
     def test_quotes_unicode_backslashes_and_newlines_round_trip(self):
         self.submit('python3 -c \'print("""caf\u00e9\\nC:\\\\temp""")\'\n# second line')
 
+    def test_invalid_job_json_fails_before_modifying_worker(self):
+        for bad_job in ([], "invalid", {}, {"job": ""}, {"job": "  "}, {"job": 123}):
+            with self.subTest(bad_job=bad_job), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                worker = root / "worker"
+                worker.mkdir()
+                script = worker / "script.py"
+                script.write_text(TEMPLATE, encoding="utf-8")
+                jobdir = root / "job"
+                jobdir.mkdir()
+                (jobdir / "job.json").write_text(json.dumps(bad_job), encoding="utf-8")
+                with mock.patch.object(job_tool, "WORKER_DIR", str(worker)), \
+                     mock.patch.object(job_tool, "resolve_head", return_value="a" * 40):
+                    with self.assertRaises(SystemExit):
+                        job_tool.kaggle_submit(str(jobdir))
+                self.assertEqual(script.read_text(encoding="utf-8"), TEMPLATE)
+                self.assertFalse((worker / "job.json").exists())
+                self.assertFalse((jobdir / "submitted.json").exists())
+
+    def test_kaggle_wait_nonzero_rc_treated_as_unknown_state(self):
+        calls = []
+        def fake_sh(cmd, timeout=60):
+            calls.append(cmd)
+            # return nonzero rc with diagnostic text mentioning a quoted state token
+            return 1, 'CLI error "KernelWorkerStatus.COMPLETE"'
+        with mock.patch.object(job_tool, "sh", side_effect=fake_sh), \
+             mock.patch.object(job_tool.time, "sleep", return_value=None), \
+             mock.patch.object(job_tool.time, "time", side_effect=[0, 1, 70]):
+            res = job_tool.kaggle_wait(1, slug="user/kernel")
+            self.assertEqual(res, 2)  # timeout, not premature exit 0 COMPLETE
+
     def test_failed_push_restores_template_and_does_not_record_submission(self):
         self.submit("python3 -c \"print('''hello''')\"", push_exit=1)
 
