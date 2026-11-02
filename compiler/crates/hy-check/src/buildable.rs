@@ -675,19 +675,42 @@ impl<'a> Collector<'a> {
         match bare {
             Expr::Ident { name, .. } => {
                 if let Some(tname) = self.lookup_type_name(name) {
-                    if let Some(elem) = tname.strip_prefix("[]") {
-                        return Some(elem.to_string());
+                    let trimmed = tname.trim();
+                    if trimmed.starts_with('[') {
+                        if let Some(idx) = trimmed.find(']') {
+                            return Some(trimmed[idx + 1..].trim().to_string());
+                        }
                     }
                 }
                 None
             }
-            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
+            Expr::SliceLit { elem: Some(t), .. } => {
+                let rendered = t.render();
+                let trimmed = rendered.trim();
+                if trimmed.starts_with('[') {
+                    if let Some(idx) = trimmed.find(']') {
+                        return Some(trimmed[idx + 1..].trim().to_string());
+                    }
+                }
+                Some(rendered)
+            }
             Expr::Slice { base, .. } => self.slice_element_type_name(base),
             Expr::Call { callee, args, .. } => {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                     if name == "make" {
                         if let Some(first) = args.first() {
                             return self.slice_element_type_name(&first.value);
+                        }
+                    }
+                    if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                        if fd.results.len() == 1 {
+                            let r_ty = fd.results[0].ty.render();
+                            let trimmed = r_ty.trim();
+                            if trimmed.starts_with('[') {
+                                if let Some(idx) = trimmed.find(']') {
+                                    return Some(trimmed[idx + 1..].trim().to_string());
+                                }
+                            }
                         }
                     }
                 }
@@ -6633,25 +6656,48 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if copy_element_kinds_conflict(dst_elem, src_elem) {
+                        let dst_elem_ty = self.slice_element_type_name(dst_arg);
+                        let src_elem_ty = self.slice_element_type_name(src_arg);
+
+                        let elem_types_mismatch = match (&dst_elem_ty, &src_elem_ty) {
+                            (Some(d), Some(s)) => {
+                                let d_canon = canonical_numeric_name(d).unwrap_or(d.as_str());
+                                let s_canon = canonical_numeric_name(s).unwrap_or(s.as_str());
+                                d_canon != s_canon
+                            }
+                            _ => false,
+                        };
+
+                        if copy_element_kinds_conflict(dst_elem, src_elem) || elem_types_mismatch {
+                            let d_label = dst_elem_ty
+                                .unwrap_or_else(|| dst_elem.label());
+                            let s_label = src_elem_ty
+                                .unwrap_or_else(|| src_elem.label());
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "arguments to `copy` have different element types: `{}` and `{}` (HYB-E1002)",
-                                    dst_elem.label(),
-                                    src_elem.label()
+                                    d_label,
+                                    s_label
                                 ),
                                 "arguments to `copy` must have identical element types",
                             );
                         }
                     }
                     (OpKind::Slice(dst_elem), OpKind::Str) => {
-                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                        let dst_elem_ty = self.slice_element_type_name(dst_arg);
+                        let is_byte = match &dst_elem_ty {
+                            Some(name) => canonical_numeric_name(name) == Some("uint8"),
+                            None => matches!(**dst_elem, OpKind::Unknown),
+                        };
+                        if !is_byte {
+                            let d_label = dst_elem_ty
+                                .unwrap_or_else(|| dst_elem.label());
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "cannot copy string into slice with element type `{}` (HYB-E1002)",
-                                    dst_elem.label()
+                                    d_label
                                 ),
                                 "copying from a string requires a byte slice destination (`[]byte`)",
                             );
