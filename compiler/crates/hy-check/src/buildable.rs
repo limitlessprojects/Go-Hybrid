@@ -75,6 +75,12 @@ pub(crate) enum OpKind {
     /// any value), and assigning *from* one stays fail-open because type
     /// assertions are not modelled.
     Interface,
+    /// The predeclared error interface (#3064).
+    ///
+    /// Resolved, like Interface, so it cannot fall through to Unknown.
+    /// Unlike any, Go refuses to let an error value stand in for a
+    /// concrete type, which is what #3064 let through.
+    Error,
     Int,
     Float,
     Bool,
@@ -106,6 +112,7 @@ impl OpKind {
         match self {
             OpKind::Unknown => "unknown".to_string(),
             OpKind::Interface => "any".to_string(),
+            OpKind::Error => "error".to_string(),
             OpKind::Int => "int".to_string(),
             OpKind::Float => "float64".to_string(),
             OpKind::Bool => "bool".to_string(),
@@ -165,6 +172,11 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Float, Int) => false,
         // A struct whose name did not resolve is not evidence of a mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
+        // #3064: a named type with an Error() method is a legal error
+        // value, so struct/pointer pairings prove nothing either way.
+        // Scalars fall through to the mismatch arm, which is the point.
+        (Error, Struct(_)) | (Struct(_), Error) => false,
+        (Error, Pointer(_)) | (Pointer(_), Error) => false,
         (a, b) if a == b => false,
         // Same container shape: recurse into the element kinds.
         (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
@@ -291,6 +303,11 @@ fn copy_element_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
         (Unknown, _) | (_, Unknown) => false,
         // Struct whose name did not resolve is not evidence of mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
+        // #3064: a named type with an Error() method is a legal error
+        // value, so struct/pointer pairings prove nothing either way.
+        // Scalars fall through to the mismatch arm, which is the point.
+        (Error, Struct(_)) | (Struct(_), Error) => false,
+        (Error, Pointer(_)) | (Pointer(_), Error) => false,
         (a, b) if a == b => false,
         (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) | (Pointer(a), Pointer(b)) => {
             copy_element_kinds_conflict(a, b)
@@ -419,6 +436,9 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // kind model (it may hold anything), so a member lookup on it cannot
         // claim absence — same fail-open as `kinds_conflict`'s Interface arm.
         OpKind::Interface => false,
+        // #3064: error is a RESOLVED interface with exactly one member,
+        // Error(), so a lookup on it is evidence.
+        OpKind::Error => true,
         OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str => true,
         OpKind::Void => false,
         // A struct whose NAME did not resolve cannot have its members looked up.
@@ -2771,6 +2791,7 @@ impl<'a> Collector<'a> {
             // #682 U9-U12: `any` is a resolved interface type, not an
             // unresolved one, so it must not fall through to `Unknown`.
             "any" | "interface{}" => OpKind::Interface,
+            "error" => OpKind::Error,
             "bool" => OpKind::Bool,
             "string" => OpKind::Str,
             "float32" | "float64" | "f32" | "f64" => OpKind::Float,
