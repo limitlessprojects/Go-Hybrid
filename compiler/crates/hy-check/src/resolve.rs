@@ -114,7 +114,7 @@ impl<'a> Scan<'a> {
                     self.file_decls.contains(head) && !self.local_decls.contains(head);
                 if !generic_callee {
                     if let Some(inside) = rest.strip_suffix(']') {
-                        self.check_folded_bracket(inside, span);
+                        self.check_folded_bracket(head, inside, span);
                     }
                 }
                 return;
@@ -149,7 +149,16 @@ impl<'a> Scan<'a> {
     /// the resolved set already carries every legal spelling (predeclared types,
     /// fn type parameters, file-level type/fn names). Compound spellings
     /// (`[]int`, `map[string]int`) are left to the type walkers.
-    fn check_folded_bracket(&mut self, inside: &str, span: Span) {
+    fn check_folded_bracket(&mut self, head: &str, inside: &str, span: Span) {
+        // A bracket on a name this file declares as a type or a function is a TYPE
+        // ARGUMENT (`id[t](x)`, `box[t]{...}`), not an index on a value: a type
+        // parameter is a legal spelling there (test
+        // resolve_pkg_typeparam_and_self_const, issue #2666 family). Only a bracket
+        // on a VALUE head can be an index whose key must resolve (#2423).
+        if self.file_decls.contains(head) {
+            return;
+        }
+
         let trimmed = inside.trim();
         if trimmed.is_empty()
             || !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
