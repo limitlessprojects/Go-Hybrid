@@ -102,6 +102,23 @@ impl OpKind {
         matches!(self, OpKind::Int | OpKind::Float)
     }
 
+    /// Whether Go accepts a bare `nil` in a slot of this kind. Unresolved
+    /// kinds (`Unknown`, `Void`) and `option[T]` stay fail-open.
+    fn accepts_nil(&self) -> bool {
+        matches!(
+            self,
+            OpKind::Unknown
+                | OpKind::Interface
+                | OpKind::Slice(_)
+                | OpKind::Map(_, _)
+                | OpKind::Chan(_)
+                | OpKind::Pointer(_)
+                | OpKind::Fn(..)
+                | OpKind::Option(_)
+                | OpKind::Void
+        )
+    }
+
     fn label(&self) -> String {
         match self {
             OpKind::Unknown => "unknown".to_string(),
@@ -629,6 +646,18 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
         c.finish();
         c.diags
     };
+    // The N1 sweep (`check_composite_nils`, HYB-E4001) already reports `nil`
+    // in some composite-literal slots; keep that one and drop the duplicate
+    // E1002 for the same `nil` span.
+    let diags = diags.into_iter().filter(|d| {
+        !(d.code == "HYB-E1002"
+            && d.message.starts_with("cannot use `nil` as `")
+            && ck
+                .diags
+                .iter()
+                .any(|o| o.code == "HYB-E4001" && o.span == d.span))
+    });
+    let diags: Vec<_> = diags.collect();
     ck.diags.extend(diags);
 }
 
@@ -3251,6 +3280,34 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// `nil` written into a composite-literal slot whose type Go cannot
+    /// initialise with `nil` (`[]int{nil}`, `map[string]int{"k": nil}`).
+    fn emit_nil_lit_item(&mut self, span: Span, slot_ty: &TypeExpr, what: &str) {
+        let (place, note) = match what {
+            "map key" => (
+                "map key".to_string(),
+                "only pointers, slices, maps, channels, interfaces, and function types may be initialized with `nil`",
+            ),
+            "map" => (
+                "map value".to_string(),
+                "only pointers, slices, maps, channels, interfaces, and function types may be initialized with `nil`",
+            ),
+            other => (
+                format!("{other} literal"),
+                "only pointers, slices, maps, channels, interfaces, and function types may be initialized with `nil`",
+            ),
+        };
+        self.emit_e1002(
+            span,
+            format!(
+                "cannot use `nil` as `{}` value in {} (HYB-E1002)",
+                slot_ty.render(),
+                place
+            ),
+            note,
+        );
+    }
+
     fn emit_e2005(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E2005", self.path.clone(), span, msg)
@@ -5684,6 +5741,9 @@ impl<'a> Collector<'a> {
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                if !expected.accepts_nil() {
+                    self.emit_nil_lit_item(item.span(), elem_ty, "array");
+                }
                 continue;
             }
             if self.non_single_value_count(item).is_some() {
@@ -5765,6 +5825,9 @@ impl<'a> Collector<'a> {
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                if !expected.accepts_nil() {
+                    self.emit_nil_lit_item(item.span(), elem_ty, "slice");
+                }
                 continue;
             }
             if self.non_single_value_count(item).is_some() {
@@ -5924,6 +5987,11 @@ impl<'a> Collector<'a> {
         let exp_val = self.kind_of_ty(&resolved_val, 0);
         for (k, v) in entries {
             if exp_key != OpKind::Unknown && exp_key != OpKind::Interface && self.non_single_value_count(k).is_none() {
+                if matches!(unwrap_parens(k), Expr::Lit { kind: LitKind::Nil, .. }) {
+                    if !exp_key.accepts_nil() {
+                        self.emit_nil_lit_item(k.span(), key_ty, "map key");
+                    }
+                }
                 let kk = self.kind_of_expr(k);
                 // #2788: a typed key of another concrete numeric width.
                 let scalar_mismatch = self
@@ -5950,6 +6018,9 @@ impl<'a> Collector<'a> {
             if exp_val != OpKind::Unknown && exp_val != OpKind::Interface && self.non_single_value_count(v).is_none() {
                 let bare_v = unwrap_parens(v);
                 if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
+                    if !exp_val.accepts_nil() {
+                        self.emit_nil_lit_item(v.span(), val_ty, "map");
+                    }
                     continue;
                 }
                 let vk = self.kind_of_expr(v);
