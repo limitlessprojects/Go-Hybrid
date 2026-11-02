@@ -70,6 +70,41 @@ MISSING_MEMBER_DWARF_OUTPUT = """
     DW_AT_data_member_location: 112
 """
 
+INDIRECT_STRP_AND_UCONST_DWARF_OUTPUT = """
+ <1><50>: Abbrev Number: 9 (DW_TAG_structure_type)
+    DW_AT_name        : (indirect string, offset: 0x10): runtime.g
+    DW_AT_declaration : 1
+ <2><58>: Abbrev Number: 0
+ <1><100>: Abbrev Number: 1 (DW_TAG_structure_type)
+    DW_AT_name        : (indirect string, offset: 0x10): runtime.g
+    DW_AT_byte_size   : 376
+ <2><110>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : (indirect string, offset: 0x20): stack
+    DW_AT_data_member_location: 2 byte block: 23 0 \t(DW_OP_plus_uconst: 0)
+ <2><120>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : (indirect string, offset: 0x30): stackguard0
+    DW_AT_data_member_location: 2 byte block: 23 10 \t(DW_OP_plus_uconst: 16)
+ <2><130>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : (indirect string, offset: 0x40): m
+    DW_AT_data_member_location: 2 byte block: 23 30 \t(DW_OP_plus_uconst: 48)
+ <2><140>: Abbrev Number: 0
+ <1><200>: Abbrev Number: 1 (DW_TAG_structure_type)
+    DW_AT_name        : (indexed string: 0x05): runtime.m
+    DW_AT_byte_size   : 504
+ <2><210>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : g0
+    DW_AT_data_member_location: 2 byte block: 23 0 \t(DW_OP_plus_uconst: 0)
+ <2><220>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : curg
+    DW_AT_data_member_location: 2 byte block: 23 18 \t(DW_OP_plus_uconst: 24)
+ <2><230>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : id
+    DW_AT_data_member_location: 2 byte block: 23 68 \t(DW_OP_plus_uconst: 104)
+ <2><240>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : locks
+    DW_AT_data_member_location: 2 byte block: 23 70 \t(DW_OP_plus_uconst: 112)
+"""
+
 
 class ExtractOffsetsTests(unittest.TestCase):
     def test_readelf_non_zero_fails(self):
@@ -123,6 +158,27 @@ class ExtractOffsetsTests(unittest.TestCase):
         self.assertIn("g_stack_lo       = 0", output)
         self.assertIn("g_stack_hi       = 8", output)
         self.assertIn("m_g0             = 0", output)
+        self.assertIn("m_curg           = 24", output)
+        self.assertIn("m_id             = 104", output)
+        self.assertIn("m locks          = 112", output)
+
+    def test_indirect_strings_uconst_blocks_and_forward_declarations_succeed(self):
+        proc = subprocess.CompletedProcess(
+            ["readelf", "--debug-dump=info", "test_binary"],
+            returncode=0,
+            stdout=INDIRECT_STRP_AND_UCONST_DWARF_OUTPUT,
+            stderr="",
+        )
+        stdout_buf = io.StringIO()
+        with patch.object(extractor.subprocess, "run", return_value=proc):
+            with contextlib.redirect_stdout(stdout_buf):
+                extractor.main("test_binary")
+        output = stdout_buf.getvalue()
+        self.assertIn("# runtime.g size=376  runtime.m size=504  (from test_binary)", output)
+        self.assertIn("g_m              = 48", output)
+        self.assertIn("g_stackguard0    = 16", output)
+        self.assertIn("g_stack_lo       = 0", output)
+        self.assertIn("g_stack_hi       = 8", output)
         self.assertIn("m_curg           = 24", output)
         self.assertIn("m_id             = 104", output)
         self.assertIn("m locks          = 112", output)
