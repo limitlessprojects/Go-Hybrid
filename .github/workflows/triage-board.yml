@@ -21,11 +21,29 @@ jobs:
     steps:
       - name: Checkout (pinned v4)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Scan (one snapshot for the board and the labels)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 tools/triage_bot.py --token-env GITHUB_TOKEN scan --out /tmp/triage --jobs 8
       - name: Refresh triage board issue
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python3 tools/triage_bot.py --token-env GITHUB_TOKEN board --post
+          python3 tools/triage_bot.py --token-env GITHUB_TOKEN board --post --from-scan /tmp/triage/TRIAGE.json
+      - name: Apply triage labels
+        # CONTRIBUTING.md and queue_sweeper.py both state that the daily board
+        # promotes land-candidates to triage:pareto, which is what keeps them out
+        # of the 5-day sweep. classify() computes that label, but nothing wrote
+        # it: the sweep protects only {triage:wildcard-hold, triage:pareto,
+        # triage:keep}, and bot:land-candidate is not one of them, so every
+        # scored PR stayed unprotected (issue #2218). This step is that missing
+        # call. It reuses the scan above instead of re-fetching, so it costs one
+        # pagination pass plus the label POSTs, not a second full scan.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 tools/triage_bot.py --token-env GITHUB_TOKEN labels --apply --from-scan /tmp/triage/TRIAGE.json
       - name: Approve pending first-time-contributor CI runs (daily quota)
         # Unblocks the per-PR workflows (ci / shepherd-board / shepherd-preflight)
         # that GitHub holds in action_required for new contributors. Runs AFTER the
