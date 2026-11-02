@@ -1785,6 +1785,12 @@ impl<'a> Collector<'a> {
                 }
             }
         }
+        // #3137 rows 7-8: an enum value only fits its own enum type.
+        if l.values.len() == l.names.len() {
+            for (name, val) in l.names.iter().zip(&l.values) {
+                self.check_enum_value_target(name, l.ty.as_ref(), val);
+            }
+        }
         // Composed resolution (pr-430 x landed pr-475): #475's track_read
         // set (Define|Let|Var|Const) drives which locals get unused-read
         // tracking; #430's operand-kind inference runs for EVERY name so
@@ -1815,6 +1821,10 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                }
+                // #3137: `c := color.red` records `c` as a `color` value.
+                else if let Some(en) = self.enum_of_expr(val) {
+                    self.bind_type_name(name, en);
                 }
             }
         }
@@ -2532,6 +2542,7 @@ impl<'a> Collector<'a> {
             // interface is not a struct — so reject the base explicitly.
             Expr::Field { base, name, span } => {
                 self.check_pointer_method_receiver(base, name, *span);
+                self.check_enum_field(base, name, *span);
                 if matches!(self.kind_of_expr(base), OpKind::Interface) {
                     self.emit_e1002(
                         *span,
@@ -3728,6 +3739,99 @@ impl<'a> Collector<'a> {
                 "the payload must have the type declared on the enum variant",
             );
         }
+    }
+
+    /// #3137: the user enum a value expression provably belongs to:
+    /// `color.red`, `shape.circle(2.0)`, or a local recorded as an enum
+    /// value. Anything else (including a shadowed enum name) is `None`.
+    fn enum_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Field { base, name, .. } => {
+                let Expr::Ident { name: en, .. } = unwrap_parens(base) else {
+                    return None;
+                };
+                if self.scopes.iter().any(|l| l.contains_key(en.as_str())) {
+                    return None;
+                }
+                let vs = self.ck.enums.get(en.as_str())?;
+                vs.iter().any(|v| v == name).then(|| en.clone())
+            }
+            Expr::Call { callee, .. } => {
+                let Expr::Field { .. } = unwrap_parens(callee) else {
+                    return None;
+                };
+                self.enum_of_expr(callee)
+            }
+            Expr::Ident { name, .. } => {
+                let t = self.lookup_type_name(name)?;
+                self.ck.enums.contains_key(t.as_str()).then_some(t)
+            }
+            _ => None,
+        }
+    }
+
+    /// #3137 rows 7-8: `var c color = shape.point` and `var n int = c`
+    /// (with `c` a `color`) build nothing Go would accept once enums emit:
+    /// an enum value is only assignable to its own enum type (or `any`).
+    fn check_enum_value_target(&mut self, name: &str, ty: Option<&TypeExpr>, val: &Expr) {
+        let (Some(TypeExpr::Named { name: tn, .. }), Some(en)) = (ty, self.enum_of_expr(val))
+        else {
+            return;
+        };
+        let tn = tn.trim();
+        let wrong = if self.ck.enums.contains_key(tn) {
+            tn != en
+        } else {
+            matches!(
+                self.kind_of_named(tn, 0),
+                OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str
+            ) || self.ck.structs.contains_key(tn)
+        };
+        if wrong {
+            self.emit_e1002(
+                val.span(),
+                format!(
+                    "cannot initialize `{}` (type `{}`) with `{}` (enum `{}`) (HYB-E1002)",
+                    name,
+                    tn,
+                    val.render(),
+                    en
+                ),
+                "an enum value is only assignable to its own enum type; SPEC T17 gives a numeric view only through `int(e)`",
+            );
+        }
+    }
+
+    /// #3137 row 10: enums have no fields. `s.radius` on an enum value is
+    /// refused unless the enum declares a method of that name.
+    fn check_enum_field(&mut self, base: &Expr, name: &str, span: Span) {
+        if matches!(unwrap_parens(base), Expr::Ident { name: n, .. }
+            if self.ck.enums.contains_key(n.as_str())
+                && !self.scopes.iter().any(|l| l.contains_key(n.as_str())))
+        {
+            return;
+        }
+        let Some(en) = self.enum_of_expr(base) else {
+            return;
+        };
+        if self
+            .ck
+            .method_decls
+            .contains_key(&(en.clone(), name.to_string()))
+        {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "`{}.{}`: enum `{}` has no field or method `{}` (HYB-E1002)",
+                base.render(),
+                name,
+                en,
+                name
+            ),
+            "enum values have no fields; bind the payload with `match` instead",
+        );
     }
 
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {

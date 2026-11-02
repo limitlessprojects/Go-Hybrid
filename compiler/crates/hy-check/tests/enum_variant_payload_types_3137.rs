@@ -244,3 +244,116 @@ fn main() {
 "#;
     assert_eq!(e1002_count(src), 0);
 }
+
+#[test]
+fn enum_values_only_fit_their_own_enum_and_have_no_fields() {
+    for (name, src) in [
+        (
+            "r7",
+            r#"
+enum shape {
+    circle(f64)
+    rectangle(string)
+    point
+}
+enum color {
+    red
+    green
+}
+fn (c color) name() string { return "c" }
+
+fn main() {
+    var c color = shape.point
+    fmt.println(c)
+}
+"#,
+        ),
+        (
+            "r8",
+            r#"
+enum shape {
+    circle(f64)
+    rectangle(string)
+    point
+}
+enum color {
+    red
+    green
+}
+fn (c color) name() string { return "c" }
+
+fn main() {
+    c := color.red
+    var n int = c
+    fmt.println(n)
+}
+"#,
+        ),
+        (
+            "r8b",
+            r#"
+enum shape {
+    circle(f64)
+    rectangle(string)
+    point
+}
+enum color {
+    red
+    green
+}
+fn (c color) name() string { return "c" }
+
+fn main() {
+    var n string = color.green
+    fmt.println(n)
+}
+"#,
+        ),
+        (
+            "r10",
+            r#"
+enum shape {
+    circle(f64)
+    rectangle(string)
+    point
+}
+enum color {
+    red
+    green
+}
+fn (c color) name() string { return "c" }
+
+fn main() {
+    s := shape.circle(2.0)
+    fmt.println(s.radius)
+}
+"#,
+        ),
+    ] {
+        assert_eq!(e1002_count(src), 1, "{name} must be rejected with one HYB-E1002");
+    }
+}
+
+#[test]
+fn enum_value_to_own_type_any_and_method_accepted() {
+    let src = r#"
+enum shape {
+    circle(f64)
+    rectangle(string)
+    point
+}
+enum color {
+    red
+    green
+}
+fn (c color) name() string { return "c" }
+
+fn main() {
+    c := color.red
+    var d color = c
+    var a any = c
+    fmt.println(d, a, c.name())
+}
+"#;
+    assert_eq!(e1002_count(src), 0);
+}
