@@ -221,6 +221,24 @@ fn canonical_numeric_name(name: &str) -> Option<&'static str> {
 
 /// #2771 — `[3]int` yes; `[]int` (slice), `[N]int` (non-constant length), and
 /// named types no — so only genuinely sized arrays are compared.
+fn strip_outer_bracket_dim(ty_str: &str) -> Option<&str> {
+    if !ty_str.starts_with('[') {
+        return None;
+    }
+    let mut depth = 0;
+    for (i, c) in ty_str.char_indices() {
+        if c == '[' {
+            depth += 1;
+        } else if c == ']' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(&ty_str[i + 1..]);
+            }
+        }
+    }
+    None
+}
+
 fn is_sized_array_spelling(s: &str) -> bool {
     let t = s.trim();
     if !t.starts_with('[') {
@@ -875,6 +893,21 @@ impl<'a> Collector<'a> {
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         match unwrap_parens(e) {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::SliceLit { elem: Some(elem_ty), .. } => Some(elem_ty.render()),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                fields
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, ty)| ty.render())
+            }
+            Expr::Index { base, .. } => {
+                let base_ty = self.typed_value_type_name(base)?;
+                strip_outer_bracket_dim(&base_ty).map(|s| s.to_string())
+            }
             _ => None,
         }
     }
@@ -883,6 +916,20 @@ impl<'a> Collector<'a> {
     fn place_type_name(&self, p: &Place) -> Option<String> {
         match &p.kind {
             PlaceKind::Ident(n) => self.lookup_type_name(n),
+            PlaceKind::Field { base, name, .. } => {
+                let bk = self.kind_of_place(base);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                fields
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, ty)| ty.render())
+            }
+            PlaceKind::Index { base, .. } => {
+                let base_ty = self.place_type_name(base)?;
+                strip_outer_bracket_dim(&base_ty).map(|s| s.to_string())
+            }
             _ => None,
         }
     }
@@ -912,6 +959,30 @@ impl<'a> Collector<'a> {
     /// #1031 — exact result types of a call whose callee is provably known:
     /// a non-generic top-level function, or a predeclared numeric conversion
     /// `T(x)`. A local binding of the callee name shadows both (fail-open).
+    fn call_result_type_names(
+        &self,
+        callee: &Expr,
+        _args: &[CallArg],
+    ) -> Option<Vec<Option<String>>> {
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+            return None;
+        };
+        if self
+            .scopes
+            .iter()
+            .any(|layer| layer.contains_key(name.as_str()))
+        {
+            return None;
+        }
+        if let Some(fd) = self.ck.fns.get(name.as_str()) {
+            if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                return None;
+            }
+            return Some(fd.results.iter().map(|r| Some(r.ty.render())).collect());
+        }
+        None
+    }
+
     fn call_result_scalars(
         &self,
         callee: &Expr,
@@ -5046,7 +5117,11 @@ impl<'a> Collector<'a> {
                             (self.place_scalar(t), self.typed_value_scalar(v)),
                             (Some(tp), Some(vp)) if tp != vp
                         );
-                        if conflict || scalar_mismatch {
+                        let array_mismatch = self.sized_array_names_differ(
+                            self.place_type_name(t).as_deref(),
+                            self.typed_value_type_name(v).as_deref(),
+                        );
+                        if conflict || scalar_mismatch || array_mismatch {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
@@ -5077,9 +5152,23 @@ impl<'a> Collector<'a> {
                     } else {
                         let got_kinds = self.multi_value_kinds(&values[0]);
                         if got_kinds.len() == targets.len() {
-                            for (t, vk) in targets.iter().zip(got_kinds.iter()) {
+                            let bare_val = unwrap_parens(&values[0]);
+                            let (call_scalars, call_tys) = if let Expr::Call { callee, args, .. } = bare_val {
+                                (self.call_result_scalars(callee, args), self.call_result_type_names(callee, args))
+                            } else {
+                                (None, None)
+                            };
+                            for (i, (t, vk)) in targets.iter().zip(got_kinds.iter()).enumerate() {
                                 let tpk = self.kind_of_place(t);
-                                if kinds_conflict(&tpk, vk) {
+                                let scalar_mismatch = matches!(
+                                    (self.place_scalar(t), call_scalars.as_ref().and_then(|s| s.get(i).copied().flatten())),
+                                    (Some(tp), Some(vp)) if tp != vp
+                                );
+                                let array_mismatch = self.sized_array_names_differ(
+                                    self.place_type_name(t).as_deref(),
+                                    call_tys.as_ref().and_then(|tys| tys.get(i).as_ref().and_then(|x| x.as_deref())),
+                                );
+                                if kinds_conflict(&tpk, vk) || scalar_mismatch || array_mismatch {
                                     self.emit_e1002(
                                         span,
                                         format!(
