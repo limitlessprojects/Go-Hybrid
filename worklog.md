@@ -1256,3 +1256,15 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 299 -> 300 -> 301 -> 302. Final main 9a2b6f21, tree clean.
 - OPEN DEDUPE: #2614 (gttps) same title as landed #2836 (aswadi, fixes #2613) — verify overlap next tick before landing; likely redirect reply if #2836 covers it.
 - NEXT TICK QUEUE: #2958 (option/fn .pop() reject + option method arity, 3y3y3y-huaiji) -> #2960 (method/generic-fn equality guards) -> #2947 (T24 O8 field loans) -> #2959 (foreign const-write args) -> #2882 (shadowed try contexts) -> #2925 (folded index callees) -> #2807/#2661 (N5 zero-init — CHECK OVERLAP, both emit-side) -> #2963 (set[T] typing) -> #2961 (scalar types on field/index assign) -> #2911 -> #2907 -> #2935 -> #2934 -> tail (#2798/#2926/#2741/#2756/#2781/#2905/#2785/#2923/#2855/#2938) -> #2593 -> #2815.
+
+## Session 51 — 2026-11-02 day I (3 landed: 2993 recovery + 3044 + 2985; recycle + cold build)
+
+- Session-50 note: tool layer died mid-tick after verifying #2993 but BEFORE merge — recovered cleanly here (main/PR head both unchanged, battery evidence still valid, landed without re-verify).
+- Recycle + full restore (tarball cache evaporated AGAIN — re-cached). Cold rebuild one slice. scan + approve 10/10 (4982 remaining).
+- LANDED:
+  8ae84869 Merge PR #2993 (00Desa00, fixes #2992) — conversion_kinds_conflict (_, Option(_)) => true: option[T] values reject u8/int/float64/string conversions (prelude struct lowering), option-to-option allowed. New option_value_conversion.rs. 303 suites. (Evidence from session-50 battery.)
+  37edfda6 Merge PR #3044 (ket4min-susan, fixes #3041) — regexbinding: UTF-8 validity before deep crossing, status decode strictly 0/1, FnAbiWord via Cross1S. New regex_edge_test.go. Branch predated #2993 — kept both (option-conversion suite 2 passed post-merge). 303 suites.
+  d293c312 Merge PR #2985 (00Desa00, fixes #2984) — typed_value_scalar maps Char literals (incl. negated) to int32 (Go default type for untyped rune const): r := 'x' + i and var n int = r reject HYB-E1002. New rune_literal_binding_width.rs. Branch predated #2993/#3044 — kept both (2 passed). 304 suites.
+- All three: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
+- Suite trajectory: 302 -> 303 -> 304. Final main d293c312, tree clean.
+- NEXT TICK QUEUE: #3069 (string for-in element as rune, fixes #3065) -> #3045 (none as option kind) -> #3038 (hybench histogram clamp/overflow) -> #3048 (tools path bounds/anchors) -> #3023 (hy-syntax fn-type render + Paren peel) -> #3043 (managed_ report schemas) -> #2988 (set[T] index/slice/cap reject) -> #3039 (type use shadowed by local value) -> #2923 (loop backedge replay) -> then re-scan for the wave tail.

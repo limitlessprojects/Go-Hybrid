@@ -333,6 +333,13 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Interface, _) => false,
         (a, b) if a == b => false,
 
+        // An `option[T]` value lowers to the generic prelude struct
+        // `option[T]`; Go converts it to nothing but itself or an interface
+        // (`u8(op)`, `float64(op)`, `string(op)` fail `go build` with
+        // `cannot convert op (variable of struct type option[int])`).
+        (Option(_), Option(_)) => false,
+        (_, Option(_)) => true,
+
         // Struct targets: Go forbids converting non-structs to structs.
         (Struct(_), other) if !matches!(other, Unknown | Struct(_)) => true,
 
@@ -1010,6 +1017,13 @@ impl<'a> Collector<'a> {
                 kind: LitKind::Float(_),
                 ..
             } => Some("float64"),
+            // Go's default type for an untyped rune constant is `rune`
+            // (`int32`): `r := 'x'` binds an int32, so `r + i` (i int) or
+            // `var n int = r` must not pass as a same-width pair.
+            Expr::Lit {
+                kind: LitKind::Char(_),
+                ..
+            } => Some("int32"),
             Expr::Unary {
                 op: UnOp::Neg,
                 operand,
@@ -1023,6 +1037,10 @@ impl<'a> Collector<'a> {
                     kind: LitKind::Float(_),
                     ..
                 } => Some("float64"),
+                Expr::Lit {
+                    kind: LitKind::Char(_),
+                    ..
+                } => Some("int32"),
                 _ => self.typed_value_scalar(operand),
             },
             other => self.typed_value_scalar(other),
