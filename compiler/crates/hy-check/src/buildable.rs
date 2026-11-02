@@ -514,6 +514,7 @@ struct Collector<'a> {
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     file_untyped_consts: HashSet<String>,
+    file_const_scalars: HashMap<String, Option<&'static str>>,
     /// Result kinds of the function whose body is currently being walked
     /// (#577 C9/C10). Empty for a fn declared with no results — which is also
     /// the state outside any body, so `Stmt::Return` can only ever see it
@@ -543,6 +544,8 @@ struct Collector<'a> {
     /// signature (`None` = not a predeclared numeric spelling). Swapped
     /// together with `fn_results`.
     fn_result_scalars: Vec<Option<&'static str>>,
+    /// #3102 — parallel scope stack tracking return scalars of local fn-literals.
+    fn_var_scalars: Vec<HashMap<String, Vec<Option<&'static str>>>>,
     /// Lexical nesting depth within loops (`for` / `loop`).
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
@@ -575,12 +578,14 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
+            file_const_scalars: HashMap::new(),
             fn_results: Vec::new(),
             fn_type_params: HashSet::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
             scalar_scopes: Vec::new(),
             fn_result_scalars: Vec::new(),
+            fn_var_scalars: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
             defines: Vec::new(),
@@ -597,6 +602,8 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                     .map(|t| c.kind_of_ty(t, 0))
                     .unwrap_or_else(|| c.kind_of_expr(&cd.value));
                 c.file_consts.insert(cd.name.clone(), k);
+                let scalar = cd.ty.as_ref().and_then(|t| c.scalar_of_ty(t));
+                c.file_const_scalars.insert(cd.name.clone(), scalar);
                 if cd.ty.is_none() {
                     c.file_untyped_consts.insert(cd.name.clone());
                 }
@@ -642,6 +649,7 @@ impl<'a> Collector<'a> {
         self.scalar_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
+        self.fn_var_scalars.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -651,6 +659,7 @@ impl<'a> Collector<'a> {
         self.scalar_scopes.pop();
         self.set_elem_scopes.pop();
         self.copy_var_scopes.pop();
+        self.fn_var_scalars.pop();
     }
 
     fn bind_type_name(&mut self, name: &str, type_name: String) {
@@ -670,6 +679,64 @@ impl<'a> Collector<'a> {
         None
     }
 
+    fn lookup_fn_var_scalars(&self, name: &str) -> Option<Vec<Option<&'static str>>> {
+        for layer in self.fn_var_scalars.iter().rev() {
+            if let Some(s) = layer.get(name) {
+                return Some(s.clone());
+            }
+        }
+        None
+    }
+
+    fn infer_expr_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::StructLit { ty: Some(t), .. } => Some(t.render()),
+            Expr::Slice { base, .. } => {
+                let bt = self.infer_expr_type_name(base)?;
+                if let Some(rest) = bt.strip_prefix('[') {
+                    if let Some(close) = rest.find(']') {
+                        let elem = &rest[close + 1..];
+                        return Some(format!("[]{}", elem));
+                    }
+                }
+                None
+            }
+            Expr::SliceLit { elem: Some(t), .. } => {
+                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                    Some(arr_ty.render())
+                } else {
+                    Some(format!("[]{}", t.render()))
+                }
+            }
+            Expr::MapLit { key, value, .. } => {
+                Some(format!("map[{}]{}", key.render(), value.render()))
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            let fbare = unwrap_parens(&first.value);
+                            match fbare {
+                                Expr::StructLit { ty: Some(t), .. } => return Some(t.render()),
+                                Expr::SliceLit { elem: Some(t), .. } => {
+                                    return Some(format!("[]{}", t.render()))
+                                }
+                                Expr::MapLit { key, value, .. } => {
+                                    return Some(format!("map[{}]{}", key.render(), value.render()))
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn slice_element_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
         match bare {
@@ -678,10 +745,25 @@ impl<'a> Collector<'a> {
                     if let Some(elem) = tname.strip_prefix("[]") {
                         return Some(elem.to_string());
                     }
+                    if let Some(rest) = tname.strip_prefix('[') {
+                        if let Some(close) = rest.find(']') {
+                            return Some(rest[close + 1..].to_string());
+                        }
+                    }
                 }
                 None
             }
-            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
+            Expr::SliceLit { elem: Some(t), .. } => {
+                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                    let s = arr_ty.render();
+                    if let Some(rest) = s.strip_prefix('[') {
+                        if let Some(close) = rest.find(']') {
+                            return Some(rest[close + 1..].to_string());
+                        }
+                    }
+                }
+                Some(t.render())
+            }
             Expr::Slice { base, .. } => self.slice_element_type_name(base),
             Expr::Call { callee, args, .. } => {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
@@ -695,6 +777,25 @@ impl<'a> Collector<'a> {
             }
             _ => None,
         }
+    }
+
+    fn slice_element_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let elem = self.slice_element_type_name(e)?;
+        canonical_numeric_name(&elem)
+    }
+
+    fn parse_generic_type_instance(&self, tname: &str) -> Option<(String, HashMap<String, &'static str>)> {
+        let open = tname.find('[')?;
+        let close = tname.rfind(']')?;
+        if close <= open { return None; }
+        let base_name = tname[..open].trim().to_string();
+        let arg_str = tname[open + 1..close].trim();
+        let s = canonical_numeric_name(arg_str)?;
+        let tps = self.ck.struct_type_params.get(&base_name)?;
+        let first_param = tps.first()?;
+        let mut map = HashMap::new();
+        map.insert(first_param.name.clone(), s);
+        Some((base_name, map))
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -856,7 +957,58 @@ impl<'a> Collector<'a> {
                 return *s;
             }
         }
-        None
+        self.file_const_scalars.get(name).copied().flatten()
+    }
+
+    fn expr_fn_scalars(&self, e: &Expr) -> Option<Vec<Option<&'static str>>> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::FnLit { results, .. } => {
+                Some(results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect())
+            }
+            Expr::Ident { name, .. } => {
+                if let Some(res) = self.lookup_fn_var_scalars(name) {
+                    return Some(res);
+                }
+                if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                    if fd.receiver.is_none() && fd.type_params.is_empty() {
+                        return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                    }
+                }
+                None
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let head = Checker::base_named_type_str(name);
+                let tname_opt = self.infer_expr_type_name(base);
+                if let Some(ref tname) = tname_opt {
+                    if let Some((sname, type_map)) = self.parse_generic_type_instance(tname) {
+                        if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
+                            let res = m.results.iter().map(|r| {
+                                if let TypeExpr::Named { name: r_name, .. } = &r.ty {
+                                    if let Some(&s) = type_map.get(r_name) {
+                                        return Some(s);
+                                    }
+                                }
+                                self.scalar_of_ty(&r.ty)
+                            }).collect();
+                            return Some(res);
+                        }
+                    }
+                }
+                if let Some(sname) = self.struct_base_name(&bk) {
+                    if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
+                        if m.type_params.is_empty() {
+                            return Some(
+                                m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect(),
+                            );
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     /// #2770 — the canonical numeric spelling of a simple local target, for the
@@ -917,38 +1069,122 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+        let bare = unwrap_parens(callee);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(res) = self.lookup_fn_var_scalars(name) {
+                    return Some(res);
+                }
+                if self
+                    .scopes
+                    .iter()
+                    .any(|layer| layer.contains_key(name.as_str()))
+                {
+                    return None;
+                }
+                let (base_fn, explicit_type_args) = if let Some(open) = name.find('[') {
+                    if name.ends_with(']') {
+                        let base = &name[..open];
+                        let inner = &name[open + 1..name.len() - 1];
+                        (base, split_top_level_type_args(inner))
+                    } else {
+                        (name.as_str(), Vec::new())
+                    }
+                } else {
+                    (name.as_str(), Vec::new())
+                };
+
+                if let Some(fd) = self.ck.fns.get(base_fn) {
+                    if fd.receiver.is_some() {
+                        return None;
+                    }
+                    if !fd.type_params.is_empty() {
+                        let mut type_arg_scalars: HashMap<String, &'static str> = HashMap::new();
+                        for (tp, &arg_str) in fd.type_params.iter().zip(explicit_type_args.iter()) {
+                            if let Some(s) = canonical_numeric_name(arg_str) {
+                                type_arg_scalars.insert(tp.name.clone(), s);
+                            }
+                        }
+                        for (p, a) in fd.params.iter().zip(args.iter()) {
+                            match &p.ty {
+                                TypeExpr::Named { name: p_name, .. } => {
+                                    if fd.type_params.iter().any(|tp| &tp.name == p_name) {
+                                        if !type_arg_scalars.contains_key(p_name) {
+                                            if let Some(s) = self.typed_value_scalar(&a.value).or_else(|| self.initializer_scalar(&a.value)) {
+                                                type_arg_scalars.insert(p_name.clone(), s);
+                                            }
+                                        }
+                                    }
+                                }
+                                TypeExpr::Slice { elem, .. } => {
+                                    if let TypeExpr::Named { name: elem_name, .. } = &**elem {
+                                        if fd.type_params.iter().any(|tp| &tp.name == elem_name) {
+                                            if !type_arg_scalars.contains_key(elem_name) {
+                                                if let Some(s) = self.slice_element_scalar(&a.value) {
+                                                    type_arg_scalars.insert(elem_name.clone(), s);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        let res = fd.results.iter().map(|r| {
+                            if let TypeExpr::Named { name: r_name, .. } = &r.ty {
+                                if let Some(&s) = type_arg_scalars.get(r_name) {
+                                    return Some(s);
+                                }
+                            }
+                            self.scalar_of_ty(&r.ty)
+                        }).collect();
+                        return Some(res);
+                    }
+                    return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                }
+                if name == "min" || name == "max" {
+                    let res_scalar = args
+                        .iter()
+                        .find_map(|a| self.typed_value_scalar(&a.value));
+                    return Some(vec![res_scalar]);
+                }
+                if name == "len" || name == "cap" || name == "copy" {
+                    return Some(vec![Some("int")]);
+                }
+                if args.len() == 1
+                    && !self.ck.structs.contains_key(name.as_str())
+                    && !self.ck.enums.contains_key(name.as_str())
+                    && !self.ck.type_aliases.contains_key(name.as_str())
+                {
+                    if let Some(s) = canonical_numeric_name(name) {
+                        return Some(vec![Some(s)]);
+                    }
+                }
+                None
+            }
+            Expr::FnLit { .. } | Expr::Field { .. } => {
+                self.expr_fn_scalars(bare)
+            }
+            _ => None,
+        }
+    }
+
+    fn chan_elem_scalar(&self, chan: &Expr) -> Option<&'static str> {
+        let bare = unwrap_parens(chan);
+        let tname = match bare {
+            Expr::Ident { name, .. } => self.lookup_type_name(name)?,
+            _ => self.infer_expr_type_name(bare)?,
+        };
+        let elem_str = if let Some(e) = tname.strip_prefix("<-chan ") {
+            e.trim()
+        } else if let Some(e) = tname.strip_prefix("chan<- ") {
+            e.trim()
+        } else if let Some(e) = tname.strip_prefix("chan ") {
+            e.trim()
+        } else {
             return None;
         };
-        if self
-            .scopes
-            .iter()
-            .any(|layer| layer.contains_key(name.as_str()))
-        {
-            return None;
-        }
-        if let Some(fd) = self.ck.fns.get(name.as_str()) {
-            if fd.receiver.is_some() || !fd.type_params.is_empty() {
-                return None;
-            }
-            return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
-        }
-        if name == "min" || name == "max" {
-            let res_scalar = args
-                .iter()
-                .find_map(|a| self.typed_value_scalar(&a.value));
-            return Some(vec![res_scalar]);
-        }
-        if args.len() == 1
-            && !self.ck.structs.contains_key(name.as_str())
-            && !self.ck.enums.contains_key(name.as_str())
-            && !self.ck.type_aliases.contains_key(name.as_str())
-        {
-            if let Some(s) = canonical_numeric_name(name) {
-                return Some(vec![Some(s)]);
-            }
-        }
-        None
+        canonical_numeric_name(elem_str)
     }
 
     /// #1031 — the exact numeric type of a value that is provably TYPED.
@@ -980,9 +1216,34 @@ impl<'a> Collector<'a> {
                 operand,
                 ..
             } => self.typed_value_scalar(operand),
+            Expr::Receive { chan, .. } => self.chan_elem_scalar(chan),
             Expr::Call { callee, args, .. } => match self.call_result_scalars(callee, args) {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
+            },
+            Expr::Field { base, name, .. } => {
+                if let Some(tname) = self.infer_expr_type_name(base) {
+                    if let Some((sname, type_map)) = self.parse_generic_type_instance(&tname) {
+                        if let Some(fields) = self.ck.structs.get(&sname) {
+                            if let Some((_, f_ty_expr)) = fields.iter().find(|(fname, _)| fname == name) {
+                                if let TypeExpr::Named { name: f_ty, .. } = f_ty_expr {
+                                    if let Some(&s) = type_map.get(f_ty) {
+                                        return Some(s);
+                                    }
+                                }
+                                return self.scalar_of_ty(f_ty_expr);
+                            }
+                        }
+                    }
+                }
+                None
+            },
+            Expr::Index { base, .. } => {
+                let bk = self.kind_of_expr(base);
+                if matches!(bk, OpKind::Str) {
+                    return Some("uint8");
+                }
+                self.slice_element_scalar(base)
             },
             _ => None,
         }
@@ -1562,8 +1823,15 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                if let Some(tname) = self.infer_expr_type_name(val) {
+                    self.bind_type_name(name, tname);
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                }
+                if let Some(res_scalars) = self.expr_fn_scalars(val) {
+                    if let Some(top) = self.fn_var_scalars.last_mut() {
+                        top.insert(name.clone(), res_scalars);
+                    }
                 }
             }
         }
@@ -1700,6 +1968,20 @@ impl<'a> Collector<'a> {
                 if targets.len() == 1 && values.len() == 1 {
                     self.check_single_value_position(&values[0], "an assignment", /*binding_position=*/ true);
                 }
+                if *op == AssignOp::Assign && targets.len() == values.len() {
+                    for (t, v) in targets.iter().zip(values.iter()) {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            if let Some(res_scalars) = self.expr_fn_scalars(v) {
+                                for layer in self.fn_var_scalars.iter_mut().rev() {
+                                    if layer.contains_key(name) {
+                                        layer.insert(name.clone(), res_scalars.clone());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 self.check_assign_operands(targets, *op, values, *span);
             }
             Stmt::Expr { expr, .. } => self.expr(expr),
@@ -1752,10 +2034,11 @@ impl<'a> Collector<'a> {
                         self.check_repeated_bindings(vars, *span);
                         self.expr(expr);
                         let iter_kinds = self.iterate_var_kinds(expr, vars.len());
+                        let iter_scalars = self.iterate_var_scalars(expr, vars.len());
                         // Unread iterate bindings are lowered to `_` at
                         // emission (issue #139); write-only ones still
                         // reject as unused (PR #536).
-                        for (v, k) in vars.iter().zip(iter_kinds) {
+                        for ((v, k), s) in vars.iter().zip(iter_kinds).zip(iter_scalars) {
                             self.define_elidable(v, *span);
                             // #1480: a struct/array element binding is a
                             // per-iteration copy at emission (`for _, x :=
@@ -1771,6 +2054,7 @@ impl<'a> Collector<'a> {
                                 }
                             }
                             self.bind_kind(v, k);
+                            self.set_scalar(v, s);
                         }
                     }
                     ForKind::Infinite => {}
@@ -1963,6 +2247,89 @@ impl<'a> Collector<'a> {
             }
             OpKind::Str => vec![OpKind::Int; n_vars.max(1)],
             _ => vec![OpKind::Unknown; n_vars.max(1)],
+        }
+    }
+
+    fn iterate_var_scalars(&self, expr: &Expr, n_vars: usize) -> Vec<Option<&'static str>> {
+        let bare = unwrap_parens(expr);
+        let tname = match bare {
+            Expr::Ident { name, .. } => self.lookup_type_name(name),
+            _ => self.infer_expr_type_name(bare),
+        };
+        if let Some(t) = tname {
+            if let Some(elem) = t.strip_prefix("[]") {
+                let elem_s = canonical_numeric_name(elem.trim());
+                if n_vars >= 2 {
+                    return vec![Some("int"), elem_s];
+                } else {
+                    return vec![elem_s];
+                }
+            }
+            if t.starts_with('[') {
+                if let Some(idx) = t.find(']') {
+                    let elem = &t[idx + 1..];
+                    let elem_s = canonical_numeric_name(elem.trim());
+                    if n_vars >= 2 {
+                        return vec![Some("int"), elem_s];
+                    } else {
+                        return vec![elem_s];
+                    }
+                }
+            }
+            if let Some(rest) = t.strip_prefix("map[") {
+                if let Some(idx) = rest.find(']') {
+                    let k_name = &rest[..idx];
+                    let v_name = &rest[idx + 1..];
+                    let k_s = canonical_numeric_name(k_name.trim());
+                    let v_s = canonical_numeric_name(v_name.trim());
+                    if n_vars >= 2 {
+                        return vec![k_s, v_s];
+                    } else {
+                        return vec![k_s];
+                    }
+                }
+            }
+            let elem_str = if let Some(e) = t.strip_prefix("<-chan ") {
+                Some(e.trim())
+            } else if let Some(e) = t.strip_prefix("chan ") {
+                Some(e.trim())
+            } else {
+                None
+            };
+            if let Some(es) = elem_str {
+                let chan_s = canonical_numeric_name(es);
+                return vec![chan_s; n_vars.max(1)];
+            }
+        }
+        match bare {
+            Expr::SliceLit { elem: Some(t), .. } => {
+                let elem_s = self.scalar_of_ty(t);
+                if n_vars >= 2 {
+                    vec![Some("int"), elem_s]
+                } else {
+                    vec![elem_s]
+                }
+            }
+            Expr::MapLit { key, value, .. } => {
+                let k_s = self.scalar_of_ty(key);
+                let v_s = self.scalar_of_ty(value);
+                if n_vars >= 2 {
+                    vec![k_s, v_s]
+                } else {
+                    vec![k_s]
+                }
+            }
+            _ => {
+                if self.kind_of_expr(bare) == OpKind::Str {
+                    if n_vars >= 2 {
+                        vec![Some("int"), Some("int32")]
+                    } else {
+                        vec![Some("int32")]
+                    }
+                } else {
+                    vec![None; n_vars.max(1)]
+                }
+            }
         }
     }
 
