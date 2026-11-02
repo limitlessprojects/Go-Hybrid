@@ -241,6 +241,20 @@
       "tier0_rule_id": "BUILDABLE"
     },
     {
+      "code": "HYB-E2011",
+      "name": "try-without-error-result",
+      "category": "type",
+      "severity": "error",
+      "title": "`?` used where no `error` result can receive it",
+      "summary": "E4: `?` may appear only in a function or closure whose results end in `error`, in `main` (the E6 exit contract), or in a closure converted by a target with an E11 propagation contract (`http.handler`). A closure's `?` binds to the closure's own results, never the enclosing function's. Elsewhere the error has nowhere to go: accepted programs either failed in the emitter or, inside `main`, let a closure's `?` set main's exit error and keep running (E3b: never a silent swallow).",
+      "fixits": [
+        "add `error` as the last result of the enclosing function or closure and return it",
+        "handle the error in place: `v, err := f()` then `if err != nil { ... }`"
+      ],
+      "example": "fn count() int { n := parse(s)?; return n }   // reject: HYB-E2011 — `count` has no error result",
+      "rule": "E"
+    },
+    {
       "code": "HYB-E3001",
       "name": "not-sendable-spawn",
       "category": "ownership-sendability",

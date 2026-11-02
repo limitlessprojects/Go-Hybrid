@@ -300,6 +300,13 @@ pub(crate) struct FnState {
     /// time so call sites can analyze parameter/capture stores (`record_callee_param_stores`).
     pub closure_defs:
         HashMap<String, (Vec<hy_syntax::Param>, Vec<hy_syntax::FnResult>, hy_syntax::Block)>,
+    /// Active generic type parameter names declared on the enclosing function or
+    /// method receiver (`fn f[t](...)`, `fn (c *box[t]) m()`), for O4.9 fail-closed
+    /// boundary checks on uninstantiated generic containers (`[]t`, `[N]t`, `map[k]t`, `*t`).
+    pub type_params: HashSet<String>,
+    /// Active `defer <call>` sites seen prior to the current program point, paired
+    /// with eager per-argument borrow flags evaluated at the `defer` statement.
+    pub deferred_calls: Vec<(hy_syntax::Expr, Vec<bool>)>,
 }
 
 impl FnState {

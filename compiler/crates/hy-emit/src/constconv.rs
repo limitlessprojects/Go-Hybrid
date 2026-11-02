@@ -67,7 +67,192 @@ pub fn parse_int(text: &str) -> Option<i128> {
     if neg { v.checked_neg() } else { Some(v) }
 }
 
-fn const_int_expr(expr: &hy_syntax::Expr) -> Option<i128> {
+/// 512-bit signed two's-complement integer (matching Go's 512-bit constant
+/// precision ceiling) so intermediate constant shifts past 127 bits (`(1 << 67)
+/// << 60`, `(1 << 70) << 60`) neither sign-corrupt at bit 127 nor silently drop
+/// high bits before a subsequent right shift or masking operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WideInt([u64; 8]);
+
+impl WideInt {
+    fn from_i128(v: i128) -> Self {
+        let lo = v as u64;
+        let hi = (v >> 64) as u64;
+        let fill = if v < 0 { u64::MAX } else { 0 };
+        Self([lo, hi, fill, fill, fill, fill, fill, fill])
+    }
+
+    fn to_i128(self) -> Option<i128> {
+        let v = (((self.0[1] as u128) << 64) | (self.0[0] as u128)) as i128;
+        let fill = if v < 0 { u64::MAX } else { 0 };
+        if self.0[2..].iter().all(|&w| w == fill) {
+            Some(v)
+        } else {
+            None
+        }
+    }
+
+    fn is_neg(self) -> bool {
+        (self.0[7] as i64) < 0
+    }
+
+    fn checked_add(self, rhs: Self) -> Option<Self> {
+        let mut out = [0u64; 8];
+        let mut carry = false;
+        for i in 0..8 {
+            let (s1, c1) = self.0[i].overflowing_add(rhs.0[i]);
+            let (s2, c2) = s1.overflowing_add(u64::from(carry));
+            out[i] = s2;
+            carry = c1 || c2;
+        }
+        let res = Self(out);
+        if (self.is_neg() == rhs.is_neg()) && (res.is_neg() != self.is_neg()) {
+            None
+        } else {
+            Some(res)
+        }
+    }
+
+    fn checked_neg(self) -> Option<Self> {
+        let mut inv = [0u64; 8];
+        for (dst, &src) in inv.iter_mut().zip(&self.0) {
+            *dst = !src;
+        }
+        Self(inv).checked_add(Self::from_i128(1))
+    }
+
+    fn checked_sub(self, rhs: Self) -> Option<Self> {
+        rhs.checked_neg().and_then(|neg_r| self.checked_add(neg_r))
+    }
+
+    fn shl_bits(mut self, shift: u32) -> Self {
+        for _ in 0..shift {
+            let mut carry = 0u64;
+            for w in &mut self.0 {
+                let next = *w >> 63;
+                *w = (*w << 1) | carry;
+                carry = next;
+            }
+        }
+        self
+    }
+
+    fn shr_bits(mut self, shift: u32) -> Self {
+        for _ in 0..shift {
+            let mut carry = self.0[7] & (1u64 << 63);
+            for w in self.0.iter_mut().rev() {
+                let next = (*w & 1) << 63;
+                *w = (*w >> 1) | carry;
+                carry = next;
+            }
+        }
+        self
+    }
+
+    fn checked_shl(self, rhs: Self) -> Option<Self> {
+        if rhs.is_neg() {
+            return None;
+        }
+        let zero = Self::from_i128(0);
+        if self == zero {
+            return Some(zero);
+        }
+        let shift = u32::try_from(rhs.to_i128()?).ok()?;
+        if shift >= 512 {
+            return None;
+        }
+        let shifted = self.shl_bits(shift);
+        if shifted.shr_bits(shift) == self {
+            Some(shifted)
+        } else {
+            None
+        }
+    }
+
+    fn checked_shr(self, rhs: Self) -> Option<Self> {
+        if rhs.is_neg() {
+            return None;
+        }
+        let shift = rhs
+            .to_i128()
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(512)
+            .min(512);
+        Some(self.shr_bits(shift))
+    }
+
+    fn checked_mul(self, rhs: Self) -> Option<Self> {
+        let neg = self.is_neg() ^ rhs.is_neg();
+        let mut a = if self.is_neg() { self.checked_neg()? } else { self };
+        let mut b = if rhs.is_neg() { rhs.checked_neg()? } else { rhs };
+        let zero = Self::from_i128(0);
+        let mut acc = zero;
+        while b != zero {
+            if (b.0[0] & 1) == 1 {
+                acc = acc.checked_add(a)?;
+            }
+            b = b.shr_bits(1);
+            if b != zero {
+                let next_a = a.shl_bits(1);
+                if next_a.shr_bits(1) != a {
+                    return None;
+                }
+                a = next_a;
+            }
+        }
+        if neg { acc.checked_neg() } else { Some(acc) }
+    }
+
+    fn div_rem_pos(a: Self, b: Self) -> (Self, Self) {
+        let mut q = Self::from_i128(0);
+        let mut r = Self::from_i128(0);
+        for i in (0..512).rev() {
+            r = r.shl_bits(1);
+            r.0[0] |= (a.0[i / 64] >> (i % 64)) & 1;
+            if let Some(sub) = r.checked_sub(b) {
+                if !sub.is_neg() {
+                    r = sub;
+                    q.0[i / 64] |= 1u64 << (i % 64);
+                }
+            }
+        }
+        (q, r)
+    }
+
+    fn checked_div_rem(self, rhs: Self) -> Option<(Self, Self)> {
+        let zero = Self::from_i128(0);
+        if rhs == zero {
+            return None;
+        }
+        let a = if self.is_neg() { self.checked_neg()? } else { self };
+        let b = if rhs.is_neg() { rhs.checked_neg()? } else { rhs };
+        let (q, r) = Self::div_rem_pos(a, b);
+        let q = if self.is_neg() ^ rhs.is_neg() { q.checked_neg()? } else { q };
+        let r = if self.is_neg() { r.checked_neg()? } else { r };
+        Some((q, r))
+    }
+
+    fn bit_op(self, rhs: Self, f: fn(u64, u64) -> u64) -> Self {
+        let mut out = [0u64; 8];
+        for i in 0..8 {
+            out[i] = f(self.0[i], rhs.0[i]);
+        }
+        Self(out)
+    }
+
+    fn truncate_to_width(self, bits: u32, signed: bool) -> i128 {
+        let low = (self.0[0] as u128) as i128;
+        let len = 1i128 << bits;
+        let masked = low & (len - 1);
+        if signed && (masked >> (bits - 1)) & 1 == 1 {
+            masked - len
+        } else {
+            masked
+        }
+    }
+}
+
+fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
     use hy_syntax::{BinOp, Expr, UnOp};
     match expr {
         Expr::Paren { inner, .. } => const_int_expr(inner),
@@ -79,11 +264,11 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<i128> {
         Expr::Lit {
             kind: LitKind::Int(t),
             ..
-        } => parse_int(t),
+        } => parse_int(t).map(WideInt::from_i128),
         Expr::Lit {
             kind: LitKind::Char(c),
             ..
-        } => Some(*c as u32 as i128),
+        } => Some(WideInt::from_i128(*c as u32 as i128)),
         Expr::Binary { op, lhs, rhs, .. } => {
             let l = const_int_expr(lhs)?;
             let r = const_int_expr(rhs)?;
@@ -91,39 +276,13 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<i128> {
                 BinOp::Add => l.checked_add(r),
                 BinOp::Sub => l.checked_sub(r),
                 BinOp::Mul => l.checked_mul(r),
-                BinOp::Div => {
-                    if r == 0 {
-                        None
-                    } else {
-                        l.checked_div(r)
-                    }
-                }
-                BinOp::Mod => {
-                    if r == 0 {
-                        None
-                    } else {
-                        l.checked_rem(r)
-                    }
-                }
-                BinOp::BitAnd => Some(l & r),
-                BinOp::BitOr => Some(l | r),
-                BinOp::BitXor => Some(l ^ r),
-                BinOp::Shl => {
-                    let shift = u32::try_from(r).ok()?;
-                    if shift >= 127 {
-                        None
-                    } else {
-                        l.checked_shl(shift)
-                    }
-                }
-                BinOp::Shr => {
-                    let shift = u32::try_from(r).ok()?;
-                    if shift >= 127 {
-                        None
-                    } else {
-                        l.checked_shr(shift)
-                    }
-                }
+                BinOp::Div => l.checked_div_rem(r).map(|(q, _)| q),
+                BinOp::Mod => l.checked_div_rem(r).map(|(_, rem)| rem),
+                BinOp::BitAnd => Some(l.bit_op(r, |a, b| a & b)),
+                BinOp::BitOr => Some(l.bit_op(r, |a, b| a | b)),
+                BinOp::BitXor => Some(l.bit_op(r, |a, b| a ^ b)),
+                BinOp::Shl => l.checked_shl(r),
+                BinOp::Shr => l.checked_shr(r),
                 _ => None,
             }
         }
@@ -136,14 +295,8 @@ fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool) -> 
     let Some(v) = const_int_expr(expr) else {
         return false;
     };
-    let len = 1i128 << bits;
-    let masked = v & (len - 1);
-    let folded = if signed && (masked >> (bits - 1)) & 1 == 1 {
-        masked - len
-    } else {
-        masked
-    };
-    if v != folded {
+    let folded = v.truncate_to_width(bits, signed);
+    if v.to_i128() != Some(folded) {
         return true;
     }
     match expr {
@@ -168,18 +321,11 @@ pub fn fold_constant(operand: &hy_syntax::Expr, spec_name: &str) -> Option<i128>
         return None;
     }
     let v = const_int_expr(operand)?;
-
-    let len = 1i128 << bits;
-    let masked = v & (len - 1);
-    let folded = if signed && (masked >> (bits - 1)) & 1 == 1 {
-        masked - len
-    } else {
-        masked
-    };
+    let folded = v.truncate_to_width(bits, signed);
 
     // Only rewrite what Go would refuse; a fitting value whose sub-operands
     // also fit in the target width stays verbatim.
-    if v == folded && !has_out_of_range_subexpr(operand, bits, signed) {
+    if v.to_i128() == Some(folded) && !has_out_of_range_subexpr(operand, bits, signed) {
         None
     } else {
         Some(folded)

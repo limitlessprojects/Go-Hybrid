@@ -371,6 +371,66 @@ class KaggleArgumentTests(unittest.TestCase):
             mock_status.assert_called_once_with("custom-slug")
 
 
+@unittest.skipUnless(os.name == "posix", "job.py uses a POSIX shell")
+class KaggleStatusExitTests(unittest.TestCase):
+    """A failed status request must fail the real CLI and its Make target."""
+
+    def run_status(self, code=0, output="status fixture", via_make=False, missing=False):
+        with tempfile.TemporaryDirectory(prefix="kaggle-status-") as tmp:
+            cli = Path(tmp) / "fake kaggle"
+            if not missing:
+                cli.write_text(
+                    "#!/bin/sh\nprintf '%s\\n' " + shlex.quote(output)
+                    + "\nexit " + str(code) + "\n",
+                    encoding="utf-8",
+                )
+                cli.chmod(0o755)
+            env = dict(os.environ, KAGGLE_CLI=str(cli))
+            args = (["make", "-s", "kaggle-status", "PY=" + shlex.quote(sys.executable)]
+                    if via_make else
+                    [sys.executable, str(ENTRY), "kaggle", "status", "fixture/kernel"])
+            return subprocess.run(
+                args, cwd=ENTRY.resolve().parents[1], env=env,
+                capture_output=True, text=True, timeout=10,
+            )
+
+    def test_failed_request_preserves_nonzero_exit_and_diagnostic(self):
+        for code in (1, 7):
+            with self.subTest(code=code):
+                result = self.run_status(code, "fixture: request failed")
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertIn("fixture: request failed", result.stdout)
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_missing_cli_is_not_reported_as_success(self):
+        result = self.run_status(missing=True)
+        self.assertEqual(result.returncode, 127, result.stdout + result.stderr)
+        self.assertIn("fake kaggle", result.stdout)
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_successful_request_keeps_output_and_zero_exit(self):
+        result = self.run_status(output='"KernelWorkerStatus.RUNNING"')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, '"KernelWorkerStatus.RUNNING"\n')
+
+    def test_kernel_error_state_is_still_a_successful_status_request(self):
+        result = self.run_status(output='"KernelWorkerStatus.ERROR"')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, '"KernelWorkerStatus.ERROR"\n')
+
+    @unittest.skipUnless(shutil.which("make"), "requires make")
+    def test_make_target_fails_when_status_request_fails(self):
+        result = self.run_status(7, "fixture: request failed", via_make=True)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("fixture: request failed", result.stdout)
+
+    @unittest.skipUnless(shutil.which("make"), "requires make")
+    def test_make_target_succeeds_when_status_request_succeeds(self):
+        result = self.run_status(output="fixture: running", via_make=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "fixture: running\n")
+
+
 class GhTokenTests(unittest.TestCase):
     def test_reads_token_from_environment(self):
         import importlib.util
@@ -587,6 +647,51 @@ class KaggleFetchFreshnessTests(unittest.TestCase):
             self.assertNotIn("Traceback", result.stdout + result.stderr)
             self.assertEqual(
                 list((root / "result" / "raw").glob(".staging-*")), [])
+
+
+class FailClosedJobControlTests(unittest.TestCase):
+    """Fail-closed guards for kaggle_submit schema, kaggle_wait nonzero status, and actions_fetch artifact paths."""
+
+    def test_kaggle_submit_rejects_missing_or_empty_job_before_push(self):
+        for bad_payload in ('{"commands": []}', '{"job": "", "commands": []}', '[]'):
+            with self.subTest(bad_payload=bad_payload), tempfile.TemporaryDirectory() as tmp:
+                jobdir = Path(tmp)
+                (jobdir / "job.json").write_text(bad_payload, encoding="utf-8")
+                with patch.object(JOB, "resolve_head", return_value="a" * 40), \
+                     patch.object(JOB, "sh") as mock_sh:
+                    with self.assertRaises(SystemExit) as ctx:
+                        JOB.kaggle_submit(str(jobdir))
+                    self.assertNotEqual(ctx.exception.code, 0)
+                    mock_sh.assert_not_called()
+                self.assertFalse((jobdir / "submitted.json").exists())
+
+    def test_kaggle_wait_ignores_quoted_state_on_nonzero_status_exit(self):
+        responses = [
+            (1, 'CLI error while polling "KernelWorkerStatus.RUNNING"'),
+            (1, 'CLI error while polling "KernelWorkerStatus.COMPLETE"'),
+            (0, '"KernelWorkerStatus.RUNNING"'),
+            (1, 'transient error "KernelWorkerStatus.COMPLETE"'),
+            (0, '"KernelWorkerStatus.COMPLETE"'),
+        ]
+        with patch.object(JOB, "sh", side_effect=responses) as mock_sh, \
+             patch.object(JOB.time, "sleep"), \
+             patch("sys.stdout", new=io.StringIO()):
+            rc = JOB.kaggle_wait(5, slug="demo/kernel")
+        self.assertEqual(rc, 0)
+        self.assertEqual(mock_sh.call_count, 5)
+
+    def test_actions_fetch_rejects_traversal_artifact_names(self):
+        for unsafe_name in ("../escape", "sub/nested", "..", ""):
+            with self.subTest(unsafe_name=unsafe_name), tempfile.TemporaryDirectory() as td:
+                arts = {"artifacts": [{"name": unsafe_name, "size_in_bytes": 4,
+                                       "archive_download_url": "https://artifacts.invalid/1"}]}
+                with patch.object(JOB, "gh_token", return_value="fixture-token"), \
+                     patch.object(JOB, "gh_api", return_value=arts), \
+                     patch.object(JOB.urllib.request, "urlopen") as mock_open, \
+                     patch("sys.stderr", new=io.StringIO()):
+                    rc = JOB.actions_fetch(123, td)
+                self.assertEqual(rc, 1)
+                mock_open.assert_not_called()
 
 
 if __name__ == "__main__":
