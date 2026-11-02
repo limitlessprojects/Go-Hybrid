@@ -893,18 +893,38 @@ impl<'a> Collector<'a> {
         matches!((a, b), (Some(x), Some(y))
             if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
     }
-    /// #1031 — the exact predeclared numeric spelling of a type expression.
-    /// A user-declared struct/enum/alias of that name is not the predeclared
-    /// type, so it fails open.
+    /// #1031 / #3125 — the exact predeclared numeric spelling of a type expression.
+    /// Type aliases resolving to a numeric scalar unpack to that underlying scalar;
+    /// structs and enums fail open.
     fn scalar_of_ty(&self, ty: &TypeExpr) -> Option<&'static str> {
+        self.scalar_of_ty_depth(ty, 0)
+    }
+
+    fn scalar_of_ty_depth(&self, ty: &TypeExpr, depth: usize) -> Option<&'static str> {
+        if depth > 16 {
+            return None;
+        }
         let TypeExpr::Named { name, .. } = ty else {
             return None;
         };
         if self.ck.structs.contains_key(name.as_str())
             || self.ck.enums.contains_key(name.as_str())
-            || self.ck.type_aliases.contains_key(name.as_str())
         {
             return None;
+        }
+        if let Some(target) = self.ck.type_aliases.get(name.as_str()) {
+            return self.scalar_of_ty_depth(target, depth + 1);
+        }
+        canonical_numeric_name(name)
+    }
+
+    /// #3125 — the exact numeric scalar of a named type or alias.
+    fn scalar_of_name(&self, name: &str) -> Option<&'static str> {
+        if self.ck.structs.contains_key(name) || self.ck.enums.contains_key(name) {
+            return None;
+        }
+        if let Some(target) = self.ck.type_aliases.get(name) {
+            return self.scalar_of_ty_depth(target, 1);
         }
         canonical_numeric_name(name)
     }
@@ -942,9 +962,8 @@ impl<'a> Collector<'a> {
         if args.len() == 1
             && !self.ck.structs.contains_key(name.as_str())
             && !self.ck.enums.contains_key(name.as_str())
-            && !self.ck.type_aliases.contains_key(name.as_str())
         {
-            if let Some(s) = canonical_numeric_name(name) {
+            if let Some(s) = self.scalar_of_name(name.as_str()) {
                 return Some(vec![Some(s)]);
             }
         }
@@ -4273,7 +4292,7 @@ impl<'a> Collector<'a> {
     fn append_dest_scalar(&self, first: &Expr) -> Option<&'static str> {
         self.slice_element_type_name(first)
             .as_deref()
-            .and_then(canonical_numeric_name)
+            .and_then(|n| self.scalar_of_name(n))
     }
 
     fn check_append_elements(&mut self, args: &[CallArg]) {
