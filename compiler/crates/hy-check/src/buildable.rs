@@ -670,14 +670,79 @@ impl<'a> Collector<'a> {
         None
     }
 
+    fn resolve_type_spelling(&self, name: &str) -> String {
+        let t = name.trim();
+        if let Some(inner) = t.strip_prefix("[]") {
+            return format!("[]{}", self.resolve_type_spelling(inner));
+        }
+        let mut cur = t.to_string();
+        for _ in 0..8 {
+            let base = Checker::base_named_type_str(&cur);
+            if !base.is_empty() {
+                if let Some(target) = self.ck.type_aliases.get(base) {
+                    cur = target.render();
+                    continue;
+                }
+            }
+            break;
+        }
+        cur
+    }
+
+    fn parse_sized_array(s: &str) -> Option<(&str, &str)> {
+        let t = s.trim();
+        if !t.starts_with('[') {
+            return None;
+        }
+        let close = t.find(']')?;
+        let head = &t[1..close];
+        if head.is_empty() || !head.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        Some((head, t[close + 1..].trim()))
+    }
+
+    fn elem_types_conflict(&self, want: &str, got: &str) -> bool {
+        let w_res = self.resolve_type_spelling(want);
+        let g_res = self.resolve_type_spelling(got);
+        let w = w_res.trim();
+        let g = g_res.trim();
+        if let (Some(wn), Some(gn)) = (canonical_numeric_name(w), canonical_numeric_name(g)) {
+            return wn != gn;
+        }
+        if let (Some(w_inner), Some(g_inner)) = (w.strip_prefix("[]"), g.strip_prefix("[]")) {
+            return self.elem_types_conflict(w_inner, g_inner);
+        }
+        if let (Some((wl, we)), Some((gl, ge))) = (Self::parse_sized_array(w), Self::parse_sized_array(g)) {
+            return wl != gl || self.elem_types_conflict(we, ge);
+        }
+        false
+    }
+
     fn slice_element_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
         match bare {
             Expr::Ident { name, .. } => {
                 if let Some(tname) = self.lookup_type_name(name) {
-                    if let Some(elem) = tname.strip_prefix("[]") {
+                    let resolved = self.resolve_type_spelling(&tname);
+                    if let Some(elem) = resolved.strip_prefix("[]") {
                         return Some(elem.to_string());
                     }
+                }
+                let resolved = self.resolve_type_spelling(name);
+                if let Some(elem) = resolved.strip_prefix("[]") {
+                    return Some(elem.to_string());
+                }
+                None
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let struct_name = self.struct_base_name(&bk)?;
+                let fields = self.ck.structs.get(&struct_name)?;
+                let (_, fty) = fields.iter().find(|(n, _)| n == name)?;
+                let resolved = self.ck.resolve_type_alias(fty);
+                if let TypeExpr::Slice { elem, .. } = resolved {
+                    return Some(elem.render());
                 }
                 None
             }
@@ -873,8 +938,21 @@ impl<'a> Collector<'a> {
     /// Only identifiers bound with an explicit type name are known; everything
     /// else (literals, conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
-        match unwrap_parens(e) {
+        let bare = unwrap_parens(e);
+        if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+            return Some(arr_ty.render());
+        }
+        match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let struct_name = self.struct_base_name(&bk)?;
+                let fields = self.ck.structs.get(&struct_name)?;
+                let (_, fty) = fields.iter().find(|(n, _)| n == name)?;
+                let resolved = self.ck.resolve_type_alias(fty);
+                Some(resolved.render())
+            }
+            Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
             _ => None,
         }
     }
@@ -4352,8 +4430,9 @@ impl<'a> Collector<'a> {
                         let src_elem_ty = self.slice_element_type_name(&extra.value);
                         let ty_mismatch = match (&dst_elem_ty, &src_elem_ty) {
                             (Some(d), Some(s)) => {
-                                crate::const_overflow::canonical_int_type_name(d)
-                                    != crate::const_overflow::canonical_int_type_name(s)
+                                self.elem_types_conflict(d, s)
+                                    || (crate::const_overflow::canonical_int_type_name(d)
+                                        != crate::const_overflow::canonical_int_type_name(s))
                             }
                             _ => false,
                         };
@@ -4437,18 +4516,30 @@ impl<'a> Collector<'a> {
             let dst_scalar = self.append_dest_scalar(&first.value);
             let got_scalar = self.typed_value_scalar(&extra.value);
             let scalar_mismatch = matches!((dst_scalar, got_scalar), (Some(d), Some(g)) if d != g);
-            if kinds_conflict(&elem, &got) || int_to_float_conflict || scalar_mismatch {
+            let got_ty = self.typed_value_type_name(&extra.value);
+            let elem_ty_conflict = match (&dst_elem_ty, &got_ty) {
+                (Some(d), Some(g)) => self.elem_types_conflict(d, g),
+                _ => false,
+            };
+            if kinds_conflict(&elem, &got) || int_to_float_conflict || scalar_mismatch || elem_ty_conflict {
                 let dst_label = match dst_elem_ty.as_deref() {
                     Some(d) => format!("[]{}", d),
                     None => self.kind_of_expr(&first.value).label().to_string(),
                 };
-                let got_label = match got_scalar {
-                    Some(s) => s.to_string(),
-                    None => got.label().to_string(),
+                let got_label = if let Some(g) = &got_ty {
+                    g.clone()
+                } else {
+                    match got_scalar {
+                        Some(s) => s.to_string(),
+                        None => got.label().to_string(),
+                    }
                 };
-                let elem_label = match dst_scalar {
+                let elem_label = match dst_elem_ty.as_deref() {
                     Some(d) => d.to_string(),
-                    None => elem.label().to_string(),
+                    None => match dst_scalar {
+                        Some(d) => d.to_string(),
+                        None => elem.label().to_string(),
+                    },
                 };
                 self.emit_e1002(
                     extra.value.span(),
