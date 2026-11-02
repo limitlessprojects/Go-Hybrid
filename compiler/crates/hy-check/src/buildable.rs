@@ -954,6 +954,43 @@ impl<'a> Collector<'a> {
     /// #1031 — the exact numeric type of a value that is provably TYPED.
     /// Literals are untyped constants (assignable to any numeric type), so
     /// they are deliberately `None` here.
+    fn chan_elem_scalar(&self, chan: &Expr) -> Option<&'static str> {
+        let bare = unwrap_parens(chan);
+        let tname = match bare {
+            Expr::Ident { name, .. } => self.lookup_type_name(name)?,
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            let fb = unwrap_parens(&first.value);
+                            match fb {
+                                Expr::StructLit { ty: Some(t), .. } => t.render(),
+                                _ => return None,
+                            }
+                        } else {
+                            return None;
+                        }
+                    } else {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+        let elem_str = if let Some(e) = tname.strip_prefix("<-chan ") {
+            e.trim()
+        } else if let Some(e) = tname.strip_prefix("chan<- ") {
+            e.trim()
+        } else if let Some(e) = tname.strip_prefix("chan ") {
+            e.trim()
+        } else {
+            return None;
+        };
+        canonical_numeric_name(elem_str)
+    }
+
     fn typed_value_scalar(&self, e: &Expr) -> Option<&'static str> {
         match unwrap_parens(e) {
             Expr::Ident { name, .. } => self.lookup_scalar(name),
@@ -980,6 +1017,7 @@ impl<'a> Collector<'a> {
                 operand,
                 ..
             } => self.typed_value_scalar(operand),
+            Expr::Receive { chan, .. } => self.chan_elem_scalar(chan),
             Expr::Call { callee, args, .. } => match self.call_result_scalars(callee, args) {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
@@ -1564,6 +1602,16 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Expr::Call { callee, args, .. } = unwrap_parens(val) {
+                    if let Expr::Ident { name: fn_name, .. } = unwrap_parens(callee) {
+                        if fn_name == "make" {
+                            if let Some(first) = args.first() {
+                                if let Expr::StructLit { ty: Some(t), .. } = unwrap_parens(&first.value) {
+                                    self.bind_type_name(name, t.render());
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1752,10 +1800,15 @@ impl<'a> Collector<'a> {
                         self.check_repeated_bindings(vars, *span);
                         self.expr(expr);
                         let iter_kinds = self.iterate_var_kinds(expr, vars.len());
+                        let chan_scalar = if vars.len() == 1 {
+                            self.chan_elem_scalar(expr)
+                        } else {
+                            None
+                        };
                         // Unread iterate bindings are lowered to `_` at
                         // emission (issue #139); write-only ones still
                         // reject as unused (PR #536).
-                        for (v, k) in vars.iter().zip(iter_kinds) {
+                        for (i, (v, k)) in vars.iter().zip(iter_kinds).enumerate() {
                             self.define_elidable(v, *span);
                             // #1480: a struct/array element binding is a
                             // per-iteration copy at emission (`for _, x :=
@@ -1771,6 +1824,9 @@ impl<'a> Collector<'a> {
                                 }
                             }
                             self.bind_kind(v, k);
+                            if i == 0 && chan_scalar.is_some() {
+                                self.set_scalar(v, chan_scalar);
+                            }
                         }
                     }
                     ForKind::Infinite => {}
@@ -1929,9 +1985,13 @@ impl<'a> Collector<'a> {
                                 OpKind::Chan(e) => *e,
                                 _ => OpKind::Unknown,
                             };
+                            let elem_scalar = self.chan_elem_scalar(chan);
                             for (i, n) in names.iter().enumerate() {
                                 self.define_elidable(n, chan.span());
                                 self.bind_kind(n, if i == 0 { elem.clone() } else { OpKind::Bool });
+                                if i == 0 {
+                                    self.set_scalar(n, elem_scalar);
+                                }
                             }
                         }
                         SelectArmKind::Default => {}
