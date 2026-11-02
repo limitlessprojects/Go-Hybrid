@@ -73,5 +73,48 @@ class SubmitRevisionTests(unittest.TestCase):
                 self.assertEqual(job.resolve_head(), expected)
 
 
+tb_spec = importlib.util.spec_from_file_location("triage_bot", Path(__file__).with_name("triage_bot.py"))
+triage_bot = importlib.util.module_from_spec(tb_spec)
+tb_spec.loader.exec_module(triage_bot)
+
+
+class TriageBotCompareCacheTests(unittest.TestCase):
+    def test_collect_caches_shared_merge_base_and_skips_head_at_main(self):
+        calls = []
+
+        class FakeGh:
+            repo = "o/r"
+
+            def paginate(self, path, **kw):
+                if path.startswith("/repos/o/r/pulls?"):
+                    return [
+                        {"number": i, "title": f"PR {i}", "user": {"login": "u"},
+                         "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z",
+                         "head": {"sha": "mainsha00000" if i == 1 else f"headsha{i:05d}"}}
+                        for i in range(1, 5)
+                    ]
+                return [{"filename": "compiler/crates/hy-check/src/buildable.rs", "additions": 10, "deletions": 1}]
+
+            def get(self, path):
+                calls.append(path)
+                if path.endswith("/commits/main"):
+                    return {"sha": "mainsha00000"}
+                if "/compare/mainsha00000..." in path:
+                    return {"behind_by": 4, "merge_base_commit": {"sha": "sharedmb0000"}}
+                if "/compare/sharedmb0000...mainsha00000" in path:
+                    return {"files": [{"filename": "compiler/crates/hy-check/src/buildable.rs"}]}
+                return {"mergeable": True, "mergeable_state": "clean"}
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            items, main_sha = triage_bot.collect({}, FakeGh(), type("A", (), {"jobs": 4})())
+        self.assertEqual(main_sha, "mainsha00000")
+        by_num = {it["number"]: it for it in items}
+        self.assertEqual(by_num[1]["behind_by"], 0)
+        self.assertEqual(by_num[2]["behind_by"], 4)
+        self.assertEqual(by_num[2]["overlap_risk"], ["compiler/crates/hy-check/src/buildable.rs"])
+        self.assertFalse(any("compare/mainsha00000...mainsha00000" in c for c in calls))
+        self.assertEqual(sum(1 for c in calls if "compare/sharedmb0000...mainsha00000" in c), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

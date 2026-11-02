@@ -6,6 +6,7 @@ use super::{to_go_name, BindingKind, EmitError, Emitter};
 
 use super::expr::ATOM;
 use super::shapes::lookup_conversion;
+use std::collections::BTreeSet;
 
 impl Emitter {
     pub fn emit_stmt(&mut self, s: &Stmt) -> Result<(), EmitError> {
@@ -108,7 +109,10 @@ impl Emitter {
                 // `defer f.Close()` — emitting `defer (f.Close())` would be
                 // invalid Go. A non-call operand (which the checker rejects)
                 // is left peeled-but-ungated and fails loudly below.
-                let operand = Self::peel_parens(call);
+                let mut operand = Self::peel_parens(call);
+                while let Expr::Try { operand: inner, .. } = operand {
+                    operand = Self::peel_parens(inner);
+                }
                 if matches!(operand, Expr::Call { .. }) {
                     self.hoist_tries_expr(operand)?;
                 }
@@ -180,10 +184,13 @@ impl Emitter {
                 // Go select, 1:1 — Hybrid's arm spelling
                 // (`v, ok := <-sq:` / `<-deadline:` / `ch <- v:`) lowers to
                 // Go's case clauses.
+                let hdrs: Vec<&Expr> = arms.iter().flat_map(|a| match &a.kind { SelectArmKind::Recv { chan, .. } => vec![chan], SelectArmKind::Send { chan, value, .. } => vec![chan, value], SelectArmKind::Default => vec![] }).collect();
+                for (i, e) in hdrs.iter().enumerate() { if hdrs[i + 1..].iter().any(|r| Self::expr_has_hoistable_try(r)) { self.hoist_order_before_try(e)?; } else { self.hoist_tries_expr(e)?; } }
                 self.push("select {");
                 self.indent += 1;
                 for arm in arms {
                     let saved_scope = self.save_scope();
+                    let mut wrap = false;
                     match &arm.kind {
                         SelectArmKind::Recv { names, chan } => {
                             let c = match self.emit_expr(chan, 0) {
@@ -241,6 +248,43 @@ impl Emitter {
                             };
                             self.shadow_local_names(names);
                             self.push(&head);
+                            // Go's case clause shares ONE lexical scope with
+                            // its bindings (`case v := <-ch:`); a body that
+                            // re-declares a case-bound name at its top level
+                            // (`v := v + 1`) compiles as `no new variables on
+                            // left side of :=`. When a name actually bound in
+                            // this clause is re-declared top-level, wrap the
+                            // arm body in an explicit block — legal Go (block
+                            // braces inside a case clause, verified against
+                            // go1.27.2) and preserves the Hybrid arm-scoped
+                            // shadow semantics. Same check-vs-emit shape
+                            // class as the match-arm lowering, on select's
+                            // separate lowering path; deliberately uses its
+                            // own helper name.
+                            let bound: Vec<&str> = if names.len() == 1 {
+                                if names[0] != "_"
+                                    && crate::rangebind::body_reads(&arm.body, &names[0])
+                                {
+                                    vec![names[0].as_str()]
+                                } else {
+                                    Vec::new()
+                                }
+                            } else {
+                                names
+                                    .iter()
+                                    .filter(|n| {
+                                        n.as_str() != "_"
+                                            && crate::rangebind::body_reads(&arm.body, n)
+                                    })
+                                    .map(|n| n.as_str())
+                                    .collect()
+                            };
+                            for n in names {
+                                if !bound.contains(&n.as_str()) {
+                                    self.local_vars.remove(n);
+                                }
+                            }
+                            wrap = Self::case_body_redefines_binding(&arm.body.stmts, &bound);
                         }
                         SelectArmKind::Send { chan, value, .. } => {
                             let c = self.emit_expr(chan, 0)?;
@@ -249,7 +293,13 @@ impl Emitter {
                         }
                         SelectArmKind::Default => self.push("default:"),
                     }
+                    if wrap {
+                        self.push("{");
+                    }
                     let arm_res = self.emit_block_body(&arm.body.stmts);
+                    if wrap {
+                        self.push("}");
+                    }
                     self.restore_scope(saved_scope);
                     arm_res?;
                 }
@@ -268,10 +318,41 @@ impl Emitter {
         self.emit_local_in_seq(l, &[])
     }
 
+    /// Record (or forget) the result shape of each name this declaration
+    /// binds: `f := fn() error {…}` makes `f()?` a bare-error call; any
+    /// other initializer drops a stale entry for a reused name.
+    fn note_closure_shapes(&mut self, l: &LocalDecl) {
+        for (i, name) in l.names.iter().enumerate() {
+            let fnlit = if l.names.len() == l.values.len() {
+                match l.values.get(i).map(Self::peel_parens) {
+                    Some(Expr::FnLit { results, .. }) => Some(super::result_shape(results)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            match fnlit {
+                Some(shape) => {
+                    self.closure_shapes.insert(name.clone(), shape);
+                }
+                None => {
+                    self.closure_shapes.remove(name);
+                }
+            }
+        }
+    }
+
     fn emit_local_in_seq(&mut self, l: &LocalDecl, rest: &[Stmt]) -> Result<(), EmitError> {
+        self.note_closure_shapes(l);
         match l.kind {
             LocalKind::Var => {
                 let ty = l.ty.as_ref().map(|t| self.type_text(t));
+                let is_ptr_ty = l.ty.as_ref().map_or(true, |t| self.is_pointer_ty(t));
+                let alias = l
+                    .values
+                    .first()
+                    .and_then(|v| self.slot_loan_alias_rhs(v))
+                    .filter(|_| is_ptr_ty);
                 match (&ty, l.values.first()) {
                     // N5: a zero map (or a struct carrying one) allocates
                     // at its declaration (zeroinit.rs, issue #645).
@@ -284,12 +365,18 @@ impl Emitter {
                     },
                     (Some(t), Some(v)) => {
                         self.hoist_tries_expr(v)?;
-                        let e = self.emit_expr(v, 0)?;
+                        let mut e = self.emit_expr(v, 0)?;
+                        if matches!(alias, Some((_, true))) {
+                            e = format!("&{}", e);
+                        }
                         self.push(&format!("var {} {} = {}", l.names.join(", "), t, e));
                     }
                     (None, Some(v)) => {
                         self.hoist_tries_expr(v)?;
-                        let e = self.emit_expr(v, 0)?;
+                        let mut e = self.emit_expr(v, 0)?;
+                        if matches!(alias, Some((_, true))) {
+                            e = format!("&{}", e);
+                        }
                         self.push(&format!("var {} = {}", l.names.join(", "), e));
                     }
                     (None, None) => {
@@ -299,10 +386,21 @@ impl Emitter {
                     }
                 }
                 self.hint_from_values(&l.names, &l.values);
+                if let Some((loan_root, _)) = alias {
+                    for n in &l.names {
+                        if n != "_" {
+                            self.pointer_vars.insert(n.clone());
+                            self.loan_aliases
+                                .entry(loan_root.clone())
+                                .or_default()
+                                .insert(n.clone());
+                        }
+                    }
+                }
                 // Typed var decls carry receiver knowledge (Batch I):
                 // `var hits atomic.int64` → shape-known, not a pointer.
                 if let Some(t) = &l.ty {
-                    if matches!(t, TypeExpr::Pointer { .. }) {
+                    if self.is_pointer_ty(t) {
                         for n in &l.names {
                             if n != "_" {
                                 self.pointer_vars.insert(n.clone());
@@ -352,7 +450,7 @@ impl Emitter {
 
         // `x := f()?` — the try desugar. Values.len() == 1, a Try node.
         if l.values.len() == 1 {
-            if let Expr::Try { operand, .. } = &l.values[0] {
+            if let Expr::Try { operand, .. } = Self::peel_parens(&l.values[0]) {
                 return self.emit_try_define(l, operand);
             }
         }
@@ -387,22 +485,48 @@ impl Emitter {
         {
             let mut val_texts = Vec::with_capacity(l.values.len());
             let mut new_loans = Vec::new();
+            let mut new_aliases = Vec::new();
             for (name, v) in l.names.iter().zip(l.values.iter()) {
                 if let Some(operand) = Self::as_slot_loan_operand(v) {
                     let (read_place, write_place) =
-                        self.emit_slot_loan_place(operand, name, rest)?;
+                        self.emit_slot_loan_place(operand, name, &l.names, rest)?;
                     val_texts.push(read_place);
                     if name != "_" {
                         new_loans.push((name.clone(), format!("{} = {}", write_place, name)));
+                    }
+                } else if let Some((loan_root, is_val_loan)) = self.slot_loan_alias_rhs(v) {
+                    let e = self.emit_expr(v, 0)?;
+                    val_texts.push(if is_val_loan { format!("&{}", e) } else { e });
+                    if name != "_" {
+                        new_aliases.push((name.clone(), loan_root));
                     }
                 } else {
                     val_texts.push(self.emit_expr(v, 0)?);
                 }
             }
             self.shadow_local_names(&l.names);
+            for name in &l.names {
+                if name != "_" {
+                    self.flush_loan_for_name(name);
+                }
+            }
             for (loan_name, _) in &new_loans {
                 self.bindings.insert(loan_name.clone(), BindingKind::Plain);
-                self.flush_loan_for_name(loan_name);
+            }
+            for (name, v) in l.names.iter().zip(l.values.iter()) {
+                if name != "_"
+                    && Self::as_slot_loan_operand(v).is_none()
+                    && self.expr_is_pointer(v)
+                {
+                    self.pointer_vars.insert(name.clone());
+                }
+            }
+            for (alias_name, loan_root) in new_aliases {
+                self.pointer_vars.insert(alias_name.clone());
+                self.loan_aliases
+                    .entry(loan_root)
+                    .or_default()
+                    .insert(alias_name);
             }
             self.push(&format!(
                 "{} := {}",
@@ -415,11 +539,26 @@ impl Emitter {
             return Ok(());
         }
 
-        let values = l
-            .values
-            .iter()
-            .map(|v| self.emit_expr(v, 0))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut values = Vec::with_capacity(l.values.len());
+        let mut new_aliases = Vec::new();
+        for (idx, v) in l.values.iter().enumerate() {
+            let alias = if l.names.len() == l.values.len() {
+                self.slot_loan_alias_rhs(v)
+            } else {
+                None
+            };
+            let e = self.emit_expr(v, 0)?;
+            if let Some((loan_root, is_val_loan)) = alias {
+                values.push(if is_val_loan { format!("&{}", e) } else { e });
+                if let Some(name) = l.names.get(idx) {
+                    if name != "_" {
+                        new_aliases.push((name.clone(), loan_root));
+                    }
+                }
+            } else {
+                values.push(e);
+            }
+        }
         for name in &l.names {
             if name != "_" {
                 self.flush_loan_for_name(name);
@@ -431,6 +570,13 @@ impl Emitter {
         // (Batch I): `stats := pool_stats{}` — field chains type through
         // struct_fields (18's `stats.mu.lock()`).
         self.hint_from_values(&l.names, &l.values);
+        for (alias_name, loan_root) in new_aliases {
+            self.pointer_vars.insert(alias_name.clone());
+            self.loan_aliases
+                .entry(loan_root)
+                .or_default()
+                .insert(alias_name);
+        }
         Ok(())
     }
 
@@ -518,7 +664,7 @@ impl Emitter {
         }
     }
 
-    fn expr_has_call_or_recv(e: &Expr) -> bool {
+    pub(crate) fn expr_has_call_or_recv(e: &Expr) -> bool {
         match e {
             Expr::Call { .. } | Expr::Receive { .. } | Expr::Try { .. } => true,
             Expr::Binary { lhs, rhs, .. } => {
@@ -573,6 +719,7 @@ impl Emitter {
             let text = self.emit_expr(e, 0)?;
             let temp = self.next_temp("hyT");
             self.push(&format!("{} := {}", temp, text));
+            self.expr_temps.insert(Self::expr_key(inner), temp.clone());
             self.expr_temps.insert(Self::expr_key(e), temp);
         }
         Ok(())
@@ -581,10 +728,12 @@ impl Emitter {
     fn hoist_tries_call(&mut self, callee: &Expr, args: &[CallArg]) -> Result<(), EmitError> {
         let any_arg_has_try = args.iter().any(|a| Self::expr_has_hoistable_try(&a.value));
         if any_arg_has_try {
-            match callee {
+            match Self::peel_parens(callee) {
                 Expr::Field { base, .. } => self.hoist_order_before_try(base)?,
-                Expr::Call { .. } => self.hoist_order_before_try(callee)?,
-                _ => self.hoist_tries_expr(callee)?,
+                Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => {
+                    self.hoist_tries_expr(callee)?
+                }
+                _ => self.hoist_order_before_try(callee)?,
             }
         } else {
             self.hoist_tries_expr(callee)?;
@@ -842,6 +991,10 @@ impl Emitter {
                 }
                 None
             }
+            // A closure bound by name in this fn (`f := fn() error {…}`).
+            Expr::Ident { name, .. } if self.closure_shapes.contains_key(name.as_str()) => {
+                self.closure_shapes.get(name.as_str()).copied()
+            }
             // User fns: the eagerly collected declared shape.
             Expr::Ident { name, .. } => self
                 .fn_shapes
@@ -890,17 +1043,17 @@ impl Emitter {
             callee,
             args,
             span: _,
-        } = call
+        } = Self::peel_parens(call)
         {
             if let Expr::Field {
                 base,
                 name,
                 span: _,
-            } = callee.as_ref()
+            } = Self::peel_parens(callee)
             {
-                if let Expr::Ident { name: pkg, .. } = base.as_ref() {
-                    if *pkg == "httptest" && (*name == "get" || *name == "post") {
-                        return self.emit_httptest_get(l, args, name);
+                if let Expr::Ident { name: pkg, .. } = Self::peel_parens(base) {
+                    if self.is_unshadowed_pkg_root(pkg) && *pkg == "httptest" && (*name == "get" || *name == "post") {
+                        self.hoist_tries_call(callee, args)?; return self.emit_httptest_get(l, args, name);
                     }
                 }
             }
@@ -1047,6 +1200,9 @@ impl Emitter {
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
         let e = Self::peel_parens(e);
+        if matches!(e, Expr::MapLit { .. }) {
+            return BindingKind::Map;
+        }
         if let Expr::StructLit { ty: Some(t), .. } = e {
             if let Some(kind) = self.binding_kind_of_ty(t) {
                 return kind;
@@ -1107,6 +1263,16 @@ impl Emitter {
                 {
                     return BindingKind::Chan;
                 }
+                if matches!(
+                    &first.value,
+                    Expr::MapLit { .. }
+                        | Expr::StructLit {
+                            ty: Some(TypeExpr::Map { .. }),
+                            ..
+                        }
+                ) {
+                    return BindingKind::Map;
+                }
             }
             return BindingKind::Plain;
         }
@@ -1129,6 +1295,21 @@ impl Emitter {
         }
     }
 
+    /// Whether an expression evaluates to a map (`map[K]V` local/param,
+    /// map literal, `make(map…)` or a call whose result is a map). Single-var
+    /// `for k in m` binds the key (SPEC LX13, #2945).
+    fn is_map_expr(&self, e: &Expr) -> bool {
+        match Self::peel_parens(e) {
+            Expr::Ident { name, .. } => {
+                matches!(self.bindings.get(name), Some(BindingKind::Map))
+            }
+            e @ (Expr::Call { .. } | Expr::Try { .. } | Expr::StructLit { .. } | Expr::MapLit { .. }) => {
+                self.binding_kind_of(e) == BindingKind::Map
+            }
+            _ => false,
+        }
+    }
+
     /// Whether an expression evaluates to a set (`set[T]`). Set ranges in
     /// Go iterate over the underlying map (`s.m`).
     pub(crate) fn is_set_expr(&self, e: &Expr) -> bool {
@@ -1142,12 +1323,14 @@ impl Emitter {
                 _ => false,
             },
             Expr::Field { base, name, .. } => {
-                if let Expr::Ident { name: vn, .. } = base.as_ref() {
-                    if let Some(sn) = self.var_struct.get(vn) {
-                        if let Some(fields) = self.struct_fields.get(sn) {
-                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                                return fty.starts_with("set[") || fty == "set";
-                            }
+                // Recursive since #1553: `o.sub.seen` is a set field of a
+                // nested struct, not just `o.seen`. The single-hop read
+                // made `len(o.sub.seen)` / `delete(o.sub.seen, k)` fall
+                // through to raw Go builtins on the `set[T]` wrapper.
+                if let Some(sn) = self.user_struct_name_of(base.as_ref()) {
+                    if let Some(fields) = self.struct_fields.get(sn) {
+                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                            return fty.starts_with("set[") || fty == "set";
                         }
                     }
                 }
@@ -1234,10 +1417,11 @@ impl Emitter {
             }
             let mut rhs_texts = Vec::with_capacity(values.len());
             let mut new_loans = Vec::new();
+            let mut new_aliases = Vec::new();
             for (name, v) in names.iter().zip(values.iter()) {
                 if let Some(operand) = Self::as_slot_loan_operand(v) {
                     let (read_place, write_place) =
-                        self.emit_slot_loan_place(operand, name, rest)?;
+                        self.emit_slot_loan_place(operand, name, &names, rest)?;
                     if self.pointer_vars.contains(name) {
                         // A pointer-typed target (`var x *T`, a `*T` param,
                         // `x := &T{}`) keeps its Go type: point it at a copy
@@ -1252,9 +1436,23 @@ impl Emitter {
                             new_loans.push((name.clone(), format!("{} = {}", write_place, name)));
                         }
                     }
+                } else if let Some((loan_root, is_val_loan)) = self.slot_loan_alias_rhs(v) {
+                    let e = self.emit_expr(v, 0)?;
+                    let take_addr = is_val_loan && self.pointer_vars.contains(name);
+                    rhs_texts.push(if take_addr { format!("&{}", e) } else { e });
+                    if name != "_" && (!is_val_loan || self.pointer_vars.contains(name)) {
+                        new_aliases.push((name.clone(), loan_root));
+                    }
                 } else {
                     rhs_texts.push(self.emit_expr(v, 0)?);
                 }
+            }
+            for (alias_name, loan_root) in new_aliases {
+                self.pointer_vars.insert(alias_name.clone());
+                self.loan_aliases
+                    .entry(loan_root)
+                    .or_default()
+                    .insert(alias_name);
             }
             self.push(&format!("{} = {}", names.join(", "), rhs_texts.join(", ")));
             if let Some(frame) = self.loan_frames.last_mut() {
@@ -1262,11 +1460,37 @@ impl Emitter {
             }
             return Ok(());
         }
+        let mut alias_assigns: Vec<Option<(String, bool)>> = Vec::new();
         if targets.len() == values.len() && op == AssignOp::Assign {
-            let ptr_flags: Vec<bool> = values.iter().map(|v| self.expr_is_pointer(v)).collect();
-            for (t, is_ptr) in targets.iter().zip(ptr_flags) {
+            alias_assigns = targets
+                .iter()
+                .zip(values.iter())
+                .map(|(t, v)| match (&t.kind, self.slot_loan_alias_rhs(v)) {
+                    (PlaceKind::Ident(name), Some((root, is_val_loan)))
+                        if !is_val_loan || self.pointer_vars.contains(name) =>
+                    {
+                        Some((root, is_val_loan))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let ptr_flags: Vec<bool> = values
+                .iter()
+                .enumerate()
+                .map(|(i, v)| alias_assigns[i].is_some() || self.expr_is_pointer(v))
+                .collect();
+            for ((t, is_ptr), alias) in targets.iter().zip(ptr_flags).zip(alias_assigns.iter()) {
                 if let PlaceKind::Ident(name) = &t.kind {
                     if name != "_" {
+                        for aliases in self.loan_aliases.values_mut() {
+                            aliases.remove(name);
+                        }
+                        if let Some((loan_root, _)) = alias {
+                            self.loan_aliases
+                                .entry(loan_root.clone())
+                                .or_default()
+                                .insert(name.clone());
+                        }
                         if is_ptr {
                             self.pointer_vars.insert(name.clone());
                         } else {
@@ -1318,10 +1542,15 @@ impl Emitter {
             .iter()
             .map(|t| self.emit_place(t))
             .collect::<Result<Vec<_>, _>>()?;
-        let vs = values
-            .iter()
-            .map(|v| self.emit_expr(v, 0))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut vs = Vec::with_capacity(values.len());
+        for (idx, v) in values.iter().enumerate() {
+            let e = self.emit_expr(v, 0)?;
+            if matches!(alias_assigns.get(idx), Some(Some((_, true)))) {
+                vs.push(format!("&{}", e));
+            } else {
+                vs.push(e);
+            }
+        }
         self.push(&format!("{} {} {}", ts.join(", "), op_text, vs.join(", ")));
         Ok(())
     }
@@ -1347,10 +1576,63 @@ impl Emitter {
         }
     }
 
+    pub fn type_of_place(&self, p: &Place) -> Option<&'static str> {
+        match &p.kind {
+            PlaceKind::Ident(name) => {
+                if let Some(BindingKind::ForeignTy(t)) = self.bindings.get(name) {
+                    return Some(t);
+                }
+                if let Some((ty, _)) = self.var_ty.get(name) {
+                    if let Some((k, _)) = super::shapes::SHAPES.iter().find(|(k, _)| *k == ty) {
+                        return Some(k);
+                    }
+                }
+                None
+            }
+            PlaceKind::Field { base, name } => {
+                if let Some(bt) = self.type_of_place(base) {
+                    if let Some(m) = super::shapes::lookup_member(bt, name) {
+                        return m.result;
+                    }
+                }
+                if let PlaceKind::Ident(vn) = &base.kind {
+                    if let Some(sn) = self.var_struct.get(vn) {
+                        if let Some(fields) = self.struct_fields.get(sn) {
+                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                                if let Some((k, _)) =
+                                    super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
+                                {
+                                    return Some(k);
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            PlaceKind::AddrOf { base } => self.type_of_place(base),
+            PlaceKind::Index { .. } => None,
+        }
+    }
+
     /// Member-name normalization for a PLACE (assignment target). Same rule
-    /// as the expression side: foreign package roots and Foreign bindings
-    /// normalize; our own members stay verbatim.
+    /// as the expression side: shape-table members (including MethodZero
+    /// `w.header[k] = v` -> `w.Header()[k] = v` and foreign fields nested
+    /// inside user structs `ctx.req.host = ...` -> `ctx.req.Host = ...`)
+    /// resolve first; foreign package roots and Foreign bindings normalize;
+    /// our own struct members stay verbatim.
     pub fn place_member_name(&self, base: &Place, name: &str) -> String {
+        if let Some(t) = self.type_of_place(base) {
+            if let Some(m) = super::shapes::lookup_member(t, name) {
+                return match m.kind {
+                    super::shapes::MemberKind::Field | super::shapes::MemberKind::Method => {
+                        m.go.to_string()
+                    }
+                    super::shapes::MemberKind::MethodZero => format!("{}()", m.go),
+                };
+            }
+            return super::to_go_name(name);
+        }
         let root = base.root();
         if self.is_unshadowed_pkg_root(root)
             || matches!(
@@ -1544,7 +1826,7 @@ impl Emitter {
                     .collect::<Result<Vec<_>, _>>()?;
                 self.hint_from_values(&l.names, &l.values);
                 if let Some(t) = &l.ty {
-                    if matches!(t, TypeExpr::Pointer { .. }) {
+                    if self.is_pointer_ty(t) {
                         for n in &l.names {
                             if n != "_" {
                                 self.pointer_vars.insert(n.clone());
@@ -1602,6 +1884,21 @@ impl Emitter {
         let r = self.emit_stmts_with_loans(stmts);
         self.branch_inherit = inherited;
         r
+    }
+
+    /// True when a select receive-arm body re-declares one of the names
+    /// actually bound by its case clause at the body's top level. Only the
+    /// flat top level matters: Go puts the case bindings and the body in the
+    /// same clause scope, while a `Stmt::Block` inside the body emits its own
+    /// braces (a fresh Go scope) and can never conflict.
+    fn case_body_redefines_binding(stmts: &[Stmt], bound: &[&str]) -> bool {
+        if bound.is_empty() {
+            return false;
+        }
+        stmts.iter().any(|s| match s {
+            Stmt::Local(l) => l.names.iter().any(|n| bound.contains(&n.as_str())),
+            _ => false,
+        })
     }
 
     fn block_terminates(b: &Block) -> bool {
@@ -1712,10 +2009,12 @@ impl Emitter {
                 let c = self.emit_expr(cond, ATOM)?;
                 self.push(&format!("if !{} {{", c));
                 self.indent += 1;
+                for (_, s) in self.branch_inherit.clone().unwrap_or_default() { self.push(&s); }
                 self.push("break");
                 self.indent -= 1;
                 self.push("}");
-                self.emit_arm_stmts_with_loans(&body.stmts)?;
+                self.loan_frames.push(vec![(String::new(), label.clone().unwrap_or_default())]);
+                let r = self.emit_arm_stmts_with_loans(&body.stmts); self.loan_frames.pop(); r?;
                 self.indent -= 1;
                 self.push("}");
                 if label.is_some() {
@@ -1749,6 +2048,7 @@ impl Emitter {
                 // `for _ in a..b` (differential corpus 16/17/18): Go has no
                 // blank := variable — a fresh temp carries the count. The
                 // semantics are identical: the variable is never read.
+                let var_in_scope = self.local_vars.contains(var);
                 let v = if var == "_" {
                     self.next_temp("hyBlank")
                 } else {
@@ -1775,8 +2075,14 @@ impl Emitter {
                         "for {}, {} := {}, {} <= {}; {}; {}++ {{",
                         v, cont, lo_once, lo_once, hi_once, cont, v
                     )
-                } else {
+                } else if (!Self::expr_mentions_ident(hi, &v) || !var_in_scope)
+                    && !Self::expr_has_call_or_recv(hi)
+                {
                     format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_t, v)
+                } else {
+                    let hi_once = self.next_temp("hyHi");
+                    self.push(&format!("{} := {}", hi_once, hi_t));
+                    format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_once, v)
                 }
             }
             ForKind::Iterate { vars, expr } => {
@@ -1796,12 +2102,14 @@ impl Emitter {
                         if self.is_set_expr(expr) {
                             self.shadow_local_names(vars);
                             if !read {
+                                self.local_vars.remove(&vars[0]);
                                 format!("for range {}.m {{", e)
                             } else {
                                 format!("for {} := range {}.m {{", vars[0], e)
                             }
                         } else if !read {
                             self.shadow_local_names(vars);
+                            self.local_vars.remove(&vars[0]);
                             format!("for range {} {{", e)
                         } else {
                             // Hybrid's single-var iterate binds the VALUE.
@@ -1809,7 +2117,9 @@ impl Emitter {
                             // maps) or the value (channels) — hence the Chan
                             // hint check.
                             let over_chan = self.is_channel_expr(expr);
-                            if over_chan {
+                            // SPEC LX13: single-var range over a map binds
+                            // the KEY (#2945) — Go's own single-var form.
+                            if over_chan || self.is_map_expr(expr) {
                                 self.shadow_local_names(vars);
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {
@@ -1858,11 +2168,13 @@ impl Emitter {
                         let a = if crate::rangebind::body_reads(body, &vars[0]) {
                             vars[0].clone()
                         } else {
+                            self.local_vars.remove(&vars[0]);
                             "_".to_string()
                         };
                         let c = if crate::rangebind::body_reads(body, &vars[1]) {
                             vars[1].clone()
                         } else {
+                            self.local_vars.remove(&vars[1]);
                             "_".to_string()
                         };
                         if a == "_" && c == "_" {
@@ -2173,7 +2485,101 @@ impl Emitter {
                 _ => false,
             };
 
-        if simple_unguarded_chain {
+        let needs_ordered_arms = classified.iter().any(|(k, a)| !matches!(k, ArmKind::Some(_)) && a.guard.is_some())
+            || classified.iter().filter(|(k, _)| matches!(k, ArmKind::NoneArm)).count() > 1
+            || classified.iter().filter(|(k, _)| matches!(k, ArmKind::Wildcard)).count() > 1
+            || classified.iter().position(|(k, _)| matches!(k, ArmKind::Wildcard))
+                .is_some_and(|wi| classified[wi + 1..].iter().any(|(k, _)| !matches!(k, ArmKind::Wildcard)));
+        if needs_ordered_arms {
+            let matched = self.next_temp("hyMatched");
+            self.push(&format!("{} := false", matched));
+            let mut exhausted = false;
+            let mut seen_unguarded_some = false;
+            let mut seen_unguarded_none = false;
+            let mut emitted_arms: Vec<&MatchArm> = Vec::new();
+            for (kind, arm) in &classified {
+                if (matches!(kind, ArmKind::Some(_)) && seen_unguarded_some)
+                    || (matches!(kind, ArmKind::NoneArm) && seen_unguarded_none)
+                {
+                    continue;
+                }
+                emitted_arms.push(*arm);
+                let (cond, bind) = match kind {
+                    ArmKind::Some(b) => (format!("!{} && {}.ok", matched, temp), Some(b.as_str())),
+                    ArmKind::NoneArm => (format!("!{} && !{}.ok", matched, temp), None),
+                    ArmKind::Wildcard => (format!("!{}", matched), None),
+                };
+                self.push(&format!("if {} {{", cond));
+                self.indent += 1;
+                let saved = self.save_scope();
+                if let Some(b) = bind { self.shadow_local_name(b); }
+                let res = (|| -> Result<(), EmitError> {
+                    if let Some(g) = &arm.guard {
+                        let greads = bind.is_some_and(|b| b != "_" && crate::rangebind::expr_reads(g, b));
+                        if let Some(b) = bind.filter(|_| greads) { self.push(&format!("{} := {}.val", b, temp)); }
+                        self.hoist_tries_expr(g)?;
+                        let gt = self.emit_expr(g, 0)?;
+                        self.push(&format!("if {} {{", gt));
+                        self.indent += 1;
+                        self.push(&format!("{} = true", matched));
+                        let breads = bind.is_some_and(|b| b != "_" && !greads && crate::rangebind::body_reads(&arm.body, b));
+                        if let Some(b) = bind {
+                            if breads {
+                                self.push(&format!("{} := {}.val", b, temp));
+                            } else if !greads {
+                                self.local_vars.remove(b);
+                            }
+                        }
+                        self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                        self.indent -= 1;
+                        self.push("}");
+                    } else {
+                        self.push(&format!("{} = true", matched));
+                        let breads = bind.is_some_and(|b| b != "_" && crate::rangebind::body_reads(&arm.body, b));
+                        if let Some(b) = bind {
+                            if breads {
+                                self.push(&format!("{} := {}.val", b, temp));
+                            } else {
+                                self.local_vars.remove(b);
+                            }
+                        }
+                        self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                    }
+                    Ok(())
+                })();
+                self.restore_scope(saved);
+                self.indent -= 1;
+                self.push("}");
+                res?;
+                if arm.guard.is_none() {
+                    match kind {
+                        ArmKind::Wildcard => {
+                            exhausted = true;
+                            break;
+                        }
+                        ArmKind::Some(_) => seen_unguarded_some = true,
+                        ArmKind::NoneArm => seen_unguarded_none = true,
+                    }
+                    if seen_unguarded_some && seen_unguarded_none {
+                        exhausted = true;
+                        break;
+                    }
+                }
+            }
+            if !exhausted {
+                if let Some(inherited) = self.branch_inherit.clone() {
+                    self.push(&format!("if !{} {{", matched));
+                    self.indent += 1;
+                    for (_, store) in inherited { self.push(&store); }
+                    self.indent -= 1;
+                    self.push("}");
+                }
+            }
+            let covers_all = exhausted || (seen_unguarded_some && seen_unguarded_none);
+            if covers_all && emitted_arms.iter().all(|a| matches!(a.body.stmts.last(), Some(Stmt::Return { .. }))) {
+                self.push("panic(\"unreachable\")");
+            }
+        } else if simple_unguarded_chain {
             let else_arm = none_arm.or(wildcard_arm);
             self.push(&format!("if {}.ok {{", temp));
             self.indent += 1;
@@ -2200,11 +2606,11 @@ impl Emitter {
                             let gt = self.emit_expr(g, 0)?;
                             self.push(&format!("if {} {{", gt));
                             self.indent += 1;
-                            if *binding != "_"
-                                && prebound_guard_var.as_deref() != Some(binding.as_str())
-                                && crate::rangebind::body_reads(&arm.body, binding)
-                            {
+                            let prebound = prebound_guard_var.as_deref() == Some(binding.as_str());
+                            if *binding != "_" && !prebound && crate::rangebind::body_reads(&arm.body, binding) {
                                 self.push(&format!("{} := {}.val", binding, temp));
+                            } else if !prebound {
+                                self.local_vars.remove(*binding);
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             self.indent -= 1;
@@ -2216,11 +2622,11 @@ impl Emitter {
                                 self.push("} else {");
                                 self.indent += 1;
                             }
-                            if *binding != "_"
-                                && prebound_guard_var.as_deref() != Some(binding.as_str())
-                                && crate::rangebind::body_reads(&arm.body, binding)
-                            {
+                            let prebound = prebound_guard_var.as_deref() == Some(binding.as_str());
+                            if *binding != "_" && !prebound && crate::rangebind::body_reads(&arm.body, binding) {
                                 self.push(&format!("{} := {}.val", binding, temp));
+                            } else if !prebound {
+                                self.local_vars.remove(*binding);
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             if chain_opened {
@@ -2288,6 +2694,8 @@ impl Emitter {
                                 && crate::rangebind::body_reads(&arm.body, binding)
                             {
                                 self.push(&format!("{} := {}.val", binding, temp));
+                            } else if !guard_reads {
+                                self.local_vars.remove(*binding);
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             self.indent -= 1;
@@ -2296,6 +2704,8 @@ impl Emitter {
                         None => {
                             if *binding != "_" && crate::rangebind::body_reads(&arm.body, binding) {
                                 self.push(&format!("{} := {}.val", binding, temp));
+                            } else {
+                                self.local_vars.remove(*binding);
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                         }
@@ -2313,6 +2723,13 @@ impl Emitter {
                     self.push("} else {");
                     self.emit_block_body(&arm.body.stmts)?;
                     self.push("}");
+                    let all_return = reachable_some_arms
+                        .iter()
+                        .all(|(_, a)| matches!(a.body.stmts.last(), Some(Stmt::Return { .. })))
+                        && matches!(arm.body.stmts.last(), Some(Stmt::Return { .. }));
+                    if all_return {
+                        self.push("panic(\"unreachable\")");
+                    }
                 }
                 None => {
                     if let Some(inherited) = self.branch_inherit.clone() {
@@ -2360,6 +2777,8 @@ impl Emitter {
                         && crate::rangebind::body_reads(&arm.body, binding)
                     {
                         self.push(&format!("{} := {}.val", binding, temp));
+                    } else if !guard_reads {
+                        self.local_vars.remove(*binding);
                     }
                     self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                     self.indent -= 1;
@@ -2399,6 +2818,16 @@ impl Emitter {
                 self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                 self.indent -= 1;
                 self.push("}");
+                let all_return = reachable_some_arms
+                    .iter()
+                    .all(|(_, a)| matches!(a.body.stmts.last(), Some(Stmt::Return { .. })))
+                    && none_arm.is_none_or(|a| {
+                        matches!(a.body.stmts.last(), Some(Stmt::Return { .. }))
+                    })
+                    && matches!(arm.body.stmts.last(), Some(Stmt::Return { .. }));
+                if all_return {
+                    self.push("panic(\"unreachable\")");
+                }
             } else if let Some(inherited) = self.branch_inherit.clone() {
                 self.push(&format!("if !{} {{", matched_temp));
                 self.indent += 1;
@@ -2437,6 +2866,37 @@ impl Emitter {
         }
     }
 
+    /// Returns `Some((loan_root, is_value_loan_ident))` when `expr` is an
+    /// identifier (or parenthesized/`move` identifier) naming an active O8 slot
+    /// loan in `self.loan_frames` or an active local alias of one.
+    fn slot_loan_alias_rhs(&self, mut expr: &Expr) -> Option<(String, bool)> {
+        loop {
+            match expr {
+                Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => expr = inner,
+                _ => break,
+            }
+        }
+        let Expr::Ident { name, .. } = expr else {
+            return None;
+        };
+        let is_active_loan = |loan_name: &str| {
+            !loan_name.is_empty()
+                && self
+                    .loan_frames
+                    .iter()
+                    .any(|frame| frame.iter().any(|(n, _)| n == loan_name))
+        };
+        if is_active_loan(name) {
+            return Some((name.clone(), !self.pointer_vars.contains(name)));
+        }
+        for (loan_root, aliases) in &self.loan_aliases {
+            if aliases.contains(name) && is_active_loan(loan_root) {
+                return Some((loan_root.clone(), false));
+            }
+        }
+        None
+    }
+
     /// Emits the read-place and store-back-place for an O8 slot loan `&operand`
     /// bound to `loan_var`, snapshotting the index expression into a fresh
     /// `hyKeyN` temporary when the index is non-trivial or is mutated before
@@ -2445,6 +2905,7 @@ impl Emitter {
         &mut self,
         operand: &Expr,
         loan_var: &str,
+        same_stmt_targets: &[String],
         rest: &[Stmt],
     ) -> Result<(String, String), EmitError> {
         if let Expr::Index { base, index, .. } = operand {
@@ -2452,6 +2913,8 @@ impl Emitter {
                 Expr::Lit { .. } => false,
                 Expr::Ident { name, .. } => {
                     name == loan_var
+                        || same_stmt_targets.iter().any(|t| t == name)
+                        || self.closure_written.contains(name)
                         || rest.iter().any(|s| Self::stmt_modifies_ident(s, name))
                 }
                 _ => true,
@@ -2479,6 +2942,10 @@ impl Emitter {
     /// Flushes and removes any active slot-loan entries for `target_name` in
     /// the current loan frame (used before rebinding `target_name = &...`).
     fn flush_loan_for_name(&mut self, target_name: &str) {
+        self.loan_aliases.remove(target_name);
+        for aliases in self.loan_aliases.values_mut() {
+            aliases.remove(target_name);
+        }
         let mut to_flush = Vec::new();
         if let Some(frame) = self.loan_frames.last_mut() {
             let mut i = 0;
@@ -2514,14 +2981,21 @@ impl Emitter {
         if let Some(frame) = self.loan_frames.last_mut() {
             let mut i = 0;
             while i < frame.len() {
-                if !frame[i].0.is_empty() && !Self::remaining_stmts_use_loan(stmts, &frame[i].0) {
+                if !frame[i].0.is_empty()
+                    && !Self::remaining_stmts_use_loan_with_aliases(
+                        &self.loan_aliases,
+                        stmts,
+                        &frame[i].0,
+                    )
+                {
                     unused.push(frame.remove(i));
                 } else {
                     i += 1;
                 }
             }
         }
-        for (_, store) in unused {
+        for (name, store) in unused {
+            self.loan_aliases.remove(&name);
             self.push(&store);
         }
         for (idx, st) in stmts.iter().enumerate() {
@@ -2543,10 +3017,24 @@ impl Emitter {
                         let (name, place) = &frame[i];
                         let root = Self::place_root(place);
                         if !name.is_empty()
-                            && !Self::remaining_stmts_use_loan(rest, name)
-                            && Self::stmt_has_boundary_using(st, name, root)
+                            && !Self::remaining_stmts_use_loan_with_aliases(
+                                &self.loan_aliases,
+                                rest,
+                                name,
+                            )
+                            && Self::stmt_has_boundary_using_with_aliases(
+                                &self.loan_aliases,
+                                st,
+                                name,
+                                root,
+                            )
                         {
-                            if Self::stmt_must_pre_flush_loan(st, name, root) {
+                            if Self::stmt_must_pre_flush_loan_with_aliases(
+                                &self.loan_aliases,
+                                st,
+                                name,
+                                root,
+                            ) {
                                 pre_flush.push(frame.remove(i));
                             } else {
                                 handoff.push(frame.remove(i));
@@ -2557,7 +3045,8 @@ impl Emitter {
                     }
                 }
             }
-            for (_, store) in pre_flush {
+            for (name, store) in pre_flush {
+                self.loan_aliases.remove(&name);
                 self.push(&store);
             }
             let saved_inherit = if handoff.is_empty() {
@@ -2586,7 +3075,11 @@ impl Emitter {
                 if let Some(frame) = self.loan_frames.last_mut() {
                     let mut i = 0;
                     while i < frame.len() {
-                        if !Self::remaining_stmts_use_loan(rest, &frame[i].0) {
+                        if !Self::remaining_stmts_use_loan_with_aliases(
+                            &self.loan_aliases,
+                            rest,
+                            &frame[i].0,
+                        ) {
                             early_flush.push(frame.remove(i));
                         } else {
                             i += 1;
@@ -2595,6 +3088,7 @@ impl Emitter {
                 }
                 for (name, store) in early_flush {
                     if !name.is_empty() {
+                        self.loan_aliases.remove(&name);
                         self.push(&store);
                     }
                 }
@@ -2604,6 +3098,7 @@ impl Emitter {
         if !stmts.iter().any(Self::stmt_terminates) {
             for (name, store) in frame {
                 if !name.is_empty() {
+                    self.loan_aliases.remove(&name);
                     self.push(&store);
                 }
             }
@@ -2611,8 +3106,48 @@ impl Emitter {
         Ok(())
     }
 
+    fn remaining_stmts_use_loan_with_aliases(
+        loan_aliases: &std::collections::BTreeMap<String, BTreeSet<String>>,
+        stmts: &[Stmt],
+        name: &str,
+    ) -> bool {
+        Self::remaining_stmts_use_loan(stmts, name)
+            || loan_aliases
+                .get(name)
+                .is_some_and(|aliases| aliases.iter().any(|a| Self::remaining_stmts_use_loan(stmts, a)))
+    }
+
+    fn stmt_has_boundary_using_with_aliases(
+        loan_aliases: &std::collections::BTreeMap<String, BTreeSet<String>>,
+        st: &Stmt,
+        name: &str,
+        root: &str,
+    ) -> bool {
+        Self::stmt_has_boundary_using(st, name, root)
+            || loan_aliases.get(name).is_some_and(|aliases| {
+                aliases
+                    .iter()
+                    .any(|a| Self::stmt_has_boundary_using(st, a, root))
+            })
+    }
+
+    fn stmt_must_pre_flush_loan_with_aliases(
+        loan_aliases: &std::collections::BTreeMap<String, BTreeSet<String>>,
+        st: &Stmt,
+        name: &str,
+        root: &str,
+    ) -> bool {
+        Self::stmt_must_pre_flush_loan(st, name, root)
+            || loan_aliases.get(name).is_some_and(|aliases| {
+                aliases
+                    .iter()
+                    .any(|a| Self::stmt_must_pre_flush_loan(st, a, root))
+            })
+    }
+
     /// Leading identifier of a rendered loan place (`m["a"]` -> `m`, `h.m[k]` -> `h`).
     fn place_root(place: &str) -> &str {
+        let place = place.trim_start_matches('(');
         let end = place
             .find(|c: char| !(c.is_alphanumeric() || c == '_'))
             .unwrap_or(place.len());
@@ -3074,6 +3609,166 @@ impl Emitter {
         }
     }
 
+    pub(crate) fn collect_closure_writes_block(
+        b: &Block,
+        in_closure: bool,
+        out: &mut BTreeSet<String>,
+    ) {
+        for s in &b.stmts {
+            Self::collect_closure_writes_stmt(s, in_closure, out);
+        }
+    }
+
+    fn collect_closure_writes_stmt(s: &Stmt, in_closure: bool, out: &mut BTreeSet<String>) {
+        let ex = |e: &Expr, out: &mut BTreeSet<String>| {
+            Self::collect_closure_writes_expr(e, in_closure, out)
+        };
+        match s {
+            Stmt::Local(l) => l.values.iter().for_each(|v| ex(v, out)),
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                for t in targets {
+                    if in_closure {
+                        out.insert(t.root().to_string());
+                    }
+                    Self::collect_closure_writes_place(t, in_closure, out);
+                }
+                values.iter().for_each(|v| ex(v, out));
+            }
+            Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => ex(expr, out),
+            Stmt::Send { chan, value, .. } => {
+                ex(chan, out);
+                ex(value, out);
+            }
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                if let Some(i) = init {
+                    Self::collect_closure_writes_stmt(i, in_closure, out);
+                }
+                ex(cond, out);
+                Self::collect_closure_writes_block(then, in_closure, out);
+                if let Some(o) = otherwise {
+                    Self::collect_closure_writes_stmt(o, in_closure, out);
+                }
+            }
+            Stmt::For { kind, body, .. } => {
+                match kind {
+                    ForKind::While { cond } => ex(cond, out),
+                    ForKind::Range { lo, hi, .. } => {
+                        ex(lo, out);
+                        ex(hi, out);
+                    }
+                    ForKind::Iterate { expr, .. } => ex(expr, out),
+                    ForKind::Infinite => {}
+                }
+                Self::collect_closure_writes_block(body, in_closure, out);
+            }
+            Stmt::Return { values, .. } => values.iter().for_each(|v| ex(v, out)),
+            Stmt::Task { callee, args, .. } => {
+                ex(callee, out);
+                args.iter().for_each(|a| ex(&a.value, out));
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                Self::collect_closure_writes_block(body, in_closure, out)
+            }
+            Stmt::Match { subject, arms, .. } => {
+                ex(subject, out);
+                for a in arms {
+                    if let Some(g) = &a.guard {
+                        ex(g, out);
+                    }
+                    Self::collect_closure_writes_block(&a.body, in_closure, out);
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for a in arms {
+                    match &a.kind {
+                        SelectArmKind::Send { chan, value, .. } => {
+                            ex(chan, out);
+                            ex(value, out);
+                        }
+                        SelectArmKind::Recv { chan, .. } => ex(chan, out),
+                        SelectArmKind::Default => {}
+                    }
+                    Self::collect_closure_writes_block(&a.body, in_closure, out);
+                }
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        }
+    }
+
+    fn collect_closure_writes_place(p: &Place, in_closure: bool, out: &mut BTreeSet<String>) {
+        match &p.kind {
+            PlaceKind::Ident(_) => {}
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                Self::collect_closure_writes_place(base, in_closure, out)
+            }
+            PlaceKind::Index { base, index } => {
+                Self::collect_closure_writes_place(base, in_closure, out);
+                Self::collect_closure_writes_expr(index, in_closure, out);
+            }
+        }
+    }
+
+    fn collect_closure_writes_expr(e: &Expr, in_closure: bool, out: &mut BTreeSet<String>) {
+        let ex = |e: &Expr, out: &mut BTreeSet<String>| {
+            Self::collect_closure_writes_expr(e, in_closure, out)
+        };
+        match e {
+            Expr::Ident { .. } | Expr::Lit { .. } => {}
+            Expr::FnLit { body, .. } => Self::collect_closure_writes_block(body, true, out),
+            Expr::Interp { parts, .. } => {
+                for p in parts {
+                    if let InterpPart::Expr(x) = p {
+                        ex(x, out);
+                    }
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                ex(lhs, out);
+                ex(rhs, out);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Receive { chan: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Paren { inner: operand, .. } => ex(operand, out),
+            Expr::Index { base, index, .. } => {
+                ex(base, out);
+                ex(index, out);
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                ex(base, out);
+                if let Some(l) = lo {
+                    ex(l, out);
+                }
+                if let Some(h) = hi {
+                    ex(h, out);
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                ex(callee, out);
+                args.iter().for_each(|a| ex(&a.value, out));
+            }
+            Expr::StructLit { fields, .. } => fields.iter().for_each(|f| ex(&f.value, out)),
+            Expr::SliceLit { items, .. } => items.iter().for_each(|i| ex(i, out)),
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    ex(k, out);
+                    ex(v, out);
+                }
+            }
+        }
+    }
+
     fn stmt_modifies_ident(st: &Stmt, target: &str) -> bool {
         match st {
             Stmt::Local(l) => l.names.iter().any(|n| n == target),
@@ -3110,16 +3805,24 @@ impl Emitter {
                         .any(|s| Self::stmt_modifies_ident(s, target))
             }
             Stmt::Match { arms, .. } => arms.iter().any(|a| {
-                a.body
+                matches!(
+                    &a.pattern,
+                    MatchPattern::Path {
+                        binding: Some(b),
+                        ..
+                    } if b == target
+                ) || a
+                    .body
                     .stmts
                     .iter()
                     .any(|s| Self::stmt_modifies_ident(s, target))
             }),
             Stmt::Select { arms, .. } => arms.iter().any(|a| {
-                a.body
-                    .stmts
-                    .iter()
-                    .any(|s| Self::stmt_modifies_ident(s, target))
+                Self::select_arm_binds(&a.kind, target)
+                    || a.body
+                        .stmts
+                        .iter()
+                        .any(|s| Self::stmt_modifies_ident(s, target))
             }),
             Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => body
                 .stmts
@@ -3127,5 +3830,63 @@ impl Emitter {
                 .any(|s| Self::stmt_modifies_ident(s, target)),
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::emit_go;
+    use hy_syntax::parse_file;
+
+    #[test]
+    fn parallel_short_redecl_with_sibling_slot_loan_flushes_old_loan_before_rebind() {
+        let src = r#"
+struct item {
+    inner map[int]int
+    tag int
+}
+
+fn worker(m map[string]item, ch chan int) {
+    ch <- 1
+    it := m["a"]
+    for i in 0..10 {
+        it.inner[i] = i
+    }
+    ch <- 2
+}
+
+fn main() {
+    ch := make(chan int)
+    shared := map[int]int{0: 0}
+    m := map[string]item{"a": item{inner: map[int]int{0: 1}, tag: 7}}
+    m2 := map[string]item{"b": item{inner: map[int]int{0: 2}, tag: 8}}
+    q := &m["a"]
+    q, r := item{inner: shared, tag: q.tag}, &m2["b"]
+    _ = q
+    _ = r
+    task worker(move m, ch)
+    <-ch
+    shared[1] = 99
+    <-ch
+}
+"#;
+        let ast = parse_file("test.hy", src).expect("source must parse");
+        let go = emit_go(&ast).expect("must emit Go");
+        let flush_pos = go.find("m[\"a\"] = q").expect("must flush old loan on q");
+        let redecl_pos = go
+            .find("q, r := item{inner: shared, tag: q.tag}, m2[\"b\"]")
+            .expect("must emit parallel short decl");
+        let spawn_pos = go.find("go worker(m, ch)").expect("must emit spawn");
+        assert!(
+            flush_pos < redecl_pos && redecl_pos < spawn_pos,
+            "old slot loan `m[\"a\"] = q` must flush BEFORE `q, r := ...` overwrites `q`, got:\n{}",
+            go
+        );
+        assert_eq!(
+            go.matches("m[\"a\"] = q").count(),
+            1,
+            "must flush `m[\"a\"] = q` exactly once, got:\n{}",
+            go
+        );
     }
 }

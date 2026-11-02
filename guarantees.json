@@ -1,0 +1,396 @@
+{
+  "_comment": "guarantees.json — machine-readable form of the GUARANTEES.md claims table (issue #710). The doc's table is RENDERED from this file; tools/check_guarantees.py fails the build when a rule id here no longer exists in the diagnostics registry, when a corpus fixture's registered verdict contradicts the row it pins, when a scoped rule id appears in no row (and is not declared in `unclaimed` with a reason), or when a row carries no evidence. Edit this file, then run `python3 tools/check_guarantees.py --render`.",
+  "version": 1,
+  "registry": "compiler/crates/hy-diag/data/diagnostics.json",
+  "corpus": "tests/checker-corpus",
+  "doc": "GUARANTEES.md",
+  "scope": {
+    "families": [
+      "HYB-E3",
+      "HYB-E8"
+    ],
+    "note": "The claims table is about Tier-0 (ownership & sendability, HYB-E3xx) plus the managed-block lint (HYB-E8xx). Codes in these families must be claimed by a row or listed in `unclaimed` with a reason — a new rule that silently lands in no row fails the guard."
+  },
+  "rows": [
+    {
+      "id": 1,
+      "surface": "`task` spawn arguments",
+      "does": "Every argument classified by the six sendable classes; shared mutable aliases rejected",
+      "claim": "**Guaranteed**: no value reaches a spawned task through an unproven path",
+      "strength": "guaranteed",
+      "rules": [
+        "HYB-E3001",
+        "HYB-E3005"
+      ],
+      "fixtures": [
+        {
+          "path": "tests/checker-corpus/01-shared-map-across-tasks.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/15-fanin-per-task-state.hy",
+          "expect": "accept"
+        },
+        {
+          "path": "tests/checker-corpus/52-shadow-predeclared-struct-reject.hy",
+          "expect": "reject"
+        }
+      ],
+      "evidence_md": "[§8.4 C5](SPEC-LANGUAGE.md), [§9.3 O4](SPEC-LANGUAGE.md); corpus [01](tests/checker-corpus/01-shared-map-across-tasks.hy) (reject) / [15](tests/checker-corpus/15-fanin-per-task-state.hy) (accept)"
+    },
+    {
+      "id": 2,
+      "surface": "Channel sends (`ch <- v`, `select` send)",
+      "does": "Same classification as spawn; failures `HYB-E3002` with a fix-it menu",
+      "claim": "**Guaranteed**: the sent value is moved, frozen, copied, or knowingly managed",
+      "strength": "guaranteed",
+      "rules": [
+        "HYB-E3002"
+      ],
+      "fixtures": [
+        {
+          "path": "tests/checker-corpus/16-move-send-clean.hy",
+          "expect": "accept"
+        },
+        {
+          "path": "tests/checker-corpus/17-atomic-channel-immutable.hy",
+          "expect": "accept"
+        },
+        {
+          "path": "tests/checker-corpus/32-select-send-shared-map.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/33-select-send-safe-values.hy",
+          "expect": "accept"
+        }
+      ],
+      "evidence_md": "§8.4 C5, §9.3; corpus [16-move-send-clean](tests/checker-corpus/16-move-send-clean.hy), [17-atomic-channel-immutable](tests/checker-corpus/17-atomic-channel-immutable.hy)"
+    },
+    {
+      "id": 3,
+      "surface": "Composites (struct/slice/map literals)",
+      "does": "**Deep** sendability: every reference-typed field/element must itself be sendable; a fresh literal wrapping a shared map is still rejected",
+      "claim": "**Guaranteed**: embedding an alias does not launder it",
+      "strength": "guaranteed",
+      "rules": [
+        "HYB-E3001",
+        "HYB-E3002"
+      ],
+      "fixtures": [
+        {
+          "path": "tests/checker-corpus/03-pool-shared-struct-unguarded.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/45-composite-literal-embeds-shared-map.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/deep-composite-move-fresh-control.hy",
+          "expect": "accept"
+        }
+      ],
+      "evidence_md": "§9.3 O4.6; corpus [03](tests/checker-corpus/03-pool-shared-struct-unguarded.hy) shape; differential suite"
+    },
+    {
+      "id": 4,
+      "surface": "Unknown / unresolvable types and names",
+      "does": "**Fail-closed**: unproven values are rejected (`HYB-E3005`) — never silently passed as safe. Fix-its: ascribe / route through a channel / take the hatch",
+      "claim": "**Guaranteed**: the checker never blesses what it cannot resolve",
+      "strength": "guaranteed",
+      "rules": [
+        "HYB-E3005"
+      ],
+      "fixtures": [
+        {
+          "path": "tests/checker-corpus/34-select-send-unproven-name.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/atomic-pointer-fail-closed-reject.hy",
+          "expect": "reject"
+        }
+      ],
+      "evidence_md": "§9.3 O4.9 (rule FC); dedicated checker tests; corpus `34-select-send-unproven-name`"
+    },
+    {
+      "id": 5,
+      "surface": "Closure bodies",
+      "does": "`task`/send statements inside a closure are real boundaries (goroutines in the emitted Go) and are checked fail-closed, `managed`-escapable",
+      "claim": "**Guaranteed** for boundary statements; a closure that writes a captured mutable binding and is passed to a foreign Go call is checked too (HYB-E3013, the [A5](SPEC-LANGUAGE.md) fourth check-site); captures without a boundary statement or an escape write remain **outside**",
+      "strength": "guaranteed",
+      "rules": [
+        "HYB-E3001",
+        "HYB-E3002",
+        "HYB-E3013"
+      ],
+      "fixtures": [
+        {
+          "path": "tests/checker-corpus/10-a5-http-handler-capture.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/36-closure-capture-move.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/chan-of-closure-at-send.hy",
+          "expect": "reject"
+        }
+      ],
+      "evidence_md": "§9.3 O4.10; corpus [10](tests/checker-corpus/10-a5-http-handler-capture.hy) flipped ACCEPT→REJECT by the A5 fourth check-site (W-016 M2/M3) per its own pre-registered OQ1 condition"
+    },
+    {
+      "id": 6,
+      "surface": "`move` / freeze",
+      "does": "Ownership transfer with use-after-move rejected (`HYB-E3003`)",
+      "claim": "**Guaranteed**: a moved value cannot be used by the sender afterwards",
+      "strength": "guaranteed",
+      "rules": [
+        "HYB-E3003"
+      ],
+      "fixtures": [
+        {
+          "path": "tests/checker-corpus/16-move-send-clean.hy",
+          "expect": "accept"
+        },
+        {
+          "path": "tests/checker-corpus/43-copy-ref-element-alias-freeze.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/deep-composite-move-shared-at-spawn.hy",
+          "expect": "reject"
+        }
+      ],
+      "evidence_md": "§9.3 O5; corpus [16-move-send-clean](tests/checker-corpus/16-move-send-clean.hy); differential reject-side"
+    },
+    {
+      "id": 7,
+      "surface": "Loans inside a function body",
+      "does": "Polonius-style dataflow over borrows/loans; conflict-free proven or rejected",
+      "claim": "**Guaranteed** within the checked subset",
+      "strength": "guaranteed",
+      "rules": [
+        "HYB-E3101",
+        "HYB-E3102",
+        "HYB-E3103",
+        "HYB-E3104"
+      ],
+      "fixtures": [
+        {
+          "path": "tests/checker-corpus/09-a3-map-slot-valid.hy",
+          "expect": "accept"
+        },
+        {
+          "path": "tests/checker-corpus/08-a3-map-slot-invalidated.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/07-a2-mutate-during-handle-loan.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/11-a6-borrow-in-struct-field.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/map-slot-borrow-callarg-reject.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/map-slot-borrow-paths-accept.hy",
+          "expect": "accept"
+        }
+      ],
+      "evidence_md": "§9.1 rules O1–O3 (E31xx family); checker unit tests"
+    },
+    {
+      "id": 8,
+      "surface": "`managed(\"reason\", \"category\", tickets...) { ... }` regions",
+      "does": "Explicit hatch: linted (`HYB-E8001`), payload REQUIRED (bare block rejects `HYB-E0003`; unknown category rejects `HYB-E0004` — closed set: mutex/atomic/actor/finalizer/interop/other), greppable, counted per category (`--report-managed`), optionally forbidden (`--deny-managed`), and CI-gated for NEW blocks (`tools/managed_gate.py` + baseline)",
+      "claim": "**No soundness claim inside** — it is a compile-time permit, not a synchronization mechanism. The escape is auditable, never silent",
+      "strength": "no-claim",
+      "rules": [
+        "HYB-E8001",
+        "HYB-E0003",
+        "HYB-E0004"
+      ],
+      "fixtures": [
+        {
+          "path": "tests/checker-corpus/02-shared-map-managed.hy",
+          "expect": "accept-managed"
+        },
+        {
+          "path": "tests/checker-corpus/18-pool-shared-struct-managed.hy",
+          "expect": "accept-managed"
+        }
+      ],
+      "evidence_md": "§9.5 (row 14, discussion #4); corpus [02](tests/checker-corpus/02-shared-map-managed.hy), [18](tests/checker-corpus/18-pool-shared-struct-managed.hy); `compiler/crates/hyb/tests/deny_managed.rs`"
+    },
+    {
+      "id": 9,
+      "surface": "Values escaping into Go APIs (net/http handlers, callbacks)",
+      "does": "A closure that writes a captured mutable binding and is passed to a foreign (package-qualified) Go call is a fourth check-site: rejects with HYB-E3013 unless the call site takes `managed(\"...\", \"interop\")` or the capture is const/non-`may_share`; read-only captures stay outside the checker",
+      "claim": "**Guaranteed** (HYB-E3013) for captured-write escapes; read-only captures are **outside** — Go's DRF-SC with `-race` as the backstop",
+      "strength": "guaranteed",
+      "rules": [
+        "HYB-E3013"
+      ],
+      "fixtures": [
+        {
+          "path": "tests/checker-corpus/10-a5-http-handler-capture.hy",
+          "expect": "reject"
+        }
+      ],
+      "evidence_md": "§8.5 (A5 promoted to a fourth check-site, W-016 M2/M3); §9.2; corpus [10](tests/checker-corpus/10-a5-http-handler-capture.hy) pins the reject"
+    },
+    {
+      "id": 10,
+      "surface": "`sync.Pool`",
+      "does": "Not in the curated surface today; a value of a foreign/unmodeled type at a check-site is **unproven → rejected** (fail-closed), never silently allowed",
+      "claim": "**No claim**; fail-closed rejection instead of a false one",
+      "strength": "no-claim",
+      "rules": [
+        "HYB-E3005"
+      ],
+      "fixtures": [
+        {
+          "path": "tests/checker-corpus/03-pool-shared-struct-unguarded.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/04-pool-shared-struct-mutex.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/18-pool-shared-struct-managed.hy",
+          "expect": "accept-managed"
+        }
+      ],
+      "evidence_md": "§8.4 C8 pattern; O4.9"
+    },
+    {
+      "id": 11,
+      "surface": "`sync/atomic` (`atomic.Pointer[T]`, …)",
+      "does": "**[TBD]** joins the curated surface post-MVP; when it lands, atomic-typed values become sendable-by-type (class 2). Until then: unproven → rejected",
+      "claim": "**No claim yet**; the growth path is pre-designed, not improvised",
+      "strength": "no-claim",
+      "rules": [
+        "HYB-E3005"
+      ],
+      "fixtures": [
+        {
+          "path": "tests/checker-corpus/atomic-pointer-fail-closed-reject.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/17-atomic-channel-immutable.hy",
+          "expect": "accept"
+        }
+      ],
+      "evidence_md": "§8.4 C8; [atomic pointer fail-closed corpus](tests/checker-corpus/atomic-pointer-fail-closed-reject.hy)"
+    },
+    {
+      "id": 12,
+      "surface": "`context.Context` cancellation trees",
+      "does": "Not modeled; the value itself is classified like any other at a check-site",
+      "claim": "**No claim** about cancellation semantics — the claim is about value sharing, not protocol liveness",
+      "strength": "no-claim",
+      "rules": [],
+      "fixtures": [],
+      "evidence_md": "§9.2 scope"
+    },
+    {
+      "id": 13,
+      "surface": "Finalizers (`runtime.SetFinalizer`)",
+      "does": "Not in the surface; not modeled",
+      "claim": "**No claim**",
+      "strength": "no-claim",
+      "rules": [],
+      "fixtures": [],
+      "evidence_md": "§9.2 \"foreign code the checker cannot see\""
+    },
+    {
+      "id": 14,
+      "surface": "`unsafe`",
+      "does": "**Reserved, not implemented** ([O20](SPEC-LANGUAGE.md)). There is **no memory-unsafe escape at all** in safe mode: raw cross-language pointers are forbidden, period",
+      "claim": "**No claim** because there is no surface to claim about",
+      "strength": "no-claim",
+      "rules": [],
+      "fixtures": [],
+      "evidence_md": "§9.9; abi-types.md rules (hazards P7/P8 demonstrated)"
+    },
+    {
+      "id": 15,
+      "surface": "cgo",
+      "does": "Not part of `.hy`; cgo code in the surrounding Go project is foreign code the checker cannot see",
+      "claim": "**No claim**",
+      "strength": "no-claim",
+      "rules": [],
+      "fixtures": [],
+      "evidence_md": "§9.2"
+    },
+    {
+      "id": 16,
+      "surface": "Send-on-closed-channel panics",
+      "does": "The checker proves value sendability, not send/close protocol ordering",
+      "claim": "**No claim** — a liveness/protocol property, out of Tier-0's scope",
+      "strength": "no-claim",
+      "rules": [],
+      "fixtures": [],
+      "evidence_md": "§8.4 C5 (check-sites are exactly two)"
+    },
+    {
+      "id": 17,
+      "surface": "Memory safety, Go side",
+      "does": "Go's GC, unchanged — Hybrid emits Go source",
+      "claim": "**Inherited from Go**",
+      "strength": "inherited",
+      "rules": [],
+      "fixtures": [],
+      "evidence_md": "§9.2"
+    },
+    {
+      "id": 18,
+      "surface": "Memory safety, Rust side",
+      "does": "Single ownership, moves, function-local borrows; `panic = abort` at the boundary (never unwind across)",
+      "claim": "**Guaranteed by construction**",
+      "strength": "guaranteed",
+      "rules": [],
+      "fixtures": [],
+      "evidence_md": "§6.3, abi-types.md"
+    },
+    {
+      "id": 19,
+      "surface": "Memory safety, at the boundary",
+      "does": "Owning-side handle tables with generation tags; copy-small/pin-large borrows",
+      "claim": "**Guaranteed** by the Spike-3 design + tests",
+      "strength": "guaranteed",
+      "rules": [],
+      "fixtures": [],
+      "evidence_md": "§9.0 three-layer model; interfaces/abi-types.md"
+    },
+    {
+      "id": 20,
+      "surface": "The Rust call path",
+      "does": "Guard-checked fast path on the caller's stack; pooled guarded deep stacks; blocking callees via the two-tier scheduler with hard thread budgets",
+      "claim": "**Performance claimed and measured** (3.37–3.44 ns sandbox fast path; worker-tier 6.93 ns recorded honestly as a MISS vs the 5 ns budget)",
+      "strength": "perf",
+      "rules": [],
+      "fixtures": [],
+      "evidence_md": "[gates/G2.md](gates/G2.md); PLAN.md row 3"
+    }
+  ],
+  "unclaimed": {
+    "HYB-E3004": "the rule is enforced (a move applies to whole bindings and own-handle fields, not GC fields) but no corpus fixture pins it with EXPECTED-DIAGNOSTIC and no row claims it — claiming it needs a fixture first",
+    "HYB-E3006": "const-binding immutability (T22) is enforced and pinned by corpus 27-const-write-reject / 38-const-closure-alias-write-reject, but the claims table carries no row for it — candidate row for the next doc revision",
+    "HYB-E3007": "channel-usage rule (the target of a send must be a channel): enforced by the BUILDABLE sweep; row 2 claims sendability of the value, not channel typing",
+    "HYB-E3008": "channel-direction rule (recv-only / send-only misuse): channel typing, outside the sendability claim of row 2",
+    "HYB-E3009": "channel-direction rule (close / range): channel typing, outside the sendability claim of row 2",
+    "HYB-E3010": "`break loop` / `continue loop` label rule: lexical, unrelated to Tier-0 ownership",
+    "HYB-E3011": "channel element-type rule: typing, not sendability",
+    "HYB-E3012": "channel direction conversion rule: typing, not sendability"
+  }
+}
