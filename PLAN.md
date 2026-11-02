@@ -2,7 +2,7 @@
 
 ## Contributor validation — Markdown evidence boundary (#3342)
 
-- At main `421ae80`, the explicit-Markdown claims-link guard accepted absolute paths, parent traversal and external symlinks as repository evidence. The focused patch rejects those references while retaining normalized internal paths and internal symlinks. Baseline: expanded 13-test suite has 4 failing subcases. Patched: 13/13 focused and 129/129 adjacent Python tooling tests pass; live evidence/registration/structural checks and diff whitespace check pass. Full compiler, Rust/Go, corpus/differential and hosted CI remain unverified. Submitted with AI assistance for `kalidatuna`; no award or payment claimed.
+- At main `421ae80`, the explicit-Markdown claims-link guard accepted absolute paths, parent traversal and external symlinks as repository evidence. The focused patch rejects those references while retaining normalized internal paths and internal symlinks. Baseline: expanded 13-test suite has 4 failing subcases. Patched: 13/13 focused and 129/129 adjacent Python tooling tests pass; live evidence/registration/structural checks and diff whitespace check pass. Fresh pinned Linux validation at `c4e0b6f` (2026-11-02 UTC): Python 3.12.14 tooling 496/496, make check, Rust 1.99.0 workspace 2502/2502, Go 1.26.9 corpus 130/130, differential 42/42 + 88/88, and all ten examples pass. Hosted quick/compiler jobs also pass (Actions run 41513366199). Initial Python 3.10 HTTP-308 test failure reproduces on the unchanged base; no tests weakened. PR #3343 is ready for review; award/payment remain pending. Submitted with AI assistance for `kalidatuna`; no award or payment claimed.
 
 ## Contributor validation — Go build constraints (2026-10-31)
 

@@ -1,6 +1,6 @@
 # STATUS (for the human — 15 lines max)
 
-- Contributor #3342 (2026-11-02): explicit Markdown evidence links must resolve inside the repository; 13 focused and 129 adjacent Python tests pass. Full compiler/hosted CI, review and any award remain pending. See PLAN.md.
+- Contributor #3342 (2026-11-02): explicit Markdown evidence links must resolve inside the repository; 13 focused and 129 adjacent Python tests pass. Pinned compiler, corpus/differential, ten examples and hosted quick/compiler CI pass at c4e0b6f; PR #3343 ready for review. Review, award and payment pending. See PLAN.md.
 
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
 
