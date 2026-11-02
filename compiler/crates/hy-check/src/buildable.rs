@@ -2821,10 +2821,37 @@ impl<'a> Collector<'a> {
                 );
                 if type_first_arg {
                     if let Some(first_arg) = args.first() {
+                        // #3248: the expression walk below skips this argument,
+                        // so the type it carries must still go through the
+                        // declared-position walker (`ty()`) explicitly — that
+                        // is where map-key comparability is enforced. Without
+                        // this, `make(chan map[[]int]int, 1)` slipped an
+                        // unhashable map key past the checker inside a
+                        // chan/slice/array wrapper or type alias.
                         match unwrap_parens(&first_arg.value) {
-                            Expr::Ident { name, span } => self.check_named_type_instantiation(name, *span),
-                            Expr::Index { base, index, span } if matches!(unwrap_parens(base), Expr::Ident { name, .. } if self.lookup_kind(name).is_none() && !self.file_consts.contains_key(name) && !self.ck.fns.contains_key(name)) => self.check_named_type_instantiation(&format!("{}[{}]", base.render(), index.render()), *span),
-                            _ => {}
+                            Expr::Ident { name, span } => {
+                                self.check_named_type_instantiation(name, *span);
+                                if let Some(alias_ty) = self.ck.type_aliases.get(name.as_str()) {
+                                    self.ty(alias_ty);
+                                }
+                            }
+                            Expr::Index { base, index, span } if matches!(unwrap_parens(base), Expr::Ident { name, .. } if self.lookup_kind(name).is_none() && !self.file_consts.contains_key(name) && !self.ck.fns.contains_key(name)) => {
+                                self.check_named_type_instantiation(&format!("{}[{}]", base.render(), index.render()), *span);
+                            }
+                            Expr::StructLit { ty: Some(t), .. } => self.ty(t),
+                            Expr::SliceLit { elem: Some(t), .. } => self.ty(t),
+                            Expr::MapLit {
+                                key, value, span, ..
+                            } => {
+                                self.check_map_key_comparable(key, *span);
+                                self.ty(key);
+                                self.ty(value);
+                            }
+                            other => {
+                                if let Some((_, elem, _)) = other.as_array_lit() {
+                                    self.ty(elem);
+                                }
+                            }
                         }
                     }
                 }
