@@ -3159,3 +3159,15 @@ fn issue3116_does_not_pin_literal() {
     let go = emit3116("fn f(a int, b int) (int, error) {\n    return 0, nil\n}\n\nfn observe(a int, b int) { fmt.println(a, b) }\n\nfn main() {\n    observe(7, f(1, 2)?)\n}\n");
     assert!(go.contains("observe(7, hyT"), "literal stays in place: {}", go);
 }
+
+#[test]
+fn issue3116_pins_nested_field_chain() {
+    let go = emit3116("struct c { n int }\n\nfn zero(p *c) (int, error) {\n    p.n = 0\n    return 7, nil\n}\n\nfn main() {\n    o := c{n: 42}\n    fmt.println(o.n, zero(&o)?)\n}\n");
+    assert_pinned_before(&go, "hyT0 := o.n", "hyT1, hyErr2 := zero(", "nested field read");
+}
+
+#[test]
+fn issue3116_pins_field_on_method_receiver() {
+    let go = emit3116("struct counter { n int }\n\nfn bump(p *counter) (int, error) {\n    p.n = p.n + 100\n    return 1, nil\n}\n\nfn main() {\n    c := counter{n: 0}\n    fmt.println(c.n, bump(&c)?)\n}\n");
+    assert_pinned_before(&go, "hyT0 := c.n", "hyT1, hyErr2 := bump(", "field read on receiver");
+}
