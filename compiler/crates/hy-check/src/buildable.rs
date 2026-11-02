@@ -547,6 +547,7 @@ struct Collector<'a> {
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
     select_depth: usize,
+    managed_depth: usize,
     defines: Vec<Define>,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
@@ -583,6 +584,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_result_scalars: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
+            managed_depth: 0,
             defines: Vec::new(),
             roots: HashSet::new(),
             diags: Vec::new(),
@@ -694,6 +696,205 @@ impl<'a> Collector<'a> {
                 None
             }
             _ => None,
+        }
+    }
+
+    fn strip_chan_prefix(s: &str) -> Option<&str> {
+        let s = s.trim();
+        if let Some(rest) = s.strip_prefix("chan<-") {
+            Some(rest.trim())
+        } else if let Some(rest) = s.strip_prefix("<-chan") {
+            Some(rest.trim())
+        } else if let Some(rest) = s.strip_prefix("chan") {
+            Some(rest.trim())
+        } else {
+            None
+        }
+    }
+
+    fn underlying_type_spelling(&self, name: &str) -> Option<String> {
+        let mut cur = name.trim().to_string();
+        for _ in 0..8 {
+            let base = Checker::base_named_type_str(&cur);
+            if let Some(target) = self.ck.type_aliases.get(base) {
+                cur = target.render();
+            } else {
+                return Some(cur);
+            }
+        }
+        Some(cur)
+    }
+
+    fn chan_element_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    let resolved = self.underlying_type_spelling(&tname).unwrap_or(tname);
+                    if let Some(elem) = Self::strip_chan_prefix(&resolved) {
+                        return Some(elem.to_string());
+                    }
+                }
+                None
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            match unwrap_parens(&first.value) {
+                                Expr::StructLit { ty: Some(TypeExpr::Chan { elem, .. }), .. } => {
+                                    return Some(elem.render());
+                                }
+                                Expr::StructLit { ty: Some(TypeExpr::Named { name, .. }), .. } => {
+                                    let resolved = self.underlying_type_spelling(name).unwrap_or_else(|| name.clone());
+                                    if let Some(elem) = Self::strip_chan_prefix(&resolved) {
+                                        return Some(elem.to_string());
+                                    }
+                                }
+                                Expr::Ident { name, .. } => {
+                                    let resolved = self.underlying_type_spelling(name).unwrap_or_else(|| name.clone());
+                                    if let Some(elem) = Self::strip_chan_prefix(&resolved) {
+                                        return Some(elem.to_string());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn expr_slice_elem_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    let resolved = self.underlying_type_spelling(&tname).unwrap_or(tname);
+                    if let Some(elem) = resolved.strip_prefix("[]") {
+                        return canonical_numeric_name(elem.trim());
+                    }
+                }
+                None
+            }
+            Expr::SliceLit { elem: Some(t), .. } => {
+                let rendered = t.render();
+                if let Some(elem) = rendered.strip_prefix("[]") {
+                    canonical_numeric_name(elem.trim())
+                } else {
+                    canonical_numeric_name(&rendered)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn expr_array_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    let resolved = self.underlying_type_spelling(&tname).unwrap_or(tname);
+                    if is_sized_array_spelling(&resolved) {
+                        return Some(resolved);
+                    }
+                }
+                None
+            }
+            Expr::SliceLit { elem: Some(t), .. } => {
+                let rendered = t.render();
+                if is_sized_array_spelling(&rendered) {
+                    return Some(rendered);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn check_send_operands(&mut self, chan: &Expr, value: &Expr, span: Span) {
+        if self.managed_depth > 0 {
+            return;
+        }
+        if let Some(elem_ty_raw) = self.chan_element_type_name(chan) {
+            let elem_ty = self.underlying_type_spelling(&elem_ty_raw).unwrap_or(elem_ty_raw);
+            // 1. Numeric scalar check
+            if let Some(elem_scalar) = canonical_numeric_name(&elem_ty) {
+                if let Some(val_scalar) = self.typed_value_scalar(value) {
+                    if val_scalar != elem_scalar {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot send `{}` (type `{}`) to channel element type `{}` (HYB-E1002)",
+                                value.render(),
+                                val_scalar,
+                                elem_scalar,
+                            ),
+                            "values sent to a channel must match the channel element type in Go",
+                        );
+                        return;
+                    }
+                }
+            }
+            // 2. Fixed-size array check
+            if is_sized_array_spelling(&elem_ty) {
+                if let Some(val_arr_ty) = self.expr_array_type_name(value) {
+                    if val_arr_ty != elem_ty {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot send `{}` (type `{}`) to channel element type `{}` — array lengths or element types differ (HYB-E1002)",
+                                value.render(),
+                                val_arr_ty,
+                                elem_ty,
+                            ),
+                            "fixed-size array length and element type must match the channel element type in Go",
+                        );
+                        return;
+                    }
+                }
+            }
+            // 3. Slice element scalar check
+            if let Some(elem_inner) = elem_ty.strip_prefix("[]") {
+                if let Some(want_slice_scalar) = canonical_numeric_name(elem_inner.trim()) {
+                    if let Some(val_slice_scalar) = self.expr_slice_elem_scalar(value) {
+                        if val_slice_scalar != want_slice_scalar {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot send `{}` (type `[]{}`) to channel element type `{}` — slice element types differ (HYB-E1002)",
+                                    value.render(),
+                                    val_slice_scalar,
+                                    elem_ty,
+                                ),
+                                "slice element types must match the channel element type in Go",
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Kind-level conflict check
+        let chan_kind = self.kind_of_expr(chan);
+        let val_kind = self.kind_of_expr(value);
+        if let OpKind::Chan(elem_kind) = chan_kind {
+            if kinds_conflict(&elem_kind, &val_kind) {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot send `{}` (kind `{}`) to channel of kind `{}` (HYB-E1002)",
+                        value.render(),
+                        val_kind.label(),
+                        elem_kind.label(),
+                    ),
+                    "values sent to a channel must be assignable to the channel element type in Go",
+                );
+            }
         }
     }
 
@@ -1566,6 +1767,8 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Some(chan_elem) = self.chan_element_type_name(val) {
+                    self.bind_type_name(name, format!("chan {}", chan_elem));
                 }
             }
         }
@@ -1710,12 +1913,13 @@ impl<'a> Collector<'a> {
                 self.check_assign_operands(targets, *op, values, *span);
             }
             Stmt::Expr { expr, .. } => self.expr(expr),
-            Stmt::Send { chan, value, .. } => {
+            Stmt::Send { chan, value, span, .. } => {
                 self.expr(chan);
                 // #887: the sent value is a single-value position. A void call
                 // or a multi-value call here passed the checker and emitted
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
+                self.check_send_operands(chan, value, *span);
                 self.expr(value);
             }
             Stmt::If {
@@ -1843,7 +2047,11 @@ impl<'a> Collector<'a> {
                     _ => {}
                 }
             }
-            Stmt::Managed { body, .. } => self.block_scoped(body),
+            Stmt::Managed { body, .. } => {
+                self.managed_depth += 1;
+                self.block_scoped(body);
+                self.managed_depth -= 1;
+            }
             Stmt::Match { subject, arms, .. } => {
                 self.expr(subject);
                 let subject_kind = self.kind_of_expr(subject);
@@ -1930,6 +2138,7 @@ impl<'a> Collector<'a> {
                     // #887: a channel send in a select arm is also a single-value
                     // position.
                     self.check_single_value_position(value, "a channel send", false);
+                            self.check_send_operands(chan, value, chan.span().to(value.span()));
                             self.expr(chan);
                             self.expr(value);
                         }
