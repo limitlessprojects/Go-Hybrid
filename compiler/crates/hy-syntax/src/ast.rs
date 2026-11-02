@@ -239,7 +239,15 @@ impl TypeExpr {
                 ChanDir::Send => format!("chan<- {}", elem.render()),
             },
             TypeExpr::Option { elem, .. } => format!("option[{}]", elem.render()),
-            TypeExpr::Fn { .. } => "fn".to_string(),
+            TypeExpr::Fn { params, results, .. } => {
+                let ps: Vec<String> = params.iter().map(|p| p.ty.render()).collect();
+                let rs: Vec<String> = results.iter().map(|r| r.render()).collect();
+                match rs.len() {
+                    0 => format!("fn({})", ps.join(", ")),
+                    1 => format!("fn({}) {}", ps.join(", "), rs[0]),
+                    _ => format!("fn({}) ({})", ps.join(", "), rs.join(", ")),
+                }
+            }
         }
     }
 }
@@ -767,6 +775,7 @@ impl Expr {
                 ..
             } => operand.root_ident(),
             Expr::Paren { inner, .. } => inner.root_ident(),
+            Expr::Move { operand, .. } => operand.root_ident(),
             Expr::Try { operand, .. } => operand.root_ident(),
             _ => None,
         }
@@ -777,6 +786,9 @@ impl Expr {
     /// Distinguished from a slice-of-arrays literal `[][N]T{…}` by the
     /// array `TypeExpr` sharing the literal's opening `[` source position.
     pub fn as_array_lit(&self) -> Option<(Option<&Expr>, &TypeExpr, &TypeExpr)> {
+        if let Expr::Paren { inner, .. } = self {
+            return inner.as_array_lit();
+        }
         if let Expr::SliceLit {
             elem: Some(t),
             span,
