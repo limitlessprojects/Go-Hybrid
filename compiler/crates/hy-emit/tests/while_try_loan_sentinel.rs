@@ -1,0 +1,2 @@
+#[test]
+fn while_try_loop_sentinel_and_zero_trip_handoff() { let g = hy_emit::emit_go(&hy_syntax::parse_file("t.hy", "fn ok() (bool, error) { return true, nil }\nfn main() {\n\tm := map[string]int{\"a\": 0}\n\tn := &m[\"a\"]\n\tfor ok()? {\n\t\tbreak\n\t}\n\tn = 7\n\tk := &m[\"a\"]\n\tk = 8\n\tfor ok()? {\n\t\tk = 9\n\t\tdelete(m, \"a\")\n\t\tbreak\n\t}\n\tfmt.println(len(m))\n}\n").unwrap()).unwrap(); assert!(g.matches("m[\"a\"] = n").count() == 1 && g.matches("m[\"a\"] = k").count() == 2, "{g}"); }

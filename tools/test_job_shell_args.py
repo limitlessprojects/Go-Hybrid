@@ -126,5 +126,10 @@ class KaggleShellArgumentTests(unittest.TestCase):
         self.assertEqual(self.calls(), [["kernels", "status", "owner/kernel"]])
 
 
+    def test_worker_script_does_not_mask_git_clone_exit_with_tail_pipe(self):
+        src = (ROOT / "worker/script.py").read_text(encoding="utf-8")
+        self.assertNotIn("| tail -2", src)
+        self.assertIn("shlex.quote(repo)", src)
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,1 @@
+{"fixture": "install_relative_bin_dir", "expected_prefix": "$PWD/rel-bin"}

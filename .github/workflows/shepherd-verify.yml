@@ -114,19 +114,19 @@ jobs:
           fi
 
       - name: Battery — cargo workspace
-        run: cargo test --workspace
+        run: cargo test --manifest-path compiler/Cargo.toml --workspace --quiet
 
       - name: Battery — build hyb
-        run: cargo build -p hyb --quiet
+        run: cargo build --manifest-path compiler/Cargo.toml -p hyb --quiet
 
       - name: Battery — corpus harness
-        run: python3 tools/corpus_harness.py
+        run: python3 tools/corpus_harness.py --bin compiler/target/debug/hyb
 
       - name: Battery — census
         run: python3 tools/check_corpus_census.py
 
       - name: "Battery — differential loop (FULL: cargo AND go in PATH)"
-        run: python3 tools/differential_loop.py
+        run: python3 tools/differential_loop.py --bin compiler/target/debug/hyb
 
       # ------------------------------------------------ W5 land
       - name: Merge the PR with the credit message

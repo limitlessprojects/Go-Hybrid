@@ -1,6 +1,9 @@
 package jsonbinding
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 // The handle protocol has zero direct tests until this file (the G2/G3
 // review's go-test finding): every test here crosses into the REAL hyrt
@@ -177,5 +180,49 @@ func TestStringValueUnescape(t *testing.T) {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
 		}
+	}
+}
+
+func TestMovedHandleCleanupDoesNotDestroyReusedSlot(t *testing.T) {
+	doc := NewObject()
+	func() {
+		child := NewArray()
+		if err := child.PushString("ada"); err != nil {
+			t.Fatalf("PushString: %v", err)
+		}
+		if err := doc.Set("active", child); err != nil {
+			t.Fatalf("Set(active): %v", err)
+		}
+	}()
+	next, err := Parse([]byte(`{"k": 99}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// Trigger runtime.AddCleanup for the moved `child` handle. Because `next`
+	// reuses `child`'s table slot with an incremented generation tag, the
+	// stale cleanup release must not free `next`.
+	for range 4 {
+		runtime.GC()
+	}
+	got, err := next.Int("k")
+	if err != nil || got != 99 {
+		t.Fatalf("next.Int(k) after GC = %d, %v (want 99, nil)", got, err)
+	}
+	runtime.KeepAlive(doc)
+	runtime.KeepAlive(next)
+}
+
+func TestFailedSetPreservesValueHandle(t *testing.T) {
+	arr := NewArray()
+	child, err := Parse([]byte(`{"x": 7}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := arr.Set("k", child); err == nil {
+		t.Fatal("Set on array receiver must error")
+	}
+	got, err := child.Int("x")
+	if err != nil || got != 7 {
+		t.Fatalf("child.Int(x) after failed Set = %d, %v (want 7, nil)", got, err)
 	}
 }

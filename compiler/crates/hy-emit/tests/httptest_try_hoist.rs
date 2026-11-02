@@ -1,0 +1,2 @@
+#[test]
+fn httptest_try_hoist_and_parens() { let g = hy_emit::emit_go(&hy_syntax::parse_file("t.hy", "fn p() (string, error) { return \"/ok\", nil }\nfn main() {\n\tmux := http.new_serve_mux()\n\tc1, b1 := httptest.get(mux, p()?)?\n\tc2, b2 := ((httptest).post(mux, p()?)?)\n\tfmt.println(c1, b1, c2, b2)\n}\n").unwrap()).unwrap(); assert!(g.contains("hyT0, hyErr1 := p()") && g.contains("http.NewRequest(\"GET\", hyT0, nil)") && g.contains("http.NewRequest(\"POST\", hyT5, nil)"), "{g}"); }

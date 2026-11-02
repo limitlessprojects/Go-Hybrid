@@ -18,6 +18,19 @@
 # Usage: tools/package_release.sh v0.1.0
 set -eu
 
+# --- isolation: build crate-locally, smoke ONLY what the tarball carries ---
+# tools/env.sh exports a shared CARGO_TARGET_DIR. Left set, cargo writes the
+# fresh hyb and libhyrt.a there while step 3 copies the crate-local paths
+# (target/release/, or target/$HYB_RUST_TARGET/release/ when cross-compiling),
+# so a stale archive ships and is then touched "fresh".
+# hyb's exe-relative runtime_dir() and arch-matched ensure_staticlib() do not
+# close this: runtime_dir() still prefers HYB_RUNTIME_DIR when it is set,
+# staticlib_candidates() still searches CARGO_TARGET_DIR ahead of the
+# crate-local lib, and cargo_bin() still prefers HYB_CARGO_BIN. A smoke that
+# inherits any of them can pass against a runtime, staticlib, or cargo that
+# is not in the tarball.
+unset CARGO_TARGET_DIR HYB_RUNTIME_DIR HYB_CARGO_BIN
+
 VER="${1:?usage: package_release.sh <version-tag, e.g. v0.1.0>}"
 # The version is a single path component in both the staging directory
 # (removed with rm -rf below) and the archive name. Reject path separators
