@@ -1,5 +1,6 @@
 """Tests for tools/check_conflict_markers.py (stdlib only, no network)."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -202,6 +203,48 @@ class CliTests(unittest.TestCase):
             res = self._run(td)
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertIn("none", res.stdout)
+
+    def test_json_object_workflows_are_accepted(self):
+        # JSON objects are valid YAML flow mappings. Generated workflows may
+        # use either compact JSON or pretty-printed JSON in a .yml/.yaml file.
+        workflow = {
+            "name": "generated CI",
+            "on": "push",
+            "jobs": {"test": {
+                "runs-on": "ubuntu-latest",
+                "steps": [{"run": "echo '{hello}'"}],
+            }},
+        }
+        for suffix in ("yml", "yaml"):
+            for indent in (None, 2):
+                with self.subTest(suffix=suffix, indent=indent):
+                    with tempfile.TemporaryDirectory() as td:
+                        path = Path(td, ".github", "workflows", "ci." + suffix)
+                        path.parent.mkdir(parents=True)
+                        path.write_text(json.dumps(workflow, indent=indent) + "\n",
+                                        encoding="utf-8")
+                        res = self._run(td)
+                        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                        self.assertIn("conflict markers: none", res.stdout)
+
+    def test_json_workflow_requires_a_complete_object(self):
+        # The JSON exception must not accept arrays/scalars, incomplete JSON,
+        # or a valid object followed by an accidentally unindented shell line.
+        cases = (
+            '[{"name": "ci"}]\n',
+            '"a scalar document"\n',
+            '{"name": "ci"\n',
+            '{"name": "ci"}\necho misplaced\n',
+        )
+        for source in cases:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
+                path = Path(td, ".github", "workflows", "ci.yml")
+                path.parent.mkdir(parents=True)
+                path.write_text(source, encoding="utf-8")
+                res = self._run(td)
+                self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+                self.assertIn("workflow structure:", res.stderr)
+                self.assertNotIn("conflict markers: none", res.stdout)
 
     def test_marker_exits_one_and_names_the_file(self):
         with tempfile.TemporaryDirectory() as td:
