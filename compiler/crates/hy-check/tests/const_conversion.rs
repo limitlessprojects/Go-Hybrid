@@ -214,3 +214,19 @@ fn controls_untouched() {
         "struct pair { n int } fn main() { p := pair{ n: 1 } x := int8(p.n) _ = x }",
     );
 }
+
+#[test]
+fn bool_target_rejects_non_bool_constants_issue_1682() {
+    rejects_with_e6006("fn main() { b := bool(1) _ = b }");
+    rejects_with_e6006("fn main() { b := bool(0) _ = b }");
+    rejects_with_e6006("fn main() { b := bool(2.5) _ = b }");
+    rejects_with_e6006("fn main() { b := bool(\"true\") _ = b }");
+    rejects_with_e6006("fn main() { b := bool('1') _ = b }");
+    rejects_with_e6006("fn main() { b := bool(nil) _ = b }");
+    rejects_with_e6006(&format!(
+        "fn main() {{ b := bool(1{}) _ = b }}",
+        "0".repeat(45)
+    ));
+    accepts_without_e6006("fn main() { b := bool(true) _ = b }");
+    accepts_without_e6006("fn main() { b := bool(false) _ = b }");
+}
