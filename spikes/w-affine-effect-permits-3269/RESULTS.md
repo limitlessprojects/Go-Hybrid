@@ -73,3 +73,52 @@ python3 -m unittest discover -s spikes/w-affine-effect-permits-3269/tests -p 'te
 ```
 
 Expected: `PASS`, 81 reachable states, 5 gates ok; 7 tests OK.
+
+## 7. Gate 5, trace half — run after the first draft of this file
+
+The proposal asks gate 5 to "compare tiny admitted programs and their emitted Go/Rust traces against it. Include a plain `(T, error)` retry control and an explicit hand-written state-machine control."
+
+Three programs, each attempting one protected operation, losing the ack, then retrying twice. The counter is how many times the protected operation actually ran.
+
+| Shape | Emissions | Note |
+| :--- | :--- | :--- |
+| plain `(T, error)` retry | **3** | re-issues on every error, the status quo |
+| hand-written state machine (correct) | **1** | refuses to re-initiate: permit spent |
+| proposed permit discipline | **1** | same count, same refusal |
+
+That alone reads as a **narrow signal**: a hand-written state machine already achieves the discipline, so language support adds nothing *expressiveness-wise*. I wrote that down before running the next variant, because it is the honest first reading.
+
+The second variant is what changes the conclusion:
+
+```go
+func tryOnceBuggy(p *permit, failAck bool) (string, error) {
+    if p.used { return "", errors.New("no right") }
+    p.used = true
+    _, err := protect(failAck)
+    if err != nil {
+        p.used = false   // THE BUG: "it failed, so give the right back"
+        return "", err
+    }
+    return "receipt", nil
+}
+```
+
+```
+correct=1 buggy=3
+CONFIRMED: the discipline is expressible by hand; only enforcement
+           distinguishes correct from buggy.
+```
+
+Returning the permit on a post-initiation failure is not a contrived mistake — it is the *natural* thing to write, because "the call failed" reads as "nothing happened". Nothing in Go, and nothing in Hybrid's current checker, prevents it. Both versions compile, both look reasonable, one emits three times.
+
+### What this changes about the verdict
+
+Gate 5's falsifier was "an ordinary library offers the same enforceable contract more simply". The trace comparison says something sharper:
+
+- **Expressiveness**: an ordinary hand-written state machine is enough. The proposal is not needed to *say* the contract.
+- **Enforcement**: the hand-written version is correct only by author discipline. The plausible wrong version is one line away and silently re-emits.
+
+So the proposal's actual product is not a new way to express the protocol — it is a checker obligation that makes the wrong version a compile error. That reframes what M2 should try to demonstrate, and it narrows the claim: not "Hybrid can express affine effect permits" (a library can), but "Hybrid can *reject* the permit-restoring mistake".
+
+Recorded as **PASS-WITH-NARROW-SIGNAL** in the verifier, and the narrowing is stated in the PR rather than left for a reviewer to find.
+
