@@ -136,3 +136,97 @@ fn main() {
         "expected 0 diagnostics for valid integer ranges and 2-var iteration, got: {c:?}"
     );
 }
+
+#[test]
+fn indirect_send_only_channel_iterations_reject_e2009_issue_1829() {
+    let src_receive = r#"
+type tx_chan = chan<- int
+
+fn repro(ch_of_tx <-chan tx_chan) {
+    for a in <-ch_of_tx {
+        _ = a
+    }
+}
+"#;
+    let c = codes(src_receive);
+    assert!(
+        c.contains(&"HYB-E2009".to_string()),
+        "expected HYB-E2009 for `for a in <-ch_of_tx`, got: {c:?}"
+    );
+
+    let src_loop_var = r#"
+fn repro(txs []chan<- int) {
+    for ch in txs {
+        for b in ch {
+            _ = b
+        }
+    }
+}
+"#;
+    let c = codes(src_loop_var);
+    assert!(
+        c.contains(&"HYB-E2009".to_string()),
+        "expected HYB-E2009 for iterating loop-bound send-only channel `for b in ch`, got: {c:?}"
+    );
+
+    let src_aliased_struct = r#"
+struct holder {
+    ch chan<- int
+}
+
+type holder_alias = holder
+
+fn repro(s *holder_alias) {
+    for c in s.ch {
+        _ = c
+    }
+}
+"#;
+    let c = codes(src_aliased_struct);
+    assert!(
+        c.contains(&"HYB-E2009".to_string()),
+        "expected HYB-E2009 for `for c in s.ch` on aliased pointer receiver, got: {c:?}"
+    );
+}
+
+#[test]
+fn compound_and_chained_non_int_consts_and_typed_bounds_reject_e2009_issue_1829() {
+    let src_compound_const = r#"
+const b_not = !true
+const f_neg = -1.5
+const f_chain = f_neg
+
+fn repro() {
+    for i in 0..b_not {
+        _ = i
+    }
+    for j in 0..f_chain {
+        _ = j
+    }
+}
+"#;
+    let c = codes(src_compound_const);
+    assert!(
+        c.contains(&"HYB-E2009".to_string()),
+        "expected HYB-E2009 for compound/chained non-int consts in range bounds, got: {c:?}"
+    );
+
+    let src_typed_bounds = r#"
+fn repro(x int8, u u32) {
+    for k in 0..(-x) {
+        _ = k
+    }
+    for m in 0..(u << 1) {
+        _ = m
+    }
+    for n in (-x)..300 {
+        _ = n
+    }
+}
+"#;
+    let c = codes(src_typed_bounds);
+    assert!(
+        c.contains(&"HYB-E2009".to_string()),
+        "expected HYB-E2009 for fixed-width int typed unary/shift range bound mismatches, got: {c:?}"
+    );
+}

@@ -369,6 +369,26 @@ impl<'a> Checker<'a> {
                 let ty = self.ty_of_expr(st, e)?;
                 self.named_int_of(&ty)
             }
+            Expr::Unary { op, operand, .. } => {
+                if matches!(op, hy_syntax::UnOp::Neg) {
+                    return self.typed_int_bound(st, operand);
+                }
+                let ty = self.ty_of_expr(st, e)?;
+                self.named_int_of(&ty)
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                if matches!(op, hy_syntax::BinOp::Shl | hy_syntax::BinOp::Shr) {
+                    return self.typed_int_bound(st, lhs);
+                }
+                if let Some(t) = self.typed_int_bound(st, lhs) {
+                    return Some(t);
+                }
+                if let Some(t) = self.typed_int_bound(st, rhs) {
+                    return Some(t);
+                }
+                let ty = self.ty_of_expr(st, e)?;
+                self.named_int_of(&ty)
+            }
             _ => {
                 let ty = self.ty_of_expr(st, e)?;
                 self.named_int_of(&ty)
@@ -384,6 +404,64 @@ impl<'a> Checker<'a> {
             }
         }
         None
+    }
+
+    fn chan_type_of_expr(&self, st: &FnState, expr: &Expr) -> Option<TypeExpr> {
+        let unwrapped = unwrap_parens(expr);
+        if let Some(ty) = self.ty_of_expr(st, unwrapped) {
+            return Some(ty);
+        }
+        match unwrapped {
+            Expr::Ident { name, .. } => {
+                let root = crate::freeze::resolve_alias(st, name);
+                if let Some(b) = self.lookup_binding(st, &root) {
+                    if let Some(ty) = &b.ty {
+                        return Some(ty.clone());
+                    }
+                    if let Some(orig) = &b.non_owned_origin {
+                        if let Some(txs_name) = orig.split("iterating `").nth(1).and_then(|s| s.split('`').next()) {
+                            let txs_root = crate::freeze::resolve_alias(st, txs_name);
+                            if let Some(txs_b) = self.lookup_binding(st, &txs_root) {
+                                if let Some(txs_ty) = &txs_b.ty {
+                                    let resolved_txs = self.resolve_type_alias(txs_ty);
+                                    if let TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } = resolved_txs {
+                                        return Some(*elem);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Receive { chan, .. } => {
+                let chan_ty = self.chan_type_of_expr(st, chan)?;
+                let resolved = self.resolve_type_alias(&chan_ty);
+                if let TypeExpr::Chan { elem, .. } = resolved {
+                    Some(*elem)
+                } else {
+                    None
+                }
+            }
+            Expr::Field { base, name, .. } => {
+                let mut base_ty = self.ty_of_expr(st, base);
+                if base_ty.is_none() {
+                    if let Expr::Ident { name: bname, .. } = unwrap_parens(base) {
+                        let root = crate::freeze::resolve_alias(st, bname);
+                        base_ty = self.lookup_binding(st, &root).and_then(|b| b.ty.clone());
+                    }
+                }
+                let bty = base_ty?;
+                let mut cur = self.resolve_type_alias(&bty);
+                while let TypeExpr::Pointer { to, .. } = &cur {
+                    cur = self.resolve_type_alias(to);
+                }
+                let sname = Self::base_named_type(&cur)?;
+                let sdecl = self.structs.get(&sname)?;
+                sdecl.iter().find(|(fname, _)| fname == name).map(|(_, ty)| ty.clone())
+            }
+            _ => None,
+        }
     }
 
     /// Classify a range's ITERABLE — the mirror of `check_send_target`
@@ -415,14 +493,7 @@ impl<'a> Checker<'a> {
             | TypeShape::BorrowHandle(_) => {}
             TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set" => {}
             TypeShape::Chan(_) => {
-                let chan_ty = self.ty_of_expr(st, expr).or_else(|| {
-                    if let Expr::Ident { name, .. } = unwrap_parens(expr) {
-                        let root = crate::freeze::resolve_alias(st, name);
-                        self.lookup_binding(st, &root).and_then(|b| b.ty.clone())
-                    } else {
-                        None
-                    }
-                });
+                let chan_ty = self.chan_type_of_expr(st, expr);
                 if let Some(ty) = chan_ty {
                     let resolved = self.resolve_type_alias(&ty);
                     if matches!(
