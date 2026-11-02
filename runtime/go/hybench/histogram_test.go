@@ -1,6 +1,9 @@
 package hybench
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestRecordsAndRanks(t *testing.T) {
 	h := New()
@@ -69,6 +72,30 @@ func TestEmptyAndEdges(t *testing.T) {
 	h.Record(0)
 	if h.P50() != 0 {
 		t.Fatalf("a recorded zero is real: %d", h.P50())
+	}
+}
+
+func TestValueAtNumericBoundaries(t *testing.T) {
+	nanHistogram := New()
+	nanHistogram.Record(42)
+	if got := nanHistogram.ValueAt(math.NaN()); got != 0 {
+		t.Fatalf("ValueAt(NaN) = %d, want 0", got)
+	}
+
+	const maxInt64 = int64(1<<63 - 1)
+	maxHistogram := New()
+	maxHistogram.Record(maxInt64)
+	if got := maxHistogram.ValueAt(0); got != maxInt64 {
+		t.Fatalf("ValueAt(0) for MaxInt64 sample = %d, want %d", got, maxInt64)
+	}
+
+	const sample = 3000
+	sameValueHistogram := New()
+	for i := 0; i < 100; i++ {
+		sameValueHistogram.Record(sample)
+	}
+	if got := sameValueHistogram.P50(); got > sameValueHistogram.ValueAt(1) {
+		t.Fatalf("P50() = %d exceeds ValueAt(1) = %d", got, sameValueHistogram.ValueAt(1))
 	}
 }
 

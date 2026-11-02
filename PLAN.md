@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor amendment — runtime histogram (#3388)
+
+- `hybench.Histogram` now initializes its minimum sentinel to `math.MaxInt64`, returns zero for NaN fractions, and clamps unsigned bucket reconstructions to the recorded range. Regression coverage passes; corpus is 130/130 and `cargo test --workspace` passes.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - `hyb generate` excludes sibling filenames reported by `go list -e -find -json .` as `IgnoredGoFiles`, once per directory and invocation. Modern/legacy constraints, platform suffixes and `GOFLAGS` tags use Go's own selection; existing production-package conflict checks remain. This is CLI tooling correctness, not a language/checker soundness change; PR #1900's separate dot/underscore-prefix fix is untouched.
