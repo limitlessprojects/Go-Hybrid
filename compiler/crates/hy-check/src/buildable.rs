@@ -233,6 +233,21 @@ fn is_sized_array_spelling(s: &str) -> bool {
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
+fn sized_array_parts(s: &str) -> Option<(&str, &str)> {
+    let t = s.trim();
+    if !is_sized_array_spelling(t) {
+        return None;
+    }
+    let close = t.find(']')?;
+    Some((&t[1..close], &t[close + 1..]))
+}
+
+fn channel_element_type_name(s: &str) -> Option<&str> {
+    s.strip_prefix("<-chan ")
+        .or_else(|| s.strip_prefix("chan<- "))
+        .or_else(|| s.strip_prefix("chan "))
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -893,6 +908,59 @@ impl<'a> Collector<'a> {
         matches!((a, b), (Some(x), Some(y))
             if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
     }
+
+    /// Equality needs exact element widths within comparable containers:
+    /// `OpKind` intentionally collapses numeric widths, so `*int32` and
+    /// `*int64` otherwise look identical. Resolve aliases at each layer so
+    /// array aliases retain their length and element type detail.
+    fn equality_type_names_conflict(
+        &self,
+        a: Option<&str>,
+        b: Option<&str>,
+        depth: usize,
+    ) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        let (Some(a), Some(b)) = (a, b) else {
+            return false;
+        };
+        let resolve_alias = |name: &str| {
+            let name = name.trim();
+            let base = Checker::base_named_type_str(name);
+            self.ck
+                .type_aliases
+                .get(base)
+                .map(|ty| self.ck.resolve_type_alias(ty).render())
+                .unwrap_or_else(|| name.to_string())
+        };
+        let a = resolve_alias(a);
+        let b = resolve_alias(b);
+
+        if self.sized_array_names_differ(Some(&a), Some(&b)) {
+            return true;
+        }
+        if let (Some(a), Some(b)) = (canonical_numeric_name(&a), canonical_numeric_name(&b)) {
+            return a != b;
+        }
+        if let (Some(a), Some(b)) = (a.strip_prefix('*'), b.strip_prefix('*')) {
+            return self.equality_type_names_conflict(Some(a), Some(b), depth + 1);
+        }
+        if let (Some(a), Some(b)) = (
+            channel_element_type_name(&a),
+            channel_element_type_name(&b),
+        ) {
+            return self.equality_type_names_conflict(Some(a), Some(b), depth + 1);
+        }
+        if let (Some((alen, aelem)), Some((blen, belem))) =
+            (sized_array_parts(&a), sized_array_parts(&b))
+        {
+            return alen != blen
+                || self.equality_type_names_conflict(Some(aelem), Some(belem), depth + 1);
+        }
+        false
+    }
+
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
@@ -4786,9 +4854,10 @@ impl<'a> Collector<'a> {
                     if equality_kinds_conflict(&lk, &rk)
                         || int_float_conflict
                         || self.scalar_conflict(lhs, rhs)
-                        || self.sized_array_names_differ(
+                        || self.equality_type_names_conflict(
                             self.typed_value_type_name(lhs).as_deref(),
                             self.typed_value_type_name(rhs).as_deref(),
+                            0,
                         )
                     {
                         self.emit_e1002(

@@ -60,6 +60,54 @@ fn accepts_matching_and_nil_equality() {
 }
 
 #[test]
+fn rejects_mismatched_composite_equality_scalar_types() {
+    for op in ["==", "!="] {
+        assert_e1002(&format!(
+            "fn main() {{\n\
+             var p1 *int32\n\
+             var p2 *int64\n\
+             if p1 {op} p2 {{}}\n\
+             }}"
+        ));
+        assert_e1002(&format!(
+            "fn main() {{\n\
+             var c1 chan int32\n\
+             var c2 chan int64\n\
+             if c1 {op} c2 {{}}\n\
+             }}"
+        ));
+        assert_e1002(&format!(
+            "type arr1 = [3]int32\n\
+             type arr2 = [3]int64\n\
+             fn main() {{\n\
+             var a1 arr1\n\
+             var a2 arr2\n\
+             if a1 {op} a2 {{}}\n\
+             }}"
+        ));
+    }
+}
+
+#[test]
+fn accepts_matching_composite_equality_types_and_aliases() {
+    assert_ok(
+        "type arr1 = [3]int32\n\
+         type arr2 = [3]int32\n\
+         fn main() {\n\
+         var p1 *int32\n\
+         var p2 *int32\n\
+         var c1 chan int32\n\
+         var c2 chan int32\n\
+         var a1 arr1\n\
+         var a2 arr2\n\
+         _ = p1 == p2\n\
+         _ = c1 != c2\n\
+         _ = a1 == a2\n\
+         }",
+    );
+}
+
+#[test]
 fn rejects_non_nilable_types_compared_to_nil_issue_2471() {
     // int
     assert_e1002("fn main() {\n    x := 5\n    if x == nil {}\n}\n");
