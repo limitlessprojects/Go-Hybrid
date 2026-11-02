@@ -1225,6 +1225,7 @@ impl<'a> Collector<'a> {
                 let bk = self.kind_of_expr(base);
                 self.struct_field_type_name(&bk, name)
             }
+            Expr::Move { operand, .. } => self.typed_value_type_name(operand),
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
             _ => None,
         }
@@ -7098,13 +7099,8 @@ impl<'a> Collector<'a> {
             // into `float32`) slipped through and failed `go build`
             // (`cannot use i (variable of type int) as int64 value in array
             // or slice literal`).
-            let scalar_mismatch = self
-                .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
-            // #3412: the kind model also collapses container inners
-            // (`chan int64` and `chan int32` are both `Chan(Int)`), so a
-            // typed element whose composite inner differs passed the equal
-            // kind arm and failed `go build`. Deep-compare the spellings;
-            // aliases and type parameters fail open.
+let scalar_mismatch =
+                self.scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
             let deep_conflict = if ik == expected && expected != OpKind::Interface {
                 self.deep_composite_conflict(&resolved_ty, self.typed_value_type_name(item).as_deref())
             } else {
@@ -7203,12 +7199,8 @@ impl<'a> Collector<'a> {
             }
             let ik = self.kind_of_expr(item);
             // #2788: a typed element of another concrete numeric width.
-            let scalar_mismatch = self
-                .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
-            // #3412: the kind model collapses container inners, so a typed
-            // element whose composite inner differs passed the equal kind
-            // arm. Deep-compare the spellings; aliases and type parameters
-            // fail open.
+            let scalar_mismatch =
+                self.scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
             let deep_conflict = if ik == expected && expected != OpKind::Interface {
                 self.deep_composite_conflict(&resolved_ty, self.typed_value_type_name(item).as_deref())
             } else {
@@ -7221,9 +7213,11 @@ impl<'a> Collector<'a> {
                 continue;
             }
             if expected == OpKind::Float
-                && ik == OpKind::Int
-                && self.is_untyped_int_const(item)
+                && matches!(self.kind_of_expr(item), OpKind::Float)
+                && scalar_mismatch
             {
+                // float width mismatch handled below
+            } else if ik == expected && !scalar_mismatch && deep_conflict.is_none() {
                 continue;
             }
             let is_untyped_int_to_float = expected == OpKind::Float
