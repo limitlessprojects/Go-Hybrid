@@ -377,9 +377,9 @@ fn cmd_generate(args: &[String]) -> ExitCode {
 
     let mut drifted: Vec<String> = Vec::new();
     let mut written: usize = 0;
-    let mut formatters = None;
+    let mut tools = GenTools::default();
     for hy in &hy_files {
-        match generate_one(hy, check_only, &binding_prefix, &mut formatters) {
+        match generate_one(hy, check_only, &binding_prefix, &mut tools) {
             Ok(GenOutcome::Wrote(f)) => {
                 written += 1;
                 println!("emitted {}", f);
@@ -415,6 +415,69 @@ enum GenOutcome {
     Wrote(String),
     Fresh(String),
     Drift(String),
+}
+
+#[derive(Default)]
+struct GenTools {
+    formatters: Option<Vec<std::path::PathBuf>>,
+    ignored_go_files:
+        std::collections::BTreeMap<std::path::PathBuf, std::collections::BTreeSet<String>>,
+}
+
+impl GenTools {
+    fn ignored_go_files(
+        &mut self,
+        dir: &std::path::Path,
+    ) -> Result<&std::collections::BTreeSet<String>, String> {
+        let files = match self.ignored_go_files.entry(dir.to_path_buf()) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                // Let Go interpret GOOS/GOARCH, build tags and legacy constraints.
+                // -find does not resolve imports. -e retains file metadata when a
+                // stale generated output disagrees with the hand-written package.
+                // auto also permits module-free projects; selection must not depend
+                // on an enclosing workspace or download project dependencies.
+                let out = Command::new(go_bin())
+                    .args(["list", "-e", "-find", "-json", "."])
+                    .current_dir(dir)
+                    .env("GO111MODULE", "auto")
+                    .env("GOWORK", "off")
+                    .output()
+                    .map_err(|e| format!("selecting Go files in {}: {}", dir.display(), e))?;
+                if !out.status.success() {
+                    return Err(format!(
+                        "selecting Go files in {}: {}",
+                        dir.display(),
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ));
+                }
+                let package: serde_json::Value =
+                    serde_json::from_slice(&out.stdout).map_err(|e| {
+                        format!("reading Go file selection in {}: {}", dir.display(), e)
+                    })?;
+                if package.get("Dir").and_then(|v| v.as_str()).is_none() {
+                    return Err(format!(
+                        "Go did not identify the package directory {}: {}",
+                        dir.display(),
+                        package
+                    ));
+                }
+                let mut ignored = std::collections::BTreeSet::new();
+                if let Some(files) = package.get("IgnoredGoFiles") {
+                    let files = files.as_array().ok_or("invalid Go ignored-file list")?;
+                    for file in files {
+                        ignored.insert(
+                            file.as_str()
+                                .ok_or("invalid Go ignored filename")?
+                                .to_string(),
+                        );
+                    }
+                }
+                entry.insert(ignored)
+            }
+        };
+        Ok(files)
+    }
 }
 
 /// gofmt over stdin→stdout — the one formatter that decides what a
@@ -497,7 +560,7 @@ fn generate_one(
     hy: &std::path::Path,
     check_only: bool,
     binding_prefix: &str,
-    formatters: &mut Option<Vec<std::path::PathBuf>>,
+    tools: &mut GenTools,
 ) -> Result<GenOutcome, String> {
     let src = std::fs::read_to_string(hy)
         .map_err(|e| format!("reading {}: {}", hy.display(), e))?;
@@ -547,6 +610,12 @@ fn generate_one(
         })
         .collect::<Vec<_>>();
     siblings.sort();
+    if !siblings.is_empty() {
+        let ignored = tools.ignored_go_files(&dir)?;
+        siblings.retain(|p| {
+            !ignored.contains(p.file_name().unwrap_or_default().to_string_lossy().as_ref())
+        });
+    }
     if siblings.is_empty() {
         return Err(format!(
             "{}: no non-test .go files beside it — the emitted file must join a Go package (HYB-E9002); add a non-test .go file with a `package <name>` clause first",
@@ -597,7 +666,7 @@ fn generate_one(
     // Discover lazily after source validation, once per generate invocation.
     let out_text = run_gofmt_candidates(
         &unformatted,
-        formatters.get_or_insert_with(gofmt_candidates),
+        tools.formatters.get_or_insert_with(gofmt_candidates),
     )?;
 
     let stem = hy
@@ -609,13 +678,17 @@ fn generate_one(
     let out_disp = out_path.display().to_string();
 
     // Overwrite guard: never clobber a hand-written file.
-    if let Ok(existing) = std::fs::read_to_string(&out_path) {
-        if !existing.starts_with(GENERATED_HEADER_PREFIX) {
-            return Err(format!(
-                "{} exists and is NOT hyb-generated — refusing to overwrite a hand-written file",
-                out_disp
-            ));
+    match std::fs::read_to_string(&out_path) {
+        Ok(existing) => {
+            if !existing.starts_with(GENERATED_HEADER_PREFIX) {
+                return Err(format!(
+                    "{} exists and is NOT hyb-generated — refusing to overwrite a hand-written file",
+                    out_disp
+                ));
+            }
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("reading {}: {}", out_disp, e)),
     }
 
     if check_only {
@@ -722,29 +795,87 @@ fn render_build_error(e: &BuildError) -> String {
 }
 
 fn cmd_build(args: &[String]) -> ExitCode {
-    // The .hy file: the first arg ending in .hy (flag values never do).
-    let file = args.iter().find(|a| a.ends_with(".hy")).cloned();
-    let Some(file) = file else {
-        eprintln!("usage: hyb build <file.hy> -o <bin-path> [--emit-go] | --package <name> --out-dir <dir> [--binding-prefix <path>]");
-        return ExitCode::from(2);
-    };
-    let out_idx = args.iter().position(|a| a == "-o");
-    let out_path = out_idx
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_else(|| "a.out".to_string());
-    let emit_go_only = args.iter().any(|a| a == "--emit-go");
+    const USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--deny-managed] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
+    // Validate the entire invocation before touching the filesystem or the
+    // toolchain, mirroring cmd_check/cmd_generate: a mistyped option or a
+    // missing value must not fall back to a default and build something else.
+    let mut file: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut emit_go_only = false;
+    let mut deny_managed = false;
     // Package mode (example 09): emit an importable Go package + the
     // runtime pieces, instead of building a binary.
-    let pkg_idx = args.iter().position(|a| a == "--package");
-    let pkg_name = pkg_idx.and_then(|i| args.get(i + 1)).cloned();
-    let outdir_idx = args.iter().position(|a| a == "--out-dir");
-    let out_dir = outdir_idx.and_then(|i| args.get(i + 1)).cloned();
-    let bprefix_idx = args.iter().position(|a| a == "--binding-prefix");
-    let binding_prefix = bprefix_idx
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_else(|| "hybrid.program".to_string());
+    let mut pkg_name: Option<String> = None;
+    let mut out_dir: Option<String> = None;
+    let mut binding_prefix: Option<String> = None;
+    let mut end_of_options = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if !end_of_options {
+            match arg.as_str() {
+                "--" => {
+                    end_of_options = true;
+                    i += 1;
+                    continue;
+                }
+                "--emit-go" => {
+                    emit_go_only = true;
+                    i += 1;
+                    continue;
+                }
+                "--deny-managed" => {
+                    deny_managed = true;
+                    i += 1;
+                    continue;
+                }
+                "-o" | "--package" | "--out-dir" | "--binding-prefix" => {
+                    let Some(value) = args.get(i + 1) else {
+                        eprintln!("error: {arg} requires a value\n{USAGE}");
+                        return ExitCode::from(2);
+                    };
+                    if value.is_empty() || value.starts_with('-') {
+                        eprintln!("error: {arg} requires a value, not an option\n{USAGE}");
+                        return ExitCode::from(2);
+                    }
+                    match arg.as_str() {
+                        "-o" => out_path = Some(value.clone()),
+                        "--package" => pkg_name = Some(value.clone()),
+                        "--out-dir" => out_dir = Some(value.clone()),
+                        "--binding-prefix" => binding_prefix = Some(value.clone()),
+                        _ => unreachable!(),
+                    }
+                    i += 2;
+                    continue;
+                }
+                value if value.starts_with('-') => {
+                    eprintln!("error: unknown build option: {value}\n{USAGE}");
+                    return ExitCode::from(2);
+                }
+                _ => {}
+            }
+        }
+        if file.is_some() {
+            eprintln!("build expects exactly one input file; unexpected argument: {arg}\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        file = Some(arg.clone());
+        i += 1;
+    }
+    let Some(file) = file else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    };
+    if !file.ends_with(".hy") {
+        eprintln!("error: build expects a .hy input, got: {file}\n{USAGE}");
+        return ExitCode::from(2);
+    }
+    if pkg_name.is_some() != out_dir.is_some() {
+        eprintln!("error: --package and --out-dir must be supplied together\n{USAGE}");
+        return ExitCode::from(2);
+    }
+    let out_path = out_path.unwrap_or_else(|| "a.out".to_string());
+    let binding_prefix = binding_prefix.unwrap_or_else(|| "hybrid.program".to_string());
 
     // --- 1. Toolchain pin enforcement (HYB-E9001) ---
     // The walking skeleton's reproducibility guard (DX study: ~30 lines).
@@ -812,6 +943,17 @@ fn cmd_build(args: &[String]) -> ExitCode {
         for d in &result.diagnostics {
             println!("{}", d.render_head());
         }
+        return ExitCode::FAILURE;
+    }
+
+    // CI policy gate (--deny-managed): any managed block fails the build
+    // before emitting or compiling, matching `hyb check --deny-managed`.
+    if deny_managed && result.managed.managed_blocks > 0 {
+        println!(
+            "deny-managed: {} managed block(s) present — build failed by policy (--deny-managed); \
+             audit the block(s) or remove them",
+            result.managed.managed_blocks
+        );
         return ExitCode::FAILURE;
     }
 
@@ -2125,7 +2267,7 @@ mod tests {
         std::fs::write(&main_go, "package oldpkg\n").unwrap();
         std::fs::write(&calc_hy, "fn add(a int, b int) int {\n    return a + b\n}\n").unwrap();
 
-        generate_one(&calc_hy, false, "hybrid.program", &mut None)
+        generate_one(&calc_hy, false, "hybrid.program", &mut GenTools::default())
             .expect("initial generate_one succeeds");
         assert!(
             std::fs::read_to_string(&stale_hy_go)
@@ -2138,7 +2280,7 @@ mod tests {
             "/*\npackage commentpkg\n*/\npackage\tnewpkg; // active\n",
         )
         .unwrap();
-        generate_one(&calc_hy, false, "hybrid.program", &mut None)
+        generate_one(&calc_hy, false, "hybrid.program", &mut GenTools::default())
             .expect("generate_one succeeds despite stale .hy.go");
         let generated = std::fs::read_to_string(&stale_hy_go).unwrap();
         assert!(
