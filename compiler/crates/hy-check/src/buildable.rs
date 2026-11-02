@@ -970,6 +970,14 @@ impl<'a> Collector<'a> {
                     out[1] = self.scalar_of_type_text(v);
                 }
             }
+        } else if let Some(elem) = text
+            .strip_prefix("<-chan ")
+            .or_else(|| text.strip_prefix("chan "))
+        {
+            // #3105 — `for v in ch` binds the channel's element.
+            if n == 1 {
+                out[0] = self.scalar_of_type_text(elem);
+            }
         } else if let Some(rest) = text.strip_prefix('[') {
             if let Some(c) = rest.find(']') {
                 let elem = self.scalar_of_type_text(&rest[c + 1..]);
@@ -2140,9 +2148,13 @@ impl<'a> Collector<'a> {
                                 OpKind::Chan(e) => *e,
                                 _ => OpKind::Unknown,
                             };
+                            // #3105 — the value binding carries the channel's
+                            // element width for the #2712 scalar check.
+                            let elem_scalar = self.receive_scalar(chan);
                             for (i, n) in names.iter().enumerate() {
                                 self.define_elidable(n, chan.span());
                                 self.bind_kind(n, if i == 0 { elem.clone() } else { OpKind::Bool });
+                                self.set_scalar(n, if i == 0 { elem_scalar } else { None });
                             }
                         }
                         SelectArmKind::Default => {}
