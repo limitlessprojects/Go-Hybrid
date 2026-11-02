@@ -311,9 +311,9 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
             }
         }
         Stmt::Expr { expr, .. } => expr_uses(expr, out),
-        Stmt::Send { chan, value, .. } => {
+        Stmt::Send { chan, value, is_move, .. } => {
             expr_uses(chan, out);
-            expr_uses(value, out);
+            if *is_move { expr_uses(&Expr::Move { operand: Box::new(value.clone()), span: value.span() }, out); } else { expr_uses(value, out); }
         }
         Stmt::If { cond, .. } => expr_uses(cond, out),
         Stmt::For { kind, .. } => match kind {
@@ -375,9 +375,9 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
-                    SelectArmKind::Send { chan, value, .. } => {
+                    SelectArmKind::Send { chan, value, is_move } => {
                         expr_uses(chan, out);
-                        expr_uses(value, out);
+                        if *is_move { expr_uses(&Expr::Move { operand: Box::new(value.clone()), span: value.span() }, out); } else { expr_uses(value, out); }
                     }
                     SelectArmKind::Recv { chan, .. } => expr_uses(chan, out),
                     SelectArmKind::Default => {}
@@ -450,7 +450,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                 via_move: true,
                 via_addr: false,
             }),
-            Expr::Field { .. } => {
+            Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
                 if let Some(root) = crate::model::unwrap_parens(operand).root_ident() {
                     out.push(Use {
                         name: root.to_string(),
@@ -832,13 +832,25 @@ pub(crate) fn expr_path(expr: &Expr) -> Option<String> {
 /// an index-free ident/field chain, so two different keys on the same base
 /// are provably distinct slots. `None` means the slot may be any slot.
 pub(crate) fn addr_of_index_slot_key(value: &Expr) -> Option<String> {
-    let Expr::Index { base, index, .. } = as_addr_of(value)? else {
-        return None;
-    };
+    let (base, index) = peel_slot_loan_index(value)?;
     if !expr_is_index_free(base) {
         return None;
     }
     lit_index_key(index)
+}
+
+fn peel_slot_loan_index(mut value: &Expr) -> Option<(&Expr, &Expr)> {
+    while let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = value {
+        value = inner;
+    }
+    let mut cur = as_addr_of(value)?;
+    loop {
+        match cur {
+            Expr::Index { base, index, .. } => return Some((base, index)),
+            Expr::Field { base, .. } | Expr::Paren { inner: base, .. } => cur = base,
+            _ => return None,
+        }
+    }
 }
 
 /// A field store `s[k].f = v` (or `s[k].f.g op= v`) writes into one slot of
@@ -865,6 +877,9 @@ pub(crate) fn place_field_store_slot(place: &Place) -> Option<(String, Option<St
 }
 
 fn lit_index_key(index: &Expr) -> Option<String> {
+    if let Some(v) = crate::const_overflow::const_int_value(index) {
+        return Some(v.to_string());
+    }
     match crate::model::unwrap_parens(index) {
         e @ Expr::Lit { .. } => Some(e.render()),
         _ => None,
@@ -891,9 +906,6 @@ fn place_is_index_free(p: &Place) -> bool {
 /// `svc := &e.services[existing]` — extract (defined-name-agnostic) the base
 /// path of an `&path[key]`-shaped value, if it is one.
 pub(crate) fn addr_of_index_base_path(value: &Expr) -> Option<String> {
-    let operand = as_addr_of(value)?;
-    match operand {
-        Expr::Index { base, .. } => expr_path(base),
-        _ => None,
-    }
+    let (base, _) = peel_slot_loan_index(value)?;
+    expr_path(base)
 }

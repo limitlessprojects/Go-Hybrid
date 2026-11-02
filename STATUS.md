@@ -1,5 +1,16 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
+
+- Contributor #1165: range bounds spelled as different names of one Go integer type no longer raise a false HYB-E2009 (shared canonicaliser in `hy-check` + regression pin); workspace/corpus/differential/CI remain delivery gates.
+- Contributor #2199: a store whose target is a type name (`n string = "str"`, `q.n int = 5`) is rejected as HYB-E1002 (Row 13 BUILDABLE) — the #778 check now also covers assignment targets; declarations and plain stores unchanged; 3 new tests in `type_name_in_value_position.rs` (16/16 green).
+- Contributor #2320: `collect_callee_const_return_roots` no longer fails open — a `const` map returned through five wrappers (`m := h5()`) or through a fn value (`cb := leaf; m := cb()`) is rejected as HYB-E3004 (spawn) + HYB-E3006 (element write) instead of `OK (0 diagnostics)` with a `go run -race` data race in 10/10 runs; past the walk bound and for a callee whose body the file cannot see, the walk reports every may-share file-level `const`, gated on the result being able to share (a chain returning a plain value keeps its old verdict) (SPEC-LANGUAGE O5.6, O4.9). 11 new tests in `callee_const_return_roots_2320.rs`, 5 of them fail pre-fix; corpus 127/127 (39/2/86) and census/markers/registration guards green; no corpus verdict changed.
+- Contributor #1598 follow-up (2026-10-24): specialized smoke gate also requires rejection exit 1 and an exact diagnostic token. Eight new process regressions; four fail before, sixteen combined pass after. New-head compiler CI/review pending.
+
+- Contributor candidate (2026-10-24): author-stage repro evidence distinguishes checker failure from rejection and requires an exact diagnostic token. Eight subprocess/Git regressions, baseline 4 failures. No compiler soundness claim; see PLAN.md. Upstream review/CI pending.
+
+- Contributor #1347: composite receive operands (`<-chs[0]`, `<-chs[i:]`, `<-append(chs, ch)[0]`, `<-outer[0][0]`) now resolve to their channel, so a receive from a send-only channel is rejected (HYB-E2008); regression pin in `recv_composite_channel_operands.rs`; workspace/corpus/differential/CI remain delivery gates.
+- Contributor #1347-sibling (2026-10-31): locals bound from a composite (`sub := append(chs, ch)`) now bind the projected `ty`, so `<-sub[0]` in a type position rejects HYB-E2008 on send-only channels instead of passing with 0 diagnostics (the "known remaining sibling" NOTE in recv_composite_channel_operands.rs is closed); HYB-E2008 tier0_rule_id BUILDABLE; corpus 129; pin in recv_local_composite_binding.rs.
 - AUTOMATION (session-35): **the daily human-chore is gone** — triage-board.yml now runs `triage_bot.py approve --max 60` every 04:30 UTC after the board post (board FIRST: run 39897148251 proved the approve POSTs drain the shared per-repo GITHUB_TOKEN hour pool and RateGuard kills the scan otherwise; approve is best-effort with continue-on-error) · session-side sweep cleared 172 pending action_required runs (all 3 per-PR workflows, 0 left at 03:56Z) · `triage_bot.Gh.req` now retries rate-limit 403s with 5/20/45s backoff (GitHub secondary limits surface as 403, not 429; shepherd.py inherits via the shared Gh class) · BOT AUDIT: board #940 fresh, stale+rebase green on schedule, autoland gates proven honest (758/827/929/905 landed via session-side autoland.py per the session-34 GH006 finding — the workflow push transport remains the missing infra: bundle→branch→PR→checks→auto-merge)
 - LANDED (session-35, Pareto round 6): #1095 afe0c03 (ryder777777, package_release.sh dot-segment/dash/extra-arg rejection, bug live ×4 cases) · #1097 ff446e2 (ryder777777, install.sh HYB_VERSION path-component validation, bug live via regression suite failing on main) · #1098 37364a8 (ryder777777, check_test_registration start-dir escape; live-bug proof = direct probe: `-s ..` + package-chained root bypasses the guard exit-0 on main, fixed tree refuses; PR's own test passes pre-fix too — quoted-pattern weakness noted to the author) — each: merge gate clean, battery 1770/1770, corpus 126 tripwire-not-fired, differential FULL 40+86, CI compiler+quick green on heads (preflight reds were the shared-token 403 saturation, not code), credit comments posted
 
@@ -47,6 +58,7 @@ fail on unmodified main; all eight pass with the repair. Error/alias and
 foreign nil homes remain accepted; a Hybrid struct shadowing `error` does not
 inherit that exception. The 127 registered
 corpus verdicts are unchanged. SPEC-LANGUAGE N1 now spells out map keys.
-Validation: 1808 workspace tests pass; checker corpus 127/127; differential
-41 accepted / 86 rejected cases pass; all ten examples pass. Upstream CI
-remains required before final review.
+Prior validation on the original PR base: 1808 workspace tests passed;
+checker corpus 127/127, differential 41 accepted / 86 rejected, and ten
+examples passed. This refreshed merge requires new upstream CI and review.
+- Contributor #1518 (2026-10-30): rebased to main `5435169`; all 11 fresh Linux checks pass on Rust 1.99.0/Go 1.26.9: runtime 4/4, real Go bridge, workspace 1891/1891, corpus 127/127, differential 41/41+86/86, format/clippy. CI/review/merge/award/payment pending; details in PLAN.md.
