@@ -3828,15 +3828,16 @@ impl<'a> Collector<'a> {
                         .chain(self.diags.iter())
                         .any(|d| d.code == "HYB-E3012" && d.span == f.value.span());
                     if conflict && !already_diagnosed_e3012 {
+                        let got_label = self.operand_label(&f.value, &got);
+                        let want_label = match self.scalar_of_ty(fty) {
+                            Some(s) => s.to_string(),
+                            None => want.label(),
+                        };
                         self.emit_e1002(
                             f.value.span(),
                             format!(
                                 "cannot use a value of type `{}` for field `{}` of `{}` (declared `{}`) — Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
-                                got.label(),
-                                f.name,
-                                full_name,
-                                want.label(),
-                                want.label()
+                                got_label, f.name, full_name, want_label, want_label
                             ),
                             "the field's declared type is fixed; write an explicit conversion when a conversion is intended",
                         );

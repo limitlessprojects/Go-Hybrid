@@ -93,3 +93,21 @@ fn kind_mismatch_keeps_kind_labels() {
     let ms = messages("fn main() {\n    s := \"x\"\n    _ = s - 1\n}\n");
     assert!(ms.iter().any(|m| m.contains("`string`")), "{ms:?}");
 }
+
+#[test]
+fn struct_literal_field_names_both_widths() {
+    // Before: "value of type `int` for field `x` of `pt` (declared `int`)".
+    assert_named(
+        "struct pt {\n    x i64\n}\n\nfn main() {\n    var a int = 3\n    var p = pt{x: a}\n    fmt.println(p.x)\n}\n",
+        "int",
+        "int64",
+    );
+    let ms = messages(
+        "struct pt {\n    x f32\n}\n\nfn main() {\n    var a f64 = 3.0\n    var p = pt{x: a}\n    fmt.println(p.x)\n}\n",
+    );
+    assert!(
+        ms.iter()
+            .any(|m| m.contains("`float64` for field") && m.contains("(declared `float32`)")),
+        "struct literal message should name float64 and float32: {ms:?}"
+    );
+}
