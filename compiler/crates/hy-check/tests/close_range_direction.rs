@@ -35,8 +35,24 @@ fn close_recv_only_rejects_e3009() {
          }",
     );
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
-    assert_eq!(first_code(&r).as_deref(), Some("HYB-E3009"));
+    assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3009"));
     assert!(r.diagnostics[0].message.contains("receive-only"));
+}
+
+#[test]
+fn close_recv_only_reports_e2005_from_builtin_operand_check() {
+    let r = check(
+        "fn main() {\n\
+           var ch <-chan int\n\
+           close(ch)\n\
+         }",
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+    assert!(
+        r.diagnostics.iter().any(|d| d.code == "HYB-E2005"),
+        "expected the built-in close operand check to report HYB-E2005: {:?}",
+        r.diagnostics
+    );
 }
 
 #[test]
@@ -49,7 +65,7 @@ fn defer_close_recv_only_rejects_e3009() {
          }",
     );
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
-    assert_eq!(first_code(&r).as_deref(), Some("HYB-E3009"));
+    assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3009"));
 }
 
 #[test]
@@ -141,7 +157,7 @@ fn close_inside_closure_and_struct_field_rejects_e3009() {
          }",
     );
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
-    assert_eq!(first_code(&r).as_deref(), Some("HYB-E3009"));
+    assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3009"));
 }
 
 #[test]

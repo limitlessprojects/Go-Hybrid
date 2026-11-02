@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor amendment — #3295
+
+- `hyb check` now preserves channel direction in buildability operand kinds and reports HYB-E2005 when `close` targets a receive-only channel. Regression pin: `compiler/crates/hy-check/tests/close_range_direction.rs`; bidirectional and send-only controls remain accepted. Focused tests pass (13/13), corpus 130/130, and `cargo test --workspace` passes.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - `hyb generate` excludes sibling filenames reported by `go list -e -find -json .` as `IgnoredGoFiles`, once per directory and invocation. Modern/legacy constraints, platform suffixes and `GOFLAGS` tags use Go's own selection; existing production-package conflict checks remain. This is CLI tooling correctness, not a language/checker soundness change; PR #1900's separate dot/underscore-prefix fix is untouched.

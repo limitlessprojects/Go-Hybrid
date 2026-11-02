@@ -45,9 +45,9 @@
 
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    AssignOp, BinOp, Block, CallArg, Decl, Expr, FieldInit, File, FnDecl, FnResult, ForKind,
-    InterpPart, LitKind, LocalDecl, LocalKind, MatchPattern, Param, Place, PlaceKind, SelectArmKind,
-    Stmt, TypeExpr, UnOp,
+    AssignOp, BinOp, Block, CallArg, ChanDir, Decl, Expr, FieldInit, File, FnDecl, FnResult,
+    ForKind, InterpPart, LitKind, LocalDecl, LocalKind, MatchPattern, Param, Place, PlaceKind,
+    SelectArmKind, Stmt, TypeExpr, UnOp,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -82,7 +82,7 @@ pub(crate) enum OpKind {
     Slice(Box<OpKind>),
     Array(Box<OpKind>),
     Map(Box<OpKind>, Box<OpKind>),
-    Chan(Box<OpKind>),
+    Chan(Box<OpKind>, ChanDir),
     Struct(Option<String>),
     Pointer(Box<OpKind>),
     /// Function kind: result kinds, plus the declared parameter count when the
@@ -113,7 +113,11 @@ impl OpKind {
             OpKind::Slice(e) => format!("[]{}", e.label()),
             OpKind::Array(e) => format!("[N]{}", e.label()),
             OpKind::Map(k, v) => format!("map[{}]{}", k.label(), v.label()),
-            OpKind::Chan(e) => format!("chan {}", e.label()),
+            OpKind::Chan(e, dir) => match dir {
+                ChanDir::Both => format!("chan {}", e.label()),
+                ChanDir::Recv => format!("<-chan {}", e.label()),
+                ChanDir::Send => format!("chan<- {}", e.label()),
+            },
             OpKind::Struct(Some(n)) => format!("struct {}", n),
             OpKind::Struct(None) => "struct".to_string(),
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
@@ -167,7 +171,7 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Struct(None), _) | (_, Struct(None)) => false,
         (a, b) if a == b => false,
         // Same container shape: recurse into the element kinds.
-        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
+        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a, _), Chan(b, _)) => {
             kinds_conflict(a, b)
         }
         (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
@@ -292,7 +296,10 @@ fn copy_element_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
         // Struct whose name did not resolve is not evidence of mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
         (a, b) if a == b => false,
-        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) | (Pointer(a), Pointer(b)) => {
+        (Slice(a), Slice(b))
+        | (Array(a), Array(b))
+        | (Chan(a, _), Chan(b, _))
+        | (Pointer(a), Pointer(b)) => {
             copy_element_kinds_conflict(a, b)
         }
         (Map(k1, v1), Map(k2, v2)) => {
@@ -350,28 +357,28 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
 
         // Numeric targets (Int, Float): can convert between Int and Float.
         // Cannot convert Str, Slice, Array, Map, Chan, Struct to numeric.
-        (Int | Float, Str | Slice(_) | Array(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
+        (Int | Float, Str | Slice(_) | Array(_) | Map(_, _) | Chan(..) | Struct(_)) => true,
 
         // String target: can convert from Int (rune/byte code point) or Slice(Int) (byte/rune slice) or Str.
         // Cannot convert from Float, Bool, Map, Chan, Struct, Array, or non-int Slice.
-        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_) | Array(_)) => true,
+        (Str, Float | Bool | Map(_, _) | Chan(..) | Struct(_) | Array(_)) => true,
         (Str, Slice(elem)) if !matches!(**elem, Unknown | Int) => true,
 
         // Slice target: can convert from Str (to []byte/[]rune), or Slice of identical element type.
         // Direct array-to-slice conversion `[]T(arr)` is invalid in Go (must write `arr[:]`).
         // Cannot convert from Int, Float, Bool, Map, Chan, Struct, Array.
-        (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_) | Array(_)) => true,
+        (Slice(_), Int | Float | Bool | Map(_, _) | Chan(..) | Struct(_) | Array(_)) => true,
         (Slice(elem), Str) if !matches!(**elem, Unknown | Int) => true,
         (Slice(a), Slice(b)) => a != b && **a != Unknown && **b != Unknown,
 
         // Array target: cannot convert from Str directly, or from non-container.
         // In Go 1.20+, slice-to-array conversion [N]T(slice) requires matching element types.
-        (Array(_), Int | Float | Bool | Str | Map(_, _) | Chan(_) | Struct(_)) => true,
+        (Array(_), Int | Float | Bool | Str | Map(_, _) | Chan(..) | Struct(_)) => true,
         (Array(a), Array(b)) | (Array(a), Slice(b)) => a != b && **a != Unknown && **b != Unknown,
 
         // Map target: cannot convert from Int, Float, Bool, Str, Slice, Array, Chan, Struct.
         // Converting between maps requires matching key and value types.
-        (Map(_, _), Int | Float | Bool | Str | Slice(_) | Array(_) | Chan(_) | Struct(_)) => true,
+        (Map(_, _), Int | Float | Bool | Str | Slice(_) | Array(_) | Chan(..) | Struct(_)) => true,
         (Map(k1, v1), Map(k2, v2)) => {
             (k1 != k2 && **k1 != Unknown && **k2 != Unknown)
                 || (v1 != v2 && **v1 != Unknown && **v2 != Unknown)
@@ -379,8 +386,8 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
 
         // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Array, Map, Struct.
         // Converting between channels requires matching element types.
-        (Chan(_), Int | Float | Bool | Str | Slice(_) | Array(_) | Map(_, _) | Struct(_)) => true,
-        (Chan(a), Chan(b)) => a != b && **a != Unknown && **b != Unknown,
+        (Chan(..), Int | Float | Bool | Str | Slice(_) | Array(_) | Map(_, _) | Struct(_)) => true,
+        (Chan(a, _), Chan(b, _)) => a != b && **a != Unknown && **b != Unknown,
 
         // Pointer targets and arguments: Go only converts between pointers.
         // Direct pointer-to-pointer conversions require identical base types
@@ -424,7 +431,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // A struct whose NAME did not resolve cannot have its members looked up.
         OpKind::Struct(None) => false,
         OpKind::Struct(Some(_)) => true,
-        OpKind::Slice(e) | OpKind::Array(e) | OpKind::Chan(e) | OpKind::Pointer(e) => {
+        OpKind::Slice(e) | OpKind::Array(e) | OpKind::Chan(e, _) | OpKind::Pointer(e) => {
             is_fully_resolved(e)
         }
         OpKind::Map(k, v) => is_fully_resolved(k) && is_fully_resolved(v),
@@ -1646,7 +1653,7 @@ impl<'a> Collector<'a> {
                 _ => vec![OpKind::Unknown, OpKind::Unknown],
             },
             Expr::Receive { chan, .. } => match self.kind_of_expr(chan) {
-                OpKind::Chan(elem) => vec![*elem, OpKind::Bool],
+                OpKind::Chan(elem, _) => vec![*elem, OpKind::Bool],
                 _ => vec![OpKind::Unknown, OpKind::Bool],
             },
             Expr::Call { callee, args, .. } => {
@@ -1946,7 +1953,7 @@ impl<'a> Collector<'a> {
                             self.check_repeated_bindings(names, chan.span());
                             self.expr(chan);
                             let elem = match self.kind_of_expr(chan) {
-                                OpKind::Chan(e) => *e,
+                                OpKind::Chan(e, _) => *e,
                                 _ => OpKind::Unknown,
                             };
                             for (i, n) in names.iter().enumerate() {
@@ -1966,7 +1973,7 @@ impl<'a> Collector<'a> {
 
     fn iterate_var_kinds(&self, expr: &Expr, n_vars: usize) -> Vec<OpKind> {
         match self.kind_of_expr(expr) {
-            OpKind::Slice(e) | OpKind::Array(e) | OpKind::Chan(e) => {
+            OpKind::Slice(e) | OpKind::Array(e) | OpKind::Chan(e, _) => {
                 if n_vars >= 2 {
                     vec![OpKind::Int, *e]
                 } else {
@@ -2741,8 +2748,8 @@ impl<'a> Collector<'a> {
                 Box::new(self.kind_of_ty(key, depth + 1)),
                 Box::new(self.kind_of_ty(value, depth + 1)),
             ),
-            TypeExpr::Chan { elem, .. } => {
-                OpKind::Chan(Box::new(self.kind_of_ty(elem, depth + 1)))
+            TypeExpr::Chan { dir, elem, .. } => {
+                OpKind::Chan(Box::new(self.kind_of_ty(elem, depth + 1)), *dir)
             }
             TypeExpr::Option { elem, .. } => OpKind::Option(Box::new(self.kind_of_ty(elem, depth + 1))),
             TypeExpr::Fn { params, results, .. } => OpKind::Fn(
@@ -2795,12 +2802,23 @@ impl<'a> Collector<'a> {
         if let Some(rest) = s.strip_prefix("[...]") {
             return OpKind::Array(Box::new(self.kind_of_type_str(rest, depth + 1)));
         }
-        if let Some(rest) = s
-            .strip_prefix("<-chan ")
-            .or_else(|| s.strip_prefix("chan<- "))
-            .or_else(|| s.strip_prefix("chan "))
-        {
-            return OpKind::Chan(Box::new(self.kind_of_type_str(rest, depth + 1)));
+        if let Some(rest) = s.strip_prefix("<-chan ") {
+            return OpKind::Chan(
+                Box::new(self.kind_of_type_str(rest, depth + 1)),
+                ChanDir::Recv,
+            );
+        }
+        if let Some(rest) = s.strip_prefix("chan<- ") {
+            return OpKind::Chan(
+                Box::new(self.kind_of_type_str(rest, depth + 1)),
+                ChanDir::Send,
+            );
+        }
+        if let Some(rest) = s.strip_prefix("chan ") {
+            return OpKind::Chan(
+                Box::new(self.kind_of_type_str(rest, depth + 1)),
+                ChanDir::Both,
+            );
         }
         self.kind_of_named(s, depth)
     }
@@ -2837,8 +2855,11 @@ impl<'a> Collector<'a> {
                 Box::new(self.kind_of_ty_with_subst(key, subst, depth + 1)),
                 Box::new(self.kind_of_ty_with_subst(value, subst, depth + 1)),
             ),
-            TypeExpr::Chan { elem, .. } => {
-                OpKind::Chan(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
+            TypeExpr::Chan { dir, elem, .. } => {
+                OpKind::Chan(
+                    Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)),
+                    *dir,
+                )
             }
             TypeExpr::Option { elem, .. } => {
                 OpKind::Option(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
@@ -3018,7 +3039,7 @@ impl<'a> Collector<'a> {
                 }
             },
             Expr::Receive { chan, .. } => match self.kind_of_expr(chan) {
-                OpKind::Chan(elem) => *elem,
+                OpKind::Chan(elem, _) => *elem,
                 _ => OpKind::Unknown,
             },
             Expr::Index { base, .. } => match self.kind_of_expr(base) {
@@ -6453,7 +6474,7 @@ impl<'a> Collector<'a> {
             | OpKind::Str
             | OpKind::Array(_)
             | OpKind::Map(_, _)
-            | OpKind::Chan(_) => {
+            | OpKind::Chan(..) => {
                 self.emit_e1002(
                     span,
                     format!(
@@ -6525,7 +6546,7 @@ impl<'a> Collector<'a> {
                         | OpKind::Slice(_)
                         | OpKind::Array(_)
                         | OpKind::Map(_, _)
-                        | OpKind::Chan(_)
+                        | OpKind::Chan(..)
                 ) || matches!(
                     &ak,
                     OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(_))
@@ -6553,7 +6574,7 @@ impl<'a> Collector<'a> {
                 let ak = self.kind_of_expr(op);
                 let ok = matches!(
                     ak,
-                    OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(_) | OpKind::Chan(_)
+                    OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(_) | OpKind::Chan(..)
                 ) || matches!(
                     &ak,
                     OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(_))
@@ -6579,7 +6600,17 @@ impl<'a> Collector<'a> {
                     return;
                 }
                 let ak = self.kind_of_expr(op);
-                if !matches!(ak, OpKind::Unknown | OpKind::Chan(_)) {
+                if matches!(ak, OpKind::Chan(_, ChanDir::Recv)) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot close receive-only channel `{}` (type `{}`) (HYB-E2005)",
+                            op.render(),
+                            ak.label()
+                        ),
+                        "`close` requires a bidirectional or send-only channel (`chan T` or `chan<- T`)",
+                    );
+                } else if !matches!(ak, OpKind::Unknown | OpKind::Chan(..)) {
                     self.emit_e2005(
                         span,
                         format!(
