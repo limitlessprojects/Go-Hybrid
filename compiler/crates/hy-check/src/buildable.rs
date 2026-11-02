@@ -1037,6 +1037,30 @@ impl<'a> Collector<'a> {
         out
     }
 
+    /// The type text of each `for … in expr` binding over a typed
+    /// slice/array (element) or map (`k` / `k, v`); anything else is `None`.
+    fn iterate_var_texts(&self, expr: &Expr, n: usize) -> Vec<Option<String>> {
+        let mut out = vec![None; n];
+        let Some(text) = self.value_type_text(expr) else {
+            return out;
+        };
+        let text = text.trim();
+        if text.starts_with("map[") || text.starts_with("chan ") || text.starts_with("<-chan ") {
+            return out;
+        }
+        if let Some(rest) = text.strip_prefix('[') {
+            if let Some(c) = rest.find(']') {
+                let elem = rest[c + 1..].trim().to_string();
+                if n == 1 {
+                    out[0] = Some(elem);
+                } else if n == 2 {
+                    out[1] = Some(elem);
+                }
+            }
+        }
+        out
+    }
+
     /// #3102 — the exact numeric element type of a receive `<-c` on a local
     /// whose type text is `chan T` / `<-chan T`.
     fn receive_scalar(&self, chan: &Expr) -> Option<&'static str> {
@@ -1517,6 +1541,12 @@ impl<'a> Collector<'a> {
         }
         if n == l.values.len() {
             return l.values.iter().map(|v| self.initializer_scalar(v)).collect();
+        }
+        if n == 2 && l.values.len() == 1 {
+            // Comma-ok receive `v, ok := <-c`: `v` takes the element type.
+            if let Expr::Receive { chan, .. } = unwrap_parens(&l.values[0]) {
+                return vec![self.receive_scalar(chan), None];
+            }
         }
         if n >= 2 && l.values.len() == 1 {
             if let Expr::Call { callee, args, .. } = unwrap_parens(&l.values[0]) {
@@ -2226,11 +2256,16 @@ impl<'a> Collector<'a> {
                         let str_elem = matches!(self.kind_of_expr(expr), OpKind::Str)
                             .then(|| vars.len().saturating_sub(1));
                         let iter_scalars = self.iterate_var_scalars(expr, vars.len());
+                        let iter_texts = self.iterate_var_texts(expr, vars.len());
                         // Unread iterate bindings are lowered to `_` at
                         // emission (issue #139); write-only ones still
                         // reject as unused (PR #536).
-                        for (vi, ((v, k), sc)) in
-                            vars.iter().zip(iter_kinds).zip(iter_scalars).enumerate()
+                        for (vi, (((v, k), sc), vt)) in vars
+                            .iter()
+                            .zip(iter_kinds)
+                            .zip(iter_scalars)
+                            .zip(iter_texts)
+                            .enumerate()
                         {
                             self.define_elidable(v, *span);
                             // #1480: a struct/array element binding is a
@@ -2252,6 +2287,9 @@ impl<'a> Collector<'a> {
                             } else {
                                 self.set_scalar(v, sc);
                             }
+                            // Nested `for row in xs { for v in row }` needs
+                            // the element's own type text.
+                            self.set_vtext(v, vt);
                         }
                     }
                     ForKind::Infinite => {}
@@ -3849,8 +3887,17 @@ impl<'a> Collector<'a> {
                     // the field's own Go spelling may differ from the typed
                     // initializer's (`int` into `int64`, `float64` into
                     // `float32`) — Go refuses that in a struct literal.
+                    // #3120: a generic struct's field is spelled with its type
+                    // parameter (`v t`); substitute the literal's type
+                    // arguments (`box[int8]` → `t = int8`) first.
+                    let field_scalar = match fty {
+                        TypeExpr::Named { name, .. } if subst.contains_key(name.as_str()) => {
+                            self.scalar_of_type_text(&subst[name.as_str()])
+                        }
+                        _ => self.scalar_of_ty(fty),
+                    };
                     let scalar_mismatch =
-                        self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
+                        self.scalar_names_conflict(field_scalar, self.typed_value_scalar(&f.value));
                     let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
                         || kinds_conflict(&want, &got)
                         || scalar_mismatch;
