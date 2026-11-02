@@ -444,8 +444,9 @@ impl Parser {
         let mut variants = Vec::new();
         while !self.at_punct("}") && !self.at_eof() {
             let vname = self.expect_ident()?;
-            // discriminant `= Int` — not representable in EnumVariant; skipped
-            if self.eat_punct("=") {
+            // discriminant `= Int` — only its presence is kept (SPEC T17)
+            let has_discriminant = self.eat_punct("=");
+            if has_discriminant {
                 if !matches!(self.cur(), Tok::Int(_)) {
                     return self.err("expected integer discriminant after `=`");
                 }
@@ -464,6 +465,7 @@ impl Parser {
             variants.push(EnumVariant {
                 name: vname,
                 payload,
+                has_discriminant,
             });
             self.eat_punct(",");
         }

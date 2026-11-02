@@ -297,6 +297,11 @@ fn build_tables(ck: &mut Checker<'_>) {
                     e.name.clone(),
                     e.variants.iter().map(|v| (v.name.clone(), v.payload.clone())).collect(),
                 );
+                if !e.variants.is_empty()
+                    && e.variants.iter().all(|v| v.has_discriminant && v.payload.is_none())
+                {
+                    ck.enum_constant.insert(e.name.clone());
+                }
                 ck.declare_pkg_name(&e.name, "enum", e.span);
             }
             Decl::TypeAlias(ta) => {

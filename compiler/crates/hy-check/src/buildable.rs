@@ -2584,6 +2584,7 @@ impl<'a> Collector<'a> {
                     Expr::Ident { name, .. } => self.read(name),
                     other => self.expr(other),
                 }
+                self.check_enum_int_conversion(callee, args, *span);
                 // `new(T)` and `make(T, len, cap)` take a TYPE as their FIRST
                 // argument, so that position is a type position and the
                 // #778 value-position check must not fire there — `new(bag)`
@@ -3800,6 +3801,38 @@ impl<'a> Collector<'a> {
                 "an enum value is only assignable to its own enum type; SPEC T17 gives a numeric view only through `int(e)`",
             );
         }
+    }
+
+    /// #3137 row 9: SPEC T17 defines `int(e)` only when every variant of
+    /// the enum carries an explicit integer constant. On any other enum
+    /// there is no numeric view, so the conversion is refused.
+    fn check_enum_int_conversion(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
+        let Expr::Ident { name: conv, .. } = unwrap_parens(callee) else {
+            return;
+        };
+        if args.len() != 1
+            || !matches!(self.kind_of_named(conv, 0), OpKind::Int | OpKind::Float)
+            || self.scopes.iter().any(|l| l.contains_key(conv.as_str()))
+        {
+            return;
+        }
+        let Some(en) = self.enum_of_expr(&args[0].value) else {
+            return;
+        };
+        if self.ck.enum_constant.contains(en.as_str()) {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "cannot convert `{}` (enum `{}`) to `{}`: not every variant of `{}` has an explicit integer constant (HYB-E1002)",
+                args[0].value.render(),
+                en,
+                conv,
+                en
+            ),
+            "SPEC T17: `int(e)` is defined only when every variant carries a constant (`read = 0`); give each variant one, or `match` on the value",
+        );
     }
 
     /// #3137 row 10: enums have no fields. `s.radius` on an enum value is

@@ -402,3 +402,27 @@ fn match_arms_naming_own_variants_accepted() {
     assert_eq!(e5001_count(&src), 0);
     assert_eq!(e1002_count(&src), 0);
 }
+
+const ROW9_DECLS: &str = "enum color {\n    red\n    green\n}\nenum mode {\n    read = 0\n    write = 1\n}\nenum part {\n    a = 0\n    b\n}\n\n";
+
+#[test]
+fn int_of_enum_without_full_constants_rejected() {
+    // #3137 row 9, SPEC T17: `int(e)` needs a constant on every variant.
+    for (name, body) in [
+        ("no constants, local", "    c := color.red\n    fmt.println(int(c))\n"),
+        ("no constants, variant", "    fmt.println(int(color.green))\n"),
+        ("partial constants", "    p := part.a\n    fmt.println(int(p))\n"),
+        ("float64", "    c := color.red\n    fmt.println(float64(c))\n"),
+    ] {
+        let src = format!("{ROW9_DECLS}fn main() {{\n{body}}}\n");
+        assert_eq!(e1002_count(&src), 1, "{name} must be rejected with one HYB-E1002");
+    }
+}
+
+#[test]
+fn int_of_fully_constant_enum_accepted() {
+    let src = format!(
+        "{ROW9_DECLS}fn main() {{\n    m := mode.write\n    fmt.println(int(m))\n    fmt.println(int(mode.read))\n    var n int = 3\n    fmt.println(int(n), float64(n))\n}}\n"
+    );
+    assert_eq!(e1002_count(&src), 0);
+}

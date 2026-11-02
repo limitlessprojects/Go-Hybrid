@@ -699,6 +699,9 @@ pub(crate) struct Checker<'a> {
     /// order, so constructor arguments and `match` payload bindings can be
     /// typed from the declaration.
     pub enum_payloads: HashMap<String, Vec<(String, Option<TypeExpr>)>>,
+    /// #3137 row 9: enums where every variant is unit and carries an
+    /// explicit integer constant, so `int(e)` is defined (SPEC T17).
+    pub enum_constant: std::collections::HashSet<String>,
     /// type alias name -> target TypeExpr.
     pub type_aliases: HashMap<String, TypeExpr>,
     /// fn name -> decl (return-type inference for single-value defines).
@@ -764,6 +767,7 @@ impl<'a> Checker<'a> {
             enums: HashMap::new(),
             enum_has_zero_value: HashMap::new(),
             enum_payloads: HashMap::new(),
+            enum_constant: std::collections::HashSet::new(),
             type_aliases: HashMap::new(),
             fns: HashMap::new(),
             zd_defined: std::collections::HashSet::new(),
