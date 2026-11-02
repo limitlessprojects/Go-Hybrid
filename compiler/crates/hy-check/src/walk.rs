@@ -913,6 +913,12 @@ pub(crate) fn place_field_store_slot(place: &Place) -> Option<(String, Option<St
     }
 }
 
+/// The rendered key spelling for an index expression, exposed for passes that
+/// need to compare a slot read against a loan's recorded key (#3257).
+pub(crate) fn index_literal_key(index: &Expr) -> Option<String> {
+    lit_index_key(index)
+}
+
 fn lit_index_key(index: &Expr) -> Option<String> {
     if let Some(v) = crate::const_overflow::const_int_value(index) {
         return Some(v.to_string());

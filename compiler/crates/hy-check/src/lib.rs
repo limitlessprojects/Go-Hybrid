@@ -466,6 +466,11 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         let stmt: &Stmt = stmt;
         let idx = *idx;
         let managed = flat.in_managed(idx);
+        // #3257: a read of a loaned slot through its container inside the
+        // live O8 window sees the pre-loan value. Runs before the per-stmt
+        // dispatch so it covers expression statements, call arguments, print
+        // macros and returns alike.
+        ck.check_o8_stmt_slot_reads(&st, stmt, idx);
         // Issue #14: apply the statement's scope events BEFORE processing, in
         // exact order so multiple Pop/Push events at the same index never
         // coalesce into one, and select-receive arm bindings live inside their
@@ -876,6 +881,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             }
 
             Stmt::Expr { expr, .. } => {
+                // #3257: a read of the loaned slot through its container
+                // inside the live O8 window sees the pre-loan value.
+                ck.check_o8_stale_slot_reads(&st, expr, idx);
                 ck.mark_move_in_value(
                     &mut st,
                     expr,

@@ -529,6 +529,73 @@ impl<'a> Checker<'a> {
         self.emit_a3_if_live(st, path, span, idx, verb);
     }
 
+
+    /// #3257: scan every expression this statement evaluates for a read of a
+    /// loaned slot through its container while the O8 window is live.
+    /// Delegates the per-expression work to `check_o8_stale_slot_reads`.
+    pub(crate) fn check_o8_stmt_slot_reads(&mut self, st: &FnState, stmt: &Stmt, idx: usize) {
+        if st.loans.is_empty() {
+            return;
+        }
+        let mut exprs: Vec<&Expr> = Vec::new();
+        collect_stmt_exprs(stmt, &mut exprs);
+        for e in exprs {
+            self.check_o8_stale_slot_reads(st, e, idx);
+        }
+    }
+    /// #3257: a live O8 slot loan shadows its slot. The loan lowers to
+    /// copy-out now and store-back when its window ends, so any read of the
+    /// slot through its container inside that window sees the pre-loan value.
+    /// `emit_o8_alias_if_live` already rejects writes; this rejects reads.
+    ///
+    /// Two shapes, both from the report:
+    ///   - a direct index read of the loaned slot (m["a"], xs[0])
+    ///   - handing the whole container to a call (show(xs))
+    ///
+    /// A read THROUGH the loan binding (p.n) is the intended access path and
+    /// is not matched: only the container path reaches the stale slot.
+    pub(crate) fn check_o8_stale_slot_reads(&mut self, st: &FnState, e: &Expr, idx: usize) {
+        if st.loans.is_empty() {
+            return;
+        }
+        let mut reads: Vec<(String, Option<String>, Span)> = Vec::new();
+        collect_container_slot_reads(e, &mut reads);
+        for (path, key, span) in reads {
+            let Some(loan) = st.loans.iter().find(|l| {
+                let eff_last = self.effective_loan_last(st, l);
+                matches!(&l.target, LoanTarget::MapSlot { path: p, key: k, .. }
+                    if a3_paths_conflict(st, p, &path)
+                        && !matches!((k.as_deref(), key.as_deref()), (Some(a), Some(b)) if a != b))
+                    && l.created <= idx
+                    && idx <= eff_last
+            }) else {
+                continue;
+            };
+            let LoanTarget::MapSlot { binding, .. } = &loan.target else {
+                continue;
+            };
+            if self.diags.iter().any(|d| d.span == span && d.code == "HYB-E3102") {
+                continue;
+            }
+            let eff_last = self.effective_loan_last(st, loan);
+            let msg = format!(
+                "reading `{}` sees the pre-loan value of the live slot loan `{}`",
+                path, binding
+            );
+            let notes = vec![
+                format!(
+                    "{} ({}:{}) is a unique loan on a slot of `{}`, live from creation to its last use (O8, non-lexical window ending at statement {})",
+                    loan.desc, self.path, loan.span.start, path, eff_last
+                ),
+                format!(
+                    "the loan lowers to copy-out / store-back, so this read hits the container before `{}` is stored back — read through `{}` instead, or finish the loan before touching `{}`",
+                    binding, binding, path
+                ),
+            ];
+            self.diags
+                .push(Diagnostic::error("HYB-E3102", self.path.clone(), span, msg).with_notes(notes));
+        }
+    }
     /// Extend any live `LoanTarget::MapSlot` window when a slot-loan binding
     /// (or an existing alias of one) is copied into `alias_name` (`p := s` or `p = s`).
     pub(crate) fn extend_map_slot_loan_to_alias(
@@ -10227,6 +10294,80 @@ fn main() {
             check_codes(src_a6).iter().any(|c| c == "HYB-E3103"),
             "expected HYB-E3103 for parenthesized &(x) stored in struct field"
         );
+    }
+}
+
+/// Container-relative reads of a slot: an index expression on a container path
+/// (m["a"], xs[0]) and a bare container handed to a call (show(xs)).
+/// Reads through the loan binding itself are deliberately not collected.
+fn collect_container_slot_reads(e: &Expr, out: &mut Vec<(String, Option<String>, Span)>) {
+    match unwrap_parens(e) {
+        Expr::Index { base, index, span } => {
+            if let Some(path) = crate::walk::expr_path(base) {
+                out.push((path, crate::walk::index_literal_key(index), *span));
+            }
+            collect_container_slot_reads(base, out);
+            collect_container_slot_reads(index, out);
+        }
+        Expr::Field { base, .. } => {
+            // `m["a"].n` — the index sits under a field projection, so the
+            // field base still has to be scanned for a container read.
+            if let Expr::Index { base: cbase, index, span } = unwrap_parens(base) {
+                if let Some(path) = crate::walk::expr_path(cbase) {
+                    out.push((path, crate::walk::index_literal_key(index), *span));
+                }
+            }
+            collect_container_slot_reads(base, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            // Only an INDEX read of the slot is stale here. Handing the
+            // whole container to a callee is not: `len(m)` and other
+            // read-only helpers never touch the loaned slot, and the A3
+            // interprocedural pass already covers callees that mutate it.
+            for a in args {
+                collect_container_slot_reads(&a.value, out);
+            }
+            collect_container_slot_reads(callee, out);
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_container_slot_reads(lhs, out);
+            collect_container_slot_reads(rhs, out);
+        }
+        Expr::Interp { parts, .. } => {
+            for p in parts {
+                if let hy_syntax::InterpPart::Expr(x) = p {
+                    collect_container_slot_reads(x, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every expression a statement evaluates, depth-first, one level of nesting.
+fn collect_stmt_exprs<'a>(st: &'a Stmt, out: &mut Vec<&'a Expr>) {
+    match st {
+        Stmt::Expr { expr, .. } => out.push(expr),
+        Stmt::Local(l) => out.extend(l.values.iter()),
+        Stmt::Assign { values, .. } => out.extend(values.iter()),
+        Stmt::Return { values, .. } => out.extend(values.iter()),
+        Stmt::Send { chan, value, .. } => {
+            out.push(chan);
+            out.push(value);
+        }
+        Stmt::If { cond, .. } => out.push(cond),
+        Stmt::Match { subject, .. } => out.push(subject),
+        Stmt::For { kind, .. } => match kind {
+            hy_syntax::ForKind::While { cond } => out.push(cond),
+            hy_syntax::ForKind::Range { lo, hi, .. } => {
+                out.push(lo);
+                out.push(hi);
+            }
+            hy_syntax::ForKind::Iterate { expr, .. } => out.push(expr),
+            hy_syntax::ForKind::Infinite => {}
+        },
+        Stmt::Defer { call, .. } => out.push(call),
+        _ => {}
     }
 }
 
