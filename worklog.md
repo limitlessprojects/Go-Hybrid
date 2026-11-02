@@ -1393,3 +1393,16 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 321 -> 322 nominal (verify printed 320 on PR head; discrepancy noted above). Final main c9aea77c, tree clean.
 - NEXT TICK QUEUE: #3300 round-2 if author fixes harness -> #3299 (multi-value call arg widths) -> #3296 (map key width) -> #3291 (E1002 width messages) -> #3169 (hy-emit closure error-tail, 7 files) -> #1818 (pointer/array conversions, 7.4d) -> #1663 (install symlinks, 8.3d) -> #3204 (recheck head) -> old tail (#2982/#3182/#3176/#3184/#2948/#2977/#1811/#2863/#3207/#2517).
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978.
+
+## Session 63/64 — 2026-11-03 03:10 tick (sandbox down, zero ops) + 04:10 tick (3 landed: #3325, #3204, #3340)
+
+- 03:10 tick: sandbox failed to start entirely — no env, no pull, no scan, no replies. Zero-ops tick, queue untouched.
+- 04:10: recycle + restore (go tarball re-downloaded + cache backfilled AGAIN; CARGO_TARGET_DIR gone -> cold rebuild in one call). scan OK (REAL_EXIT=0 this time); approve 32/32 (4968 remaining). New wave Pareto head: #3325/#3340/#3338/#3214/#3226/#3245/#3204-BACK/#3299/#3296/#3346/#3347/#3308. #3300 still behind 3 — author has not fixed the harness yet.
+- LANDED:
+  d5c80034 Merge PR #3325 (dextermos-dev, fixes #3323) — is_builtin_error_type resolves type alias before Named("error") match; `type failure = error` + deep chains satisfy E4 ?-propagation; alias-to-int still HYB-E2011. ALL-GREEN vs 421ae80f.
+  8006d368 Merge PR #3204 round-2 (nyxlabs29-cyber, fixes #3194) — author re-pushed fd4d2c18 -> 40ef60ef after the head-missing blocker reply. emit_local_in_seq registers closure-bound FnLits mentioning active slot loans in loan_aliases; store-back deferred past the closure's last call (for row 11 11). Real go run behavioral suite (for/if/block, slice/array/map, twice, direct control). ALL-GREEN vs d5c80034, 321 suites.
+  9bbb0825 Merge PR #3340 (Shokun123, fixes #3339) — specialized_brain fails closed: accept controls must exist+be non-empty at HEAD, nonpositive rounds abort, anchor-rot/smoke-fail propose no diff; new test_author_repro_verdict suite. ALL-GREEN vs 8006d368. MERGE-COMMIT TYPO DISCLOSED: message says "fixes #3319", correct reference is #3339 (PR reply carries the written correction; main never force-pushed).
+- Suite trajectory: 321 -> 322 (#3325) -> 323 (#3204) nominal (verify printed 320/321 on PR heads). Final main 9bbb0825, tree clean.
+- DUP WATCH NEW: #3346 vs #3347 (both fix #3330, untyped slice literal non-literal heads) — compare before landing either.
+- NEXT TICK QUEUE: #3338 (tools/job fail-closed twin) -> #3214 (chan directions) -> #3226 (TypeExpr array-len walks) -> #3245 (E3104 array lengths) -> #3299 -> #3296 -> #3346/#3347 dup-check -> #3308 -> #3169 -> #1818 -> #1663 -> old tail.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978.
