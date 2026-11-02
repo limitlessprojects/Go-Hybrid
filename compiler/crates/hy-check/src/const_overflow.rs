@@ -630,8 +630,14 @@ impl<'a> Checker<'a> {
             ..
         } = callee
         {
-            if items.is_empty() && callee.as_array_lit().is_none() {
-                self.check_slice_conversion(t, arg, span);
+            if items.is_empty() {
+                if let Some((_, _, arr_ty)) = callee.as_array_lit() {
+                    if let Some(c) = conv_const(arg) {
+                        self.emit_conv_kind_error(&arr_ty.render(), &c, arg, span);
+                    }
+                } else {
+                    self.check_slice_conversion(t, arg, span);
+                }
                 return;
             }
         }
@@ -814,7 +820,7 @@ impl<'a> Checker<'a> {
             // exceeds i128's max (1.7e38), so integer/runes always fit.
             // Past-i128 literals carry their f64 reading and still have to
             // respect f32's max (`float32(1e40)` overflows f32 in Go).
-            "f32" | "f64" | "float32" | "float64" => match c {
+            "f32" | "f64" | "float32" | "float64" | "c64" | "c128" | "complex64" | "complex128" => match c {
                 ConvConst::Float(f) | ConvConst::Huge { f, .. } => {
                     let overflows = !f.is_finite()
                         || (is_f32_target(target) && f.abs() > f32::MAX as f64);
@@ -880,6 +886,11 @@ impl<'a> Checker<'a> {
                     self.emit_conv_kind_error(target, c, arg, span)
                 }
             },
+            "bool" => {
+                if !matches!(c, ConvConst::Bool) {
+                    self.emit_conv_kind_error(target, c, arg, span);
+                }
+            }
             _ => {}
         }
     }
@@ -1040,7 +1051,10 @@ fn huge_int_as_f64(s: &str) -> f64 {
 /// True when `name` is a built-in conversion target of `Type(const)` calls.
 fn is_conversion_target(name: &str) -> bool {
     fixed_width_int_range(name).is_some()
-        || matches!(name, "f32" | "f64" | "float32" | "float64" | "string")
+        || matches!(
+            name,
+            "f32" | "f64" | "float32" | "float64" | "c64" | "c128" | "complex64" | "complex128" | "string" | "bool"
+        )
 }
 
 /// Targets the emitter's SPEC X4 fold skips (`bits >= 64`) — constants here
@@ -1053,7 +1067,7 @@ fn is_64bit_int_target(name: &str) -> bool {
 }
 
 fn is_f32_target(name: &str) -> bool {
-    matches!(name, "f32" | "float32")
+    matches!(name, "f32" | "float32" | "c64" | "complex64")
 }
 
 /// The built-in float TYPES as spelled in an ascription: `Some(true)` =
