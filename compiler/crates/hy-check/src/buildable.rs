@@ -6077,7 +6077,18 @@ impl<'a> Collector<'a> {
                 // `go build` (`cannot convert ... to type ...`, Row 13 BUILDABLE).
                 if let OpKind::Slice(arg_elem) = &ak {
                     let target_elem = self.kind_of_ty(elem_ty, 0);
-                    if copy_element_kinds_conflict(&target_elem, arg_elem) {
+                    // #1838: `OpKind::Int` merges every integer width, so
+                    // `[]byte([]int)` needs the declared spellings compared.
+                    let width_mismatch = matches!(
+                        (
+                            canonical_numeric_name(&elem_str),
+                            self.slice_element_type_name(arg)
+                                .as_deref()
+                                .and_then(canonical_numeric_name),
+                        ),
+                        (Some(t), Some(s)) if t != s
+                    );
+                    if width_mismatch || copy_element_kinds_conflict(&target_elem, arg_elem) {
                         self.emit_e1002(
                             arg.span(),
                             format!(

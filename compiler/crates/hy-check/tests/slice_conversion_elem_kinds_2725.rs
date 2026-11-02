@@ -47,6 +47,18 @@ fn slice_conversions_with_mismatched_element_kinds_reject_e1002() {
             "[]int([]string) declared var (#1838)",
             "fn main() {\n    var s []string = []string{\"alpha\", \"beta\"}\n    var numbers = []int(s)\n    println(numbers[0])\n}\n",
         ),
+        (
+            "[]byte([]int) (#1838)",
+            "fn main() {\n    s := []int{1, 2}\n    _ = []byte(s)\n}\n",
+        ),
+        (
+            "[]rune([]int) (#1838)",
+            "fn main() {\n    var s []int = []int{1}\n    _ = []rune(s)\n}\n",
+        ),
+        (
+            "[]int([]int64) (#1838)",
+            "fn main() {\n    s := []int64{1}\n    _ = []int(s)\n}\n",
+        ),
     ] {
         let r = check(src);
         assert_eq!(r.verdict, Verdict::Reject, "{name}");
@@ -76,6 +88,14 @@ fn matching_and_unknown_element_kinds_stay_accepted() {
         (
             "[]float64([]float64)",
             "fn main() {\n    f := []float64{1.0}\n    _ = []float64(f)\n}\n",
+        ),
+        (
+            "[]byte([]uint8)",
+            "fn main() {\n    s := []uint8{1}\n    _ = []byte(s)\n}\n",
+        ),
+        (
+            "[]rune([]int32)",
+            "fn main() {\n    s := []int32{1}\n    _ = []rune(s)\n}\n",
         ),
     ] {
         let r = check(src);
