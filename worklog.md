@@ -1368,3 +1368,15 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 318 -> 319. Final main 464a2022, tree clean.
 - NEXT TICK QUEUE: #3204 (emit closure slot-loan lifetime) -> #3196 (fn lit scalar widths) -> #2982 (any as concrete) -> #3182 (some() arity) -> #3176 (option payload width) -> #3184 (string byte naming) -> #2948 -> #2977 -> #1811 (7.7d) -> #2863 -> #3207 -> #2517 -> tail.
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978.
+
+## Session 61 — 2026-11-02 23:10 tick (2 landed: #3302, #3191; #1710 superseded reply; scan recovered)
+
+- Recycle + restore. Cold build 1 slice. scan OK this time (recovered from 3-tick crash streak); approve 22/22 (4978 remaining). Big new wave: Pareto head now #1710/#3302/#3191/#3190/#1818/#3303/#3300/#1663/#3299/#3296/#3291/#3169.
+- LANDED:
+  46059b6b Merge PR #3302 (urielit1313-creator, fixes #3301) — try_context: array-length slot walks with Ctx::NoErrorResult so [v?]T rejects HYB-E2011 in all 5 contexts; elem keeps outer ctx. New try_context_array_len_3301 suite. 320 suites.
+  77183364 Merge PR #3191 (aswadi, fixes #3021) — hyrt FFI hardening: sha3 isize::MAX guard + null/0 fast path, next_gen wrap MAX-1, HyStr isize cap + try_from clamp, json_get_array validates handle before key decode. New slice_and_handle_3021 suite. 321 suites.
+- REPLIES:
+  #1710 (gorky117-cell, fixes #1707) — superseded-by-#3167: verified its fixtures PASS on main by applying patch to scratch tree + running const_conversion (all green). Redirect posted. (8.1d-old land candidate cleared.)
+- Suite trajectory: 319 -> 320 -> 321. Final main 77183364, tree clean.
+- DUP WATCH: #3303 (james-kkc) also fixes #3301 — now overlaps landed #3302; review residual next tick. #3145 vs #3153; #2982 vs #2976 vs #2978.
+- NEXT TICK QUEUE: #3190 (hy-diag severity coherence) -> #3300 (error OpKind) -> #3299 (multi-value call arg widths) -> #3296 (map key width) -> #3291 (E1002 width messages) -> #3169 (hy-emit closure error-tail, 7 files) -> #1818 (pointer/array conversions, 7.4d) -> #1663 (install symlinks, 8.3d) -> #3204 (recheck head) -> old tail (#2982/#3182/#3176/#3184/#2948/#2977/#1811/#2863/#3207/#2517).

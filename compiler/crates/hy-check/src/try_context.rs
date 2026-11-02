@@ -172,7 +172,11 @@ fn walk_type(ck: &mut TryWalker<'_, '_>, ty: &TypeExpr, ctx: Ctx<'_>) {
         | TypeExpr::Option { elem: to, .. } => walk_type(ck, to, ctx),
         TypeExpr::Array { len, elem, .. } => {
             if let Some(l) = len {
-                walk_expr(ck, l, ctx);
+                let len_ctx = match ctx {
+                    Ctx::Ok => Ctx::NoErrorResult("array length"),
+                    no_err => no_err,
+                };
+                walk_expr(ck, l, len_ctx);
             }
             walk_type(ck, elem, ctx);
         }
