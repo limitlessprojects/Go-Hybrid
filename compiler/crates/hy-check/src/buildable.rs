@@ -675,7 +675,8 @@ impl<'a> Collector<'a> {
         match bare {
             Expr::Ident { name, .. } => {
                 if let Some(tname) = self.lookup_type_name(name) {
-                    if let Some(elem) = tname.strip_prefix("[]") {
+                    let resolved = self.underlying_type_spelling(&tname).unwrap_or(tname);
+                    if let Some(elem) = resolved.strip_prefix("[]") {
                         return Some(elem.to_string());
                     }
                 }
@@ -690,6 +691,66 @@ impl<'a> Collector<'a> {
                             return self.slice_element_type_name(&first.value);
                         }
                     }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn underlying_type_spelling(&self, name: &str) -> Option<String> {
+        let mut cur = name.trim().to_string();
+        for _ in 0..8 {
+            let base = Checker::base_named_type_str(&cur);
+            if let Some(target) = self.ck.type_aliases.get(base) {
+                cur = target.render();
+            } else {
+                return Some(cur);
+            }
+        }
+        Some(cur)
+    }
+
+    fn expr_slice_elem_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    let resolved = self.underlying_type_spelling(&tname).unwrap_or(tname);
+                    if let Some(elem) = resolved.strip_prefix("[]") {
+                        return canonical_numeric_name(elem.trim());
+                    }
+                }
+                None
+            }
+            Expr::SliceLit { elem: Some(t), .. } => {
+                let rendered = t.render();
+                if let Some(elem) = rendered.strip_prefix("[]") {
+                    canonical_numeric_name(elem.trim())
+                } else {
+                    canonical_numeric_name(&rendered)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn expr_array_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    let resolved = self.underlying_type_spelling(&tname).unwrap_or(tname);
+                    if is_sized_array_spelling(&resolved) {
+                        return Some(resolved);
+                    }
+                }
+                None
+            }
+            Expr::SliceLit { elem: Some(t), .. } => {
+                let rendered = t.render();
+                if is_sized_array_spelling(&rendered) {
+                    return Some(rendered);
                 }
                 None
             }
@@ -4352,8 +4413,16 @@ impl<'a> Collector<'a> {
                         let src_elem_ty = self.slice_element_type_name(&extra.value);
                         let ty_mismatch = match (&dst_elem_ty, &src_elem_ty) {
                             (Some(d), Some(s)) => {
-                                crate::const_overflow::canonical_int_type_name(d)
-                                    != crate::const_overflow::canonical_int_type_name(s)
+                                if is_sized_array_spelling(d) && is_sized_array_spelling(s) {
+                                    d != s
+                                } else if d.starts_with("[]") && s.starts_with("[]") {
+                                    let d_inner = canonical_numeric_name(d[2..].trim());
+                                    let s_inner = canonical_numeric_name(s[2..].trim());
+                                    matches!((d_inner, s_inner), (Some(di), Some(si)) if di != si)
+                                } else {
+                                    crate::const_overflow::canonical_int_type_name(d)
+                                        != crate::const_overflow::canonical_int_type_name(s)
+                                }
                             }
                             _ => false,
                         };
@@ -4437,16 +4506,37 @@ impl<'a> Collector<'a> {
             let dst_scalar = self.append_dest_scalar(&first.value);
             let got_scalar = self.typed_value_scalar(&extra.value);
             let scalar_mismatch = matches!((dst_scalar, got_scalar), (Some(d), Some(g)) if d != g);
-            if kinds_conflict(&elem, &got) || int_to_float_conflict || scalar_mismatch {
+
+            let array_mismatch = match (&dst_elem_ty, self.expr_array_type_name(&extra.value)) {
+                (Some(d), Some(g)) if is_sized_array_spelling(d) && is_sized_array_spelling(&g) => {
+                    d != &g
+                }
+                _ => false,
+            };
+
+            let nested_slice_mismatch = match (&dst_elem_ty, self.expr_slice_elem_scalar(&extra.value)) {
+                (Some(d), Some(g_scalar)) if d.starts_with("[]") => {
+                    canonical_numeric_name(d[2..].trim()).map_or(false, |d_scalar| d_scalar != g_scalar)
+                }
+                _ => false,
+            };
+
+            if kinds_conflict(&elem, &got) || int_to_float_conflict || scalar_mismatch || array_mismatch || nested_slice_mismatch {
                 let dst_label = match dst_elem_ty.as_deref() {
                     Some(d) => format!("[]{}", d),
                     None => self.kind_of_expr(&first.value).label().to_string(),
                 };
-                let got_label = match got_scalar {
-                    Some(s) => s.to_string(),
-                    None => got.label().to_string(),
+                let got_label = if array_mismatch {
+                    self.expr_array_type_name(&extra.value).unwrap_or_else(|| got.label().to_string())
+                } else if nested_slice_mismatch {
+                    format!("[]{}", self.expr_slice_elem_scalar(&extra.value).unwrap_or("?"))
+                } else {
+                    match got_scalar {
+                        Some(s) => s.to_string(),
+                        None => got.label().to_string(),
+                    }
                 };
-                let elem_label = match dst_scalar {
+                let elem_label = match dst_elem_ty.as_deref() {
                     Some(d) => d.to_string(),
                     None => elem.label().to_string(),
                 };
