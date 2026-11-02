@@ -3171,3 +3171,9 @@ fn issue3116_pins_field_on_method_receiver() {
     let go = emit3116("struct counter { n int }\n\nfn bump(p *counter) (int, error) {\n    p.n = p.n + 100\n    return 1, nil\n}\n\nfn main() {\n    c := counter{n: 0}\n    fmt.println(c.n, bump(&c)?)\n}\n");
     assert_pinned_before(&go, "hyT0 := c.n", "hyT1, hyErr2 := bump(", "field read on receiver");
 }
+
+#[test]
+fn issue3116_pins_index_read_before_mutating_call() {
+    let go = emit3116("fn chg(xs []int) (int, error) {\n    xs[0] = 77\n    return 4, nil\n}\n\nfn main() {\n    xs := []int{1, 2, 3}\n    fmt.println(xs[0], chg(xs)?)\n}\n");
+    assert_pinned_before(&go, "hyT0 := xs[0]", "hyT1, hyErr2 := chg(", "index read with shared backing array");
+}
