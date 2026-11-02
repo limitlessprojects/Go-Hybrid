@@ -2001,6 +2001,10 @@ fn update_post_defer_watch(
             return;
         }
         let Some(v) = val else {
+            watch.remove(target);
+            if target == deferred_name {
+                *rebound_self = true;
+            }
             return;
         };
         let reads_watched = watch
@@ -2033,6 +2037,21 @@ fn update_post_defer_watch(
                 if let hy_syntax::PlaceKind::Ident(target) = &t.kind {
                     let val = values.get(i).or_else(|| values.first());
                     handle_bind(target, val);
+                }
+            }
+        }
+        Stmt::For {
+            kind: Iterate { vars, expr },
+            ..
+        } => {
+            if !matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_)) {
+                let shapes = ck.iterate_var_shapes(st, expr, vars.len());
+                for (target, shape) in vars.iter().zip(shapes) {
+                    if ck.shape_may_share(&shape) {
+                        handle_bind(target, Some(expr));
+                    } else {
+                        handle_bind(target, None);
+                    }
                 }
             }
         }
@@ -2092,7 +2111,7 @@ fn stmt_moves_watched_binding(
                 }
             );
             if *is_move {
-                if let Expr::Ident { name, .. } = crate::model::unwrap_parens(value) {
+                if let Some(name) = value.root_ident() {
                     if watch.contains(name) {
                         return Some(crate::model::MoveInfo {
                             span: *span,
@@ -2153,7 +2172,7 @@ fn stmt_moves_watched_binding(
                             }
                         );
                         if *is_move {
-                            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(value) {
+                            if let Some(name) = value.root_ident() {
                                 if watch.contains(name) {
                                     return Some(crate::model::MoveInfo {
                                         span: chan.span().to(value.span()),
