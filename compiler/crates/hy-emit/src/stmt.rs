@@ -3751,7 +3751,10 @@ impl Emitter {
                 ex(callee, out);
                 args.iter().for_each(|a| ex(&a.value, out));
             }
-            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+            Stmt::Managed { body, .. }
+            | Stmt::Block { block: body, .. }
+            | Stmt::TaskBlock { body, .. }
+            | Stmt::Auto { body, .. } => {
                 Self::collect_closure_writes_block(body, in_closure, out)
             }
             Stmt::Match { subject, arms, .. } => {

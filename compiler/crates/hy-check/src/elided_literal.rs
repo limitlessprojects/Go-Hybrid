@@ -115,7 +115,10 @@ impl<'a> Checker<'a> {
                     self.elided_expr(&a.value, Slot::Free);
                 }
             }
-            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+            Stmt::Managed { body, .. }
+            | Stmt::Block { block: body, .. }
+            | Stmt::TaskBlock { body, .. }
+            | Stmt::Auto { body, .. } => {
                 self.elided_block(body)
             }
             Stmt::Match { subject, arms, .. } => {

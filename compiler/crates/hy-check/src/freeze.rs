@@ -690,7 +690,9 @@ impl<'a> Checker<'a> {
                 Self::expr_mutates_var(callee, var)
                     || args.iter().any(|a| Self::expr_mutates_var(&a.value, var))
             }
-            hy_syntax::Stmt::Managed { body, .. } => {
+            hy_syntax::Stmt::Managed { body, .. }
+            | hy_syntax::Stmt::TaskBlock { body, .. }
+            | hy_syntax::Stmt::Auto { body, .. } => {
                 Self::is_loop_var_mutated(var, &body.stmts)
             }
             hy_syntax::Stmt::Match { subject, arms, .. } => {
