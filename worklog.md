@@ -1325,3 +1325,26 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 314 -> 315. Final main b67b22b0, tree clean.
 - NEXT TICK QUEUE: #3187 RE-VERIFY (updated head ca40c619) -> #3173 (elided struct lit) -> #3185 (TypeExpr array lengths) -> #3204 (emit closure slot-loan lifetime) -> #3196 (fn lit scalar widths) -> #3069 (string for-in rune) -> #2982 (any as concrete) -> #3182 (some() arity) -> #3176 (option payload width) -> #3184 (string byte naming) -> #2948 -> #2977 -> #1811 (7.3d) -> #2863 -> #3207 -> #2517 -> tail.
 - DUP WATCH: #3050 vs landed #3178; #3145 vs #3153; #2982 vs #2976 vs #2978.
+
+## Session 57 — 2026-11-02 19:10 tick (1 landed: #3187 round-2 after author fix; 1 gate-fail: #3173)
+
+- Recycle + restore (tarball cache survived this time). Cold build 1 slice. scan crashed (RemoteDisconnected mid-run, S53 pattern — did not retry); approve 18/18 (4982 remaining).
+- LANDED:
+  416d4ea5 Merge PR #3187 round-2 (aswadi, fixes #3019) — author re-pointed r1 assertion HYB-E3012 -> HYB-E1002 per session-55 evidence (head ca40c619 -> fadb2c0d). ast.rs: Fn::render full signature, Move in root_ident, as_array_lit Paren peel. ALL-GREEN battery vs dd3a9688 (315 suites). 316 suites.
+- GATE FAIL (evidence posted, not landed):
+  #3173 (aswadi, fixes #3100) — elided_literal rewrite (Slot enum -> expected-type threading) rejects elided {} elements of []map[string]int{{}, {}, {}}: is_elidable_struct_slot falls through 'let Named else return false' for non-Named composite heads (Map/Slice/Array). Regresses 2 ACCEPTANCE fixtures (loop_carried_param_store_2308: fresh_copy_per_iteration + inner_block_shadow). AUTHOR FORCE-PUSHED DURING EVIDENCE GATHERING (e2745a72 -> 1ca9f537): newer head DROPS the is_empty Map/Slice/Array early-true entirely — worse. Reply includes concrete predicate fix.
+- All landed: gate CLEAN, tripwire not fired, differential FULL 42/42+88/88, ls-remote==HEAD asserted, reply + CREDIT.
+- Suite trajectory: 315 -> 316. Final main 416d4ea5, tree clean.
+- NEXT TICK QUEUE: #3173 RE-VERIFY if author pushes composite-arm fix -> #3185 (TypeExpr array lengths) -> #3204 (emit closure slot-loan lifetime) -> #3196 (fn lit scalar widths) -> #3069 (string for-in rune) -> #2982 (any as concrete) -> #3182 (some() arity) -> #3176 (option payload width) -> #3184 (string byte naming) -> #2948 -> #2977 -> #1811 (7.4d) -> #2863 -> #3207 -> #2517 -> tail.
+- DUP WATCH: #3050 vs landed #3178; #3145 vs #3153; #2982 vs #2976 vs #2978.
+
+## Session 58 — 2026-11-02 20:10 tick (1 landed: #3173 round-2; #3050 superseded reply)
+
+- Recycle + restore. Cold build 1 slice. scan crashed AGAIN (RemoteDisconnected, 2nd tick running — do not retry mid-tick); approve 15/15 (4985 remaining).
+- LANDED:
+  a9430161 Merge PR #3173 round-2 (aswadi, fixes #3100) — head 4aeadf7d restored two-arg is_elidable_struct_slot(exp, is_empty) with is_empty && Map|Slice|Array early-true per session-57 evidence. loop_carried_param_store_2308 7/7 passes. ALL-GREEN battery vs 416d4ea5 (316 suites). 317 suites.
+- REPLIES:
+  #3050 (nyxlabs29-cyber) — superseded-by-#3178 redirect posted: #3029 closed by d30ea65c; offered re-scope-against-residual-surface or close; explicitly not a quality judgment. DUP WATCH #3050 CLOSED.
+- Suite trajectory: 316 -> 317. Final main a9430161, tree clean.
+- NEXT TICK QUEUE: #3185 (TypeExpr array lengths) -> #3204 (emit closure slot-loan lifetime) -> #3196 (fn lit scalar widths) -> #3069 (string for-in rune) -> #2982 (any as concrete) -> #3182 (some() arity) -> #3176 (option payload width) -> #3184 (string byte naming) -> #2948 -> #2977 -> #1811 (7.5d) -> #2863 -> #3207 -> #2517 -> tail.
+- DUP WATCH remaining: #3145 vs #3153 (copy() same shape); #2982 vs #2976 vs #2978 (any/concrete — note #3178 landed, so any remaining any-rejection PRs may also be superseded; check fixes-lines).
