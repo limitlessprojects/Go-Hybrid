@@ -215,6 +215,8 @@ fn canonical_numeric_name(name: &str) -> Option<&'static str> {
         "uintptr" => "uintptr",
         "float32" | "f32" => "float32",
         "float64" | "f64" => "float64",
+        "complex64" | "c64" => "complex64",
+        "complex128" | "c128" => "complex128",
         _ => return None,
     })
 }
@@ -677,6 +679,11 @@ impl<'a> Collector<'a> {
                 if let Some(tname) = self.lookup_type_name(name) {
                     if let Some(elem) = tname.strip_prefix("[]") {
                         return Some(elem.to_string());
+                    }
+                    if let Some(elem) = tname.strip_prefix("[") {
+                        if let Some(close) = elem.find(']') {
+                            return Some(elem[close + 1..].to_string());
+                        }
                     }
                 }
                 None
@@ -6633,25 +6640,43 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if copy_element_kinds_conflict(dst_elem, src_elem) {
+                        let dst_elem_ty = self.slice_element_type_name(dst_arg);
+                        let src_elem_ty = self.slice_element_type_name(src_arg);
+                        let elem_ty_conflict = match (&dst_elem_ty, &src_elem_ty) {
+                            (Some(d), Some(s)) => {
+                                let cd = canonical_numeric_name(d).unwrap_or(d.as_str());
+                                let cs = canonical_numeric_name(s).unwrap_or(s.as_str());
+                                cd != cs
+                            }
+                            _ => false,
+                        };
+                        if copy_element_kinds_conflict(dst_elem, src_elem) || elem_ty_conflict {
+                            let d_label = dst_elem_ty.unwrap_or_else(|| dst_elem.label().to_string());
+                            let s_label = src_elem_ty.unwrap_or_else(|| src_elem.label().to_string());
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "arguments to `copy` have different element types: `{}` and `{}` (HYB-E1002)",
-                                    dst_elem.label(),
-                                    src_elem.label()
+                                    d_label,
+                                    s_label
                                 ),
                                 "arguments to `copy` must have identical element types",
                             );
                         }
                     }
                     (OpKind::Slice(dst_elem), OpKind::Str) => {
-                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                        let dst_elem_ty = self.slice_element_type_name(dst_arg);
+                        let is_byte = dst_elem_ty.as_deref().map_or(false, |t| {
+                            matches!(crate::const_overflow::canonical_int_type_name(t), "uint8")
+                        });
+                        let is_unknown = matches!(**dst_elem, OpKind::Unknown) && dst_elem_ty.is_none();
+                        if !is_byte && !is_unknown {
+                            let label = dst_elem_ty.unwrap_or_else(|| dst_elem.label().to_string());
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "cannot copy string into slice with element type `{}` (HYB-E1002)",
-                                    dst_elem.label()
+                                    label
                                 ),
                                 "copying from a string requires a byte slice destination (`[]byte`)",
                             );
