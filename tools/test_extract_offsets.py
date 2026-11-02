@@ -71,6 +71,139 @@ MISSING_MEMBER_DWARF_OUTPUT = """
 """
 
 
+HEX_ATTRS_DWARF_OUTPUT = """
+ <1><100>: Abbrev Number: 1 (DW_TAG_structure_type)
+    DW_AT_name        : runtime.g
+    DW_AT_byte_size   : 0x178
+ <2><110>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : stack
+    DW_AT_data_member_location: 0x0
+ <2><120>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : stackguard0
+    DW_AT_data_member_location: 0x10
+ <2><130>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : m
+    DW_AT_data_member_location: 0x30
+ <1><200>: Abbrev Number: 1 (DW_TAG_structure_type)
+    DW_AT_name        : runtime.m
+    DW_AT_byte_size   : 0x1f8
+ <2><210>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : g0
+    DW_AT_data_member_location: 0x0
+ <2><220>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : curg
+    DW_AT_data_member_location: 0x18
+ <2><230>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : id
+    DW_AT_data_member_location: 0x68
+ <2><240>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : locks
+    DW_AT_data_member_location: 0x70
+"""
+
+MISSING_SIZE_DWARF_OUTPUT = """
+ <1><100>: Abbrev Number: 1 (DW_TAG_structure_type)
+    DW_AT_name        : runtime.g
+ <2><110>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : stack
+    DW_AT_data_member_location: 0
+ <2><120>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : stackguard0
+    DW_AT_data_member_location: 16
+ <2><130>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : m
+    DW_AT_data_member_location: 48
+ <1><200>: Abbrev Number: 1 (DW_TAG_structure_type)
+    DW_AT_name        : runtime.m
+ <2><210>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : g0
+    DW_AT_data_member_location: 0
+ <2><220>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : curg
+    DW_AT_data_member_location: 24
+ <2><230>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : id
+    DW_AT_data_member_location: 104
+ <2><240>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : locks
+    DW_AT_data_member_location: 112
+"""
+
+FORWARD_DECL_DWARF_OUTPUT = """
+ <1><100>: Abbrev Number: 1 (DW_TAG_structure_type)
+    DW_AT_name        : runtime.g
+    DW_AT_declaration : 1
+ <1><101>: Abbrev Number: 1 (DW_TAG_structure_type)
+    DW_AT_name        : runtime.m
+    DW_AT_declaration : 1
+ <1><110>: Abbrev Number: 1 (DW_TAG_structure_type)
+    DW_AT_name        : runtime.g
+    DW_AT_byte_size   : 376
+ <2><120>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : stack
+    DW_AT_data_member_location: 0
+ <2><121>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : stackguard0
+    DW_AT_data_member_location: 16
+ <2><122>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : m
+    DW_AT_data_member_location: 48
+ <1><210>: Abbrev Number: 1 (DW_TAG_structure_type)
+    DW_AT_name        : runtime.m
+    DW_AT_byte_size   : 504
+ <2><220>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : g0
+    DW_AT_data_member_location: 0
+ <2><221>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : curg
+    DW_AT_data_member_location: 24
+ <2><222>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : id
+    DW_AT_data_member_location: 104
+ <2><223>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : locks
+    DW_AT_data_member_location: 112
+"""
+
+NESTED_SHADOW_DWARF_OUTPUT = """
+ <1><100>: Abbrev Number: 1 (DW_TAG_structure_type)
+    DW_AT_name        : runtime.g
+    DW_AT_byte_size   : 376
+ <2><110>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : stack
+    DW_AT_data_member_location: 0
+ <2><111>: Abbrev Number: 3 (DW_TAG_structure_type)
+    DW_AT_name        : inner
+ <3><112>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : stack
+    DW_AT_data_member_location: 999
+ <3><113>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : stackguard0
+    DW_AT_data_member_location: 888
+ <2><120>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : stackguard0
+    DW_AT_data_member_location: 16
+ <2><130>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : m
+    DW_AT_data_member_location: 48
+ <1><200>: Abbrev Number: 1 (DW_TAG_structure_type)
+    DW_AT_name        : runtime.m
+    DW_AT_byte_size   : 504
+ <2><210>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : g0
+    DW_AT_data_member_location: 0
+ <2><220>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : curg
+    DW_AT_data_member_location: 24
+ <2><230>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : id
+    DW_AT_data_member_location: 104
+ <2><240>: Abbrev Number: 2 (DW_TAG_member)
+    DW_AT_name        : locks
+    DW_AT_data_member_location: 112
+"""
+
+
 class ExtractOffsetsTests(unittest.TestCase):
     def test_readelf_non_zero_fails(self):
         proc = subprocess.CompletedProcess(
@@ -126,6 +259,51 @@ class ExtractOffsetsTests(unittest.TestCase):
         self.assertIn("m_curg           = 24", output)
         self.assertIn("m_id             = 104", output)
         self.assertIn("m locks          = 112", output)
+
+
+    def _run(self, fixture):
+        proc = subprocess.CompletedProcess(
+            ["readelf", "--debug-dump=info", "test_binary"],
+            returncode=0,
+            stdout=fixture,
+            stderr="",
+        )
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(extractor.subprocess, "run", return_value=proc):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    extractor.main("test_binary")
+                except SystemExit as e:
+                    return out.getvalue(), err.getvalue(), e.code
+        return out.getvalue(), err.getvalue(), 0
+
+    def test_hex_attributes_are_parsed_not_truncated(self):
+        # `0x10` used to match (\d+) as `0`, silently reporting stackguard0=0.
+        out, err, code = self._run(HEX_ATTRS_DWARF_OUTPUT)
+        self.assertEqual(code, 0, err)
+        self.assertIn("g_stackguard0    = 16", out)
+        self.assertIn("g_stack_lo       = 0", out)
+        self.assertIn("g_m              = 48", out)
+        self.assertIn("m_id             = 104", out)
+        self.assertIn("size=376", out)
+        self.assertIn("size=504", out)
+
+    def test_missing_byte_size_fails_closed(self):
+        out, err, code = self._run(MISSING_SIZE_DWARF_OUTPUT)
+        self.assertNotEqual(code, 0, f"expected failure, got {out!r}")
+        self.assertIn("byte_size", err)
+
+    def test_forward_declaration_is_skipped(self):
+        out, err, code = self._run(FORWARD_DECL_DWARF_OUTPUT)
+        self.assertEqual(code, 0, err)
+        self.assertIn("g_stackguard0    = 16", out)
+        self.assertIn("m_id             = 104", out)
+
+    def test_nested_members_do_not_clobber_outer_offsets(self):
+        out, err, code = self._run(NESTED_SHADOW_DWARF_OUTPUT)
+        self.assertEqual(code, 0, err)
+        self.assertIn("g_stackguard0    = 16", out)
+        self.assertIn("g_stack_lo       = 0", out)
 
 
 if __name__ == "__main__":
