@@ -1418,3 +1418,14 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 321 -> 322 -> 323 -> 324. Final main 7e0a1688, tree clean.
 - NEXT TICK QUEUE: #3169 (hy-emit closure error-tail, 6 files — budget it first) -> #3299 -> #3296 -> #3347 (dup-check vs #3346 which dropped off Pareto) -> #3308 -> #3384 -> #3389 -> #3362 -> #3393 -> old tail (#2982/#3182/#3176/#3184/#2948/#2977/#1811/#2863/#3207/#2517). #3300 still behind — awaiting harness fix.
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
+
+## Session 66 — 2026-11-03 07:10 tick (1 landed: #1818; 1 gate-fail: #3409 double-report)
+
+- Recycle + restore (full evaporate again: go tarball re-downloaded + backfilled, CARGO_TARGET_DIR cold rebuild one call). scan OK (3rd tick running); approve 30/30 (4970 remaining).
+- LANDED:
+  16df42dc Merge PR #1818 (gorky117-cell, fixes #1813) — 7.7d-old test-only PR finally at Pareto top: 4 regression tests pin rejection of int(p)/string(p)/int(arr)/string(arr) with HYB-E1002 + "cannot convert" message. Checker behavior pre-existing on main. ALL-GREEN vs 186745ca, 324 suites.
+- GATE FAIL (evidence posted, not landed):
+  #3409 (alexrayyandev, fixes #3405) — chan_direction_coercion suite 16/18. E3012 fires correctly (repro_06 holder{ch: sc} send-only->recv-only field) but a SECONDARY E1002 is appended for the same operand: left [E3012, E1002] vs right [E3012]; repro_10 left [E3012, E3012, E1002] vs right [E3012, E3012]. Double-reporting: new container-elem check + pre-existing operand/width check both report. Offered (a) suppress secondary E1002 when E3012 already fired (preferred, dedup by span/expr), (b) relax to contains(). issuecomment-6591066318.
+- Suite trajectory: 324 (unchanged; #1818 test-only). Final main 16df42dc, tree clean.
+- NEXT TICK QUEUE: #3169 (hy-emit, 6 files) -> #3415 ([N]T(s) array conversions) -> #3299 -> #3296 -> #3347 (dup-check vs #3346) -> #3308 -> #3384 -> #3389 -> #3362 -> #3393 -> old tail. #3409 round-2 if author suppresses the double-report. #3300 still behind.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
