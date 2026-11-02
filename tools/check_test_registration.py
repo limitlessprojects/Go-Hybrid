@@ -21,7 +21,8 @@ reference it, and fails closed on any file no reference reaches:
 Only explicit single-line Python invocations count. Comments, echoed text,
 step names, interpreter flags, chained later commands, and paths passed as
 arguments to other scripts register nothing. This is not a general
-shell/YAML interpreter.
+shell/YAML interpreter. Standalone here-document payload lines are data,
+not test invocations; quoted and tab-stripped delimiters are recognized.
 
 Usage: python3 tools/check_test_registration.py [--workflow PATH] [--root DIR]
 Exit:  0 = every test file is registered; 1 = unregistered file(s); 2 = guard misuse.
@@ -34,6 +35,7 @@ from pathlib import Path
 import re
 import shlex
 import sys
+import textwrap
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -50,10 +52,58 @@ def shell_words(line):
     return list(lexer)
 
 
+def heredoc_redirects(line):
+    """Read explicit here-doc redirects without treating quoted << as one."""
+    lexer = shlex.shlex(line, posix=False, punctuation_chars=";&|<>()")
+    lexer.whitespace_split = True
+    words = list(lexer)
+    for index, word in enumerate(words[:-1]):
+        if word != "<<":
+            continue
+        delimiter = words[index + 1]
+        strip_tabs = delimiter.startswith("-")
+        if strip_tabs:
+            delimiter = delimiter[1:]
+        # Apply shell quote removal to the delimiter only. Expanding it
+        # would be incorrect, even for an unquoted delimiter.
+        parts = shlex.split(delimiter, posix=True)
+        if len(parts) == 1:
+            yield parts[0], strip_tabs
+
+
+def command_lines(workflow_text):
+    """Remove YAML indentation from explicit literal run blocks only."""
+    lines = workflow_text.splitlines()
+    index = 0
+    while index < len(lines):
+        source = lines[index]
+        block = re.fullmatch(r"( *)(?:-\s+)?run:\s*\|[+-]?\s*(?:#.*)?", source)
+        index += 1
+        if not block:
+            yield source
+            continue
+        start = index
+        while index < len(lines):
+            line = lines[index]
+            if line.strip() and len(line) - len(line.lstrip(" ")) <= len(block[1]):
+                break
+            index += 1
+        yield from textwrap.dedent("\n".join(lines[start:index])).splitlines()
+
+
 def python_commands(workflow_text):
     """Yield arguments of explicit, single-line Python invocations."""
-    for line in workflow_text.splitlines():
-        line = line.strip()
+    pending_heredocs = []
+    for source_line in command_lines(workflow_text):
+        if pending_heredocs:
+            delimiter, strip_tabs = pending_heredocs[0]
+            candidate = source_line
+            if strip_tabs:
+                candidate = candidate.lstrip("\t")
+            if candidate == delimiter:
+                pending_heredocs.pop(0)
+            continue
+        line = source_line.strip()
         inline_run = re.match(r"(?:-\s+)?run:\s*(.*)", line)
         if inline_run:
             line = inline_run.group(1)
@@ -61,7 +111,9 @@ def python_commands(workflow_text):
             tokens = shell_words(line)
             # A quoted YAML run scalar wraps the whole shell command.
             if inline_run and len(tokens) == 1:
-                tokens = shell_words(tokens[0])
+                line = tokens[0]
+                tokens = shell_words(line)
+            pending_heredocs.extend(heredoc_redirects(line))
         except ValueError:
             continue
         if tokens and PYTHON_RE.fullmatch(tokens[0]):
