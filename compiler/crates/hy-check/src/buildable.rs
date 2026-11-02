@@ -670,6 +670,47 @@ impl<'a> Collector<'a> {
         None
     }
 
+    fn underlying_type_spelling(&self, name: &str) -> Option<String> {
+        let mut cur = name.trim().to_string();
+        for _ in 0..8 {
+            let base = Checker::base_named_type_str(&cur);
+            if let Some(target) = self.ck.type_aliases.get(base) {
+                cur = target.render();
+            } else {
+                return Some(cur);
+            }
+        }
+        Some(cur)
+    }
+
+    fn map_key_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    let resolved = self.underlying_type_spelling(&tname).unwrap_or(tname);
+                    if let Some(rest) = resolved.strip_prefix("map[") {
+                        if let Some(idx) = rest.find(']') {
+                            return Some(rest[..idx].trim().to_string());
+                        }
+                    }
+                }
+                if let Some(rest) = name.strip_prefix("map[") {
+                    if let Some(idx) = rest.find(']') {
+                        return Some(rest[..idx].trim().to_string());
+                    }
+                }
+                None
+            }
+            Expr::MapLit { key, .. } => Some(key.render()),
+            _ => None,
+        }
+    }
+
+    fn map_key_scalar(&self, e: &Expr) -> Option<&'static str> {
+        self.map_key_type_name(e).as_deref().and_then(canonical_numeric_name)
+    }
+
     fn slice_element_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
         match bare {
@@ -1566,6 +1607,8 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Some(key_ty) = self.map_key_type_name(val) {
+                    self.bind_type_name(name, format!("map[{}]{{}}", key_ty));
                 }
             }
         }
@@ -5332,16 +5375,31 @@ impl<'a> Collector<'a> {
                 let is_untyped_int_to_float = **key_kind == OpKind::Float
                     && *ik == OpKind::Int
                     && self.is_untyped_int_const(index);
+                let scalar_mismatch = match (
+                    base_expr.and_then(|b| self.map_key_scalar(b)),
+                    self.typed_value_scalar(index),
+                ) {
+                    (Some(want), Some(got)) => want != got,
+                    _ => false,
+                };
                 let conflict = (**key_kind == OpKind::Float && *ik == OpKind::Int && !is_untyped_int_to_float)
-                    || kinds_conflict(key_kind, ik);
+                    || kinds_conflict(key_kind, ik)
+                    || scalar_mismatch;
                 if conflict {
+                    let want_label = base_expr
+                        .and_then(|b| self.map_key_type_name(b))
+                        .unwrap_or_else(|| key_kind.label().to_string());
+                    let got_label = self
+                        .typed_value_scalar(index)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| ik.label().to_string());
                     self.emit_e1002(
                         index.span(),
                         format!(
                             "cannot use `{}` (type `{}`) as `{}` value in map index on `{}` (HYB-E1002)",
                             index.render(),
-                            ik.label(),
-                            key_kind.label(),
+                            got_label,
+                            want_label,
                             bk.label()
                         ),
                         "map index expression must match the map's key type",
@@ -6628,18 +6686,31 @@ impl<'a> Collector<'a> {
                         let is_untyped_int_to_float = **k_expected == OpKind::Float
                             && kk == OpKind::Int
                             && self.is_untyped_int_const(key_arg);
+                        let scalar_mismatch = match (
+                            self.map_key_scalar(map_arg),
+                            self.typed_value_scalar(key_arg),
+                        ) {
+                            (Some(want), Some(got)) => want != got,
+                            _ => false,
+                        };
                         if **k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
-                            && kk != **k_expected
-                            && !is_untyped_int_to_float
+                            && (kk != **k_expected && !is_untyped_int_to_float || scalar_mismatch)
                         {
+                            let want_label = self
+                                .map_key_type_name(map_arg)
+                                .unwrap_or_else(|| k_expected.label().to_string());
+                            let got_label = self
+                                .typed_value_scalar(key_arg)
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| kk.label().to_string());
                             self.emit_e2005(
                                 span,
                                 format!(
                                     "cannot use `{}` (type `{}`) as key type `{}` in `delete` (HYB-E2005)",
                                     key_arg.render(),
-                                    kk.label(),
-                                    k_expected.label()
+                                    got_label,
+                                    want_label
                                 ),
                                 "the second argument to `delete(m, k)` must match the map's key type",
                             );
