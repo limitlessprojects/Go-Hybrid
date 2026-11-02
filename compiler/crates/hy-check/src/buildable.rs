@@ -543,6 +543,10 @@ struct Collector<'a> {
     /// signature (`None` = not a predeclared numeric spelling). Swapped
     /// together with `fn_results`.
     fn_result_scalars: Vec<Option<&'static str>>,
+    /// #3264 — declared result type expressions of the enclosing signature,
+    /// swapped together with `fn_results` so a returned slice can be compared
+    /// against the declared element spelling.
+    fn_result_types: Vec<hy_syntax::TypeExpr>,
     /// Lexical nesting depth within loops (`for` / `loop`).
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
@@ -576,6 +580,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
+            fn_result_types: Vec::new(),
             fn_type_params: HashSet::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
@@ -1376,6 +1381,10 @@ impl<'a> Collector<'a> {
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
+        let outer_types = std::mem::replace(
+            &mut self.fn_result_types,
+            f.results.iter().map(|r| r.ty.clone()).collect(),
+        );
         let outer_tp = std::mem::replace(
             &mut self.fn_type_params,
             f.type_params.iter().map(|p| p.name.clone()).collect(),
@@ -1389,6 +1398,7 @@ impl<'a> Collector<'a> {
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
         self.fn_result_scalars = outer_scalars;
+        self.fn_result_types = outer_types;
         self.fn_type_params = outer_tp;
         self.pop_scope();
     }
@@ -2375,6 +2385,8 @@ impl<'a> Collector<'a> {
                     .iter()
                     .map(|r| self.kind_of_ty(&r.ty, 0))
                     .collect();
+                let lit_types: Vec<hy_syntax::TypeExpr> =
+                    results.iter().map(|r| r.ty.clone()).collect();
                 let all_named =
                     !results.is_empty() && results.iter().all(|r| r.name.is_some());
                 let error_tail = matches!(
@@ -2387,6 +2399,7 @@ impl<'a> Collector<'a> {
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
+                let outer_types = std::mem::replace(&mut self.fn_result_types, lit_types);
                 let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
                 let outer_select = std::mem::replace(&mut self.select_depth, 0);
                 self.block_stmts(body);
@@ -2396,6 +2409,7 @@ impl<'a> Collector<'a> {
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
                 self.fn_result_scalars = outer_scalars;
+                self.fn_result_types = outer_types;
                 self.pop_scope();
             }
             Expr::Paren { inner, .. } => self.expr(inner),
@@ -3966,6 +3980,40 @@ impl<'a> Collector<'a> {
         );
     }
 
+
+    /// #3264: two slice spellings whose element types are both known and
+    /// differ (`[]int32` vs `[]int64`, `[][2]int` vs `[][3]int`). `OpKind`
+    /// collapses integer widths and fixed-size array dimensions, so the kind
+    /// comparison cannot see this. Either side unknown fails open.
+    fn slice_element_names_conflict(&self, want: &TypeExpr, got: Option<&str>) -> bool {
+        let Some(got) = got else {
+            return false;
+        };
+        let TypeExpr::Slice { elem, .. } = want else {
+            return false;
+        };
+        let want_elem = elem.render();
+        let Some(got_elem) = got.strip_prefix("[]") else {
+            return false;
+        };
+        if want_elem == *got_elem {
+            return false;
+        }
+        // Numeric element widths compare through their canonical names so
+        // the genuine Go aliases (`byte`/`uint8`, `rune`/`int32`) never
+        // conflict; anything else falls back to the exact spelling.
+        match (
+            canonical_numeric_name(&want_elem),
+            canonical_numeric_name(got_elem),
+        ) {
+            (Some(w), Some(g)) => w != g,
+            (None, None) => {
+                is_sized_array_spelling(&want_elem) && is_sized_array_spelling(got_elem)
+            }
+            _ => false,
+        }
+    }
+
     fn check_user_fn_arg_types(&mut self, name: &str, args: &[CallArg]) {
         let head = Checker::base_named_type_str(name);
         let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
@@ -4016,21 +4064,36 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
+            // #3264: `[]int32` vs `[]int64` both collapse to
+            // `OpKind::Slice(Int)`, and `scalar_of_ty` returns None for a
+            // slice, so compare the declared element spellings too.
+            let slice_elem_mismatch = self.slice_element_names_conflict(
+                &p.ty,
+                self.typed_value_type_name(&a.value).as_deref(),
+            );
             if kinds_conflict(&want, &got)
                 || int_to_float_conflict
                 || scalar_mismatch
+                || slice_elem_mismatch
                 || self.sized_array_names_differ(
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
                 )
             {
+                // Prefer the declared spellings when both are known: the kind
+                // labels collapse `[]int32` and `[]int64` to `[]int`, which
+                // reads as a mismatch between identical types (#3264).
+                let got_label = self
+                    .typed_value_type_name(&a.value)
+                    .unwrap_or_else(|| got.label());
+                let want_label = p.ty.render();
                 self.emit_e1002(
                     a.value.span(),
                     format!(
                         "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
                         a.value.render(),
-                        got.label(),
-                        want.label(),
+                        got_label,
+                        want_label,
                         name
                     ),
                     "argument types must match declared parameter types",
@@ -4241,8 +4304,33 @@ impl<'a> Collector<'a> {
             if !self.report_return_conflict(v, &got, w, v.span()) {
                 let got_s = self.typed_value_scalar(v);
                 self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                self.report_slice_return_mismatch(v, i, v.span());
             }
         }
+    }
+
+    /// #3264: a returned slice whose element spelling differs from the
+    /// declared result (`[]int32` into `[]int64`). Both sides collapse to
+    /// `OpKind::Slice(Int)`, so `report_return_conflict` cannot see it. Fires
+    /// only when both spellings are known and the kind check has not already
+    /// reported this value.
+    fn report_slice_return_mismatch(&mut self, val: &Expr, idx: usize, span: Span) {
+        let Some(want_ty) = self.fn_result_types.get(idx).cloned() else {
+            return;
+        };
+        let got_name = self.typed_value_type_name(val);
+        if !self.slice_element_names_conflict(&want_ty, got_name.as_deref()) {
+            return;
+        }
+        let want = want_ty.render();
+        let got = got_name.unwrap_or_else(|| "slice".to_string());
+        self.emit_e1002(
+            span,
+            format!(
+                "cannot return a value of type `{got}` from a function declaring `{want}` — Go refuses `cannot use ... (variable of type {got}) as {want} value in return statement` (HYB-E1002)"
+            ),
+            "slice element types must match the declared result type exactly; write an explicit conversion when one is intended",
+        );
     }
 
     /// #1031 — a TYPED numeric value returned into a result of a different
