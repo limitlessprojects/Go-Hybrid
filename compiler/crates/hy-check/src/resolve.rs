@@ -437,7 +437,7 @@ impl<'a> Scan<'a> {
                     None => (name.as_str(), None),
                 };
                 if let Some(inside) = folded {
-                    self.check_folded_bracket(&inside, *span);
+                    self.check_folded_bracket(member, &inside, *span);
                 }
                 let unwrapped = crate::model::unwrap_parens(base);
                 if let Expr::Ident { name: root, .. } = unwrapped {
