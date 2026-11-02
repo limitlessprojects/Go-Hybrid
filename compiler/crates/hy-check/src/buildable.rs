@@ -4815,7 +4815,6 @@ impl<'a> Collector<'a> {
         if let Some(n) = self.multi_value_arg_count(args) {
             let want = params.len();
             if want != n {
-                self.report_local_arity(&callee.render(), want, n, span);
                 return;
             }
             let got_kinds = self.multi_value_kinds(&args[0].value);
