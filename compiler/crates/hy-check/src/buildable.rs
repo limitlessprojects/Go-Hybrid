@@ -697,6 +697,80 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn extract_map_key_type(s: &str) -> Option<&str> {
+        let rest = s.strip_prefix("map[")?;
+        let mut depth = 1;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&rest[..i]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn map_key_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(k) = Self::extract_map_key_type(&tname) {
+                        return Some(k.trim().to_string());
+                    }
+                    let base = Checker::base_named_type_str(&tname);
+                    if let Some(target) = self.ck.type_aliases.get(base) {
+                        let resolved = self.ck.resolve_type_alias(target);
+                        if let TypeExpr::Map { key, .. } = resolved {
+                            return Some(key.render());
+                        }
+                    }
+                }
+                if let Some(k) = Self::extract_map_key_type(name) {
+                    return Some(k.trim().to_string());
+                }
+                let base = Checker::base_named_type_str(name);
+                if let Some(target) = self.ck.type_aliases.get(base) {
+                    let resolved = self.ck.resolve_type_alias(target);
+                    if let TypeExpr::Map { key, .. } = resolved {
+                        return Some(key.render());
+                    }
+                }
+                None
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let struct_name = self.struct_base_name(&bk)?;
+                let fields = self.ck.structs.get(&struct_name)?;
+                let (_, fty) = fields.iter().find(|(n, _)| n == name)?;
+                let resolved = self.ck.resolve_type_alias(fty);
+                if let TypeExpr::Map { key, .. } = resolved {
+                    return Some(key.render());
+                }
+                None
+            }
+            Expr::MapLit { key, .. } => Some(key.render()),
+            _ => None,
+        }
+    }
+
+    fn map_key_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let kty = self.map_key_type_name(e)?;
+        let trimmed = kty.trim();
+        let base = Checker::base_named_type_str(trimmed);
+        if let Some(target) = self.ck.type_aliases.get(base) {
+            let resolved = self.ck.resolve_type_alias(target);
+            return self.scalar_of_ty(&resolved);
+        }
+        canonical_numeric_name(trimmed)
+    }
+
+
     /// A name that shadows checked defines but is not itself checked.
     fn exempt(&mut self, name: &str) {
         if name != "_" {
@@ -1566,6 +1640,8 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Some(kty) = self.map_key_type_name(val) {
+                    self.bind_type_name(name, format!("map[{}]{{}}", kty));
                 }
             }
         }
@@ -5332,16 +5408,31 @@ impl<'a> Collector<'a> {
                 let is_untyped_int_to_float = **key_kind == OpKind::Float
                     && *ik == OpKind::Int
                     && self.is_untyped_int_const(index);
+                let scalar_mismatch = match (
+                    base_expr.and_then(|b| self.map_key_scalar(b)),
+                    self.typed_value_scalar(index),
+                ) {
+                    (Some(want), Some(got)) => want != got,
+                    _ => false,
+                };
                 let conflict = (**key_kind == OpKind::Float && *ik == OpKind::Int && !is_untyped_int_to_float)
-                    || kinds_conflict(key_kind, ik);
+                    || kinds_conflict(key_kind, ik)
+                    || scalar_mismatch;
                 if conflict {
+                    let want_name = base_expr
+                        .and_then(|b| self.map_key_type_name(b))
+                        .unwrap_or_else(|| key_kind.label());
+                    let got_name = self
+                        .typed_value_scalar(index)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| ik.label());
                     self.emit_e1002(
                         index.span(),
                         format!(
                             "cannot use `{}` (type `{}`) as `{}` value in map index on `{}` (HYB-E1002)",
                             index.render(),
-                            ik.label(),
-                            key_kind.label(),
+                            got_name,
+                            want_name,
                             bk.label()
                         ),
                         "map index expression must match the map's key type",
@@ -6628,18 +6719,31 @@ impl<'a> Collector<'a> {
                         let is_untyped_int_to_float = **k_expected == OpKind::Float
                             && kk == OpKind::Int
                             && self.is_untyped_int_const(key_arg);
+                        let scalar_mismatch = match (
+                            self.map_key_scalar(map_arg),
+                            self.typed_value_scalar(key_arg),
+                        ) {
+                            (Some(want), Some(got)) => want != got,
+                            _ => false,
+                        };
                         if **k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
-                            && kk != **k_expected
-                            && !is_untyped_int_to_float
+                            && ((kk != **k_expected && !is_untyped_int_to_float) || scalar_mismatch)
                         {
+                            let want_name = self
+                                .map_key_type_name(map_arg)
+                                .unwrap_or_else(|| k_expected.label());
+                            let got_name = self
+                                .typed_value_scalar(key_arg)
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| kk.label());
                             self.emit_e2005(
                                 span,
                                 format!(
                                     "cannot use `{}` (type `{}`) as key type `{}` in `delete` (HYB-E2005)",
                                     key_arg.render(),
-                                    kk.label(),
-                                    k_expected.label()
+                                    got_name,
+                                    want_name
                                 ),
                                 "the second argument to `delete(m, k)` must match the map's key type",
                             );
