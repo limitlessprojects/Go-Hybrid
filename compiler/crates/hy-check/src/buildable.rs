@@ -233,6 +233,23 @@ fn is_sized_array_spelling(s: &str) -> bool {
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
+/// Extracts the key type spelling from a map type string `map[K]V`.
+fn map_key_type_name_from_str(s: &str) -> Option<&str> {
+    let stripped = s.strip_prefix("map[")?;
+    let mut depth = 1;
+    for (i, c) in stripped.char_indices() {
+        if c == '[' {
+            depth += 1;
+        } else if c == ']' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(&stripped[..i]);
+            }
+        }
+    }
+    None
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -873,7 +890,17 @@ impl<'a> Collector<'a> {
     /// Only identifiers bound with an explicit type name are known; everything
     /// else (literals, conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
-        match unwrap_parens(e) {
+        let bare = match unwrap_parens(e) {
+            Expr::Move { operand, .. } => unwrap_parens(operand),
+            other => other,
+        };
+        if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+            return Some(arr_ty.render());
+        }
+        if let Expr::MapLit { key, value, .. } = bare {
+            return Some(format!("map[{}]{}", key.render(), value.render()));
+        }
+        match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             _ => None,
         }
@@ -1564,7 +1591,18 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                let bare_val = unwrap_parens(val);
+                if let Some((_, _, arr_ty)) = bare_val.as_array_lit() {
+                    self.bind_type_name(name, arr_ty.render());
+                } else if let Expr::MapLit { key, value, .. } = bare_val {
+                    self.bind_type_name(name, format!("map[{}]{}", key.render(), value.render()));
+                } else if let Expr::Call { callee, args, .. } = bare_val {
+                    if let Expr::Ident { name: fn_name, .. } = unwrap_parens(callee) {
+                        if fn_name == "make" && !args.is_empty() {
+                            self.bind_type_name(name, args[0].value.render());
+                        }
+                    }
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
                 }
             }
@@ -5332,16 +5370,33 @@ impl<'a> Collector<'a> {
                 let is_untyped_int_to_float = **key_kind == OpKind::Float
                     && *ik == OpKind::Int
                     && self.is_untyped_int_const(index);
+                let base_ty_name = base_expr
+                    .and_then(|be| self.typed_value_type_name(be));
+                let expected_key_str = base_ty_name
+                    .as_deref()
+                    .and_then(map_key_type_name_from_str);
+                let scalar_mismatch = matches!(
+                    (expected_key_str.and_then(canonical_numeric_name), self.typed_value_scalar(index)),
+                    (Some(w), Some(g)) if w != g
+                );
+                let array_mismatch = self.sized_array_names_differ(
+                    expected_key_str,
+                    self.typed_value_type_name(index).as_deref(),
+                );
                 let conflict = (**key_kind == OpKind::Float && *ik == OpKind::Int && !is_untyped_int_to_float)
-                    || kinds_conflict(key_kind, ik);
+                    || kinds_conflict(key_kind, ik)
+                    || scalar_mismatch
+                    || array_mismatch;
                 if conflict {
+                    let fallback = key_kind.label();
+                    let want_label = expected_key_str.unwrap_or(&fallback);
                     self.emit_e1002(
                         index.span(),
                         format!(
                             "cannot use `{}` (type `{}`) as `{}` value in map index on `{}` (HYB-E1002)",
                             index.render(),
                             ik.label(),
-                            key_kind.label(),
+                            want_label,
                             bk.label()
                         ),
                         "map index expression must match the map's key type",
