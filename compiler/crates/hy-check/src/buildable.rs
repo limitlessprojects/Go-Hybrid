@@ -1979,7 +1979,7 @@ impl<'a> Collector<'a> {
                             // #887: a channel send in a select arm is also a single-value
                             // position.
                             self.check_single_value_position(value, "a channel send", false);
-                            self.check_channel_send(chan, value, arm.span);
+                            self.check_channel_send(chan, value, chan.span());
                             self.expr(chan);
                             self.expr(value);
                         }
