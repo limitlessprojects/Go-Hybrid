@@ -235,8 +235,10 @@ impl<'a> Checker<'a> {
         // Issue #827: an untyped const identifier carries no type
         // ascription, so `ty_of_expr`/`shape_of_expr` see nothing. Resolve
         // the initializer through the file const map (#998 pattern) and
-        // classify the literal. Block-scoped consts stay fail-open (no
-        // const-value map in FnState — the #998 precedent).
+        // recursively classify compound/chained constant expressions (`!true`,
+        // `1 < 2`, `-1.5`, `1.5 + 2.5`, `"a" + "b"`, `const K2 = K1`).
+        // Block-scoped consts stay fail-open (no const-value map in FnState —
+        // the #998 precedent).
         if let Expr::Ident { name, .. } = unwrap_parens(expr) {
             if st.env_lookup(name).is_none() {
                 if let Some(init) = self.const_values.get(name.as_str()) {
@@ -358,6 +360,25 @@ impl<'a> Checker<'a> {
                 let ty = self.ty_of_expr(st, e)?;
                 self.named_int_of(&ty)
             }
+            Expr::Unary {
+                op: hy_syntax::UnOp::Neg,
+                operand,
+                ..
+            } => self.typed_int_bound(st, operand),
+            Expr::Binary { op, lhs, rhs, .. } => match op {
+                hy_syntax::BinOp::Add
+                | hy_syntax::BinOp::Sub
+                | hy_syntax::BinOp::Mul
+                | hy_syntax::BinOp::Div
+                | hy_syntax::BinOp::Mod
+                | hy_syntax::BinOp::BitAnd
+                | hy_syntax::BinOp::BitOr
+                | hy_syntax::BinOp::BitXor => self
+                    .typed_int_bound(st, lhs)
+                    .or_else(|| self.typed_int_bound(st, rhs)),
+                hy_syntax::BinOp::Shl | hy_syntax::BinOp::Shr => self.typed_int_bound(st, lhs),
+                _ => None,
+            },
             Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
                 // a fixed-width conversion names its own type: `u32(0)`
                 // is a u32 bound regardless of what ty_of_expr infers.
@@ -384,6 +405,98 @@ impl<'a> Checker<'a> {
             }
         }
         None
+    }
+
+    fn unwrap_collection_elem_type(&self, ty: &TypeExpr) -> Option<TypeExpr> {
+        let mut cur = self.resolve_type_alias(ty);
+        if let TypeExpr::Pointer { to, .. } = cur {
+            cur = self.resolve_type_alias(&to);
+        }
+        match cur {
+            TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(*elem),
+            TypeExpr::Map { value, .. } => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn chan_type_of_expr(&self, st: &FnState, expr: &Expr) -> Option<TypeExpr> {
+        if let Some(ty) = self.ty_of_expr(st, expr) {
+            return Some(ty);
+        }
+        match unwrap_parens(expr) {
+            Expr::Ident { name, .. } => {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    if let Some(ty) = &b.ty {
+                        return Some(ty.clone());
+                    }
+                    if let Some(origin) = &b.non_owned_origin {
+                        let prefix = format!("range variable `{}` iterating `", name);
+                        let suffix = "` (the collection still holds the element)";
+                        if let Some(col_name) = origin
+                            .strip_prefix(&prefix)
+                            .and_then(|s| s.strip_suffix(suffix))
+                        {
+                            if let Some(col_ty) =
+                                self.lookup_binding(st, col_name).and_then(|cb| cb.ty.clone())
+                            {
+                                if let Some(elem) = self.unwrap_collection_elem_type(&col_ty) {
+                                    return Some(elem);
+                                }
+                            }
+                        }
+                    }
+                }
+                let root = crate::freeze::resolve_alias(st, name);
+                if let Some(rb) = self.lookup_binding(st, &root) {
+                    if let Some(rty) = &rb.ty {
+                        let resolved = self.resolve_type_alias(rty);
+                        if matches!(resolved, TypeExpr::Chan { .. }) {
+                            return Some(rty.clone());
+                        }
+                        if let Some(elem) = self.unwrap_collection_elem_type(&resolved) {
+                            return Some(elem);
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Receive { chan, .. } => {
+                let outer = self.chan_type_of_expr(st, chan)?;
+                match self.resolve_type_alias(&outer) {
+                    TypeExpr::Chan { elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            Expr::Index { base, .. } => {
+                let base_inner = match unwrap_parens(base) {
+                    Expr::AddrOf { operand, .. }
+                    | Expr::Unary {
+                        op: hy_syntax::UnOp::Addr,
+                        operand,
+                        ..
+                    } => operand.as_ref(),
+                    other => other,
+                };
+                let base_ty = self.chan_type_of_expr(st, base_inner)?;
+                self.unwrap_collection_elem_type(&base_ty)
+            }
+            Expr::Field { base, name, .. } => {
+                let base_ty = self.chan_type_of_expr(st, base)?;
+                let mut cur = self.resolve_type_alias(&base_ty);
+                while let TypeExpr::Pointer { to, .. } = cur {
+                    cur = self.resolve_type_alias(&to);
+                }
+                let sname = Self::base_named_type(&cur)?;
+                self.structs
+                    .get(&sname)
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == name))
+                    .map(|(_, t)| t.clone())
+            }
+            Expr::Move { operand, .. } | Expr::Try { operand, .. } => {
+                self.chan_type_of_expr(st, operand)
+            }
+            _ => None,
+        }
     }
 
     /// Classify a range's ITERABLE — the mirror of `check_send_target`
@@ -415,14 +528,7 @@ impl<'a> Checker<'a> {
             | TypeShape::BorrowHandle(_) => {}
             TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set" => {}
             TypeShape::Chan(_) => {
-                let chan_ty = self.ty_of_expr(st, expr).or_else(|| {
-                    if let Expr::Ident { name, .. } = unwrap_parens(expr) {
-                        let root = crate::freeze::resolve_alias(st, name);
-                        self.lookup_binding(st, &root).and_then(|b| b.ty.clone())
-                    } else {
-                        None
-                    }
-                });
+                let chan_ty = self.chan_type_of_expr(st, expr);
                 if let Some(ty) = chan_ty {
                     let resolved = self.resolve_type_alias(&ty);
                     if matches!(
