@@ -99,6 +99,23 @@ fn legal_landing_spots_stay_accepted() {
 }
 
 #[test]
+fn alias_of_builtin_error_allows_try_propagation() {
+    let r = check(
+        "type failure = error\n\n\
+         fn val() (int, error) {\n    return 1, nil\n}\n\n\
+         fn outer() (int, failure) {\n    x := val()?\n    return x, nil\n}\n\n\
+         fn main() {\n    _, _ = outer()\n}\n",
+    );
+    assert_eq!(
+        e2011(&r),
+        0,
+        "an identical-type alias of builtin error must allow E4 propagation: {:?}",
+        r.diagnostics
+    );
+    assert_eq!(r.verdict, hy_check::Verdict::Accept, "{:?}", r.diagnostics);
+}
+
+#[test]
 fn one_diagnostic_per_misplaced_try_with_e4_note() {
     let r = with_helpers(
         "fn noerr() int {\n    a := val()?\n    b := val()?\n    return a + b\n}\n\nfn main() {\n    fmt.println(noerr())\n}\n",
