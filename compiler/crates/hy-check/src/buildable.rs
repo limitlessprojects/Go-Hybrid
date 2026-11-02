@@ -960,6 +960,11 @@ impl<'a> Collector<'a> {
             Expr::FnLit { results, .. } if results.len() == 1 => {
                 Some(format!("func->{}", results[0].ty.render()))
             }
+            // #3111 — `x[a:b]` of a slice or array is a slice of its element.
+            Expr::Slice { base, .. } => {
+                let text = self.value_type_text(base)?;
+                slice_or_array_elem_text(&text).map(|e| format!("[]{e}"))
+            }
             _ => None,
         }
     }
@@ -1113,25 +1118,61 @@ impl<'a> Collector<'a> {
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
         let name = match unwrap_parens(callee) {
-            Expr::Ident { name, .. } => name,
+            Expr::Ident { name, .. } if !(name.contains('[') && name.ends_with(']')) => name,
             // #3102 — a method call on a non-generic struct receiver takes
             // the method's declared result types.
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
-                let sn = self.struct_base_name(&bk)?;
-                if self
+                let full = self.struct_name(&bk)?;
+                let sn = Checker::base_named_type_str(&full).to_string();
+                let generic = self
                     .ck
                     .struct_type_params
                     .get(sn.as_str())
-                    .is_some_and(|tp| !tp.is_empty())
-                {
-                    return None;
-                }
+                    .is_some_and(|tp| !tp.is_empty());
                 let m = self.ck.method_decls.get(&(sn, name.clone()))?;
                 if !m.type_params.is_empty() {
                     return None;
                 }
+                if generic {
+                    // #3111 — a method on a generic struct instance takes its
+                    // results with the receiver's type parameters bound to
+                    // the instance's type arguments (`box[int8]{}.get()`).
+                    let bound = self.receiver_type_arg_map(m, &full)?;
+                    return Some(
+                        m.results
+                            .iter()
+                            .map(|r| self.subst_scalar_of_ty(&r.ty, &bound))
+                            .collect(),
+                    );
+                }
                 return Some(m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+            }
+            // #3111 — an explicitly instantiated generic fn: the parser folds
+            // `id[int8](a)` into the callee name `id[int8]`.
+            Expr::Ident { name, .. } if name.contains('[') && name.ends_with(']') => {
+                let open = name.find('[')?;
+                let base = &name[..open];
+                if self.scopes.iter().any(|l| l.contains_key(base)) {
+                    return None;
+                }
+                let fd = self.ck.fns.get(base)?;
+                let targs = split_top_level_type_args(&name[open + 1..name.len() - 1]);
+                if fd.receiver.is_some() || fd.type_params.len() != targs.len() {
+                    return None;
+                }
+                let bound: HashMap<String, String> = fd
+                    .type_params
+                    .iter()
+                    .zip(targs)
+                    .map(|(tp, a)| (tp.name.clone(), a.trim().to_string()))
+                    .collect();
+                return Some(
+                    fd.results
+                        .iter()
+                        .map(|r| self.subst_scalar_of_ty(&r.ty, &bound))
+                        .collect(),
+                );
             }
             _ => return None,
         };
@@ -1147,8 +1188,19 @@ impl<'a> Collector<'a> {
             return Some(vec![self.scalar_of_type_text(r)]);
         }
         if let Some(fd) = self.ck.fns.get(name.as_str()) {
-            if fd.receiver.is_some() || !fd.type_params.is_empty() {
+            if fd.receiver.is_some() {
                 return None;
+            }
+            if !fd.type_params.is_empty() {
+                // #3111 — a generic fn's results with its type parameters
+                // inferred from the call's arguments.
+                let bound = self.infer_type_arg_map(fd, args)?;
+                return Some(
+                    fd.results
+                        .iter()
+                        .map(|r| self.subst_scalar_of_ty(&r.ty, &bound))
+                        .collect(),
+                );
             }
             return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
         }
@@ -1175,6 +1227,119 @@ impl<'a> Collector<'a> {
             }
         }
         None
+    }
+
+    /// #3111 — the exact numeric type of a result/field type with type
+    /// parameters substituted. A type parameter with no binding is unknown;
+    /// any other spelling resolves as usual.
+    fn subst_scalar_of_ty(
+        &self,
+        ty: &TypeExpr,
+        bound: &HashMap<String, String>,
+    ) -> Option<&'static str> {
+        if let TypeExpr::Named { name, .. } = ty {
+            if let Some(arg) = bound.get(name.as_str()) {
+                return self.scalar_of_type_text(arg);
+            }
+        }
+        self.scalar_of_ty(ty)
+    }
+
+    /// #3111 — a generic method's receiver type parameter names (`fn (b
+    /// box[u]) ...` may rename the struct's `t`) bound to the type arguments
+    /// of the instance `full` (`box[int8]`). Unmatched shapes fail open.
+    fn receiver_type_arg_map(&self, m: &FnDecl, full: &str) -> Option<HashMap<String, String>> {
+        let recv = m.receiver.as_ref()?.ty.render();
+        let recv = recv.trim_start_matches('*');
+        let open = recv.find('[')?;
+        let names = split_top_level_type_args(recv[open + 1..].strip_suffix(']')?);
+        let fopen = full.find('[')?;
+        let args = split_top_level_type_args(full[fopen + 1..].strip_suffix(']')?);
+        if names.len() != args.len() || args.is_empty() {
+            return None;
+        }
+        Some(
+            names
+                .into_iter()
+                .zip(args)
+                .map(|(n, a)| (n.trim().to_string(), a.trim().to_string()))
+                .collect(),
+        )
+    }
+
+    /// #3111 — a generic fn's type arguments inferred from a call: a `t`
+    /// parameter binds the type of a typed argument, a `[]t` parameter the
+    /// element of a typed slice/array argument. A type parameter whose
+    /// arguments are all untyped numeric literals takes their default type
+    /// (`id(3)` is `int`); any other argument shape leaves it unbound.
+    fn infer_type_arg_map(&self, fd: &FnDecl, args: &[CallArg]) -> Option<HashMap<String, String>> {
+        if fd.params.len() != args.len() {
+            return None;
+        }
+        let is_tp = |n: &str| fd.type_params.iter().any(|t| t.name == n);
+        let mut bound: HashMap<String, String> = HashMap::new();
+        let mut defaults: HashMap<String, Option<&'static str>> = HashMap::new();
+        for (p, a) in fd.params.iter().zip(args) {
+            match &p.ty {
+                TypeExpr::Named { name, .. } if is_tp(name) => {
+                    if let Some(s) = self.typed_value_scalar(&a.value) {
+                        bound.entry(name.clone()).or_insert_with(|| s.to_string());
+                    } else if let Some(d) = self.untyped_literal_default(&a.value) {
+                        let e = defaults.entry(name.clone()).or_insert(Some(d));
+                        if *e != Some(d) {
+                            *e = None;
+                        }
+                    } else {
+                        defaults.insert(name.clone(), None);
+                    }
+                }
+                TypeExpr::Slice { elem, .. } => {
+                    let TypeExpr::Named { name, .. } = elem.as_ref() else {
+                        continue;
+                    };
+                    if !is_tp(name) {
+                        continue;
+                    }
+                    let el = self
+                        .value_type_text(&a.value)
+                        .and_then(|t| slice_or_array_elem_text(&t).map(|e| e.to_string()));
+                    match el.as_deref().and_then(|e| self.scalar_of_type_text(e)) {
+                        Some(s) => {
+                            bound.entry(name.clone()).or_insert_with(|| s.to_string());
+                        }
+                        None => {
+                            defaults.insert(name.clone(), None);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (tp, d) in defaults {
+            if let Some(d) = d {
+                bound.entry(tp).or_insert_with(|| d.to_string());
+            }
+        }
+        Some(bound)
+    }
+
+    /// #3111 — Go's default type of an untyped numeric literal argument.
+    fn untyped_literal_default(&self, e: &Expr) -> Option<&'static str> {
+        let lit = match unwrap_parens(e) {
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => unwrap_parens(operand),
+            other => other,
+        };
+        match lit {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Float(_) | LitKind::Char(_),
+                ..
+            } => self.initializer_scalar(e),
+            _ => None,
+        }
     }
 
     /// #1031 — the exact numeric type of a value that is provably TYPED.
@@ -1224,6 +1389,45 @@ impl<'a> Collector<'a> {
                 _ => None,
             },
             Expr::Receive { chan, .. } => self.receive_scalar(chan),
+            // #3111 — a field read on a generic struct instance takes the
+            // field's type with the instance's type arguments substituted.
+            Expr::Field { base, name, .. } => {
+                let full = self.struct_name(&self.kind_of_expr(base))?;
+                let sn = Checker::base_named_type_str(&full);
+                if !self
+                    .ck
+                    .struct_type_params
+                    .get(sn)
+                    .is_some_and(|tp| !tp.is_empty())
+                {
+                    return None;
+                }
+                let bound = self.struct_type_arg_map(&full);
+                let (_, ty) = self.ck.structs.get(sn)?.iter().find(|(n, _)| n == name)?;
+                self.subst_scalar_of_ty(ty, &bound)
+            }
+            // #3111 — an index read on a local whose type text is known
+            // (including a slice-expression binding `s := arr[0:1]`).
+            Expr::Index { base, .. } => {
+                let text = self.value_type_text(base)?;
+                if let Some(rest) = text.strip_prefix("map[") {
+                    let mut depth = 1usize;
+                    for (i, ch) in rest.char_indices() {
+                        match ch {
+                            '[' => depth += 1,
+                            ']' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    return self.scalar_of_type_text(&rest[i + 1..]);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    return None;
+                }
+                self.scalar_of_type_text(slice_or_array_elem_text(&text)?)
+            }
             _ => None,
         }
     }
@@ -7633,4 +7837,12 @@ fn untyped_slice_head_ty(first: &Expr) -> Option<TypeExpr> {
         Expr::StructLit { ty: Some(t), .. } => Some(t.clone()),
         _ => None,
     }
+}
+
+/// #3111 — the element type text of a `[]T` / `[N]T` type text.
+fn slice_or_array_elem_text(text: &str) -> Option<&str> {
+    let rest = text.trim().strip_prefix('[')?;
+    let close = rest.find(']')?;
+    let elem = rest[close + 1..].trim();
+    (!elem.is_empty()).then_some(elem)
 }
