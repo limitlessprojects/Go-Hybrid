@@ -1144,6 +1144,7 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
         }
+        let target_from_subject = !matches!(target, MatchTarget::Unknown);
         if matches!(target, MatchTarget::Unknown) {
             for arm in arms {
                 if let MatchPattern::Path { segments, .. } = &arm.pattern {
@@ -1219,6 +1220,59 @@ impl<'a> Checker<'a> {
                 }
             }
             MatchTarget::Enum(enum_name, variants) => {
+                // #3137 row 6: an arm that names a variant of ANOTHER enum
+                // (`red` / `color.red` while matching a `shape`) can never
+                // match. A trailing `_` used to hide it from the coverage
+                // check, so it passed with 0 diagnostics. Only checked when
+                // the subject's type is known; a bare name that no enum
+                // declares stays a binding pattern (T15).
+                if target_from_subject {
+                    for arm in arms {
+                        let MatchPattern::Path { segments, .. } = &arm.pattern else {
+                            continue;
+                        };
+                        let foreign = match segments.as_slice() {
+                            [v] => {
+                                if variants.iter().any(|x| x == v) {
+                                    None
+                                } else {
+                                    self.enums
+                                        .iter()
+                                        .filter(|(en, _)| en.as_str() != enum_name)
+                                        .find(|(_, vs)| vs.iter().any(|x| x == v))
+                                        .map(|(en, _)| format!("`{v}` is a variant of `{en}`"))
+                                }
+                            }
+                            [e, v] if self.enums.contains_key(e.as_str()) => {
+                                if e != &enum_name {
+                                    Some(format!("`{e}.{v}` is a variant of `{e}`"))
+                                } else if !variants.iter().any(|x| x == v) {
+                                    Some(format!("`{e}` has no variant `{v}`"))
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        if let Some(why) = foreign {
+                            let msg = format!(
+                                "pattern can never match: {}, but the subject is a `{}` (HYB-E5001)",
+                                why, enum_name
+                            );
+                            self.diags.push(
+                                Diagnostic::error("HYB-E5001", self.path.clone(), span, msg)
+                                    .with_notes(vec![
+                                        format!(
+                                            "why: a `match` on `{}` can only name its own variants ({}) (T15)",
+                                            enum_name,
+                                            variants.join(", ")
+                                        ),
+                                        "fix: match a variant of the subject's enum, or match the other value separately".to_string(),
+                                    ]),
+                            );
+                        }
+                    }
+                }
                 let has_trailing_wildcard = arms.last().is_some_and(|a| {
                     matches!(a.pattern, MatchPattern::Wildcard) && a.guard.is_none()
                 });

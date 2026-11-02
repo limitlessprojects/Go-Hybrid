@@ -357,3 +357,48 @@ fn main() {
 "#;
     assert_eq!(e1002_count(src), 0);
 }
+
+const ROW6_DECLS: &str = r#"
+enum shape {
+    circle(f64)
+    rectangle(string)
+    point
+}
+enum color {
+    red
+    green
+}
+
+"#;
+
+fn e5001_count(src: &str) -> usize {
+    let ast = parse_file("t.hy", src).expect("snippet parses");
+    check_file(&ast)
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == hy_diag::Severity::Error && d.code == "HYB-E5001")
+        .count()
+}
+
+#[test]
+fn match_arm_naming_another_enums_variant_rejected() {
+    // #3137 row 6: the trailing `_` used to hide the impossible arm.
+    for (name, body) in [
+        ("bare", "    s := shape.point\n    match s {\n        red: fmt.println(1)\n        _: fmt.println(2)\n    }\n"),
+        ("qualified", "    s := shape.point\n    match s {\n        color.red: fmt.println(1)\n        _: fmt.println(2)\n    }\n"),
+        ("unknown variant", "    s := shape.point\n    match s {\n        shape.square: fmt.println(1)\n        _: fmt.println(2)\n    }\n"),
+        ("param subject", "    describe(shape.point)\n}\n\nfn describe(s shape) {\n    match s {\n        green: fmt.println(1)\n        _: fmt.println(2)\n    }\n"),
+    ] {
+        let src = format!("{ROW6_DECLS}fn main() {{\n{body}}}\n");
+        assert_eq!(e5001_count(&src), 1, "{name} must be rejected with one HYB-E5001");
+    }
+}
+
+#[test]
+fn match_arms_naming_own_variants_accepted() {
+    let src = format!(
+        "{ROW6_DECLS}fn main() {{\n    s := shape.circle(1.0)\n    match s {{\n        circle(r): fmt.println(r)\n        shape.point: fmt.println(0)\n        _: fmt.println(2)\n    }}\n    c := color.red\n    match c {{\n        red: fmt.println(1)\n        color.green: fmt.println(2)\n    }}\n}}\n"
+    );
+    assert_eq!(e5001_count(&src), 0);
+    assert_eq!(e1002_count(&src), 0);
+}
