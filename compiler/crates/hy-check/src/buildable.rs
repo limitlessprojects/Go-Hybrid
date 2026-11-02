@@ -859,12 +859,141 @@ impl<'a> Collector<'a> {
         None
     }
 
-    /// #2770 — the canonical numeric spelling of a simple local target, for the
-    /// assignment/argument scalar comparison. Non-ident places fail open.
+    /// Extracts the element scalar type of a slice or array place.
+    fn place_element_type_name(&self, p: &Place) -> Option<String> {
+        match &p.kind {
+            PlaceKind::Ident(n) => {
+                let tname = self.lookup_type_name(n)?;
+                let trimmed = tname.trim();
+                if trimmed.starts_with('[') {
+                    if let Some(idx) = trimmed.find(']') {
+                        return Some(trimmed[idx + 1..].trim().to_string());
+                    }
+                }
+                None
+            }
+            PlaceKind::Index { base, .. } => {
+                let inner = self.place_element_type_name(base)?;
+                let trimmed = inner.trim();
+                if trimmed.starts_with('[') {
+                    if let Some(idx) = trimmed.find(']') {
+                        return Some(trimmed[idx + 1..].trim().to_string());
+                    }
+                }
+                None
+            }
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                let subst = self.struct_type_arg_map(&full_name);
+                let (_, ty) = fields.iter().find(|(n, _)| n == name)?;
+                let render = if subst.is_empty() {
+                    ty.render()
+                } else {
+                    Self::substitute_type_str(&ty.render(), &subst)
+                };
+                let trimmed = render.trim();
+                if trimmed.starts_with('[') {
+                    if let Some(idx) = trimmed.find(']') {
+                        return Some(trimmed[idx + 1..].trim().to_string());
+                    }
+                }
+                None
+            }
+            PlaceKind::AddrOf { base } => self.place_element_type_name(base),
+        }
+    }
+
+    /// Resolves the concrete scalar numeric type of a struct field.
+    fn struct_field_scalar(&self, k: &OpKind, field: &str) -> Option<&'static str> {
+        let full_name = self.struct_name(k)?;
+        let base_name = Checker::base_named_type_str(&full_name);
+        let fields = self.ck.structs.get(base_name)?;
+        let subst = self.struct_type_arg_map(&full_name);
+        let (_, ty) = fields.iter().find(|(n, _)| n == field)?;
+        if subst.is_empty() {
+            self.scalar_of_ty(ty)
+        } else {
+            let rendered = Self::substitute_type_str(&ty.render(), &subst);
+            canonical_numeric_name(&rendered)
+        }
+    }
+
+    /// Extracts element scalar type from an array or slice expression.
+    fn slice_or_array_element_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                let tname = self.lookup_type_name(name)?;
+                let trimmed = tname.trim();
+                if trimmed.starts_with('[') {
+                    if let Some(idx) = trimmed.find(']') {
+                        return Some(trimmed[idx + 1..].trim().to_string());
+                    }
+                }
+                None
+            }
+            Expr::SliceLit { elem: Some(t), .. } => {
+                let rendered = t.render();
+                let trimmed = rendered.trim();
+                if trimmed.starts_with('[') {
+                    if let Some(idx) = trimmed.find(']') {
+                        return Some(trimmed[idx + 1..].trim().to_string());
+                    }
+                }
+                Some(rendered)
+            }
+            Expr::Slice { base, .. } => self.slice_or_array_element_type_name(base),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                let subst = self.struct_type_arg_map(&full_name);
+                let (_, ty) = fields.iter().find(|(n, _)| n == name)?;
+                let render = if subst.is_empty() {
+                    ty.render()
+                } else {
+                    Self::substitute_type_str(&ty.render(), &subst)
+                };
+                let trimmed = render.trim();
+                if trimmed.starts_with('[') {
+                    if let Some(idx) = trimmed.find(']') {
+                        return Some(trimmed[idx + 1..].trim().to_string());
+                    }
+                }
+                None
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.slice_or_array_element_type_name(&first.value);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// #2770, #3157 — the canonical numeric spelling of an assignment/argument target place.
+    /// Supports simple identifiers, slice/array indexing, and struct fields.
     fn place_scalar(&self, p: &Place) -> Option<&'static str> {
         match &p.kind {
             PlaceKind::Ident(n) => self.lookup_scalar(n),
-            _ => None,
+            PlaceKind::Index { base, .. } => {
+                let elem_ty = self.place_element_type_name(base)?;
+                canonical_numeric_name(&elem_ty)
+            }
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                self.struct_field_scalar(&bk, name)
+            }
+            PlaceKind::AddrOf { base } => self.place_scalar(base),
         }
     }
 
@@ -984,6 +1113,16 @@ impl<'a> Collector<'a> {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
             },
+            // #3157: slice and array index expressions carry the element's concrete scalar width
+            Expr::Index { base, .. } => {
+                let elem_ty = self.slice_or_array_element_type_name(base);
+                elem_ty.as_deref().and_then(canonical_numeric_name)
+            }
+            // #3157: struct field reads carry the field's declared/instantiated scalar width
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                self.struct_field_scalar(&bk, name)
+            }
             _ => None,
         }
     }
@@ -1562,7 +1701,14 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                if let Expr::SliceLit { elem: Some(t), .. } = unwrap_parens(val) {
+                    let r = t.render();
+                    if r.starts_with('[') {
+                        self.bind_type_name(name, r);
+                    } else {
+                        self.bind_type_name(name, format!("[]{}", r));
+                    }
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
                 }
             }
