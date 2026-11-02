@@ -233,6 +233,12 @@ fn is_sized_array_spelling(s: &str) -> bool {
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
+/// #3242 — Extracts the element type spelling from a `[]T` slice type string.
+fn slice_elem_type_name_from_str(s: &str) -> Option<String> {
+    let rest = s.trim().strip_prefix("[]")?;
+    Some(rest.trim().to_string())
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -877,6 +883,12 @@ impl<'a> Collector<'a> {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             _ => None,
         }
+    }
+
+    /// #3242 — Extracts the declared element type name of a slice expression.
+    fn slice_elem_type_of_expr(&self, e: &Expr) -> Option<String> {
+        let ty_name = self.typed_value_type_name(e)?;
+        slice_elem_type_name_from_str(&ty_name)
     }
 
     /// #2771 — the declared Go spelling of a simple local assignment target.
@@ -6710,25 +6722,52 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if copy_element_kinds_conflict(dst_elem, src_elem) {
+                        let dst_elem_ty = self.slice_elem_type_of_expr(dst_arg);
+                        let src_elem_ty = self.slice_elem_type_of_expr(src_arg);
+                        let scalar_mismatch = match (
+                            dst_elem_ty.as_deref().and_then(canonical_numeric_name),
+                            src_elem_ty.as_deref().and_then(canonical_numeric_name),
+                        ) {
+                            (Some(a), Some(b)) => a != b,
+                            _ => false,
+                        };
+                        let array_mismatch = self.sized_array_names_differ(
+                            dst_elem_ty.as_deref(),
+                            src_elem_ty.as_deref(),
+                        );
+                        if copy_element_kinds_conflict(dst_elem, src_elem)
+                            || scalar_mismatch
+                            || array_mismatch
+                        {
+                            let fallback_dst = dst_elem.label();
+                            let dst_label = dst_elem_ty.as_deref().unwrap_or(&fallback_dst);
+                            let fallback_src = src_elem.label();
+                            let src_label = src_elem_ty.as_deref().unwrap_or(&fallback_src);
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "arguments to `copy` have different element types: `{}` and `{}` (HYB-E1002)",
-                                    dst_elem.label(),
-                                    src_elem.label()
+                                    dst_label,
+                                    src_label
                                 ),
                                 "arguments to `copy` must have identical element types",
                             );
                         }
                     }
                     (OpKind::Slice(dst_elem), OpKind::Str) => {
-                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                        let dst_elem_ty = self.slice_elem_type_of_expr(dst_arg);
+                        let not_byte_slice = match dst_elem_ty.as_deref() {
+                            Some(s) => s != "byte" && s != "uint8",
+                            None => !matches!(**dst_elem, OpKind::Unknown | OpKind::Int),
+                        };
+                        if not_byte_slice {
+                            let fallback = dst_elem.label();
+                            let label = dst_elem_ty.as_deref().unwrap_or(&fallback);
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "cannot copy string into slice with element type `{}` (HYB-E1002)",
-                                    dst_elem.label()
+                                    label
                                 ),
                                 "copying from a string requires a byte slice destination (`[]byte`)",
                             );
