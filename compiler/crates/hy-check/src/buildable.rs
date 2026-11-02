@@ -772,6 +772,37 @@ impl<'a> Collector<'a> {
     /// #2474: `s.insert(v)` / `s.contains(v)` / `s.remove(v)` on a `set[T]`
     /// need `v` of type `T`; the prelude's Go signature takes `T`, so a
     /// mismatched argument passed `hyb check` and failed `go build`.
+    fn option_elem_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(elem) = tname.strip_prefix("option[") {
+                        if let Some(inner) = elem.strip_suffix(']') {
+                            return Some(inner.to_string());
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "some" && !args.is_empty() {
+                        let arg = &args[0].value;
+                        if let Some(s) = self.typed_value_scalar(arg) {
+                            return Some(s.to_string());
+                        }
+                        if let Some(t) = self.typed_value_type_name(arg) {
+                            return Some(t);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn check_set_method_arg(&mut self, callee: &Expr, args: &[CallArg]) {
         let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
             return;
@@ -787,14 +818,22 @@ impl<'a> Collector<'a> {
         let int_to_float_conflict = want == OpKind::Float
             && got == OpKind::Int
             && !self.is_untyped_int_const(&args[0].value);
-        if kinds_conflict(&want, &got) || int_to_float_conflict {
+        let scalar_mismatch = matches!(
+            (canonical_numeric_name(&elem), self.typed_value_scalar(&args[0].value)),
+            (Some(w), Some(g)) if w != g
+        );
+        let array_mismatch = self.sized_array_names_differ(
+            Some(elem.as_str()),
+            self.typed_value_type_name(&args[0].value).as_deref(),
+        );
+        if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch || array_mismatch {
             self.emit_e1002(
                 args[0].value.span(),
                 format!(
                     "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.{}` on `set[{}]` (HYB-E1002)",
                     args[0].value.render(),
                     got.label(),
-                    want.label(),
+                    elem,
                     base.render(),
                     name,
                     elem
@@ -821,16 +860,27 @@ impl<'a> Collector<'a> {
         let int_to_float_conflict = want == OpKind::Float
             && got == OpKind::Int
             && !self.is_untyped_int_const(&args[0].value);
-        if kinds_conflict(&want, &got) || int_to_float_conflict {
+        let opt_elem_type_name = self.option_elem_type_name(base);
+        let scalar_mismatch = matches!(
+            (opt_elem_type_name.as_deref().and_then(canonical_numeric_name), self.typed_value_scalar(&args[0].value)),
+            (Some(w), Some(g)) if w != g
+        );
+        let array_mismatch = self.sized_array_names_differ(
+            opt_elem_type_name.as_deref(),
+            self.typed_value_type_name(&args[0].value).as_deref(),
+        );
+        if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch || array_mismatch {
+            let fallback = want.label();
+            let want_label = opt_elem_type_name.as_deref().unwrap_or(&fallback);
             self.emit_e1002(
                 args[0].value.span(),
                 format!(
                     "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.or` on `option[{}]` (HYB-E1002)",
                     args[0].value.render(),
                     got.label(),
-                    want.label(),
+                    want_label,
                     base.render(),
-                    want.label()
+                    want_label
                 ),
                 "argument to `option.or` must match the option payload type",
             );
@@ -873,7 +923,14 @@ impl<'a> Collector<'a> {
     /// Only identifiers bound with an explicit type name are known; everything
     /// else (literals, conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
-        match unwrap_parens(e) {
+        let bare = match unwrap_parens(e) {
+            Expr::Move { operand, .. } => unwrap_parens(operand),
+            other => other,
+        };
+        if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+            return Some(arr_ty.render());
+        }
+        match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             _ => None,
         }
@@ -1564,7 +1621,21 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                let bare_val = unwrap_parens(val);
+                if let Some((_, _, arr_ty)) = bare_val.as_array_lit() {
+                    self.bind_type_name(name, arr_ty.render());
+                } else if let Expr::Call { callee, args, .. } = bare_val {
+                    if let Expr::Ident { name: fn_name, .. } = unwrap_parens(callee) {
+                        if fn_name == "some" && !args.is_empty() {
+                            let arg = &args[0].value;
+                            if let Some(s) = self.typed_value_scalar(arg) {
+                                self.bind_type_name(name, format!("option[{}]", s));
+                            } else if let Some(t) = self.typed_value_type_name(arg) {
+                                self.bind_type_name(name, format!("option[{}]", t));
+                            }
+                        }
+                    }
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
                 }
             }
