@@ -697,6 +697,102 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn chan_elem_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(elem) = extract_chan_elem_from_type_str(&tname) {
+                        return Some(elem.to_string());
+                    }
+                }
+                None
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            let f_bare = unwrap_parens(&first.value);
+                            if let Expr::StructLit {
+                                ty: Some(TypeExpr::Chan { elem, .. }),
+                                ..
+                            } = f_bare
+                            {
+                                return Some(elem.render());
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn chan_elem_scalar(&self, e: &Expr) -> Option<&'static str> {
+        if let Some(ename) = self.chan_elem_type_name(e) {
+            if let Some(s) = canonical_numeric_name(&ename) {
+                return Some(s);
+            }
+        }
+        None
+    }
+
+    fn chan_elem_type_name_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Receive { chan, .. } => self.chan_elem_type_name(chan),
+            _ => None,
+        }
+    }
+
+    fn check_chan_send(&mut self, chan: &Expr, value: &Expr, span: Span) {
+        let ck = self.kind_of_expr(chan);
+        let vk = self.kind_of_expr(value);
+
+        let elem_kind = match &ck {
+            OpKind::Chan(e) => (**e).clone(),
+            _ => {
+                if let Some(tname) = self.chan_elem_type_name(chan) {
+                    self.kind_of_type_str(&tname, 0)
+                } else {
+                    OpKind::Unknown
+                }
+            }
+        };
+
+        if elem_kind == OpKind::Unknown && !matches!(ck, OpKind::Chan(_)) {
+            return;
+        }
+
+                let want_scalar = self.chan_elem_scalar(chan);
+        let got_scalar = self.typed_value_scalar(value);
+        let scalar_mismatch = matches!(
+            (want_scalar, got_scalar),
+            (Some(w), Some(g)) if w != g
+        );
+
+        let want_type_name = self.chan_elem_type_name(chan);
+        let got_type_name = self.typed_value_type_name(value);
+        let array_diff = self.sized_array_names_differ(
+            want_type_name.as_deref(),
+            got_type_name.as_deref(),
+        );
+
+        if scalar_mismatch || array_diff {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot send a value of type `{}` to channel `{}` (element type `{}`) — Go refuses `cannot use ... as {} value in send` (HYB-E1002)",
+                    vk.label(),
+                    chan.render(),
+                    elem_kind.label(),
+                    elem_kind.label()
+                ),
+                "the channel element type is fixed; write an explicit conversion when a conversion is intended",
+            );
+        }
+    }
+
     /// A name that shadows checked defines but is not itself checked.
     fn exempt(&mut self, name: &str) {
         if name != "_" {
@@ -875,6 +971,8 @@ impl<'a> Collector<'a> {
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         match unwrap_parens(e) {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::Receive { chan, .. } => self.chan_elem_type_name(chan),
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
             _ => None,
         }
     }
@@ -957,6 +1055,7 @@ impl<'a> Collector<'a> {
     fn typed_value_scalar(&self, e: &Expr) -> Option<&'static str> {
         match unwrap_parens(e) {
             Expr::Ident { name, .. } => self.lookup_scalar(name),
+            Expr::Receive { chan, .. } => self.chan_elem_scalar(chan),
             // Typed arithmetic keeps its operand type: in any program that
             // builds, both operands share one type or one is an untyped
             // constant, so the typed side names the result type. A shift's
@@ -1080,6 +1179,11 @@ impl<'a> Collector<'a> {
                     if rs.len() == n {
                         return rs;
                     }
+                }
+            }
+            if let Expr::Receive { chan, .. } = unwrap_parens(&l.values[0]) {
+                if n == 2 {
+                    return vec![self.chan_elem_scalar(chan), None];
                 }
             }
         }
@@ -1566,6 +1670,10 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Some(tname) = make_call_type_name(val) {
+                    self.bind_type_name(name, tname);
+                } else if let Some(ename) = self.chan_elem_type_name_of_expr(val) {
+                    self.bind_type_name(name, ename);
                 }
             }
         }
@@ -1710,13 +1818,19 @@ impl<'a> Collector<'a> {
                 self.check_assign_operands(targets, *op, values, *span);
             }
             Stmt::Expr { expr, .. } => self.expr(expr),
-            Stmt::Send { chan, value, .. } => {
+            Stmt::Send {
+                chan,
+                value,
+                span,
+                ..
+            } => {
                 self.expr(chan);
                 // #887: the sent value is a single-value position. A void call
                 // or a multi-value call here passed the checker and emitted
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
                 self.expr(value);
+                self.check_chan_send(chan, value, *span);
             }
             Stmt::If {
                 init,
@@ -1936,11 +2050,12 @@ impl<'a> Collector<'a> {
                     self.push_scope();
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
-                    // #887: a channel send in a select arm is also a single-value
-                    // position.
-                    self.check_single_value_position(value, "a channel send", false);
+                            // #887: a channel send in a select arm is also a single-value
+                            // position.
+                            self.check_single_value_position(value, "a channel send", false);
                             self.expr(chan);
                             self.expr(value);
+                            self.check_chan_send(chan, value, chan.span());
                         }
                         SelectArmKind::Recv { names, chan } => {
                             self.check_repeated_bindings(names, chan.span());
@@ -1949,9 +2064,21 @@ impl<'a> Collector<'a> {
                                 OpKind::Chan(e) => *e,
                                 _ => OpKind::Unknown,
                             };
+                            let elem_scalar = self.chan_elem_scalar(chan);
+                            let elem_type_name = self.chan_elem_type_name(chan);
                             for (i, n) in names.iter().enumerate() {
                                 self.define_elidable(n, chan.span());
                                 self.bind_kind(n, if i == 0 { elem.clone() } else { OpKind::Bool });
+                                if i == 0 {
+                                    if let Some(s) = elem_scalar {
+                                        if let Some(top) = self.scalar_scopes.last_mut() {
+                                            top.insert(n.to_string(), Some(s));
+                                        }
+                                    }
+                                    if let Some(tn) = &elem_type_name {
+                                        self.bind_type_name(n, tn.clone());
+                                    }
+                                }
                             }
                         }
                         SelectArmKind::Default => {}
@@ -5099,9 +5226,24 @@ impl<'a> Collector<'a> {
                     } else {
                         let got_kinds = self.multi_value_kinds(&values[0]);
                         if got_kinds.len() == targets.len() {
-                            for (t, vk) in targets.iter().zip(got_kinds.iter()) {
+                            for (i, (t, vk)) in targets.iter().zip(got_kinds.iter()).enumerate() {
                                 let tpk = self.kind_of_place(t);
-                                if kinds_conflict(&tpk, vk) {
+                                let mut conflict = kinds_conflict(&tpk, vk);
+                                if i == 0 {
+                                    if let Expr::Receive { chan, .. } = unwrap_parens(&values[0]) {
+                                        let elem_scalar = self.chan_elem_scalar(chan);
+                                        let t_scalar = self.place_scalar(t);
+                                        if matches!((t_scalar, elem_scalar), (Some(ts), Some(es)) if ts != es) {
+                                            conflict = true;
+                                        }
+                                        let elem_type_name = self.chan_elem_type_name(chan);
+                                        let t_type_name = self.place_type_name(t);
+                                        if self.sized_array_names_differ(t_type_name.as_deref(), elem_type_name.as_deref()) {
+                                            conflict = true;
+                                        }
+                                    }
+                                }
+                                if conflict {
                                     self.emit_e1002(
                                         span,
                                         format!(
@@ -7368,4 +7510,37 @@ fn untyped_slice_head_ty(first: &Expr) -> Option<TypeExpr> {
         Expr::StructLit { ty: Some(t), .. } => Some(t.clone()),
         _ => None,
     }
+}
+
+fn extract_chan_elem_from_type_str(tname: &str) -> Option<&str> {
+    let trimmed = tname.trim();
+    if let Some(rest) = trimmed.strip_prefix("chan<-") {
+        Some(rest.trim_start())
+    } else if let Some(rest) = trimmed.strip_prefix("<-chan") {
+        Some(rest.trim_start())
+    } else if let Some(rest) = trimmed.strip_prefix("chan") {
+        if rest.starts_with(char::is_whitespace) || rest.starts_with('<') {
+            Some(rest.trim_start())
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+fn make_call_type_name(e: &Expr) -> Option<String> {
+    if let Expr::Call { callee, args, .. } = unwrap_parens(e) {
+        if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+            if name == "make" {
+                if let Some(first) = args.first() {
+                    let bare = unwrap_parens(&first.value);
+                    if let Expr::StructLit { ty: Some(t), .. } = bare {
+                        return Some(t.render());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
