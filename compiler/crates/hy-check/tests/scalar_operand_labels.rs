@@ -9,7 +9,11 @@ use hy_syntax::parse_file;
 fn messages(src: &str) -> Vec<String> {
     let ast = parse_file("t.hy", src).expect("snippet parses");
     let r = check_file(&ast);
-    assert_eq!(r.verdict, Verdict::Reject, "expected a rejection for:\n{src}");
+    assert_eq!(
+        r.verdict,
+        Verdict::Reject,
+        "expected a rejection for:\n{src}"
+    );
     r.diagnostics
         .iter()
         .filter(|d| d.code == "HYB-E1002")
@@ -20,7 +24,8 @@ fn messages(src: &str) -> Vec<String> {
 fn assert_named(src: &str, a: &str, b: &str) {
     let ms = messages(src);
     assert!(
-        ms.iter().any(|m| m.contains(&format!("`{a}`")) && m.contains(&format!("`{b}`"))),
+        ms.iter()
+            .any(|m| m.contains(&format!("`{a}`")) && m.contains(&format!("`{b}`"))),
         "no E1002 message names `{a}` and `{b}`: {ms:?}"
     );
 }
@@ -45,7 +50,8 @@ fn addition_names_both_widths() {
 
 #[test]
 fn ordered_and_arith_name_float_widths() {
-    let src = "fn main() {\n    var a f32 = 1.5\n    var b f64 = 2.5\n    _ = a < b\n    _ = a - b\n}\n";
+    let src =
+        "fn main() {\n    var a f32 = 1.5\n    var b f64 = 2.5\n    _ = a < b\n    _ = a - b\n}\n";
     let ms = messages(src);
     assert_eq!(ms.len(), 2, "{ms:?}");
     for m in &ms {
