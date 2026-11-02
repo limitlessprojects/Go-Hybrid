@@ -2158,6 +2158,12 @@ impl<'a> Collector<'a> {
                                     } else {
                                         OpKind::Unknown
                                     }
+                                } else if subject_kind == OpKind::Unknown {
+                                    // #3137: `circle(r)` / `shape.circle(r)` binds the
+                                    // variant's declared payload type.
+                                    self.enum_pattern_payload(segments)
+                                        .map(|t| self.kind_of_ty(&t, 0))
+                                        .unwrap_or(OpKind::Unknown)
                                 } else {
                                     OpKind::Unknown
                                 };
@@ -2605,6 +2611,7 @@ impl<'a> Collector<'a> {
                 self.check_call_operands(callee, args, *span);
                 self.check_set_method_arg(callee, args);
                 self.check_option_method_arg(callee, args);
+                self.check_enum_variant_ctor(callee, args, *span);
             }
             Expr::StructLit { ty, fields, span } => {
                 if let Some(t) = ty {
@@ -3626,6 +3633,100 @@ impl<'a> Collector<'a> {
             ),
             Expr::Ident { name, .. } => self.kind_of_named(name, 0),
             _ => OpKind::Unknown,
+        }
+    }
+
+    /// #3137: the declared payload type of the variant a `match` pattern
+    /// names. `shape.circle` resolves through the named enum; a bare
+    /// `circle` resolves only when exactly one enum declares a variant with
+    /// that name, so an ambiguous pattern stays fail-open.
+    fn enum_pattern_payload(&self, segments: &[String]) -> Option<TypeExpr> {
+        let (enum_name, variant) = match segments {
+            [v] => (None, v.as_str()),
+            [e, v] => (Some(e.as_str()), v.as_str()),
+            _ => return None,
+        };
+        let mut found: Option<TypeExpr> = None;
+        let mut hits = 0usize;
+        for (name, variants) in &self.ck.enum_payloads {
+            if enum_name.is_some_and(|e| e != name) {
+                continue;
+            }
+            for (vn, payload) in variants {
+                if vn == variant {
+                    hits += 1;
+                    found = payload.clone();
+                }
+            }
+        }
+        if hits == 1 { found } else { None }
+    }
+
+    /// #3137: `shape.circle("x")` — a variant constructor takes exactly the
+    /// declared payload (one value of the payload type, or none at all).
+    /// Go has no enum constructors to catch this later: once enums emit
+    /// (SPEC T18), a wrong payload would be wrong Go, and today the checker
+    /// is the only line of defence.
+    fn check_enum_variant_ctor(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
+        let Expr::Field { base, name: variant, .. } = unwrap_parens(callee) else {
+            return;
+        };
+        let Expr::Ident { name: enum_name, .. } = unwrap_parens(base) else {
+            return;
+        };
+        if self.scopes.iter().any(|l| l.contains_key(enum_name.as_str())) {
+            return;
+        }
+        let Some(variants) = self.ck.enum_payloads.get(enum_name.as_str()) else {
+            return;
+        };
+        let Some((_, payload)) = variants.iter().find(|(vn, _)| vn == variant) else {
+            return;
+        };
+        let payload = payload.clone();
+        let want_n = usize::from(payload.is_some());
+        if args.len() != want_n {
+            let what = match &payload {
+                Some(t) => format!("one `{}` payload", t.render()),
+                None => "no payload".to_string(),
+            };
+            self.emit_e1002(
+                span,
+                format!(
+                    "variant `{}.{}` takes {}, but {} argument(s) were given (HYB-E1002)",
+                    enum_name,
+                    variant,
+                    what,
+                    args.len()
+                ),
+                "a variant constructor takes exactly the payload declared on the enum",
+            );
+            return;
+        }
+        let (Some(t), Some(a)) = (payload, args.first()) else {
+            return;
+        };
+        let want = self.kind_of_ty(&t, 0);
+        let got = self.kind_of_expr(&a.value);
+        let int_to_float_conflict =
+            want == OpKind::Float && got == OpKind::Int && !self.is_untyped_int_const(&a.value);
+        let scalar_mismatch = matches!(
+            (self.scalar_of_ty(&t), self.typed_value_scalar(&a.value)),
+            (Some(w), Some(g)) if w != g
+        );
+        if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
+            self.emit_e1002(
+                a.value.span(),
+                format!(
+                    "cannot use `{}` (type `{}`) as `{}` payload of variant `{}.{}` (HYB-E1002)",
+                    a.value.render(),
+                    got.label(),
+                    t.render(),
+                    enum_name,
+                    variant
+                ),
+                "the payload must have the type declared on the enum variant",
+            );
         }
     }
 
