@@ -60,6 +60,19 @@ fn explicit_type_arguments_bind_the_parameters() {
 }
 
 #[test]
+fn reviewer_counterexamples_two_typed_widths_and_a_fractional_constant() {
+    // @nyxlabs29-cyber's review of #3087 (2026-11-02): both passed `hyb check`
+    // unchanged and then failed `go build` on go1.26.9.
+    // `in call to same, type int64 of b does not match inferred type int32 for t`
+    assert!(rejects(&with(
+        SAME,
+        "    var a int32 = 1\n    var b int64 = 2\n    fmt.println(same(a, b))"
+    )));
+    // `cannot use 2.5 (untyped float constant) as int value in argument to push`
+    assert!(rejects(&with(PUSH, "    fmt.println(push([]int{1}, 2.5))")));
+}
+
+#[test]
 fn go_call_site_inference_controls_stay_accepted() {
     // untyped numeric constants unify to the wider type, and a matching call
     // keeps passing: the fix must not overshoot
@@ -72,6 +85,13 @@ fn go_call_site_inference_controls_stay_accepted() {
         with(ID, "    fmt.println(id[int](3))"),
         with(PAIR, "    fmt.println(pair[int, string](1, \"a\"))"),
         with(PUT, "    m := map[string]int{}\n    put(m, \"a\", 1)"),
+        // an integral untyped float constant converts to the integer parameter
+        // (`var i int = 2.0` builds), so it must not be refused
+        with(PUSH, "    fmt.println(push([]int{1}, 2.0))"),
+        // two typed arguments that AGREE on the concrete type still pass
+        with(SAME, "    var a int32 = 1\n    var b int32 = 2\n    fmt.println(same(a, b))"),
+        with(SAME, "    var a int = 1\n    var b int = 2\n    fmt.println(same(a, b))"),
+        with(PUSH, "    var z int8 = 1\n    fmt.println(push([]int8{1}, z))"),
     ];
     for src in cases {
         let r = run(&src);

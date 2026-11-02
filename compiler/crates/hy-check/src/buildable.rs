@@ -308,9 +308,90 @@ fn is_numeric_kind(k: &OpKind) -> bool {
     matches!(k, OpKind::Int | OpKind::Float)
 }
 
+/// #3082, the reviewer's second counterexample (2026-11-02) — whether a
+/// composite literal writes its type in the source (`[]int{1}`,
+/// `map[string]int{...}`, `box[int8]{...}`). Such an argument is TYPED, so
+/// inference must not treat it as an untyped constant that yields or unifies:
+/// `push([]int{1}, 2.5)` infers `t = int` from the slice's element type and Go
+/// then refuses the constant. An untyped literal (`[1, 2]`) stays untracked.
+fn is_typed_composite_literal(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::SliceLit { elem, .. } => elem.is_some(),
+        Expr::StructLit { ty, .. } => ty.is_some(),
+        Expr::MapLit { .. } => true,
+        _ => false,
+    }
+}
+
+/// #3082, the reviewer's second counterexample (2026-11-02) — whether an
+/// untyped float LITERAL holds an integral value (`2.0`, `2.`, `1e3`), which
+/// Go does convert to an integer type (`var i int = 2.0` builds) — unlike
+/// `2.5`, whose conversion has no integer value.
+fn is_integral_float_literal(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::Lit {
+            kind: LitKind::Float(_),
+            ..
+        } => !is_fractional_float_literal(e),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => is_integral_float_literal(operand),
+        _ => false,
+    }
+}
+
+/// #3082, the reviewer's second counterexample (2026-11-02) — whether an
+/// untyped float LITERAL has a fractional part, which Go cannot convert to an
+/// integer type. `push([]int{1}, 2.5)` infers `t = int` from the slice and then
+/// refuses the constant (`cannot use 2.5 (untyped float constant) as int value
+/// in argument to push`), while `var i int = 2.0` builds — so `2.0`, `2.` and
+/// `1e3` stay accepted and only a real fraction is refused.
+fn is_fractional_float_literal(e: &Expr) -> bool {
+    fn fraction_is_nonzero(fraction: &str) -> bool {
+        fraction.chars().any(|c| c.is_ascii_digit() && c != '0')
+    }
+    match unwrap_parens(e) {
+        Expr::Lit {
+            kind: LitKind::Float(text),
+            ..
+        } => {
+            if let Some((mantissa, exponent)) = text.split_once(['e', 'E']) {
+                if exponent.starts_with('-') {
+                    return true; // `1e-1` is 0.1, not an integer
+                }
+                return mantissa.split_once('.').map_or(false, |(_, f)| fraction_is_nonzero(f));
+            }
+            text.split_once('.').map_or(false, |(_, f)| fraction_is_nonzero(f))
+        }
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => is_fractional_float_literal(operand),
+        _ => false,
+    }
+}
+
 /// #3082 — the type spelling a bound kind stands for, so an inferred type
 /// parameter can be fed back through `kind_of_ty_with_subst` (which takes
 /// type-parameter → type-name substitutions).
+/// #3082 — whether a kind still hides a part the model cannot see (a
+/// non-numeric array length, an unresolved element). An argument check that
+/// runs on such an inferred kind must fail open instead of inventing a
+/// mismatch (#3412 fixtures: `sink(a)` with `a [1][3]int` collapses to
+/// `[]unknown` and must stay accepted).
+fn kind_has_unknown(k: &OpKind) -> bool {
+    match k {
+        OpKind::Unknown => true,
+        OpKind::Slice(i) | OpKind::Array(i) | OpKind::Pointer(i) | OpKind::Chan(i)
+        | OpKind::Option(i) => kind_has_unknown(i),
+        OpKind::Map(a, b) => kind_has_unknown(a) || kind_has_unknown(b),
+        _ => false,
+    }
+}
+
 fn opkind_type_name(k: &OpKind) -> String {
     match k {
         OpKind::Int => "int".to_string(),
@@ -4741,6 +4822,15 @@ impl<'a> Collector<'a> {
                 );
                 continue;
             }
+            // #3082: a type parameter whose inferred kind still has an
+            // unknown part cannot be compared — fail open.
+            let bare_param_ty = matches!(
+                &p.ty,
+                TypeExpr::Named { name, .. } if type_params.contains(name)
+            );
+            if bare_param_ty && kind_has_unknown(&want) {
+                continue;
+            }
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
                 if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
@@ -4750,13 +4840,27 @@ impl<'a> Collector<'a> {
             let int_to_float_conflict = want == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&a.value);
+            // #3082 follow-up: the mirror case. `want` is an integer type
+            // inferred for a bare type parameter and the argument is an
+            // integral untyped float constant — `push([]int{1}, 2.0)` builds,
+            // because Go converts the constant to the inferred type and 2.0
+            // has an integer value, while `2.5` does not. Scoped to the type
+            // parameter: a concrete sized target keeps its previous behaviour.
+            let bare_int_type_param = matches!(
+                &p.ty,
+                TypeExpr::Named { name, .. } if type_params.contains(name)
+            );
+            let integral_float_constant = bare_int_type_param
+                && want == OpKind::Int
+                && got == OpKind::Float
+                && is_integral_float_literal(&a.value);
             // #2770: both sides share `OpKind::Float`/`Int` but differ in the
             // concrete type (`float32` vs `float64`, `int` vs `int64`).
             let scalar_mismatch = matches!(
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
-            if kinds_conflict(&want, &got)
+            if (kinds_conflict(&want, &got) && !integral_float_constant)
                 || int_to_float_conflict
                 || scalar_mismatch
                 || self.sized_array_names_differ(
@@ -4812,23 +4916,57 @@ impl<'a> Collector<'a> {
         args: &[CallArg],
         subst: &mut HashMap<String, String>,
     ) {
-        // type parameter -> (kind, came-from-a-typed-argument)
-        let mut bound: HashMap<String, (OpKind, bool)> = HashMap::new();
+        // type parameter -> (kind, came-from-a-typed-argument, its numeric type)
+        let mut bound: HashMap<String, (OpKind, bool, Option<&'static str>)> = HashMap::new();
         for (p, a) in params.iter().zip(args.iter()) {
             let got = self.kind_of_expr(&a.value);
-            let is_typed = self.typed_value_type_name(&a.value).is_some();
+            let scalar = self.typed_value_scalar(&a.value);
+            let is_typed = self.typed_value_type_name(&a.value).is_some()
+                || is_typed_composite_literal(&a.value);
             let mut leaves: Vec<(String, OpKind)> = Vec::new();
             self.type_param_leaves(type_params, &p.ty, &got, &mut leaves);
             for (tp, k) in leaves {
                 match bound.get(tp.as_str()).cloned() {
                     None => {
-                        bound.insert(tp, (k, is_typed));
+                        bound.insert(tp, (k, is_typed, scalar));
                     }
-                    Some((prev, prev_typed)) => {
-                        let numeric_unification = is_numeric_kind(&prev)
-                            && is_numeric_kind(&k)
-                            && !(prev_typed && is_typed);
-                        if kinds_conflict(&prev, &k) && !numeric_unification {
+                    Some((prev, prev_typed, prev_scalar)) => {
+                        // #3082 follow-up (the reviewer's two counterexamples,
+                        // 2026-11-02): unification is for two UNTYPED constants
+                        // only — a typed argument fixes the parameter outright.
+                        let numeric_unification =
+                            is_numeric_kind(&prev) && is_numeric_kind(&k) && !prev_typed && !is_typed;
+                        // `same(a, b)` with `a int32` / `b int64`: one OpKind, two
+                        // concrete types. Go infers `t = int32` from the first
+                        // argument and refuses the second (`type int64 of b does
+                        // not match inferred type int32 for t`), and the kind model
+                        // alone cannot see that difference.
+                        let typed_scalar_clash = prev_typed
+                            && is_typed
+                            && prev_scalar.is_some()
+                            && scalar.is_some()
+                            && prev_scalar != scalar;
+                        // `push([]int{1}, 2.5)`: `t` is already `int` and Go
+                        // converts the untyped constant to the inferred type, where
+                        // 2.5 has no value. `2.0` does, so only a literal with a
+                        // fractional part is refused.
+                        let untyped_float_into_int = prev_typed
+                            && !is_typed
+                            && prev == OpKind::Int
+                            && k == OpKind::Float
+                            && is_fractional_float_literal(&a.value);
+                        // An untyped NUMERIC constant yields to the typed binding
+                        // (`push([]int{1}, 2)` and `push([]int{1}, 2.0)` build,
+                        // `var f float64 = 1` too) — but not an untyped string
+                        // against a numeric parameter, which stays a conflict.
+                        let untyped_numeric_yields = prev_typed
+                            && !is_typed
+                            && is_numeric_kind(&prev)
+                            && is_numeric_kind(&k);
+                        if (kinds_conflict(&prev, &k) && !numeric_unification && !untyped_numeric_yields)
+                            || typed_scalar_clash
+                            || untyped_float_into_int
+                        {
                             self.emit_e1002(
                                 a.value.span(),
                                 format!(
@@ -4846,18 +4984,36 @@ impl<'a> Collector<'a> {
                             // type (`same(1, 2.5)` infers `float64`), so the
                             // parameter must not stay pinned to `int`.
                             if matches!(k, OpKind::Float) || matches!(prev, OpKind::Float) {
-                                bound.insert(tp, (OpKind::Float, false));
+                                bound.insert(tp, (OpKind::Float, false, None));
                             }
                         } else if is_typed && !prev_typed {
                             // a typed argument outranks an untyped constant
-                            bound.insert(tp, (k, true));
+                            bound.insert(tp, (k, true, scalar));
                         }
                     }
                 }
             }
         }
-        for (tp, (k, _)) in bound {
-            subst.entry(tp).or_insert_with(|| opkind_type_name(&k));
+        for (tp, (k, _, _)) in bound {
+            // The kind model collapses arrays and slices and drops array
+            // lengths, so a kind-derived spelling is only safe for a simple
+            // kind. For the bare type parameter the argument's own declared
+            // spelling is exact and wins (#3412 fixtures: `sink(a)` with
+            // `a [1][3]int` must not be read as `[][]int`); anything else
+            // stays unbound and therefore fails open.
+            let declared = params
+                .iter()
+                .zip(args.iter())
+                .find(|(p, _)| matches!(&p.ty, TypeExpr::Named { name, .. } if name == &tp))
+                .and_then(|(_, a)| self.typed_value_type_name(&a.value));
+            let lossy_container =
+                matches!(k, OpKind::Slice(_) | OpKind::Array(_) | OpKind::Map(..));
+            let spelling = match declared {
+                Some(text) if !text.trim().is_empty() && !text.contains("unknown") => text.trim().to_string(),
+                _ if !lossy_container && !opkind_type_name(&k).is_empty() => opkind_type_name(&k),
+                _ => continue,
+            };
+            subst.entry(tp).or_insert(spelling);
         }
     }
 
