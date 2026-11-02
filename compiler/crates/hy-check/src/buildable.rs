@@ -896,17 +896,31 @@ impl<'a> Collector<'a> {
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
-    fn scalar_of_ty(&self, ty: &TypeExpr) -> Option<&'static str> {
+    fn scalar_of_ty_with_subst(
+        &self,
+        ty: &TypeExpr,
+        subst: &HashMap<String, String>,
+    ) -> Option<&'static str> {
         let TypeExpr::Named { name, .. } = ty else {
             return None;
         };
-        if self.ck.structs.contains_key(name.as_str())
-            || self.ck.enums.contains_key(name.as_str())
-            || self.ck.type_aliases.contains_key(name.as_str())
+        let effective_name = if let Some(sub) = subst.get(name.as_str()) {
+            sub.as_str()
+        } else {
+            name.as_str()
+        };
+        if self.ck.structs.contains_key(effective_name)
+            || self.ck.enums.contains_key(effective_name)
+            || self.ck.type_aliases.contains_key(effective_name)
         {
             return None;
         }
-        canonical_numeric_name(name)
+        canonical_numeric_name(effective_name)
+    }
+
+    fn scalar_of_ty(&self, ty: &TypeExpr) -> Option<&'static str> {
+        let empty = HashMap::new();
+        self.scalar_of_ty_with_subst(ty, &empty)
     }
 
     /// #1031 — exact result types of a call whose callee is provably known:
@@ -3380,8 +3394,9 @@ impl<'a> Collector<'a> {
                     // the field's own Go spelling may differ from the typed
                     // initializer's (`int` into `int64`, `float64` into
                     // `float32`) — Go refuses that in a struct literal.
+                    let want_scalar = self.scalar_of_ty_with_subst(fty, &subst);
                     let scalar_mismatch =
-                        self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
+                        self.scalar_names_conflict(want_scalar, self.typed_value_scalar(&f.value));
                     let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
                         || kinds_conflict(&want, &got)
                         || scalar_mismatch;
