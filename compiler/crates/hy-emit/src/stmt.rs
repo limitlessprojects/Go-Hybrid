@@ -23,7 +23,7 @@ impl Emitter {
                 // the hoist emits the call + propagation — no value temp, so
                 // there is nothing left to emit afterwards.
                 let zero_try = matches!(
-                    expr,
+                    Self::peel_parens(expr),
                     Expr::Try { operand, .. } if self.call_results(operand) == Some((0, true))
                 );
                 // E3 expression form: hoist nested `?` first (Batch G).
@@ -318,32 +318,92 @@ impl Emitter {
         self.emit_local_in_seq(l, &[])
     }
 
-    /// Record (or forget) the result shape of each name this declaration
-    /// binds: `f := fn() error {…}` makes `f()?` a bare-error call; any
-    /// other initializer drops a stale entry for a reused name.
-    fn note_closure_shapes(&mut self, l: &LocalDecl) {
-        for (i, name) in l.names.iter().enumerate() {
-            let fnlit = if l.names.len() == l.values.len() {
-                match l.values.get(i).map(Self::peel_parens) {
-                    Some(Expr::FnLit { results, .. }) => Some(super::result_shape(results)),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            match fnlit {
-                Some(shape) => {
-                    self.closure_shapes.insert(name.clone(), shape);
-                }
-                None => {
-                    self.closure_shapes.remove(name);
-                }
+    pub(crate) fn callee_shape_key(&self, callee: &Expr) -> Option<String> {
+        match Self::peel_parens(callee) {
+            Expr::Ident { name, .. } => {
+                let head = name.split('[').next().unwrap_or(name);
+                (!self.local_vars.contains(head)).then(|| head.to_string())
             }
+            Expr::Field { base, name, .. } => {
+                let base = Self::peel_parens(base);
+                let head = name.split('[').next().unwrap_or(name);
+                if let Expr::Ident { name: root, .. } = base {
+                    if !self.is_unshadowed_pkg_root(root)
+                        && !self.bindings.contains_key(root)
+                        && !self.local_vars.contains(root)
+                    {
+                        let assoc = format!("{}.{}", root, head);
+                        if self.fn_shapes.contains_key(&assoc) {
+                            return Some(assoc);
+                        }
+                    }
+                }
+                self.expr_struct_name(base)
+                    .map(|sn| format!("{}::{}", sn, head))
+            }
+            _ => None,
+        }
+    }
+
+    fn expr_callable_shape(&self, e: &Expr) -> Option<(usize, bool)> {
+        let e = Self::peel_parens(e);
+        match e {
+            Expr::FnLit { results, .. } => Some(super::result_shape(results)),
+            Expr::Ident { name, .. }
+                if self
+                    .closure_shapes
+                    .contains_key(name.split('[').next().unwrap_or(name)) =>
+            {
+                self.closure_shapes
+                    .get(name.split('[').next().unwrap_or(name))
+                    .copied()
+            }
+            Expr::Call { callee, .. } => self
+                .callee_shape_key(callee)
+                .and_then(|k| self.fn_return_callables.get(&k).copied()),
+            other => self.callee_shape_key(other).and_then(|k| {
+                self.fn_return_callables
+                    .get(&k)
+                    .copied()
+                    .or_else(|| self.fn_shapes.get(&k).map(|(n, err, _, _)| (*n, *err)))
+            }),
+        }
+    }
+
+    pub(crate) fn expr_struct_name(&self, e: &Expr) -> Option<String> {
+        if let Some(sn) = self.user_struct_name_of(e) {
+            return Some(sn.to_string());
+        }
+        match Self::peel_parens(e) {
+            Expr::StructLit { ty: Some(t), .. } => self.ty_struct_name(t),
+            Expr::AddrOf { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Move { operand, .. } => self.expr_struct_name(operand),
+            Expr::Call { callee, args, .. } => {
+                let callee = Self::peel_parens(callee);
+                if matches!(callee, Expr::Ident { name, .. } if name == "new")
+                    && !self.local_vars.contains("new")
+                    && !self.fn_shapes.contains_key("new")
+                {
+                    if let Some(first) = args.first() {
+                        return match Self::peel_parens(&first.value) {
+                            Expr::StructLit { ty: Some(t), .. } => self.ty_struct_name(t),
+                            Expr::Ident { name, span } => self.ty_struct_name(&TypeExpr::Named {
+                                name: name.clone(),
+                                span: *span,
+                            }),
+                            _ => None,
+                        };
+                    }
+                }
+                self.callee_shape_key(callee)
+                    .and_then(|k| self.fn_return_structs.get(&k).cloned())
+            }
+            _ => None,
         }
     }
 
     fn emit_local_in_seq(&mut self, l: &LocalDecl, rest: &[Stmt]) -> Result<(), EmitError> {
-        self.note_closure_shapes(l);
         match l.kind {
             LocalKind::Var => {
                 let ty = l.ty.as_ref().map(|t| self.type_text(t));
@@ -414,8 +474,10 @@ impl Emitter {
                             }
                         }
                     }
-                    if l.names.len() == 1 && l.names[0] != "_" {
-                        self.register_var_ty(&l.names[0], t);
+                    for n in &l.names {
+                        if n != "_" {
+                            self.register_var_ty(n, t);
+                        }
                     }
                 }
                 return Ok(());
@@ -956,24 +1018,29 @@ impl Emitter {
     /// binding methods, user-fn declarations, and the default rust-call
     /// convention (1, true). None = unknown → callers keep today's shape.
     fn call_results(&self, e: &Expr) -> Option<(usize, bool)> {
-        let callee = match e {
-            Expr::Try { operand, .. } => match operand.as_ref() {
-                Expr::Call { callee, .. } => callee.as_ref(),
+        let callee = match Self::peel_parens(e) {
+            Expr::Try { operand, .. } => match Self::peel_parens(operand) {
+                Expr::Call { callee, .. } => Self::peel_parens(callee),
                 _ => return None,
             },
-            Expr::Call { callee, .. } => callee.as_ref(),
+            Expr::Call { callee, .. } => Self::peel_parens(callee),
             _ => return None,
         };
+        if let Some(shape) = self.expr_callable_shape(callee) {
+            return Some(shape);
+        }
         match callee {
             // rust-crate calls: the descriptor's results field.
-            Expr::Field { base, name, .. } if matches!(base.as_ref(), Expr::Ident { .. }) => {
-                if let Expr::Ident { name: pkg, .. } = base.as_ref() {
+            Expr::Field { base, name, .. } => {
+                let base = Self::peel_parens(base);
+                let head = name.split('[').next().unwrap_or(name);
+                if let Expr::Ident { name: pkg, .. } = base {
                     if self.is_unshadowed_pkg_root(pkg) {
                         if let Some(desc) = super::shapes::lookup_rust_crate(pkg) {
                             return desc
                                 .fns
                                 .iter()
-                                .find(|f| f.hy == name.as_str())
+                                .find(|f| f.hy == head)
                                 .map(|f| (f.results.0 as usize, f.results.1));
                         }
                         return None;
@@ -981,25 +1048,16 @@ impl Emitter {
                 }
                 // Typed binding methods: the METHOD_RESULTS table.
                 if let Some(bt) = self.type_of_expr(base) {
-                    if let Some(m) = super::shapes::lookup_member(bt, name) {
+                    if let Some(m) = super::shapes::lookup_member(bt, head) {
                         if m.kind == super::shapes::MemberKind::Method {
                             let (n, e) =
-                                super::shapes::lookup_method_results(bt, name).unwrap_or((1, true));
+                                super::shapes::lookup_method_results(bt, head).unwrap_or((1, true));
                             return Some((n as usize, e));
                         }
                     }
                 }
                 None
             }
-            // A closure bound by name in this fn (`f := fn() error {…}`).
-            Expr::Ident { name, .. } if self.closure_shapes.contains_key(name.as_str()) => {
-                self.closure_shapes.get(name.as_str()).copied()
-            }
-            // User fns: the eagerly collected declared shape.
-            Expr::Ident { name, .. } => self
-                .fn_shapes
-                .get(name.as_str())
-                .map(|(n, err, _, _)| (*n, *err)),
             _ => None,
         }
     }
@@ -1172,23 +1230,30 @@ impl Emitter {
 
     /// Binding hints from the defining values (see `BindingKind`).
     fn hint_from_values(&mut self, names: &[String], values: &[Expr]) {
-        let single_hint = if names.len() == 1 && values.len() == 1 && names[0] != "_" {
-            Some(self.binding_kind_of(&values[0]))
-        } else {
-            None
-        };
-        let ptr_flags: Vec<bool> = if names.len() == values.len() {
-            values.iter().map(|v| self.expr_is_pointer(v)).collect()
-        } else {
-            Vec::new()
-        };
+        let same_len = names.len() == values.len();
+        let kinds: Vec<_> = if same_len { values.iter().map(|v| self.binding_kind_of(v)).collect() } else { Vec::new() };
+        let ptr_flags: Vec<_> = if same_len { values.iter().map(|v| self.expr_is_pointer(v)).collect() } else { Vec::new() };
+        let struct_hints: Vec<_> = if same_len { values.iter().map(|v| self.expr_struct_name(v)).collect() } else { Vec::new() };
+        let fn_shapes: Vec<_> = if same_len { values.iter().map(|v| self.expr_callable_shape(v)).collect() } else { Vec::new() };
         self.shadow_local_names(names);
-        if let Some(kind) = single_hint {
-            if kind != BindingKind::Plain {
-                self.bindings.insert(names[0].clone(), kind);
+        for (name, kind) in names.iter().zip(kinds) {
+            if name != "_" && kind != BindingKind::Plain {
+                self.bindings.insert(name.clone(), kind);
             }
-            if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first() {
+        }
+        if names.len() == 1 && values.len() == 1 && names[0] != "_" {
+            if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first().map(Self::peel_parens) {
                 self.register_var_ty(&names[0], t);
+            }
+        }
+        for (name, sn) in names.iter().zip(struct_hints) {
+            if let (false, Some(s)) = (name == "_", sn) {
+                self.var_struct.insert(name.clone(), s);
+            }
+        }
+        for (name, shape) in names.iter().zip(fn_shapes) {
+            if let (false, Some(s)) = (name == "_", shape) {
+                self.closure_shapes.insert(name.clone(), s);
             }
         }
         for (name, is_ptr) in names.iter().zip(ptr_flags) {
@@ -1203,21 +1268,26 @@ impl Emitter {
         if matches!(e, Expr::MapLit { .. }) {
             return BindingKind::Map;
         }
+        if let Expr::Ident { name, .. } = e {
+            if let Some(kind) = self.bindings.get(name) {
+                return *kind;
+            }
+        }
         if let Expr::StructLit { ty: Some(t), .. } = e {
             if let Some(kind) = self.binding_kind_of_ty(t) {
                 return kind;
             }
         }
         let (call, args) = match e {
-            Expr::Try { operand, .. } => match operand.as_ref() {
-                Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
+            Expr::Try { operand, .. } => match Self::peel_parens(operand) {
+                Expr::Call { callee, args, .. } => (Self::peel_parens(callee), args.as_slice()),
                 _ => return BindingKind::Plain,
             },
-            Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
+            Expr::Call { callee, args, .. } => (Self::peel_parens(callee), args.as_slice()),
             _ => return BindingKind::Plain,
         };
         if let Expr::Field { base, name, .. } = call {
-            if let Expr::Ident { name: pkg, .. } = base.as_ref() {
+            if let Expr::Ident { name: pkg, .. } = Self::peel_parens(base) {
                 if self.is_unshadowed_pkg_root(pkg) {
                     if pkg == "io" && name == "read_all" {
                         return BindingKind::Bytes;
@@ -1245,8 +1315,8 @@ impl Emitter {
         // binding resolves through the shape table (Batch I, corpus 13:
         // `s := summary(doc)?` — s.set normalizes like any rust-call
         // result).
-        if let Expr::Ident { name, .. } = call {
-            if let Some((_, _, Some(kind), _)) = self.fn_shapes.get(name.as_str()) {
+        if let Some(key) = self.callee_shape_key(call) {
+            if let Some((_, _, Some(kind), _)) = self.fn_shapes.get(&key) {
                 return *kind;
             }
         }
@@ -1461,7 +1531,21 @@ impl Emitter {
             return Ok(());
         }
         let mut alias_assigns: Vec<Option<(String, bool)>> = Vec::new();
+        let mut fn_assigns: Vec<(String, (usize, bool))> = Vec::new();
+        let mut struct_assigns: Vec<(String, String)> = Vec::new();
         if targets.len() == values.len() && op == AssignOp::Assign {
+            for (t, v) in targets.iter().zip(values.iter()) {
+                if let PlaceKind::Ident(name) = &t.kind {
+                    if name != "_" {
+                        if let Some(s) = self.expr_callable_shape(v) {
+                            fn_assigns.push((name.clone(), s));
+                        }
+                        if let Some(sn) = self.expr_struct_name(v) {
+                            struct_assigns.push((name.clone(), sn));
+                        }
+                    }
+                }
+            }
             alias_assigns = targets
                 .iter()
                 .zip(values.iter())
@@ -1552,6 +1636,12 @@ impl Emitter {
             }
         }
         self.push(&format!("{} {} {}", ts.join(", "), op_text, vs.join(", ")));
+        for (name, shape) in fn_assigns {
+            self.closure_shapes.insert(name, shape);
+        }
+        for (name, sn) in struct_assigns {
+            self.var_struct.insert(name, sn);
+        }
         Ok(())
     }
 
@@ -1840,8 +1930,10 @@ impl Emitter {
                             }
                         }
                     }
-                    if l.names.len() == 1 && l.names[0] != "_" {
-                        self.register_var_ty(&l.names[0], t);
+                    for n in &l.names {
+                        if n != "_" {
+                            self.register_var_ty(n, t);
+                        }
                     }
                 }
                 let names = l.names.join(", ");
@@ -2279,15 +2371,6 @@ impl Emitter {
                 self.hoist_tries_expr(v)?;
             }
         }
-        // Inside a function literal the closure owns the return — plain.
-        if self.fnlit_depth > 0 {
-            let vs = values
-                .iter()
-                .map(|v| self.emit_expr(v, 0))
-                .collect::<Result<Vec<_>, _>>()?;
-            self.push(&format!("return {}", vs.join(", ")));
-            return Ok(());
-        }
         // Inside the main wrapper closure: explicit returns carry `nil` for
         // the hidden error result; bare `return` is legal (named results)
         // and returns the current hyErr — exactly the E3 desugar's shape.
@@ -2303,13 +2386,22 @@ impl Emitter {
             self.push(&format!("return {}, nil", vs.join(", ")));
             return Ok(());
         }
+        let active_sig = self.cur_results_fnlit_depth == self.fnlit_depth;
+        let cur_conv = active_sig.then_some(self.cur_fn_conv_result).flatten();
+        let cur_opt = active_sig
+            .then(|| self.cur_option_result.clone())
+            .flatten();
+        if values.is_empty() && active_sig && self.cur_results_all_named {
+            self.push("return");
+            return Ok(());
+        }
         // `return fn(…)` where the fn's result is a conversion target
         // (Batch E): Go's interface needs the HandlerFunc conversion.
-        if let Some(key) = self.cur_fn_conv_result {
-            if values.len() == 1 && matches!(values[0], Expr::FnLit { .. }) {
+        if let Some(key) = cur_conv {
+            if values.len() == 1 && matches!(Self::peel_parens(&values[0]), Expr::FnLit { .. }) {
                 if let Some(conv) = lookup_conversion(key) {
                     self.pending_fnlit_conv = Some(conv);
-                    let lit = self.emit_expr(&values[0], 0)?;
+                    let lit = self.emit_expr(Self::peel_parens(&values[0]), 0)?;
                     self.pending_fnlit_conv = None;
                     self.use_package(key.split('.').next().unwrap_or(key));
                     self.push(&format!("return {}({})", conv.go, lit));
@@ -2324,8 +2416,8 @@ impl Emitter {
         // fns whose error-returns shape is known (E3-capable fns).
         let mut vs = Vec::new();
         for (i, v) in values.iter().enumerate() {
-            if matches!(v, Expr::Ident { name, .. } if name == "none") {
-                match &self.cur_option_result {
+            if matches!(Self::peel_parens(v), Expr::Ident { name, .. } if name == "none") {
+                match &cur_opt {
                     Some(opt) => vs.push(format!("{}{{}}", opt)),
                     None => {
                         return Err(EmitError::unsupported(
@@ -2333,7 +2425,7 @@ impl Emitter {
                         ));
                     }
                 }
-            } else if matches!(v, Expr::Ident { name, .. } if name == "_") {
+            } else if matches!(Self::peel_parens(v), Expr::Ident { name, .. } if name == "_") {
                 match &self.cur_fn_error_returns {
                     Some(zeros) if i < zeros.len() => {
                         let z = &zeros[i];
@@ -2357,8 +2449,12 @@ impl Emitter {
         // with their zero texts (13: `return v` in a (value, error) fn →
         // `return v, nil`) — Go demands the full arity. An EMPTY slot is
         // the error result (propagate_error fills it at propagation time);
-        // a short explicit return means nil.
-        if let Some(zeros) = &self.cur_fn_error_returns {
+        let multi_call_fills = values.len() == 1
+            && matches!(Self::peel_parens(&values[0]), Expr::Call { .. })
+            && self.call_results(&values[0]).is_some_and(|(n, err)| {
+                Some(n + usize::from(err)) == self.cur_fn_error_returns.as_ref().map(Vec::len)
+            });
+        if let Some(zeros) = self.cur_fn_error_returns.as_ref().filter(|_| !multi_call_fills) {
             while vs.len() < zeros.len() {
                 let i = vs.len();
                 let z = &zeros[i];
