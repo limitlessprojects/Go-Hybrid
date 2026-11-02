@@ -543,6 +543,7 @@ struct Collector<'a> {
     /// signature (`None` = not a predeclared numeric spelling). Swapped
     /// together with `fn_results`.
     fn_result_scalars: Vec<Option<&'static str>>,
+    fn_result_type_names: Vec<String>,
     /// Lexical nesting depth within loops (`for` / `loop`).
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
@@ -581,6 +582,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_results_error_tail: false,
             scalar_scopes: Vec::new(),
             fn_result_scalars: Vec::new(),
+            fn_result_type_names: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
             defines: Vec::new(),
@@ -875,6 +877,7 @@ impl<'a> Collector<'a> {
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         match unwrap_parens(e) {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
             _ => None,
         }
     }
@@ -1372,7 +1375,9 @@ impl<'a> Collector<'a> {
         }
         let result_scalars: Vec<Option<&'static str>> =
             f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+        let result_type_names: Vec<String> = f.results.iter().map(|r| r.ty.render()).collect();
         let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
+        let outer_type_names = std::mem::replace(&mut self.fn_result_type_names, result_type_names);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -1389,6 +1394,7 @@ impl<'a> Collector<'a> {
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
         self.fn_result_scalars = outer_scalars;
+        self.fn_result_type_names = outer_type_names;
         self.fn_type_params = outer_tp;
         self.pop_scope();
     }
@@ -2364,7 +2370,9 @@ impl<'a> Collector<'a> {
                 );
                 let result_scalars: Vec<Option<&'static str>> =
                     results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+                let result_type_names: Vec<String> = results.iter().map(|r| r.ty.render()).collect();
                 let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
+                let outer_type_names = std::mem::replace(&mut self.fn_result_type_names, result_type_names);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -2377,6 +2385,7 @@ impl<'a> Collector<'a> {
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
                 self.fn_result_scalars = outer_scalars;
+                self.fn_result_type_names = outer_type_names;
                 self.pop_scope();
             }
             Expr::Paren { inner, .. } => self.expr(inner),
@@ -3940,9 +3949,23 @@ impl<'a> Collector<'a> {
         if let Some(n) = self.multi_value_arg_count(args) {
             if f.params.len() == n {
                 let got_kinds = self.multi_value_kinds(&args[0].value);
-                for (p, got) in f.params.iter().zip(got_kinds.iter()) {
+                let got_scalars = match unwrap_parens(&args[0].value) {
+                    Expr::Call { callee, args: cargs, .. } => self.call_result_scalars(callee, cargs),
+                    _ => None,
+                };
+                for (i, (p, got)) in f.params.iter().zip(got_kinds.iter()).enumerate() {
                     let want = self.kind_of_ty(&p.ty, 0);
-                    if kinds_conflict(&want, got) {
+                    let mut conflict = kinds_conflict(&want, got);
+                    if let Some(ref gs) = got_scalars {
+                        if let Some(got_s) = gs.get(i).copied().flatten() {
+                            if let Some(want_s) = self.scalar_of_ty(&p.ty) {
+                                if want_s != got_s {
+                                    conflict = true;
+                                }
+                            }
+                        }
+                    }
+                    if conflict {
                         self.emit_e1002(
                             args[0].value.span(),
                             format!(
@@ -4076,11 +4099,25 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let int_to_float_conflict = want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            let scalar_mismatch = matches!(
+                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (Some(w), Some(g)) if w != g
+            );
+            if kinds_conflict(&want, &got)
+                || int_to_float_conflict
+                || scalar_mismatch
+                || self.sized_array_names_differ(
+                    Some(p.ty.render().as_str()),
+                    self.typed_value_type_name(&a.value).as_deref(),
+                )
+            {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
-                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to func literal (HYB-E1002)",
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to func literal — Go refuses mismatched argument types (HYB-E1002)",
                         a.value.render(),
                         got.label(),
                         want.label()
@@ -4202,6 +4239,7 @@ impl<'a> Collector<'a> {
             if !self.report_return_conflict(v, &got, w, v.span()) {
                 let got_s = self.typed_value_scalar(v);
                 self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                self.report_array_return_mismatch(v, i, v.span());
             }
         }
     }
@@ -4213,6 +4251,25 @@ impl<'a> Collector<'a> {
     /// Go has no implicit numeric conversion for typed values, so the emitted
     /// `return` fails `go build`. Fires only when both exact types are known
     /// and the kind check has not already reported this value.
+    fn report_array_return_mismatch(&mut self, val: &Expr, idx: usize, span: Span) {
+        let Some(want_name) = self.fn_result_type_names.get(idx).map(|s| s.as_str()) else {
+            return;
+        };
+        let got_name = self.typed_value_type_name(val);
+        if self.sized_array_names_differ(Some(want_name), got_name.as_deref()) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot return a value of type `{}` from a function declaring `{}` — Go refuses `cannot use ... as {} value in return statement` (HYB-E1002)",
+                    got_name.as_deref().unwrap_or("array"),
+                    want_name,
+                    want_name,
+                ),
+                "array length must match the declared return type",
+            );
+        }
+    }
+
     fn report_numeric_return_mismatch(
         &mut self,
         got: Option<&'static str>,
