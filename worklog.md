@@ -1289,3 +1289,15 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Both: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
 - Suite trajectory: 307 -> 308 -> 309. Final main 38166b7a, tree clean.
 - NEXT TICK QUEUE: #3101 (elided struct lit in interface/non-slice slots) -> #2978 (any as concrete, fixes #2962) -> #2970 (fn-lit error-tail zero-fill) -> #2934 (builtin range bounds) -> #2942 (foreign shapes multi-return) -> #3069 (string for-in rune, fixes #3065) -> #3103 (AND-list registration) -> #3038/#3048/#3023/#3043/#2988/#3039 + re-scan for new wave.
+
+## Session 54 — 2026-11-02 afternoon (3 landed incl. 6.7d-old #1884; prior tick lost to sandbox-start failure)
+
+- NOTE: 13:10 tick (session 54 attempt 1) never ran — sandbox failed to start; clean recovery, no lost state.
+- Recycle + restore (tarball cache gone again). scan + approve 24/24 (4976 remaining). New wave of 12 Pareto candidates.
+- LANDED:
+  c013aa82 Merge PR #3144 (Dimank92, fixes #3142) — T.m method expressions with pointer receiver *T reject HYB-E1002 (Go §Method expressions). New issue_3142 suite (71L). 310 suites.
+  cbe14ea9 Merge PR #3141 (phatloi0010, fixes #3140) — emit_guard overflow checks state-aware: return-stmt overflow threads FnState, struct-lit field checks resolve via state (shadowed consts, generic structs, aliased fn types). Branch predated #3144 — kept (4 passed). New emit_guard_overflow suite (82L). 311 suites.
+  7e2cb776 Merge PR #1884 (Dimank92, fixes #1877) — check_fn_lit_call: inline closure calls + task spawns arity + per-arg kind checks HYB-E1002, pointer-param addressable exemption. Branch predated #3144/#3141 — kept both (2/2 sanity). New closure_call_arity_soundness.rs (65L). 312 suites. (6.7d old — oldest open land-candidate now cleared.)
+- All three: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
+- Suite trajectory: 309 -> 310 -> 311 -> 312. Final main 7e2cb776, tree clean.
+- NEXT TICK QUEUE: #3156 (untyped nil conditions) -> #3143 (nil match patterns / out-of-range int patterns) -> #3145 (copy() scalar mismatches) -> #3153 (copy() non-byte string, CHECK DUP vs #3145 — both gorky/Dimank92 same shape) -> #2948 (out-of-range const conversions) -> #2977 (typed const short defines) -> #1811 (complex builtins in const init, 7.1d old) -> #3133 (variadic spread position/count) -> #2868 (typed int width through reads, 0.8d) -> re-scan for tail.
