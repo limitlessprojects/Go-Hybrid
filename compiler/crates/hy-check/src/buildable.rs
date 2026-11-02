@@ -4278,6 +4278,39 @@ impl<'a> Collector<'a> {
 
     fn check_append_elements(&mut self, args: &[CallArg]) {
         let Some(first) = args.first() else { return };
+        // #3131: Go prohibits `...` on the first argument of `append`,
+        // non-final arguments, and when `...` is used with more than 2 arguments.
+        if first.spread {
+            self.emit_e1002(
+                first.value.span(),
+                "cannot use `...` on first argument of `append` — Go refuses `cannot use ... on first argument of append` (HYB-E1002)".to_string(),
+                "the first argument to `append` is the destination slice and cannot be spread; only the final argument can carry `...`",
+            );
+        }
+        let spread_indices: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| if a.spread { Some(i) } else { None })
+            .collect();
+        for &idx in &spread_indices {
+            if idx == 0 {
+                continue;
+            }
+            if idx + 1 != args.len() {
+                self.emit_e1002(
+                    args[idx].value.span(),
+                    "cannot use `...` with non-final argument in `append` — Go refuses `cannot use ... with non-final argument in append` (HYB-E1002)".to_string(),
+                    "`...` variadic spread must be on the final argument in `append(slice, elems...)`",
+                );
+            }
+            if args.len() > 2 {
+                self.emit_e1002(
+                    args[idx].value.span(),
+                    "too many arguments in call to `append` with variadic spread — Go refuses `too many arguments in call to append` (HYB-E1002)".to_string(),
+                    "`append` with a variadic spread `...` accepts exactly 2 arguments (dst_slice, src_slice...)",
+                );
+            }
+        }
         let elem = match self.kind_of_expr(&first.value) {
             OpKind::Slice(e) => *e,
             _ => return,
@@ -6390,7 +6423,7 @@ impl<'a> Collector<'a> {
         // spread argument is legal.
         if matches!(
             name,
-            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
+            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy" | "new" | "recover"
         ) && args.iter().any(|a| a.spread)
         {
             self.emit_e1002(
