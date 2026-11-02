@@ -233,6 +233,26 @@ fn is_sized_array_spelling(s: &str) -> bool {
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
+/// #3247 — Extracts element type from `[N]T` array spelling.
+fn array_elem_type_name_from_str(s: &str) -> Option<String> {
+    let t = s.trim();
+    if !t.starts_with('[') {
+        return None;
+    }
+    let close = t.find(']')?;
+    let head = &t[1..close];
+    if head.is_empty() || !head.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(t[close + 1..].trim().to_string())
+}
+
+/// #3247 — Extracts element type from `[]T` slice spelling.
+fn slice_elem_type_name_from_str(s: &str) -> Option<String> {
+    let rest = s.trim().strip_prefix("[]")?;
+    Some(rest.trim().to_string())
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -684,7 +704,13 @@ impl<'a> Collector<'a> {
             Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
             Expr::Slice { base, .. } => self.slice_element_type_name(base),
             Expr::Call { callee, args, .. } => {
-                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                let bare_callee = unwrap_parens(callee);
+                if let Expr::SliceLit { elem: Some(t), items, .. } = bare_callee {
+                    if items.is_empty() {
+                        return Some(t.render());
+                    }
+                }
+                if let Expr::Ident { name, .. } = bare_callee {
                     if name == "make" {
                         if let Some(first) = args.first() {
                             return self.slice_element_type_name(&first.value);
@@ -877,6 +903,90 @@ impl<'a> Collector<'a> {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             _ => None,
         }
+    }
+
+    /// #3247 — Extracts element type of slice expression.
+    fn slice_elem_type_of_expr(&self, e: &Expr) -> Option<String> {
+        if let Some(elem) = self.slice_element_type_name(e) {
+            return Some(elem);
+        }
+        let ty_name = self.typed_value_type_name(e)?;
+        if let Some(underlying) = self.underlying_type_spelling(&ty_name) {
+            slice_elem_type_name_from_str(&underlying)
+        } else {
+            slice_elem_type_name_from_str(&ty_name)
+        }
+    }
+
+    /// #3247 — Resolves underlying type of a type alias.
+    fn underlying_type_spelling(&self, name: &str) -> Option<String> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            Some(self.ck.resolve_type_alias(ty).render())
+        } else {
+            None
+        }
+    }
+
+    /// #3247 — Resolves underlying type of an expression.
+    fn expr_underlying_type_name(&self, e: &Expr) -> Option<String> {
+        let ty_name = self.typed_value_type_name(e)?;
+        if let Some(underlying) = self.underlying_type_spelling(&ty_name) {
+            Some(underlying)
+        } else {
+            Some(ty_name)
+        }
+    }
+
+    /// #3247 — Validates array/slice conversion element width and length.
+    fn array_or_slice_conversion_mismatch(
+        &self,
+        target_name: &str,
+        target_kind: &OpKind,
+        arg: &Expr,
+        arg_kind: &OpKind,
+    ) -> bool {
+        let target_underlying = self
+            .underlying_type_spelling(target_name)
+            .unwrap_or_else(|| target_name.to_string());
+        let Some(arg_underlying) = self.expr_underlying_type_name(arg) else {
+            return false;
+        };
+
+        if matches!(target_kind, OpKind::Array(_)) && matches!(arg_kind, OpKind::Array(_)) {
+            if self.sized_array_names_differ(Some(&target_underlying), Some(&arg_underlying)) {
+                return true;
+            }
+            let target_elem = array_elem_type_name_from_str(&target_underlying);
+            let arg_elem = array_elem_type_name_from_str(&arg_underlying);
+            if let (Some(te), Some(ae)) = (target_elem.as_deref(), arg_elem.as_deref()) {
+                if let (Some(w1), Some(w2)) = (canonical_numeric_name(te), canonical_numeric_name(ae)) {
+                    if w1 != w2 {
+                        return true;
+                    }
+                }
+                if self.sized_array_names_differ(Some(te), Some(ae)) {
+                    return true;
+                }
+            }
+        }
+
+        if matches!(target_kind, OpKind::Slice(_)) && matches!(arg_kind, OpKind::Slice(_)) {
+            let target_elem = slice_elem_type_name_from_str(&target_underlying);
+            let arg_elem = slice_elem_type_name_from_str(&arg_underlying);
+            if let (Some(te), Some(ae)) = (target_elem.as_deref(), arg_elem.as_deref()) {
+                if let (Some(w1), Some(w2)) = (canonical_numeric_name(te), canonical_numeric_name(ae)) {
+                    if w1 != w2 {
+                        return true;
+                    }
+                }
+                if self.sized_array_names_differ(Some(te), Some(ae)) {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     /// #2771 — the declared Go spelling of a simple local assignment target.
@@ -3475,7 +3585,8 @@ impl<'a> Collector<'a> {
         // #2811: `string`↔slice conversions are restricted to byte/rune
         // elements; `OpKind::Int` cannot tell `int64` from `uint8`.
         let element_mismatch = self.string_slice_conversion_element_mismatch(name, &k, arg, &arg_k);
-        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch {
+        let array_or_slice_conv_mismatch = self.array_or_slice_conversion_mismatch(name, &k, arg, &arg_k);
+        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch || array_or_slice_conv_mismatch {
             let note = if matches!(k, OpKind::Struct(_)) {
                 "structs cannot be instantiated via function-call conversions; write a struct literal like `T{...}` instead"
             } else {
@@ -6068,7 +6179,23 @@ impl<'a> Collector<'a> {
                 // `go build` (`cannot convert ... to type ...`, Row 13 BUILDABLE).
                 if let OpKind::Slice(arg_elem) = &ak {
                     let target_elem = self.kind_of_ty(elem_ty, 0);
-                    if copy_element_kinds_conflict(&target_elem, arg_elem) {
+                    let target_elem_str = elem_ty.render();
+                    let arg_elem_ty = self.slice_elem_type_of_expr(arg);
+                    let scalar_mismatch = match (
+                        canonical_numeric_name(&target_elem_str),
+                        arg_elem_ty.as_deref().and_then(canonical_numeric_name),
+                    ) {
+                        (Some(a), Some(b)) => a != b,
+                        _ => false,
+                    };
+                    let array_mismatch = self.sized_array_names_differ(
+                        Some(&target_elem_str),
+                        arg_elem_ty.as_deref(),
+                    );
+                    if copy_element_kinds_conflict(&target_elem, arg_elem)
+                        || scalar_mismatch
+                        || array_mismatch
+                    {
                         self.emit_e1002(
                             arg.span(),
                             format!(
