@@ -442,6 +442,17 @@ fn elem_types_conflict(want: &str, got: &str) -> bool {
     false
 }
 
+/// #3255 — Extracts element type string from `[N]T` array spelling.
+fn array_elem_type_name_from_str(s: &str) -> Option<String> {
+    parse_sized_array(s).map(|(_, elem)| elem.to_string())
+}
+
+/// #3255 — Extracts element type string from `[]T` slice spelling.
+fn slice_elem_type_name_from_str(s: &str) -> Option<String> {
+    let rest = s.trim().strip_prefix("[]")?;
+    Some(rest.trim().to_string())
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -1203,10 +1214,18 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #2771 — the declared Go spelling of a value whose type carries detail
+    /// #3255 — Resolves underlying type of a type alias.
+    fn underlying_type_spelling(&self, name: &str) -> Option<String> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            Some(self.ck.resolve_type_alias(ty).render())
+        } else {
+            None
+        }
+    }
+
+    /// #2771 / #3255 — the declared Go spelling of a value whose type carries detail
     /// that `OpKind` drops, notably an array's length (`[3]int` vs `[4]int`).
-    /// Identifiers bound with an explicit type name or explicit array literals
-    /// are known; everything else (conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
         if let Some((len_opt, inner_elem, array_ty)) = bare.as_array_lit() {
@@ -1226,12 +1245,35 @@ impl<'a> Collector<'a> {
             return Some(array_ty.render());
         }
         match bare {
-            Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                if let Some(underlying) = self.underlying_type_spelling(&tn) {
+                    Some(underlying)
+                } else {
+                    Some(tn)
+                }
+            }
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
-                self.struct_field_type_name(&bk, name)
+                let tn = self.struct_field_type_name(&bk, name)?;
+                Some(self.underlying_type_spelling(&tn).unwrap_or(tn))
             }
-            Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
+            Expr::SliceLit { elem: Some(t), .. } => {
+                let resolved = self.ck.resolve_type_alias(t);
+                Some(format!("[]{}", resolved.render()))
+            }
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    let head = Checker::base_named_type_str(name);
+                    if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                        if f.results.len() == 1 {
+                            let resolved = self.ck.resolve_type_alias(&f.results[0].ty);
+                            return Some(resolved.render());
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -1262,6 +1304,89 @@ impl<'a> Collector<'a> {
             }
             _ => None,
         }
+    }
+
+    /// #3255 — Recursively extracts canonical numeric element scalar from slice or array type spelling.
+    fn elem_scalar_from_type_str(&self, s: &str) -> Option<&'static str> {
+        let mut cur = s.trim().to_string();
+        loop {
+            if let Some(elem) = slice_elem_type_name_from_str(&cur) {
+                cur = elem;
+                continue;
+            }
+            if let Some(elem) = array_elem_type_name_from_str(&cur) {
+                cur = elem;
+                continue;
+            }
+            break;
+        }
+        if let Some(underlying) = self.underlying_type_spelling(&cur) {
+            return self.elem_scalar_from_type_str(&underlying);
+        }
+        canonical_numeric_name(&cur)
+    }
+
+    /// #3255 — Extracts canonical numeric element scalar from a slice or array TypeExpr.
+    fn elem_scalar_from_ty(&self, ty: &TypeExpr) -> Option<&'static str> {
+        let resolved = self.ck.resolve_type_alias(ty);
+        match &resolved {
+            TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                if let Some(s) = self.scalar_of_ty(elem) {
+                    Some(s)
+                } else {
+                    self.elem_scalar_from_ty(elem)
+                }
+            }
+            TypeExpr::Named { name, .. } => {
+                if let Some(underlying) = self.underlying_type_spelling(name) {
+                    self.elem_scalar_from_type_str(&underlying)
+                } else {
+                    canonical_numeric_name(name)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// #3255 — Extracts canonical numeric element scalar from a slice or array expression.
+    fn expr_composite_elem_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let bare = unwrap_parens(e);
+        if let Some((_, inner_elem, _)) = bare.as_array_lit() {
+            if let Some(s) = self.scalar_of_ty(inner_elem) {
+                return Some(s);
+            }
+            return self.elem_scalar_from_ty(inner_elem);
+        }
+        match bare {
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                let underlying = self.underlying_type_spelling(&tn).unwrap_or(tn);
+                self.elem_scalar_from_type_str(&underlying)
+            }
+            Expr::SliceLit { elem: Some(t), .. } => {
+                let resolved = self.ck.resolve_type_alias(t);
+                if let Some(s) = self.scalar_of_ty(&resolved) {
+                    return Some(s);
+                }
+                self.elem_scalar_from_ty(&resolved)
+            }
+            Expr::Field { .. } | Expr::Call { .. } => {
+                let tn = self.typed_value_type_name(bare)?;
+                self.elem_scalar_from_type_str(&tn)
+            }
+            _ => None,
+        }
+    }
+
+    /// #3255 — Detects numeric scalar mismatch between composite element types.
+    fn composite_elem_scalar_mismatch(&self, declared_ty: &TypeExpr, val_expr: &Expr) -> bool {
+        let Some(want) = self.elem_scalar_from_ty(declared_ty) else {
+            return false;
+        };
+        let Some(got) = self.expr_composite_elem_scalar(val_expr) else {
+            return false;
+        };
+        want != got
     }
 
     /// #2771 — the declared Go spelling of a simple local assignment target.
@@ -4840,11 +4965,13 @@ impl<'a> Collector<'a> {
                         Some(field_type_name),
                         got_type_name.as_deref(),
                     );
+                    let elem_scalar_mismatch = self.composite_elem_scalar_mismatch(fty, &f.value);
                     let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
                         || kinds_conflict(&want, &got)
                         || scalar_mismatch
                         || container_or_alias_mismatch
-                        || array_mismatch;
+                        || array_mismatch
+                        || elem_scalar_mismatch;
                     let already_diagnosed_e3012 = self
                         .ck
                         .diags
@@ -7551,10 +7678,16 @@ impl<'a> Collector<'a> {
             } else {
                 None
             };
+            // #3255: array length or element scalar mismatch in array literals.
+            let array_dim_mismatch = self.sized_array_names_differ(
+                Some(resolved_ty.render().as_str()),
+                self.typed_value_type_name(item).as_deref(),
+            );
+            let elem_scalar_mismatch = self.composite_elem_scalar_mismatch(elem_ty, item);
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch && deep_conflict.is_none() {
+            if ik == expected && !scalar_mismatch && deep_conflict.is_none() && !array_dim_mismatch && !elem_scalar_mismatch {
                 continue;
             }
             let is_untyped_int_to_float = expected == OpKind::Float
@@ -7563,11 +7696,13 @@ impl<'a> Collector<'a> {
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
                 || scalar_mismatch
-                || deep_conflict.is_some();
+                || deep_conflict.is_some()
+                || array_dim_mismatch
+                || elem_scalar_mismatch;
             if !conflict {
                 continue;
             }
-            let got_ty = if deep_conflict.is_some() {
+            let got_ty = if deep_conflict.is_some() || array_dim_mismatch || elem_scalar_mismatch {
                 self.typed_value_type_name(item).unwrap_or_else(|| ik.label().to_string())
             } else {
                 ik.label().to_string()
@@ -7655,10 +7790,16 @@ impl<'a> Collector<'a> {
             } else {
                 None
             };
+            // #3255: array length or element scalar mismatch in slice literals.
+            let array_dim_mismatch = self.sized_array_names_differ(
+                Some(resolved_ty.render().as_str()),
+                self.typed_value_type_name(item).as_deref(),
+            );
+            let elem_scalar_mismatch = self.composite_elem_scalar_mismatch(elem_ty, item);
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch && deep_conflict.is_none() {
+            if ik == expected && !scalar_mismatch && deep_conflict.is_none() && !array_dim_mismatch && !elem_scalar_mismatch {
                 continue;
             }
             if expected == OpKind::Float
@@ -7673,11 +7814,13 @@ impl<'a> Collector<'a> {
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
                 || scalar_mismatch
-                || deep_conflict.is_some();
+                || deep_conflict.is_some()
+                || array_dim_mismatch
+                || elem_scalar_mismatch;
             if !conflict {
                 continue;
             }
-            let got_ty = if deep_conflict.is_some() {
+            let got_ty = if deep_conflict.is_some() || array_dim_mismatch || elem_scalar_mismatch {
                 self.typed_value_type_name(item).unwrap_or_else(|| ik.label().to_string())
             } else {
                 ik.label().to_string()
@@ -7840,19 +7983,27 @@ impl<'a> Collector<'a> {
                 // typed key whose composite inner differs passed the equal
                 // kind arm (`map[chan int64]string{...}` into `map[chan int32]string`).
                 let deep_conflict = if kk == exp_key && exp_key != OpKind::Interface {
-                self.deep_composite_conflict(&resolved_key, self.typed_value_type_name(k).as_deref())
-            } else {
-                None
-            };
+                    self.deep_composite_conflict(&resolved_key, self.typed_value_type_name(k).as_deref())
+                } else {
+                    None
+                };
+                // #3255: array length or element scalar mismatch in map literal key.
+                let key_array_dim_mismatch = self.sized_array_names_differ(
+                    Some(resolved_key.render().as_str()),
+                    self.typed_value_type_name(k).as_deref(),
+                );
+                let key_elem_scalar_mismatch = self.composite_elem_scalar_mismatch(key_ty, k);
                 let is_untyped_int_to_float = exp_key == OpKind::Float
                     && kk == OpKind::Int
                     && self.is_untyped_int_const(k);
                 let conflict = (exp_key == OpKind::Float && kk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_key, &kk)
                     || scalar_mismatch
-                    || deep_conflict.is_some();
+                    || deep_conflict.is_some()
+                    || key_array_dim_mismatch
+                    || key_elem_scalar_mismatch;
                 if kk != OpKind::Unknown && conflict {
-                    let got_ty = if deep_conflict.is_some() {
+                    let got_ty = if deep_conflict.is_some() || key_array_dim_mismatch || key_elem_scalar_mismatch {
                         self.typed_value_type_name(k).unwrap_or_else(|| kk.label().to_string())
                     } else {
                         kk.label().to_string()
@@ -7915,19 +8066,27 @@ impl<'a> Collector<'a> {
                 // typed value whose composite inner differs passed the equal
                 // kind arm (`map[string]chan int64` into `map[string]chan int32`).
                 let deep_conflict = if vk == exp_val && exp_val != OpKind::Interface {
-                self.deep_composite_conflict(&resolved_val, self.typed_value_type_name(v).as_deref())
-            } else {
-                None
-            };
+                    self.deep_composite_conflict(&resolved_val, self.typed_value_type_name(v).as_deref())
+                } else {
+                    None
+                };
+                // #3255: array length or element scalar mismatch in map literal value.
+                let val_array_dim_mismatch = self.sized_array_names_differ(
+                    Some(resolved_val.render().as_str()),
+                    self.typed_value_type_name(v).as_deref(),
+                );
+                let val_elem_scalar_mismatch = self.composite_elem_scalar_mismatch(val_ty, v);
                 let is_untyped_int_to_float = exp_val == OpKind::Float
                     && vk == OpKind::Int
                     && self.is_untyped_int_const(v);
                 let conflict = (exp_val == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_val, &vk)
                     || scalar_mismatch
-                    || deep_conflict.is_some();
+                    || deep_conflict.is_some()
+                    || val_array_dim_mismatch
+                    || val_elem_scalar_mismatch;
                 if vk != OpKind::Unknown && conflict {
-                    let got_ty = if deep_conflict.is_some() {
+                    let got_ty = if deep_conflict.is_some() || val_array_dim_mismatch || val_elem_scalar_mismatch {
                         self.typed_value_type_name(v).unwrap_or_else(|| vk.label().to_string())
                     } else {
                         vk.label().to_string()
