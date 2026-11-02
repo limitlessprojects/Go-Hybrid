@@ -1,0 +1,31 @@
+{
+  "suite": "workload_shape_fail_closed_cases",
+  "cases": [
+    {
+      "id": "canonical_lf_generation",
+      "mode": "generate",
+      "expect_newline": "\n",
+      "expect_exit": 0
+    },
+    {
+      "id": "missing_parent_directories_recreated",
+      "mode": "generate",
+      "removed_dirs": ["go", "rust", "hy"],
+      "expect_exit": 0
+    },
+    {
+      "id": "crlf_line_endings_reported_as_drift",
+      "mode": "check",
+      "corrupt_target": "go/main.go",
+      "corruption": "crlf",
+      "expect_exit": 1
+    },
+    {
+      "id": "invalid_utf8_bytes_reported_as_drift_without_traceback",
+      "mode": "check",
+      "corrupt_target": "go/main.go",
+      "corruption": "invalid_utf8",
+      "expect_exit": 1
+    }
+  ]
+}
