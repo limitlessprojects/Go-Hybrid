@@ -128,6 +128,12 @@ pub fn check_file(file: &File) -> CheckResult {
     // or an E11 handler closure — lexical, like `return`.
     try_context::check_try_contexts(&mut ck, file);
 
+    // C2a (HYB-E3206 / HYB-E3207): `task { … }` is schedulable only where the
+    // emitter collects it — a direct statement of an `auto` body — and the
+    // region's non-task statements stay ahead of its tasks, because that is the
+    // order the emitter writes them in.
+    auto_schedule::check_task_scopes(&mut ck, file);
+
     let fns: Vec<&FnDecl> = file.fns().collect();
     for f in fns {
         check_fn(&mut ck, f);
@@ -901,14 +907,11 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             }
 
             // `task { ... }` — inline task block (issue #1962).
-            // Only valid inside an `auto { ... }` scope; checked by the
-            // auto-scheduler pass which collects and schedules all tasks.
-            Stmt::TaskBlock { body, span } => {
-                // For now: record that we saw a task block. The full
-                // scheduling pass runs after the flat walk completes.
-                // TODO: check that we are inside an auto block (HYB-E3204)
-                let _ = (body, span);
-            }
+            // Placement is the whole rule for this position: only a direct
+            // statement of an `auto` body is collected and scheduled, which
+            // auto_schedule::check_task_scopes enforces as HYB-E3206. The
+            // body's own bindings are checked by the flat walk above.
+            Stmt::TaskBlock { .. } => {}
 
             // `auto { ... }` — automatic fork-join scheduling (issue #1962).
             // Collects all inline task blocks inside, analyzes their effects,
@@ -935,7 +938,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             &v.message,
                         )
                         .with_notes(vec![
-                            "auto scope is closed: all tasks must be inline blocks, no blocking calls, no dynamic spawn".to_string(),
+                            "auto scope is closed: all tasks must be direct inline blocks of the `auto` body, with no blocking calls, no dynamic spawn and no references taken inside".to_string(),
                             "move external calls or blocking operations outside the auto block".to_string(),
                         ]),
                     );

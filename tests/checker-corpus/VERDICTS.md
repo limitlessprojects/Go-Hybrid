@@ -1082,15 +1082,31 @@ companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.| local-composite-cha
 
 -------------------------------------------------------------------------------
 
-## Additive corpus registration — `auto { ... }` automatic fork-join scheduling (issue #1962)
+## Additive corpus registration — 2026-11-02: `auto { ... }` automatic fork-join scheduling (issue #1962)
 
-Seven programs register the closed `auto` scope, derived from the issue text
-before the scheduler was written: four ACCEPT shapes that pin the layering
-(independent roots run together, conflicting ones serialize), and three
-REJECT shapes that break the region's statically-known task set. Verdict
-codes: `HYB-E3201` AUTO-RECV, `HYB-E3203` AUTO-SPAWN, `HYB-E3204` AUTO-TASK
-(`HYB-E3202` AUTO-SELECT and `HYB-E3205` auto-escaped-reference are enforced
-by the checker's unit tests, not by a corpus fixture here).
+Twelve programs register the closed `auto` scope, taken from the issue text
+(the region is statically known, fork-join, serial-by-default): four ACCEPT
+shapes that pin the layering (independent roots run together, conflicting ones
+serialize), and eight REJECT shapes — three that break the task set the region
+can see (blocking receive, dynamic spawn, un-analyzable task call), one that
+blocks a layer's join (`select`), and four that put a task or a statement where
+the scheduler cannot reach it: a reference the effect model cannot see, a
+`task { ... }` with no region at all, one nested under a condition, and a
+region statement the emitter would hoist above the tasks it follows.
+
+Verdict codes: `HYB-E3201` AUTO-RECV, `HYB-E3202` AUTO-SELECT, `HYB-E3203`
+AUTO-SPAWN, `HYB-E3204` AUTO-TASK, `HYB-E3205` AUTO-ESCAPE, `HYB-E3206`
+AUTO-SCOPE, `HYB-E3207` AUTO-ORDER. Every code in the family is pinned by a
+fixture here — none of them rests on the checker's unit tests alone.
+
+Order note, stated rather than hidden: 130-136 were registered before the
+scheduler ran, as the pre-registration rule requires. 137-141 are registered
+with the rules already implemented — the placement and order questions only
+became reachable once `task { ... }` existed, and their verdicts turn on an
+implementation fact (which statements the emitter collects, and in what order
+it writes them). The verdicts themselves are the issue's closed-scope
+constraints applied; recording them here is the logged amendment, not a silent
+one.
 
 ### 130-auto-basic-disjoint (issue #1962) — ACCEPT
 Two inline `task { ... }` blocks whose writes are disjoint (`x` / `y`): the
@@ -1123,5 +1139,37 @@ Four tasks over `a`/`b`/`c`/`d` that must fall into three layers — `[0, 1]`
 (disjoint writes), then `[2]` (reads `a`, writes `c`), then `[3]` (reads `c`,
 writes `d`). Pins the greedy layering itself, not just the two-task case.
 
-With this registration the corpus is **137 programs: ACCEPT 44 ·
-ACCEPT-MANAGED 2 · REJECT 91** — main's 130 plus these seven.
+### 137-auto-blocking-select-rejected (issue #1962) — REJECT
+`auto { task { select { v := <-a: total += v } } }`: the region joins every
+layer, so a task parked on a clause nobody in the region can satisfy never
+lets the join happen. The whole `select` is the rejected construct; the
+receive inside its clause is not separately charged (HYB-E3202 / AUTO-SELECT).
+
+### 138-auto-escaped-reference-rejected (issue #1962) — REJECT
+`auto { task { slot := &counter } }`: the scheduler compares ROOT NAMES, and a
+reference is a second route to the same storage that no effect set records.
+Layering on top of it would be a proof the program can invalidate, so taking
+an address inside the region is refused whatever the pointer is used for
+(HYB-E3205 / AUTO-ESCAPE).
+
+### 139-stray-task-block-rejected (issue #1962) — REJECT
+A `task { ... }` with no `auto` around it. Nothing collects it, so the emitter
+reaches its goroutine fallback and the spawn is never joined: the write races
+the statement after it, silently. Placement is the rule — the identical block
+as a direct statement of an `auto` body is corpus 130 (HYB-E3206 / AUTO-SCOPE).
+
+### 140-auto-task-nested-in-cond-rejected (issue #1962) — REJECT
+`auto { if ready { task { x = 1 } } }`: inside the region, but not a direct
+statement of its body — the task set the scheduler walks is the body's
+direct blocks, so this one leaks out through the same fallback as 139. A task
+under a condition has no loop to blame, so it is AUTO-SCOPE rather than the
+dynamic-spawn code that covers a task in a loop (HYB-E3206 / AUTO-SCOPE).
+
+### 141-auto-statement-after-task-rejected (issue #1962) — REJECT
+`auto { task { x = 1 }  fmt.println(x) }`: the region emits its non-task statements
+ahead of the layers, so this `println` would run before the task it follows in
+the source — a silent wrong value rather than a race. Moving the line above
+the first task, or out of the block, is the whole fix (HYB-E3207 / AUTO-ORDER).
+
+With this registration the corpus is **142 programs: ACCEPT 44 ·
+ACCEPT-MANAGED 2 · REJECT 96** — main's 130 plus these twelve.

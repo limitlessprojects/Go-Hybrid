@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated": "2026-10-29",
+  "updated": "2026-11-02",
   "format": "HYB-Exxxx registry (SPEC-LANGUAGE.md §9.6; append-only, never renumbered, never reused)",
   "categories": {
     "E0": "parse / lexical",
@@ -587,15 +587,48 @@
       "name": "auto-escaped-reference",
       "category": "ownership-sendability",
       "severity": "error",
-      "title": "auto task state escapes the auto scope",
-      "summary": "An `auto` scope must keep every task’s effects inside the region: writing a variable that outlives the region (or handing a task-local reference to the enclosing goroutine) breaks the layered schedule, because the escape can be observed before the layer joins.",
+      "title": "reference taken inside an auto scope",
+      "summary": "The auto scheduler proves two tasks independent by comparing the ROOT NAMES they read and write. A reference created inside the region (`&x`) is a second route to the same storage: writes through it never appear in any effect set, so a layer built on the name-based proof can be raced by the alias. Fail-closed — taking an address inside `auto { ... }` is rejected, whatever is done with the pointer afterwards.",
       "fixits": [
-        "write the value to a variable declared inside the `auto` block and copy it out after the join",
-        "pass data between tasks through channels instead of shared mutable state"
+        "pass the value between tasks through a channel instead of a shared address",
+        "do the pointer-taking work outside the `auto` block, after the region has joined",
+        "if the tasks truly touch nothing in common, keep the region reference-free and let the scheduler parallelize it"
       ],
-      "example": "x = compute()   // inside task: reject: HYB-E3205 — state escapes the auto scope",
+      "example": "auto { task { acc = &counters[i] } }   // reject: HYB-E3205 — reference taken inside auto scope",
       "rule": "C2a",
       "tier0_rule_id": "AUTO-ESCAPE"
+    },
+    {
+      "code": "HYB-E3206",
+      "name": "auto-task-out-of-scope",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "`task { ... }` in a position the auto scheduler cannot collect",
+      "summary": "The task set of an `auto` scope is its DIRECT inline blocks — that is the shape the emitter gathers, layers and joins with `sync.WaitGroup`. A `task { ... }` nested in an `if`, a loop body, a plain block, a closure, another task, or written with no `auto` around it at all falls through to the `go func() { ... }()` fallback: it spawns outside the region and nobody joins it, so the code after the block races it. This is the silent-race case Tier 0 exists to refuse.",
+      "fixits": [
+        "move the block up so it is a direct statement of the `auto { ... }` body",
+        "for a conditional task, put the `if` OUTSIDE the region and use two `auto` blocks, or a plain `task f(...)` spawn",
+        "for a task in a loop, use plain `task` spawns plus your own join (see example 03) — dynamic spawn inside `auto` has no static layer schedule (HYB-E3203)"
+      ],
+      "example": "auto { if ready { task { x = 1 } } }   // reject: HYB-E3206 — not a direct statement of the auto body",
+      "rule": "C2a",
+      "tier0_rule_id": "AUTO-SCOPE"
+    },
+    {
+      "code": "HYB-E3207",
+      "name": "auto-statement-after-task",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "statement written after a task inside an auto region",
+      "summary": "An `auto { ... }` region emits its non-task statements first and then the task layers — that is what makes the layers a statically known set the region can join. A statement written AFTER a `task { ... }` block therefore runs BEFORE it, so the program's written order and its executed order disagree, silently, and the value it reads is the one the task has not written yet. The region accepts statements ahead of its tasks; the mix that contradicts itself is refused.",
+      "fixits": [
+        "move the statement above the first `task { ... }` of the region",
+        "take it out of the `auto` block: after the region joins, its order relative to the tasks is the order you wrote",
+        "if the statement must observe a task's result, make that dependency a task of a later layer (it conflicts on the same root name) and read the value after the block"
+      ],
+      "example": "auto { task { x = 1 }  fmt.println(x) }   // reject: HYB-E3207 — the println would run first",
+      "rule": "C2a",
+      "tier0_rule_id": "AUTO-ORDER"
     },
     {
       "code": "HYB-E4001",

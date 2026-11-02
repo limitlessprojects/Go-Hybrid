@@ -1232,14 +1232,29 @@ that do not conflict with each other. Layers run sequentially; tasks within a
 layer run in parallel (emitted as goroutines + `sync.WaitGroup`).
 
 **Constraints (closed scope):**
-- Only inline `task { ... }` blocks are allowed — plain `task fn(...)` calls
-  are rejected (external callee effects can't be analyzed, state might escape).
-- No blocking calls (channel receive, `select`) — would deadlock the layer.
-- No dynamic spawn (task inside loops) — task set must be statically known.
-- No escaped references — mutable state cannot leak to the outer goroutine.
+- Only inline `task { ... }` blocks that are **direct statements of the `auto`
+  body** are collected — that is the shape the scheduler sees and joins. A
+  `task { ... }` anywhere else (in an `if`, a loop body, a plain block, a
+  closure, another task, or with no `auto` around it) is HYB-E3206: it would
+  reach the emitter's `go func() { ... }()` fallback and never be joined.
+- Plain `task fn(...)` calls inside the region are rejected (HYB-E3204) — the
+  callee's effects are not analyzable, so the region cannot prove its state
+  stays closed.
+- No blocking waits — a channel receive (HYB-E3201) or a `select` (HYB-E3202)
+  can park a task forever, and the layer's join never happens.
+- No dynamic spawn (task inside a loop, HYB-E3203) — the task set must be
+  statically known.
+- No references taken inside the region (HYB-E3205) — the independence proof
+  compares root names, and `&x` is a route to the same storage that no effect
+  set records.
+- The region's own statements stay ahead of its tasks: the emitter writes the
+  body's non-task statements, then the layers, so a statement placed after a
+  `task { ... }` would run before it (HYB-E3207). Move it above the first task,
+  or out of the block.
 
-**Emission:** each layer becomes a `var wg sync.WaitGroup` block; single-task
-layers run inline (no goroutine overhead).
+**Emission:** the body's non-task statements first, then each layer as a
+`var wg sync.WaitGroup` block; single-task layers run inline (no goroutine
+overhead). That fixed order is why HYB-E3207 exists.
 
 ### 8.2 Channels
 

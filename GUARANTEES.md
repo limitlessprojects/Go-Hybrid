@@ -60,12 +60,13 @@ Everything the checker **accepts was proven** sendable; everything it
 | 18 | Memory safety, Rust side | Single ownership, moves, function-local borrows; `panic = abort` at the boundary (never unwind across) | **Guaranteed by construction** | §6.3, abi-types.md |
 | 19 | Memory safety, at the boundary | Owning-side handle tables with generation tags; copy-small/pin-large borrows | **Guaranteed** by the Spike-3 design + tests | §9.0 three-layer model; interfaces/abi-types.md |
 | 20 | The Rust call path | Guard-checked fast path on the caller's stack; pooled guarded deep stacks; blocking callees via the two-tier scheduler with hard thread budgets | **Performance claimed and measured** (3.37–3.44 ns sandbox fast path; worker-tier 6.93 ns recorded honestly as a MISS vs the 5 ns budget) | [gates/G2.md](gates/G2.md); PLAN.md row 3 |
+| 21 | The `auto { ... }` fork-join scope | Collects the region’s task set from the DIRECT statements of the `auto` body only, orders tasks by root-name read/write effects (parallel when provably disjoint, serial otherwise), keeps the body’s own statements ahead of the layers it emits, and rejects the shapes that would reach a goroutine the region never joins or a value read out of order: blocking receive, `select`, a task in a loop, a plain `task f(...)` call, a reference taken inside, a `task { ... }` outside the schedulable position, a statement written after a task | **Guaranteed**: no `task { ... }` spawns past the region’s join, and no region statement runs in an order its source denies | [§8.1.1 C2a](SPEC-LANGUAGE.md); corpus [130](tests/checker-corpus/130-auto-basic-disjoint.hy) / [136](tests/checker-corpus/136-auto-three-layer-schedule.hy) (layering accepted), [133](tests/checker-corpus/133-auto-blocking-recv-rejected.hy), [137](tests/checker-corpus/137-auto-blocking-select-rejected.hy), [134](tests/checker-corpus/134-auto-dynamic-spawn-rejected.hy), [135](tests/checker-corpus/135-auto-escaped-task-call-rejected.hy), [138](tests/checker-corpus/138-auto-escaped-reference-rejected.hy), [139](tests/checker-corpus/139-stray-task-block-rejected.hy), [140](tests/checker-corpus/140-auto-task-nested-in-cond-rejected.hy), [141](tests/checker-corpus/141-auto-statement-after-task-rejected.hy) (one code each) |
 <!-- END GENERATED CLAIMS TABLE -->
 
 ## Evidence inventory (what backs the ✅ rows)
 
 - **Adversarial corpus** — [tests/checker-corpus/](tests/checker-corpus/):
-  137 programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were
+  142 programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were
   **pre-registered before the checker existed** (the checker was built
   against them, not adjusted after); 19–20 were added during integration
   and 21+ after the checker landed, still hand-derived from the rule text

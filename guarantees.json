@@ -381,6 +381,73 @@
       "rules": [],
       "fixtures": [],
       "evidence_md": "[gates/G2.md](gates/G2.md); PLAN.md row 3"
+    },
+    {
+      "id": 21,
+      "surface": "The `auto { ... }` fork-join scope",
+      "does": "Collects the region’s task set from the DIRECT statements of the `auto` body only, orders tasks by root-name read/write effects (parallel when provably disjoint, serial otherwise), keeps the body’s own statements ahead of the layers it emits, and rejects the shapes that would reach a goroutine the region never joins or a value read out of order: blocking receive, `select`, a task in a loop, a plain `task f(...)` call, a reference taken inside, a `task { ... }` outside the schedulable position, a statement written after a task",
+      "claim": "**Guaranteed**: no `task { ... }` spawns past the region’s join, and no region statement runs in an order its source denies",
+      "strength": "guaranteed",
+      "rules": [
+        "HYB-E3201",
+        "HYB-E3202",
+        "HYB-E3203",
+        "HYB-E3204",
+        "HYB-E3205",
+        "HYB-E3206",
+        "HYB-E3207"
+      ],
+      "fixtures": [
+        {
+          "path": "tests/checker-corpus/130-auto-basic-disjoint.hy",
+          "expect": "accept"
+        },
+        {
+          "path": "tests/checker-corpus/131-auto-serialize-conflict.hy",
+          "expect": "accept"
+        },
+        {
+          "path": "tests/checker-corpus/132-auto-read-write-conflict.hy",
+          "expect": "accept"
+        },
+        {
+          "path": "tests/checker-corpus/136-auto-three-layer-schedule.hy",
+          "expect": "accept"
+        },
+        {
+          "path": "tests/checker-corpus/133-auto-blocking-recv-rejected.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/137-auto-blocking-select-rejected.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/134-auto-dynamic-spawn-rejected.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/135-auto-escaped-task-call-rejected.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/138-auto-escaped-reference-rejected.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/139-stray-task-block-rejected.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/140-auto-task-nested-in-cond-rejected.hy",
+          "expect": "reject"
+        },
+        {
+          "path": "tests/checker-corpus/141-auto-statement-after-task-rejected.hy",
+          "expect": "reject"
+        }
+      ],
+      "evidence_md": "[§8.1.1 C2a](SPEC-LANGUAGE.md); corpus [130](tests/checker-corpus/130-auto-basic-disjoint.hy) / [136](tests/checker-corpus/136-auto-three-layer-schedule.hy) (layering accepted), [133](tests/checker-corpus/133-auto-blocking-recv-rejected.hy), [137](tests/checker-corpus/137-auto-blocking-select-rejected.hy), [134](tests/checker-corpus/134-auto-dynamic-spawn-rejected.hy), [135](tests/checker-corpus/135-auto-escaped-task-call-rejected.hy), [138](tests/checker-corpus/138-auto-escaped-reference-rejected.hy), [139](tests/checker-corpus/139-stray-task-block-rejected.hy), [140](tests/checker-corpus/140-auto-task-nested-in-cond-rejected.hy), [141](tests/checker-corpus/141-auto-statement-after-task-rejected.hy) (one code each)"
     }
   ],
   "unclaimed": {

@@ -10,13 +10,21 @@
 //!   * greedy graph-coloring layering — each layer runs in parallel
 //!
 //! Safety constraints (checked separately):
-//!   * mutable state does not escape the auto block
-//!   * no blocking calls (channel receive, select, ...)
-//!   * no dynamic spawn (task inside loops)
+//!   * a `task { ... }` is only schedulable as a DIRECT statement of an
+//!     `auto` body — anywhere else the emitter would fall through to an
+//!     unscheduled `go func() { … }()` (HYB-E3206)
+//!   * no blocking calls (channel receive HYB-E3201, select HYB-E3202)
+//!   * no dynamic spawn (task inside loops, HYB-E3203) and no plain
+//!     `task f(...)` call (HYB-E3204)
+//!   * no references taken inside the region (HYB-E3205)
+//!   * the region's non-task statements stay ahead of its tasks (HYB-E3207)
 
 use std::collections::HashSet;
 
-use hy_syntax::{Block, Expr, InterpPart, Stmt};
+use hy_syntax::{Block, Expr, File, InterpPart, Stmt};
+
+use crate::model::Checker;
+use hy_diag::Diagnostic;
 
 /// The read/write effect summary of a single task.
 #[derive(Debug, Clone, Default)]
@@ -36,12 +44,6 @@ impl TaskEffect {
     /// Record a write to a root variable.
     pub fn write(&mut self, name: &str) {
         self.writes.insert(name.to_string());
-    }
-
-    /// Merge another effect into this one.
-    pub fn merge(&mut self, other: &TaskEffect) {
-        self.reads.extend(other.reads.iter().cloned());
-        self.writes.extend(other.writes.iter().cloned());
     }
 
     /// Check if this task conflicts with another.
@@ -222,7 +224,7 @@ pub(crate) fn schedule_tasks(tasks: &[&Block]) -> Vec<Vec<usize>> {
 
     for (i, effect) in effects.iter().enumerate() {
         let mut placed = false;
-        for (layer_idx, layer) in layers.iter_mut().enumerate() {
+        for layer in layers.iter_mut() {
             // Check if this task conflicts with anyone already in the layer
             let conflicts = layer.iter().any(|&j| effect.conflicts_with(&effects[j]));
             if !conflicts {
@@ -270,7 +272,9 @@ pub(crate) enum SafetyViolationKind {
     DynamicSpawn,
     /// Plain `task fn(...)` call inside auto scope (only inline `task { ... }` allowed)
     EscapedTaskCall,
-    /// Internal variable assigned to an outer-scope variable (escape)
+    /// A reference (`&x`) created inside auto scope: writes through it are
+    /// invisible to the name-based conflict test, so the region's disjointness
+    /// proof would not cover them
     EscapedReference,
 }
 
@@ -281,6 +285,8 @@ pub(crate) enum SafetyViolationKind {
 ///     to know all tasks upfront; a blocking call would deadlock the layer.
 ///   * No dynamic spawn (task inside loops) — the task set must be statically
 ///     known at compile time.
+///   * No references taken inside the region — the layering proof is by
+///     variable name, and a pointer hides the writes it enables.
 pub(crate) fn check_auto_safety(block: &Block) -> Vec<SafetyViolation> {
     let mut violations = Vec::new();
     check_block_safety(block, &mut violations, 0);
@@ -408,6 +414,21 @@ fn check_expr_safety(expr: &Expr, violations: &mut Vec<SafetyViolation>) {
         Expr::Field { base, .. } => {
             check_expr_safety(base, violations);
         }
+        // The scheduler proves independence by ROOT NAME (`analyze_expr`
+        // records reads/writes of identifiers). A reference made here hands
+        // the value to whoever holds it, and writes through it never appear in
+        // any effect set — so the layering could be built on a proof the
+        // program invalidates. Fail-closed, as everywhere else in Tier 0.
+        Expr::AddrOf { operand, .. } => {
+            violations.push(SafetyViolation {
+                kind: SafetyViolationKind::EscapedReference,
+                message: format!(
+                    "`&{}` inside auto scope — a reference created here can be written through without the scheduler seeing it",
+                    operand.render()
+                ),
+            });
+            check_expr_safety(operand, violations);
+        }
         Expr::Try { operand, .. } => {
             check_expr_safety(operand, violations);
         }
@@ -437,9 +458,138 @@ fn check_expr_safety(expr: &Expr, violations: &mut Vec<SafetyViolation>) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Task placement inside the region — HYB-E3206 (AUTO-SCOPE) and the
+// statement-order rule HYB-E3207 (AUTO-ORDER)
+// ---------------------------------------------------------------------------
+
+/// The scheduler's task set is the list of `task { … }` blocks that are DIRECT
+/// statements of an `auto` body: `hy-emit`'s `schedule_block` collects exactly
+/// that shape, and every other `Stmt::TaskBlock` reaches the goroutine
+/// fallback in `hy-emit/src/stmt.rs` — a spawn no layer joins, i.e. the race
+/// the region exists to prevent. So a task outside the schedulable position is
+/// rejected rather than emitted.
+///
+/// The same walk enforces the region's statement order: the emitter puts the
+/// body's non-task statements ahead of the layers, so writing one after a task
+/// would run it first (HYB-E3207).
+pub(crate) fn check_task_scopes<'a>(ck: &mut Checker<'a>, file: &'a File) {
+    for f in file.fns() {
+        let Some(body) = &f.body else { continue };
+        scopes_block(ck, body, false, false, 0);
+    }
+}
+
+/// `schedulable` — this block's direct statements are task positions.
+/// `in_auto`/`loops` mirror `check_auto_safety`: a task inside a loop within
+/// an auto region is that pass's HYB-E3203 case, so it is not reported twice.
+fn scopes_block(ck: &mut Checker<'_>, block: &Block, schedulable: bool, in_auto: bool, loops: u32) {
+    if schedulable {
+        // The emitter runs the region's non-task statements BEFORE the layers
+        // (`hy-emit/src/stmt.rs`, the Auto arm), so a statement written after
+        // a task would execute first — the program's order and the program's
+        // behaviour disagree, silently. Either shape is fine in a region, the
+        // mix that contradicts itself is not.
+        let mut past_task = false;
+        for stmt in &block.stmts {
+            if matches!(stmt, Stmt::TaskBlock { .. }) {
+                past_task = true;
+                continue;
+            }
+            if !past_task {
+                continue;
+            }
+            ck.diags.push(
+                Diagnostic::error(
+                    "HYB-E3207",
+                    ck.path.clone(),
+                    stmt.span(),
+                    "`auto` region: this statement is written after a `task { ... }` block, but the region runs its non-task statements before the task layers",
+                )
+                .with_notes(vec![
+                    "move the statement above the first `task { ... }` of the region (it then really does run first)".to_string(),
+                    "or take it out of the `auto` block entirely — after the region joins, its order relative to the tasks is the one you wrote".to_string(),
+                ]),
+            );
+        }
+    }
+    for stmt in &block.stmts {
+        scopes_stmt(ck, stmt, schedulable, in_auto, loops);
+    }
+}
+
+fn scopes_stmt(ck: &mut Checker<'_>, stmt: &Stmt, schedulable: bool, in_auto: bool, loops: u32) {
+    // A closure body is its own callable: an enclosing `auto` never collects
+    // tasks from it, and the dynamic-spawn pass does not walk into it either.
+    let mut fnlits: Vec<&Expr> = Vec::new();
+    crate::walk::own_fnlits(stmt, &mut fnlits);
+    for f in fnlits {
+        if let Expr::FnLit { body, .. } = f {
+            scopes_block(ck, body, false, false, 0);
+        }
+    }
+
+    match stmt {
+        Stmt::Auto { body, .. } => scopes_block(ck, body, true, true, 0),
+        Stmt::TaskBlock { body, span } => {
+            if !schedulable && !(in_auto && loops > 0) {
+                ck.diags.push(
+                    Diagnostic::error(
+                        "HYB-E3206",
+                        ck.path.clone(),
+                        *span,
+                        if in_auto {
+                            "`task { … }` here is not a direct statement of the `auto` body, so the scheduler never collects it"
+                                .to_string()
+                        } else {
+                            "`task { … }` is only legal as a direct statement of an `auto { … }` body".to_string()
+                        },
+                    )
+                    .with_notes(vec![
+                        "the region's task set — and the layers joined by its WaitGroups — are the inline blocks written directly in the `auto` body".to_string(),
+                        "move the block up to the `auto` body, or use a plain `task f(...)` spawn outside the region".to_string(),
+                    ]),
+                );
+            }
+            scopes_block(ck, body, false, in_auto, loops);
+        }
+        Stmt::For { body, .. } => scopes_block(ck, body, false, in_auto, loops + 1),
+        Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
+            scopes_block(ck, block, false, in_auto, loops)
+        }
+        Stmt::If { init, then, otherwise, .. } => {
+            if let Some(init) = init {
+                scopes_stmt(ck, init, false, in_auto, loops);
+            }
+            scopes_block(ck, then, false, in_auto, loops);
+            if let Some(otherwise) = otherwise {
+                scopes_stmt(ck, otherwise, false, in_auto, loops);
+            }
+        }
+        Stmt::Match { arms, .. } => {
+            for arm in arms {
+                scopes_block(ck, &arm.body, false, in_auto, loops);
+            }
+        }
+        Stmt::Select { arms, .. } => {
+            for arm in arms {
+                scopes_block(ck, &arm.body, false, in_auto, loops);
+            }
+        }
+        Stmt::Local(_)
+        | Stmt::Assign { .. }
+        | Stmt::Expr { .. }
+        | Stmt::Send { .. }
+        | Stmt::Return { .. }
+        | Stmt::Task { .. }
+        | Stmt::Defer { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. } => {}
+    }
+}
+
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests {    use super::*;
     use hy_diag::{Pos, Span};
 
     fn dummy_span() -> Span {
@@ -461,6 +611,85 @@ mod tests {
         let mut d = TaskEffect::default();
         d.read("y");
         assert!(!a.conflicts_with(&d), "disjoint vars should not conflict");
+    }
+
+    #[test]
+    fn test_escaped_reference_is_a_violation() {
+        // auto { task { slot := &counter } } — the effect model only records
+        // the READ of `counter`; the write the pointer enables is invisible,
+        // so the region must refuse it (HYB-E3205).
+        use hy_syntax::{LocalDecl, LocalKind};
+        let s = dummy_span();
+        let take_addr = Expr::AddrOf {
+            operand: Box::new(Expr::Ident {
+                name: "counter".to_string(),
+                span: s,
+            }),
+            span: s,
+        };
+        let body = Block {
+            stmts: vec![Stmt::Local(LocalDecl {
+                kind: LocalKind::Define,
+                names: vec!["slot".to_string()],
+                ty: None,
+                values: vec![take_addr],
+                span: s,
+            })],
+            span: s,
+        };
+        let region = Block {
+            stmts: vec![Stmt::TaskBlock { body, span: s }],
+            span: s,
+        };
+        let violations = check_auto_safety(&region);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.kind == SafetyViolationKind::EscapedReference),
+            "a reference taken inside a task must be reported: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_blocking_select_is_a_violation() {
+        // auto { task { select { ... } } } — HYB-E3202; the clause's own
+        // receive is not charged a second time (the arms are not descended).
+        let s = dummy_span();
+        let inner = Block {
+            stmts: vec![Stmt::Select {
+                arms: vec![hy_syntax::SelectArm {
+                    kind: hy_syntax::SelectArmKind::Default,
+                    body: Block {
+                        stmts: vec![Stmt::Expr {
+                            expr: Expr::Receive {
+                                chan: Box::new(Expr::Ident {
+                                    name: "a".to_string(),
+                                    span: s,
+                                }),
+                                span: s,
+                            },
+                            span: s,
+                        }],
+                        span: s,
+                    },
+                }],
+                span: s,
+            }],
+            span: s,
+        };
+        let region = Block {
+            stmts: vec![Stmt::TaskBlock { body: inner, span: s }],
+            span: s,
+        };
+        let kinds: Vec<_> = check_auto_safety(&region)
+            .into_iter()
+            .map(|v| v.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![SafetyViolationKind::BlockingSelect],
+            "one select, one code"
+        );
     }
 
     #[test]

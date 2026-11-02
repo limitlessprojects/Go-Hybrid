@@ -91,19 +91,15 @@ impl Emitter {
                 self.push("}");
                 Ok(())
             }
-            // `task { ... }` — inline task block (issue #1962).
-            // In a normal scope: emits as an immediate goroutine closure.
-            // Inside an `auto` block: collected and scheduled by the auto
-            // scheduler (handled in the Auto arm below).
-            Stmt::TaskBlock { body, .. } => {
-                // Emit as a goroutine closure: go func() { ... }()
-                self.push("go func() {");
-                self.indent += 1;
-                self.emit_block_body(&body.stmts)?;
-                self.indent -= 1;
-                self.push("}()");
-                Ok(())
-            }
+            // `task { ... }` — inline task block (issue #1962). Inside an
+            // `auto` body the Auto arm below collects the direct ones and
+            // emits them as joined layers, so this arm is reachable only for a
+            // block no region owns. Spawning it here would be the race
+            // HYB-E3206 exists to refuse, so the emitter says so instead of
+            // quietly writing `go func() { ... }()`.
+            Stmt::TaskBlock { .. } => Err(EmitError::unsupported(
+                "`task { ... }` outside an `auto` body — no region collects or joins it (checker rule: HYB-E3206)",
+            )),
             // `auto { ... }` — automatic fork-join scheduling (issue #1962).
             // Collects all inline task blocks, analyzes their effects, and
             // schedules them in parallel layers where data accesses are provably
