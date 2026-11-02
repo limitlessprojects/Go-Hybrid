@@ -873,7 +873,14 @@ impl<'a> Collector<'a> {
     /// Only identifiers bound with an explicit type name are known; everything
     /// else (literals, conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
-        match unwrap_parens(e) {
+        let bare = match unwrap_parens(e) {
+            Expr::Move { operand, .. } => unwrap_parens(operand),
+            other => other,
+        };
+        if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+            return Some(arr_ty.render());
+        }
+        match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             _ => None,
         }
@@ -949,6 +956,52 @@ impl<'a> Collector<'a> {
             }
         }
         None
+    }
+
+    /// Exact concrete result type names for a multi-value call expression.
+    fn call_result_type_names(&self, e: &Expr) -> Vec<Option<String>> {
+        let bare = unwrap_parens(e);
+        let Expr::Call { callee, args: _, .. } = bare else {
+            return Vec::new();
+        };
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                if self
+                    .scopes
+                    .iter()
+                    .any(|layer| layer.contains_key(name.as_str()))
+                {
+                    return Vec::new();
+                }
+                if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                    if fd.receiver.is_none() && fd.type_params.is_empty() {
+                        return fd.results.iter().map(|r| Some(r.ty.render())).collect();
+                    }
+                }
+            }
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        let assoc_key = format!("{}.{}", pkg, name);
+                        if let Some(fd) = self.ck.fns.get(&assoc_key) {
+                            if fd.type_params.is_empty() {
+                                return fd.results.iter().map(|r| Some(r.ty.render())).collect();
+                            }
+                        }
+                    }
+                }
+                let bk = self.kind_of_expr(base);
+                if let Some(sn) = self.struct_base_name(&bk).or_else(|| self.struct_name(&bk)) {
+                    if let Some(md) = self.ck.method_decls.get(&(sn, name.clone())) {
+                        if md.type_params.is_empty() {
+                            return md.results.iter().map(|r| Some(r.ty.render())).collect();
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
     }
 
     /// #1031 — the exact numeric type of a value that is provably TYPED.
@@ -1564,7 +1617,9 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                if let Some((_, _, arr_ty)) = val.as_array_lit() {
+                    self.bind_type_name(name, arr_ty.render());
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
                 }
             }
@@ -4078,7 +4133,41 @@ impl<'a> Collector<'a> {
     }
 
     fn check_fn_lit_call(&mut self, params: &[Param], args: &[CallArg], callee: &Expr, span: Span) {
-        if self.multi_value_arg_count(args).is_some() {
+        if let Some(n) = self.multi_value_arg_count(args) {
+            if params.len() == n {
+                let got_kinds = self.multi_value_kinds(&args[0].value);
+                let got_scalars = match unwrap_parens(&args[0].value) {
+                    Expr::Call { callee: c, args: a, .. } => self.call_result_scalars(c, a),
+                    _ => None,
+                };
+                let got_types = self.call_result_type_names(&args[0].value);
+                for (i, (p, got)) in params.iter().zip(got_kinds.iter()).enumerate() {
+                    let want = self.kind_of_ty(&p.ty, 0);
+                    let want_scalar = self.scalar_of_ty(&p.ty);
+                    let got_scalar = got_scalars.as_ref().and_then(|gs| gs.get(i).copied().flatten());
+                    let scalar_mismatch = matches!(
+                        (want_scalar, got_scalar),
+                        (Some(w), Some(g)) if w != g
+                    );
+                    let got_type_name = got_types.get(i).and_then(|opt| opt.as_deref());
+                    let array_mismatch = self.sized_array_names_differ(
+                        Some(p.ty.render().as_str()),
+                        got_type_name,
+                    );
+                    if kinds_conflict(&want, got) || scalar_mismatch || array_mismatch {
+                        self.emit_e1002(
+                            args[0].value.span(),
+                            format!(
+                                "cannot use `{}` result of type `{}` as `{}` value in argument to func literal — Go refuses mismatched argument types (HYB-E1002)",
+                                args[0].value.render(),
+                                got.label(),
+                                want.label()
+                            ),
+                            "argument types must match closure parameter types",
+                        );
+                    }
+                }
+            }
             return;
         }
         let want = params.len();
@@ -4095,7 +4184,21 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let int_to_float_conflict = want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            let scalar_mismatch = matches!(
+                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (Some(w), Some(g)) if w != g
+            );
+            if kinds_conflict(&want, &got)
+                || int_to_float_conflict
+                || scalar_mismatch
+                || self.sized_array_names_differ(
+                    Some(p.ty.render().as_str()),
+                    self.typed_value_type_name(&a.value).as_deref(),
+                )
+            {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -5933,7 +6036,11 @@ impl<'a> Collector<'a> {
                     && self.is_untyped_int_const(k);
                 let conflict = (exp_key == OpKind::Float && kk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_key, &kk)
-                    || scalar_mismatch;
+                    || scalar_mismatch
+                    || self.sized_array_names_differ(
+                        Some(key_ty.render().as_str()),
+                        self.typed_value_type_name(k).as_deref(),
+                    );
                 if kk != OpKind::Unknown && conflict {
                     self.emit_e1002(
                         k.span(),
@@ -5961,7 +6068,11 @@ impl<'a> Collector<'a> {
                     && self.is_untyped_int_const(v);
                 let conflict = (exp_val == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_val, &vk)
-                    || scalar_mismatch;
+                    || scalar_mismatch
+                    || self.sized_array_names_differ(
+                        Some(val_ty.render().as_str()),
+                        self.typed_value_type_name(v).as_deref(),
+                    );
                 if vk != OpKind::Unknown && conflict {
                     self.emit_e1002(
                         v.span(),
