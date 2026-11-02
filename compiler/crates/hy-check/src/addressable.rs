@@ -30,9 +30,6 @@ use hy_syntax::{Block, Expr, ForKind, MatchPattern, Param, Place, PlaceKind, Sel
 impl<'a> Checker<'a> {
     /// `target` of an assignment (any operator, including `++`/`--`).
     pub(crate) fn check_assign_target_addressable(&mut self, st: &FnState, target: &Place) {
-        if self.closure_rebinds(target.root()) {
-            return;
-        }
         let Some(elem) = self.place_unassignable_at(st, target) else {
             return;
         };
@@ -52,10 +49,8 @@ impl<'a> Checker<'a> {
         let Some(operand) = as_addr_of(value) else {
             return;
         };
+        let operand = unwrap_parens(operand);
         if !matches!(operand, Expr::Index { .. } | Expr::Field { .. }) {
-            return;
-        }
-        if expr_root(operand).is_some_and(|r| self.closure_rebinds(r)) {
             return;
         }
         let Some(elem) = self.expr_unassignable_at(st, operand) else {
@@ -99,7 +94,7 @@ impl<'a> Checker<'a> {
     fn place_unaddressable_at<'p>(&self, st: &FnState, p: &'p Place) -> Option<&'p Place> {
         match &p.kind {
             PlaceKind::Index { base, .. } => match self.place_shape(st, base) {
-                Some(TypeShape::Map(..)) => Some(p),
+                Some(TypeShape::Map(..)) | Some(TypeShape::Str) => Some(p),
                 Some(TypeShape::Array(_)) => self.place_unaddressable_at(st, base),
                 _ => None,
             },
@@ -121,9 +116,10 @@ impl<'a> Checker<'a> {
     }
 
     fn expr_unaddressable_at<'e>(&self, st: &FnState, e: &'e Expr) -> Option<&'e Expr> {
-        match unwrap_parens(e) {
+        let e = unwrap_parens(e);
+        match e {
             Expr::Index { base, .. } => match self.shape_of_expr(st, base) {
-                TypeShape::Map(..) => Some(e),
+                TypeShape::Map(..) | TypeShape::Str => Some(e),
                 TypeShape::Array(_) => self.expr_unaddressable_at(st, base),
                 _ => None,
             },
@@ -131,12 +127,19 @@ impl<'a> Checker<'a> {
                 TypeShape::Struct(_) => self.expr_unaddressable_at(st, base),
                 _ => None,
             },
+            Expr::Call { .. }
+            | Expr::StructLit { .. }
+            | Expr::SliceLit { .. }
+            | Expr::Receive { .. }
+                if matches!(
+                    self.shape_of_expr(st, e),
+                    TypeShape::Struct(_) | TypeShape::Array(_)
+                ) =>
+            {
+                Some(e)
+            }
             _ => None,
         }
-    }
-
-    fn closure_rebinds(&self, name: &str) -> bool {
-        self.closure_bound.iter().any(|s| s.contains(name))
     }
 
     /// Entering a closure body in the emit-guard deep walk.
@@ -148,14 +151,6 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn pop_closure_bound(&mut self) {
         self.closure_bound.pop();
-    }
-}
-
-fn expr_root(e: &Expr) -> Option<&str> {
-    match unwrap_parens(e) {
-        Expr::Ident { name, .. } => Some(name),
-        Expr::Index { base, .. } | Expr::Field { base, .. } => expr_root(base),
-        _ => None,
     }
 }
 
