@@ -312,6 +312,7 @@ fn build_tables(ck: &mut Checker<'_>) {
                     ck.check_local_array_lit_len_match(ty, &c.value);
                     ck.check_const_overflow_init(&c.name, ty, &c.value, None);
                 }
+                ck.check_expr_type_conversions(&c.value);
                 ck.check_expr_emit_guard(&FnState::default(), &c.value);
                 ck.check_composite_nils(&FnState::default(), &c.value);
                 ck.check_expr_builtin_args(&FnState::default(), &c.value);
