@@ -932,23 +932,10 @@ impl<'a> Collector<'a> {
                 None
             }
             Expr::SliceLit { elem: Some(t), .. } => {
-                match t.as_ref() {
-                    TypeExpr::Array { elem, .. } => Some(elem.render()),
-                    TypeExpr::Slice { elem, .. } => Some(elem.render()),
-                    _ => {
-                        let r = t.render();
-                        if let Some(elem) = r.strip_prefix("[]") {
-                            Some(elem.to_string())
-                        } else if let Some(elem) = r.strip_prefix("[") {
-                            if let Some(close) = elem.find(']') {
-                                Some(elem[close + 1..].to_string())
-                            } else {
-                                Some(r)
-                            }
-                        } else {
-                            Some(r)
-                        }
-                    }
+                if let Some((_, inner_elem, _)) = bare.as_array_lit() {
+                    Some(inner_elem.render())
+                } else {
+                    Some(t.render())
                 }
             }
             Expr::Slice { base, .. } => self.slice_element_type_name(base),
@@ -1182,19 +1169,186 @@ impl<'a> Collector<'a> {
 
     /// #2770 — the canonical numeric spelling of a simple local target, for the
     /// assignment/argument scalar comparison. Non-ident places fail open.
+
+    // #3261: Resolves type aliases recursively to their underlying type spelling.
+    fn resolve_type_spelling(&self, spelling: &str) -> String {
+        let mut curr = spelling.trim().to_string();
+        for _ in 0..16 {
+            if let Some(target) = self.ck.type_aliases.get(curr.as_str()) {
+                curr = target.render();
+            } else {
+                break;
+            }
+        }
+        curr
+    }
+
+    // #3261: Recursively resolves type aliases within nested type constructors ([]T, [N]T, map[K]V, *T).
+    fn resolve_deep_type_spelling(&self, s: &str) -> String {
+        let s = s.trim();
+        let resolved = self.resolve_type_spelling(s);
+        if let Some(rest) = resolved.strip_prefix("[]") {
+            let inner = self.resolve_deep_type_spelling(rest);
+            return format!("[]{}", inner);
+        }
+        if resolved.starts_with('[') {
+            if let Some(close) = resolved.find(']') {
+                let head = &resolved[1..close];
+                if !head.is_empty() && head.chars().all(|c| c.is_ascii_digit()) {
+                    let rest = resolved[close + 1..].trim();
+                    let inner = self.resolve_deep_type_spelling(rest);
+                    return format!("[{}]{}", head, inner);
+                }
+            }
+        }
+        if resolved.starts_with("map[") {
+            if let Some(close) = resolved.find(']') {
+                let key = &resolved[4..close];
+                let val = resolved[close + 1..].trim();
+                let key_res = self.resolve_deep_type_spelling(key);
+                let val_res = self.resolve_deep_type_spelling(val);
+                return format!("map[{}]{}", key_res, val_res);
+            }
+        }
+        if let Some(rest) = resolved.strip_prefix('*') {
+            let inner = self.resolve_deep_type_spelling(rest);
+            return format!("*{}", inner);
+        }
+        resolved
+    }
+
+    // #3261: Checks if two resolved type spellings conflict in assignment position
+    // (top-level interfaces/type parameters fail open; invariant inner types use strict comparison).
+    fn type_names_conflict(&self, want_raw: &str, got_raw: &str) -> bool {
+        let w = self.resolve_deep_type_spelling(want_raw);
+        let g = self.resolve_deep_type_spelling(got_raw);
+        let is_iface = |s: &str| matches!(s.trim(), "any" | "interface{}" | "error");
+        if is_iface(&w)
+            || is_iface(&g)
+            || self.fn_type_params.contains(w.trim())
+            || self.fn_type_params.contains(g.trim())
+        {
+            return false;
+        }
+        self.type_names_differ_strict(&w, &g)
+    }
+
+    fn type_names_differ_strict(&self, want_raw: &str, got_raw: &str) -> bool {
+        let w = self.resolve_deep_type_spelling(want_raw);
+        let g = self.resolve_deep_type_spelling(got_raw);
+        if w == g {
+            return false;
+        }
+        let norm_any = |s: &str| matches!(s.trim(), "any" | "interface{}");
+        if norm_any(&w) && norm_any(&g) {
+            return false;
+        }
+        if self.fn_type_params.contains(w.trim()) || self.fn_type_params.contains(g.trim()) {
+            return false;
+        }
+
+        // Slices: []T
+        if w.starts_with("[]") || g.starts_with("[]") {
+            if let (Some(w_inner), Some(g_inner)) = (w.strip_prefix("[]"), g.strip_prefix("[]")) {
+                return self.type_names_differ_strict(w_inner, g_inner);
+            }
+            return true;
+        }
+
+        // Fixed-size arrays: [N]T
+        if is_sized_array_spelling(&w) || is_sized_array_spelling(&g) {
+            if is_sized_array_spelling(&w) && is_sized_array_spelling(&g) {
+                let close_w = w.find(']').unwrap();
+                let close_g = g.find(']').unwrap();
+                let dim_w = &w[1..close_w];
+                let dim_g = &g[1..close_g];
+                if dim_w != dim_g {
+                    return true;
+                }
+                let elem_w = w[close_w + 1..].trim();
+                let elem_g = g[close_g + 1..].trim();
+                return self.type_names_differ_strict(elem_w, elem_g);
+            }
+            return true;
+        }
+
+        // Maps: map[K]V
+        if w.starts_with("map[") || g.starts_with("map[") {
+            if w.starts_with("map[") && g.starts_with("map[") {
+                if let (Some(close_w), Some(close_g)) = (w.find(']'), g.find(']')) {
+                    let key_w = &w[4..close_w];
+                    let key_g = &g[4..close_g];
+                    let val_w = w[close_w + 1..].trim();
+                    let val_g = g[close_g + 1..].trim();
+                    return self.type_names_differ_strict(key_w, key_g)
+                        || self.type_names_differ_strict(val_w, val_g);
+                }
+            }
+            return true;
+        }
+
+        // Channels: ignore direction mismatches (`chan_dir` owns HYB-E3012) while still
+        // checking channel element type compatibility (`chan int32` vs `chan int64`).
+        fn strip_chan_elem(s: &str) -> Option<&str> {
+            let t = s.trim();
+            t.strip_prefix("<-chan ")
+                .or_else(|| t.strip_prefix("chan<- "))
+                .or_else(|| t.strip_prefix("chan "))
+                .map(str::trim)
+        }
+        if let (Some(w_elem), Some(g_elem)) = (strip_chan_elem(&w), strip_chan_elem(&g)) {
+            return self.type_names_differ_strict(w_elem, g_elem);
+        }
+
+        // Pointers: *T
+        if w.starts_with('*') || g.starts_with('*') {
+            if let (Some(w_inner), Some(g_inner)) = (w.strip_prefix('*'), g.strip_prefix('*')) {
+                return self.type_names_differ_strict(w_inner, g_inner);
+            }
+            return true;
+        }
+
+        // Numerical scalars:
+        match (canonical_numeric_name(&w), canonical_numeric_name(&g)) {
+            (Some(w_num), Some(g_num)) => w_num != g_num,
+            (Some(_), None) | (None, Some(_)) => true,
+            (None, None) => w.trim() != g.trim(),
+        }
+    }
+
+    /// #2770 / #3261 — the canonical numeric spelling of a target place (ident, index, or field).
     fn place_scalar(&self, p: &Place) -> Option<&'static str> {
+        if let Some(tn) = self.place_type_name(p) {
+            if let Some(s) = canonical_numeric_name(&tn) {
+                return Some(s);
+            }
+        }
         match &p.kind {
             PlaceKind::Ident(n) => self.lookup_scalar(n),
             PlaceKind::Field { base, name } => {
                 let bk = self.kind_of_place(base);
-                self.struct_field_scalar(&bk, name)
+                if let Some(s) = self.struct_field_scalar(&bk, name) {
+                    return Some(s);
+                }
+                if let Some(tn) = self.place_type_name(p) {
+                    return canonical_numeric_name(&tn);
+                }
+                None
             }
             PlaceKind::Index { base, .. } => {
                 let bk = self.kind_of_place(base);
                 if bk == OpKind::Str {
                     Some("uint8")
                 } else if let Some(be) = place_as_expr(base) {
-                    self.container_elem_scalar_of_expr(&be)
+                    if let Some(s) = self.container_elem_scalar_of_expr(&be) {
+                        return Some(s);
+                    }
+                    if let Some(tn) = self.place_type_name(p) {
+                        return canonical_numeric_name(&tn);
+                    }
+                    None
+                } else if let Some(tn) = self.place_type_name(p) {
+                    canonical_numeric_name(&tn)
                 } else {
                     None
                 }
@@ -1203,10 +1357,8 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #2771 — the declared Go spelling of a value whose type carries detail
-    /// that `OpKind` drops, notably an array's length (`[3]int` vs `[4]int`).
-    /// Identifiers bound with an explicit type name or explicit array literals
-    /// are known; everything else (conversions, calls) fails open.
+    /// #2771 / #3261 — the declared Go spelling of a value whose type carries detail
+    /// that `OpKind` drops (array lengths, element scalars, struct fields).
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
         if let Some((len_opt, inner_elem, array_ty)) = bare.as_array_lit() {
@@ -1223,15 +1375,40 @@ impl<'a> Collector<'a> {
             } else if let Expr::SliceLit { items, .. } = bare {
                 return Some(format!("[{}]{}", items.len(), inner_elem.render()));
             }
-            return Some(array_ty.render());
+            return Some(self.resolve_deep_type_spelling(&array_ty.render()));
         }
         match bare {
-            Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::Ident { name, .. } => {
+                let raw = self.lookup_type_name(name)?;
+                Some(self.resolve_deep_type_spelling(&raw))
+            }
+            Expr::Move { operand, .. } => self.typed_value_type_name(operand),
+            Expr::SliceLit { elem: Some(t), .. } => {
+                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                    return Some(self.resolve_deep_type_spelling(&arr_ty.render()));
+                }
+                Some(format!("[]{}", self.resolve_deep_type_spelling(&t.render())))
+            }
+            Expr::Index { base, .. } => {
+                let base_ty = self.typed_value_type_name(base)?;
+                self.indexed_elem_type_spelling(&base_ty, false)
+            }
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
-                self.struct_field_type_name(&bk, name)
+                self.resolved_field_type_name(&bk, name)
             }
-            Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if self.lookup_kind(name).is_none() {
+                        if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                            if fd.results.len() == 1 && fd.type_params.is_empty() {
+                                return Some(self.resolve_deep_type_spelling(&fd.results[0].ty.render()));
+                            }
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -1264,49 +1441,75 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #2771 — the declared Go spelling of a simple local assignment target.
-    fn place_type_name(&self, p: &Place) -> Option<String> {
-        match &p.kind {
-            PlaceKind::Ident(n) => self.lookup_type_name(n),
-            PlaceKind::Field { base, name } => {
-                let bk = self.kind_of_place(base);
-                self.struct_field_type_name(&bk, name)
+    /// Resolves the instantiated field type spelling of `name` on `bk`, falling back to base struct lookup.
+    fn resolved_field_type_name(&self, bk: &OpKind, name: &str) -> Option<String> {
+        if let Some(tn) = self.struct_field_type_name(bk, name) {
+            return Some(self.resolve_deep_type_spelling(&tn));
+        }
+        if let Some(full_name) = self.struct_base_name(bk).or_else(|| self.struct_name(bk)) {
+            let sname = Checker::base_named_type_str(&full_name).to_string();
+            if let Some(declared) = self.ck.structs.get(&sname) {
+                if let Some((_, fty)) = declared.iter().find(|(n, _)| n == name) {
+                    return Some(self.resolve_deep_type_spelling(&fty.render()));
+                }
             }
-            PlaceKind::Index { base, .. } => {
-                if let Some(base_tname) = self.place_type_name(base) {
-                    let s = base_tname.trim();
-                    if let Some(elem) = s.strip_prefix("[]") {
-                        return Some(elem.trim().to_string());
-                    }
-                    if s.starts_with('[') {
-                        if let Some(close) = s.find(']') {
-                            let elem = s[close + 1..].trim();
-                            if !elem.is_empty() {
-                                return Some(elem.to_string());
-                            }
-                        }
-                    }
-                    if let Some(rest) = s.strip_prefix("map[") {
-                        let mut depth = 1;
-                        for (idx, ch) in rest.char_indices() {
-                            if ch == '[' {
-                                depth += 1;
-                            } else if ch == ']' {
-                                depth -= 1;
-                                if depth == 0 {
-                                    let val = rest[idx + 1..].trim();
-                                    if !val.is_empty() {
-                                        return Some(val.to_string());
-                                    }
-                                    break;
-                                }
-                            }
-                        }
+        }
+        None
+    }
+
+    /// Extracts the element/value type spelling when indexing a resolved slice, array, map, or string type.
+    fn indexed_elem_type_spelling(&self, base_ty: &str, allow_ptr_array: bool) -> Option<String> {
+        let base_ty = self.resolve_deep_type_spelling(base_ty);
+        if let Some(rest) = base_ty.strip_prefix("[]") {
+            return Some(rest.trim().to_string());
+        }
+        if base_ty.starts_with('[') {
+            if let Some(close) = base_ty.find(']') {
+                let head = &base_ty[1..close];
+                if !head.is_empty() && head.chars().all(|c| c.is_ascii_digit()) {
+                    return Some(base_ty[close + 1..].trim().to_string());
+                }
+            }
+        }
+        if base_ty.starts_with("map[") {
+            if let Some(close) = base_ty.find(']') {
+                return Some(base_ty[close + 1..].trim().to_string());
+            }
+        }
+        if base_ty == "string" {
+            return Some("byte".to_string());
+        }
+        if allow_ptr_array {
+            if let Some(rest) = base_ty.strip_prefix('*') {
+                if rest.starts_with('[') {
+                    if let Some(close) = rest.find(']') {
+                        return Some(rest[close + 1..].trim().to_string());
                     }
                 }
-                None
             }
-            _ => None,
+        }
+        None
+    }
+
+    /// #2771 / #3261 — the declared Go spelling of an assignment target place.
+    fn place_type_name(&self, p: &Place) -> Option<String> {
+        match &p.kind {
+            PlaceKind::Ident(n) => {
+                let raw = self.lookup_type_name(n)?;
+                Some(self.resolve_deep_type_spelling(&raw))
+            }
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                self.resolved_field_type_name(&bk, name)
+            }
+            PlaceKind::Index { base, .. } => {
+                let base_ty = self.place_type_name(base)?;
+                self.indexed_elem_type_spelling(&base_ty, true)
+            }
+            PlaceKind::AddrOf { base } => {
+                let inner = self.place_type_name(base)?;
+                Some(format!("*{}", inner))
+            }
         }
     }
 
@@ -1559,17 +1762,26 @@ impl<'a> Collector<'a> {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
             },
-            // #2858: struct field scalar resolution
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
-                self.struct_field_scalar(&bk, name)
+                if let Some(s) = self.struct_field_scalar(&bk, name) {
+                    return Some(s);
+                }
+                if let Some(tn) = self.typed_value_type_name(e) {
+                    canonical_numeric_name(&tn)
+                } else {
+                    None
+                }
             }
-            // #2858: index into slice/array/map/string
             Expr::Index { base, .. } => {
                 if self.kind_of_expr(base) == OpKind::Str {
                     Some("uint8")
+                } else if let Some(s) = self.container_elem_scalar_of_expr(base) {
+                    Some(s)
+                } else if let Some(tn) = self.typed_value_type_name(e) {
+                    canonical_numeric_name(&tn)
                 } else {
-                    self.container_elem_scalar_of_expr(base)
+                    None
                 }
             }
             _ => None,
@@ -6747,15 +6959,24 @@ impl<'a> Collector<'a> {
                         && self.is_untyped_int_const(&values[0]);
                     let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                         || kinds_conflict(&tk, &vk);
-                    // #2770: `g = f` between a `float64` and a `float32` local.
+                    // #2770 / #3261: scalar width mismatch.
                     let scalar_mismatch = matches!(
                         (self.place_scalar(target), self.typed_value_scalar(&values[0])),
                         (Some(t), Some(v)) if t != v
                     );
-                    // #2771: `b = a` between a `[4]int` and a `[3]int`.
+                    // #3261: composite assignment type conflict.
+                    let type_conflict = match (
+                        self.place_type_name(target),
+                        self.typed_value_type_name(&values[0]),
+                    ) {
+                        (Some(ptn), Some(vtn)) => self.type_names_conflict(&ptn, &vtn),
+                        _ => false,
+                    };
+                    // #2771 / #3261: array length, slice element scalar, or composite type conflict.
                     if !is_loan_shape
                         && (conflict
                             || scalar_mismatch
+                            || type_conflict
                             || self.sized_array_names_differ(
                                 self.place_type_name(target).as_deref(),
                                 self.typed_value_type_name(&values[0]).as_deref(),
@@ -6807,12 +7028,19 @@ impl<'a> Collector<'a> {
                             (self.place_scalar(t), self.typed_value_scalar(v)),
                             (Some(tp), Some(vp)) if tp != vp
                         );
+                        let type_conflict = match (
+                            self.place_type_name(t),
+                            self.typed_value_type_name(v),
+                        ) {
+                            (Some(ptn), Some(vtn)) => self.type_names_conflict(&ptn, &vtn),
+                            _ => false,
+                        };
                         let array_mismatch = self.sized_array_names_differ(
                             self.place_type_name(t).as_deref(),
                             self.typed_value_type_name(v).as_deref(),
                         );
-                        if conflict || scalar_mismatch || array_mismatch {
-                            let (v_label, t_label) = if array_mismatch {
+                        if conflict || scalar_mismatch || type_conflict || array_mismatch {
+                            let (v_label, t_label) = if array_mismatch || type_conflict {
                                 (
                                     self.typed_value_type_name(v)
                                         .unwrap_or_else(|| vk.label().to_string()),
