@@ -121,7 +121,7 @@ pub(crate) fn is_iterable_handle(name: &str) -> bool {
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
-        ("serde_json", "parse") | ("serde_json", "new_object" | "new_array") | ("flate2", "new_writer") => {
+        ("serde_json", "parse" | "new_object" | "new_array") | ("flate2", "new_writer") => {
             CallMode::Produce
         }
         ("serde_json", "to_string_pretty")
@@ -129,7 +129,7 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
         | ("serde_json", "get")
         | ("serde_json", "int")
         | ("serde_json", "string") => CallMode::Borrow,
-        ("serde_json", "set") | ("serde_json", "remove" | "push_string") => CallMode::Mutate,
+        ("serde_json", "set" | "remove" | "push_string" | "array_push_string") => CallMode::Mutate,
         ("flate2", "write") => CallMode::Mutate,
         ("flate2", "finish") => CallMode::Consume,
         _ => CallMode::Safe,
@@ -158,12 +158,14 @@ pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
 /// Result shape of a package-level call (for defines / loop variables).
 pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
     match (pkg, method) {
-        ("serde_json", "parse") | ("serde_json", "new_object" | "new_array") => {
+        ("serde_json", "parse" | "new_object" | "new_array") => {
             TypeShape::OwnHandle("serde_json.value".into())
         }
         ("flate2", "new_writer") => TypeShape::OwnHandle("flate2.writer".into()),
         ("serde_json", "array" | "get") => TypeShape::BorrowHandle("serde_json.view".into()),
-        ("serde_json", "int") | ("flate2", "write") => TypeShape::Primitive,
+        ("serde_json", "int" | "push_string" | "array_push_string") | ("flate2", "write") => {
+            TypeShape::Primitive
+        }
         ("flate2", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
         ("serde_json", "to_string_pretty") | ("serde_json", "string") | ("strings", "join") => {
             TypeShape::Str
@@ -369,8 +371,8 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     /// `sync.RWMutex`.
     const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
     match recv_type {
-        "sync.mutex" => Some(SYNC_MUTEX),
-        "sync.rwmutex" => Some(SYNC_RWMUTEX),
+        "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
+        "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -410,10 +412,14 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
             // element views: iterating the result yields borrow handles
             TypeShape::BorrowHandle("serde_json.view".into())
         }
-        ("serde_json.value" | "serde_json.view", "int") => TypeShape::Primitive,
+        ("serde_json.value" | "serde_json.view", "int" | "push_string") => TypeShape::Primitive,
         ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        ("sync.mutex" | "sync.Mutex", "try_lock")
+        | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
+            TypeShape::Primitive
+        }
         // scalar atomics only ("atomic.int" is receiver_type_name's key for
         // TypeShape::Atomic): load/swap/add yield the scalar. A non-scalar
         // atomic's `load()` / `swap()` returns a pointer / `any` — Unknown,

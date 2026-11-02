@@ -107,10 +107,17 @@ const SET_PRELUDE: &str = concat!(
     "}\n",
 );
 
+/// N5 for `make([]T, n[, c])` (zeroinit.rs): every slot up to the capacity
+/// gets an allocated zero value, so a reslice inside the capacity meets N5 values too.
+const N5_MAKE_PRELUDE: &str = "// ---- Hybrid prelude: N5 slice allocation (auto-generated; do not edit) ----\nfunc hy_n5_make[t any](zero func() t, n int, c ...int) []t {\n\tcapacity := n\n\tif len(c) > 0 {\n\t\tcapacity = c[0]\n\t}\n\ts := make([]t, capacity)\n\tfor i := range s {\n\t\ts[i] = zero()\n\t}\n\treturn s[:n]\n}\n";
+
 const POP_PRELUDE: &str = concat!(
     "// ---- Hybrid prelude: slice pop (auto-generated; do not edit) ----\n",
     "func hy_pop[t any](s *[]t) t {\n",
     "\tn := len(*s)\n",
+    "\tif n == 0 {\n",
+    "\t\tpanic(\"HY-PANIC/pop-empty\")\n",
+    "\t}\n",
     "\tv := (*s)[n-1]\n",
     "\t*s = (*s)[:n-1]\n",
     "\treturn v\n",
@@ -299,6 +306,9 @@ pub enum BindingKind {
     Chan,
     /// Bound to a set (`set[T]`) — `len(s)` / `delete(s, v)` / `for v in s`.
     Set,
+    /// Bound to a map (`map[K]V` param/local/result or `make(map…)`) —
+    /// single-var `for k in m` ranges the KEY (SPEC LX13, #2945).
+    Map,
     /// Our own struct / plain value — members emit verbatim.
     Plain,
 }
@@ -366,7 +376,11 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "rfc1123z" => "RFC1123Z",
         "rfc3339" => "RFC3339",
         "rhs" => "RHS",
+        "rlock" => "RLock",
         "rpc" => "RPC",
+        "runlock" => "RUnlock",
+        "rw" => "RW",
+        "rwmutex" => "RWMutex",
         "sha1" => "SHA1",
         "sha256" => "SHA256",
         "sha384" => "SHA384",
@@ -417,6 +431,20 @@ pub(crate) fn to_go_name(name: &str) -> String {
 /// The base NAMED type of a TypeExpr, if any (`*atomic.int64` →
 /// "atomic.int64", `env` → "env", `map[string]int` → None). Batch I's
 /// receiver tables key on this.
+/// (Go value-result count, ends in `error`) for a declared result list: a
+/// trailing `error` is the error slot, not a value (#726).
+pub(crate) fn result_shape(results: &[FnResult]) -> (usize, bool) {
+    let err = matches!(
+        results.last(),
+        Some(FnResult {
+            ty: TypeExpr::Named { name, .. },
+            ..
+        }) if name == "error"
+    );
+    let n = if err { results.len() - 1 } else { results.len() };
+    (n, err)
+}
+
 pub(crate) fn base_ty_name(t: &TypeExpr) -> Option<String> {
     match t {
         TypeExpr::Named { name, .. } => Some(name.clone()),
@@ -586,6 +614,10 @@ pub struct Emitter {
     /// The current (non-main) fn's per-result RETURN texts when its results
     /// end in `error` — E3 propagates via `return <zeros…, err>`.
     cur_fn_error_returns: Option<Vec<String>>,
+    /// Names assigned inside any closure literal of the current fn (#2386):
+    /// a call can run such a closure inside an O8 slot-loan window, so any
+    /// slot loan keyed by one of these names snapshots its key into `hyKeyN`.
+    closure_written: BTreeSet<String>,
     /// Per-fn result shapes, collected eagerly (Batch I): name →
     /// (n_results, ends_in_error, first_result's binding kind, per-param
     /// pointer-base types). Drives the `?` hoist arity (13:
@@ -594,6 +626,9 @@ pub struct Emitter {
     /// normalizes like any rust-call — and the pointer-param auto-address
     /// at call sites (09: `scale_then_register(e, …)` with `e *env`).
     fn_shapes: BTreeMap<String, FnShape>,
+    /// Result shapes of closures bound by name in the current fn
+    /// (`f := fn() error { … }`), so `f()?` knows its Go result count.
+    closure_shapes: BTreeMap<String, (usize, bool)>,
     /// User-struct field types (Batch I): struct → (field, declared hy type
     /// name — dotted for shape-known fields, "" otherwise). Receiver typing
     /// for `stats.mu.lock()` (18).
@@ -606,6 +641,8 @@ pub struct Emitter {
     var_ty: BTreeMap<String, (String, bool)>,
     /// Variables known to hold a pointer type in the current function frame.
     pointer_vars: BTreeSet<String>,
+    /// Active O8 slot-loan variable → local alias names holding a pointer to that loan.
+    loan_aliases: BTreeMap<String, BTreeSet<String>>,
     /// Local/parameter/receiver/result names bound in the current function frame.
     local_vars: BTreeSet<String>,
     /// Functions whose first result is a pointer type.
@@ -622,6 +659,7 @@ pub(crate) struct ScopeSnapshot {
     var_ty: BTreeMap<String, (String, bool)>,
     var_struct: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
+    loan_aliases: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Emitter {
@@ -650,11 +688,14 @@ impl Emitter {
             binding_prefix: "hybrid.program".to_string(),
             export_pub: false,
             cur_fn_error_returns: None,
+            closure_written: BTreeSet::new(),
             fn_shapes: BTreeMap::new(),
+            closure_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
             pointer_vars: BTreeSet::new(),
+            loan_aliases: BTreeMap::new(),
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
             explicit_imports: BTreeMap::new(),
@@ -674,6 +715,7 @@ impl Emitter {
             var_ty: self.var_ty.clone(),
             var_struct: self.var_struct.clone(),
             pointer_vars: self.pointer_vars.clone(),
+            loan_aliases: self.loan_aliases.clone(),
         }
     }
 
@@ -683,6 +725,7 @@ impl Emitter {
         self.var_ty = saved.var_ty;
         self.var_struct = saved.var_struct;
         self.pointer_vars = saved.pointer_vars;
+        self.loan_aliases = saved.loan_aliases;
     }
 
     pub(crate) fn shadow_local_name(&mut self, name: &str) {
@@ -692,7 +735,30 @@ impl Emitter {
             self.var_ty.remove(name);
             self.var_struct.remove(name);
             self.pointer_vars.remove(name);
+            self.loan_aliases.remove(name);
+            for aliases in self.loan_aliases.values_mut() {
+                aliases.remove(name);
+            }
         }
+    }
+
+    pub(crate) fn resolve_type_alias<'a>(&'a self, mut ty: &'a TypeExpr) -> &'a TypeExpr {
+        let mut seen = BTreeSet::new();
+        while let TypeExpr::Named { name, .. } = ty {
+            if !seen.insert(name.as_str()) {
+                break;
+            }
+            if let Some(target) = self.n5_aliases.get(name) {
+                ty = target;
+            } else {
+                break;
+            }
+        }
+        ty
+    }
+
+    pub(crate) fn is_pointer_ty(&self, ty: &TypeExpr) -> bool {
+        matches!(self.resolve_type_alias(ty), TypeExpr::Pointer { .. })
     }
 
     pub(crate) fn shadow_local_names(&mut self, names: &[String]) {
@@ -772,15 +838,7 @@ impl Emitter {
             .collect();
         self.ptr_returning_fns = file
             .fns()
-            .filter(|f| {
-                matches!(
-                    f.results.first(),
-                    Some(FnResult {
-                        ty: TypeExpr::Pointer { .. },
-                        ..
-                    })
-                )
-            })
+            .filter(|f| f.results.first().is_some_and(|r| self.is_pointer_ty(&r.ty)))
             .map(|f| f.name.clone())
             .collect();
         self.fn_shapes = file
@@ -800,7 +858,7 @@ impl Emitter {
                 let ptr_params = f
                     .params
                     .iter()
-                    .map(|p| match &p.ty {
+                    .map(|p| match self.resolve_type_alias(&p.ty) {
                         TypeExpr::Pointer { to, .. } => base_ty_name(to),
                         _ => None,
                     })
@@ -921,7 +979,8 @@ impl Emitter {
             || body.contains(".contains(")
             || body.contains(".insert(");
         let needs_pop = body.contains("hy_pop(");
-        if needs_option || needs_set || needs_pop {
+        let needs_n5_make = body.contains("hy_n5_make(");
+        if needs_option || needs_set || needs_pop || needs_n5_make {
             out.push('\n');
             if needs_option {
                 out.push_str(OPTION_PRELUDE);
@@ -933,6 +992,10 @@ impl Emitter {
             }
             if needs_pop {
                 out.push_str(POP_PRELUDE);
+                out.push('\n');
+            }
+            if needs_n5_make {
+                out.push_str(N5_MAKE_PRELUDE);
                 out.push('\n');
             }
         }
@@ -1058,8 +1121,13 @@ impl Emitter {
                 }
             }
             TypeExpr::Pointer { to, .. } => Self::collect_comparable_in_ty(to, param_names, out),
+            TypeExpr::Array { len, elem, .. } => {
+                if let Some(l) = len {
+                    Self::collect_comparable_in_expr(l, param_names, out);
+                }
+                Self::collect_comparable_in_ty(elem, param_names, out);
+            }
             TypeExpr::Slice { elem, .. }
-            | TypeExpr::Array { elem, .. }
             | TypeExpr::Chan { elem, .. }
             | TypeExpr::Option { elem, .. } => {
                 Self::collect_comparable_in_ty(elem, param_names, out);
@@ -1101,7 +1169,17 @@ impl Emitter {
                     Self::collect_comparable_in_expr(v, param_names, out);
                 }
             }
-            Stmt::Assign { values, .. } | Stmt::Return { values, .. } => {
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                for t in targets {
+                    Self::collect_comparable_in_place(t, param_names, out);
+                }
+                for v in values {
+                    Self::collect_comparable_in_expr(v, param_names, out);
+                }
+            }
+            Stmt::Return { values, .. } => {
                 for v in values {
                     Self::collect_comparable_in_expr(v, param_names, out);
                 }
@@ -1165,10 +1243,37 @@ impl Emitter {
             }
             Stmt::Select { arms, .. } => {
                 for a in arms {
+                    match &a.kind {
+                        SelectArmKind::Recv { chan, .. } => {
+                            Self::collect_comparable_in_expr(chan, param_names, out);
+                        }
+                        SelectArmKind::Send { chan, value, .. } => {
+                            Self::collect_comparable_in_expr(chan, param_names, out);
+                            Self::collect_comparable_in_expr(value, param_names, out);
+                        }
+                        SelectArmKind::Default => {}
+                    }
                     Self::collect_comparable_in_block(&a.body, param_names, out);
                 }
             }
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        }
+    }
+
+    fn collect_comparable_in_place(
+        p: &Place,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        match &p.kind {
+            PlaceKind::Ident(_) => {}
+            PlaceKind::Index { base, index } => {
+                Self::collect_comparable_in_place(base, param_names, out);
+                Self::collect_comparable_in_expr(index, param_names, out);
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                Self::collect_comparable_in_place(base, param_names, out);
+            }
         }
     }
 
@@ -1275,8 +1380,10 @@ impl Emitter {
     fn emit_fn(&mut self, f: &FnDecl) -> Result<(), EmitError> {
         self.bindings.clear();
         self.var_struct.clear();
+        self.closure_shapes.clear();
         self.var_ty.clear();
         self.pointer_vars.clear();
+        self.loan_aliases.clear();
         self.local_vars.clear();
         self.temp_n = 0;
         self.try_temps.clear();
@@ -1323,6 +1430,10 @@ impl Emitter {
         // E3 in an error-result fn (package mode, example 09): the
         // propagation tail returns the zero results + the error.
         self.cur_fn_error_returns = None;
+        self.closure_written.clear();
+        if let Some(body) = &f.body {
+            Self::collect_closure_writes_block(body, false, &mut self.closure_written);
+        }
         if !is_main && !f.results.is_empty() && !main_needs_wrapper {
             let last_is_err = matches!(
                 &f.results.last().unwrap().ty,
@@ -1345,7 +1456,7 @@ impl Emitter {
             if let Some(name) = &r.name {
                 if name != "_" {
                     self.shadow_local_name(name);
-                    if matches!(r.ty, TypeExpr::Pointer { .. }) {
+                    if self.is_pointer_ty(&r.ty) {
                         self.pointer_vars.insert(name.clone());
                     }
                     if let Some(kind) = self.binding_kind_of_ty(&r.ty) {
@@ -1569,10 +1680,10 @@ impl Emitter {
             self.shadow_local_name(&p.name);
             if let Some(kind) = self.binding_kind_of_ty(&p.ty) {
                 self.bindings.insert(p.name.clone(), kind);
-            } else if matches!(p.ty, TypeExpr::Chan { .. }) {
+            } else if matches!(self.resolve_type_alias(&p.ty), TypeExpr::Chan { .. }) {
                 self.bindings.insert(p.name.clone(), BindingKind::Chan);
             }
-            if matches!(p.ty, TypeExpr::Pointer { .. }) {
+            if self.is_pointer_ty(&p.ty) {
                 self.pointer_vars.insert(p.name.clone());
             }
             self.register_var_ty(&p.name, &p.ty);
@@ -1601,8 +1712,8 @@ impl Emitter {
     /// whose type is a user struct (`pool_stats`, value or pointer) lands
     /// in var_struct — `stats.mu.lock()` types through struct_fields.
     fn register_var_ty(&mut self, name: &str, ty: &TypeExpr) {
-        let (base, ptr) = match ty {
-            TypeExpr::Pointer { to, .. } => (base_ty_name(to), true),
+        let (base, ptr) = match self.resolve_type_alias(ty) {
+            TypeExpr::Pointer { to, .. } => (base_ty_name(self.resolve_type_alias(to)), true),
             t => (base_ty_name(t), false),
         };
         let Some(base) = base else { return };
@@ -1624,6 +1735,9 @@ impl Emitter {
     fn binding_kind_of_ty(&self, t: &TypeExpr) -> Option<BindingKind> {
         if matches!(t, TypeExpr::Chan { .. }) {
             return Some(BindingKind::Chan);
+        }
+        if matches!(t, TypeExpr::Map { .. }) {
+            return Some(BindingKind::Map);
         }
         let name = match t {
             TypeExpr::Named { name, .. } => name.as_str(),
