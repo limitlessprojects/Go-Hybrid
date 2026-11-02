@@ -688,7 +688,26 @@ impl<'a> Collector<'a> {
                 }
                 None
             }
-            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
+            Expr::SliceLit { elem: Some(t), .. } => {
+                match t.as_ref() {
+                    TypeExpr::Array { elem, .. } => Some(elem.render()),
+                    TypeExpr::Slice { elem, .. } => Some(elem.render()),
+                    _ => {
+                        let r = t.render();
+                        if let Some(elem) = r.strip_prefix("[]") {
+                            Some(elem.to_string())
+                        } else if let Some(elem) = r.strip_prefix("[") {
+                            if let Some(close) = elem.find(']') {
+                                Some(elem[close + 1..].to_string())
+                            } else {
+                                Some(r)
+                            }
+                        } else {
+                            Some(r)
+                        }
+                    }
+                }
+            }
             Expr::Slice { base, .. } => self.slice_element_type_name(base),
             Expr::Call { callee, args, .. } => {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
