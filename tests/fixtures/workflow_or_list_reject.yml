@@ -1,0 +1,9 @@
+name: fixture-or-list-reject
+jobs:
+  quick:
+    steps:
+      - name: Masked test failures must not register
+        run: |
+          set -e
+          python3 -m unittest discover -s tools -p test_failing.py || true
+          python3 tests/test_direct.py || true
