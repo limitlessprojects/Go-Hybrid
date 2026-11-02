@@ -697,6 +697,53 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn chan_element_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    let trimmed = tname.trim();
+                    if let Some(elem) = trimmed
+                        .strip_prefix("chan<- ")
+                        .or_else(|| trimmed.strip_prefix("<-chan "))
+                        .or_else(|| trimmed.strip_prefix("chan "))
+                        .or_else(|| trimmed.strip_prefix("chan<-"))
+                        .or_else(|| trimmed.strip_prefix("<-chan"))
+                        .or_else(|| trimmed.strip_prefix("chan"))
+                    {
+                        return Some(elem.trim().to_string());
+                    }
+                }
+                None
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.chan_element_type_name(&first.value);
+                        }
+                    }
+                }
+                None
+            }
+            Expr::StructLit { ty: Some(ty), .. } => {
+                if let TypeExpr::Chan { elem, .. } = ty {
+                    return Some(elem.render());
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn chan_element_scalar(&self, e: &Expr) -> Option<&'static str> {
+        if let Some(elem_ty) = self.chan_element_type_name(e) {
+            canonical_numeric_name(&elem_ty)
+        } else {
+            None
+        }
+    }
+
     /// A name that shadows checked defines but is not itself checked.
     fn exempt(&mut self, name: &str) {
         if name != "_" {
@@ -875,6 +922,14 @@ impl<'a> Collector<'a> {
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         match unwrap_parens(e) {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::Receive { chan, .. } => self.chan_element_type_name(chan),
+            Expr::SliceLit { .. } => {
+                if let Some((_, _, arr_ty)) = e.as_array_lit() {
+                    Some(arr_ty.render())
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -984,6 +1039,7 @@ impl<'a> Collector<'a> {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
             },
+            Expr::Receive { chan, .. } => self.chan_element_scalar(chan),
             _ => None,
         }
     }
@@ -1566,6 +1622,12 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Some(elem) = self.chan_element_type_name(val) {
+                    self.bind_type_name(name, format!("chan {}", elem));
+                } else if let Expr::Receive { chan, .. } = unwrap_parens(val) {
+                    if let Some(elem) = self.chan_element_type_name(chan) {
+                        self.bind_type_name(name, elem);
+                    }
                 }
             }
         }
@@ -1710,12 +1772,13 @@ impl<'a> Collector<'a> {
                 self.check_assign_operands(targets, *op, values, *span);
             }
             Stmt::Expr { expr, .. } => self.expr(expr),
-            Stmt::Send { chan, value, .. } => {
+            Stmt::Send { chan, value, span, .. } => {
                 self.expr(chan);
                 // #887: the sent value is a single-value position. A void call
                 // or a multi-value call here passed the checker and emitted
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
+                self.check_channel_send(chan, value, *span);
                 self.expr(value);
             }
             Stmt::If {
@@ -1936,9 +1999,10 @@ impl<'a> Collector<'a> {
                     self.push_scope();
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
-                    // #887: a channel send in a select arm is also a single-value
-                    // position.
-                    self.check_single_value_position(value, "a channel send", false);
+                            // #887: a channel send in a select arm is also a single-value
+                            // position.
+                            self.check_single_value_position(value, "a channel send", false);
+                            self.check_channel_send(chan, value, chan.span());
                             self.expr(chan);
                             self.expr(value);
                         }
@@ -1952,6 +2016,12 @@ impl<'a> Collector<'a> {
                             for (i, n) in names.iter().enumerate() {
                                 self.define_elidable(n, chan.span());
                                 self.bind_kind(n, if i == 0 { elem.clone() } else { OpKind::Bool });
+                                if i == 0 {
+                                    self.set_scalar(n, self.chan_element_scalar(chan));
+                                    if let Some(tname) = self.chan_element_type_name(chan) {
+                                        self.bind_type_name(n, tname);
+                                    }
+                                }
                             }
                         }
                         SelectArmKind::Default => {}
@@ -4961,6 +5031,38 @@ impl<'a> Collector<'a> {
     }
 
     /// Family B6 (#425): `s++`, `s--`, and compound assignment operand checks.
+    fn check_channel_send(&mut self, chan: &Expr, value: &Expr, span: Span) {
+        let chan_scalar = self.chan_element_scalar(chan);
+        let val_scalar = self.typed_value_scalar(value);
+        if matches!((chan_scalar, val_scalar), (Some(cs), Some(vs)) if cs != vs) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `{}` (value of type `{}`) as `{}` value in send to channel (HYB-E1002)",
+                    value.render(),
+                    val_scalar.unwrap_or_default(),
+                    chan_scalar.unwrap_or_default()
+                ),
+                "the channel's element type is fixed; write an explicit conversion when a conversion is intended",
+            );
+            return;
+        }
+        let chan_elem_name = self.chan_element_type_name(chan);
+        let val_type_name = self.typed_value_type_name(value);
+        if self.sized_array_names_differ(chan_elem_name.as_deref(), val_type_name.as_deref()) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `{}` (value of type `{}`) as `{}` value in send to channel (HYB-E1002)",
+                    value.render(),
+                    val_type_name.unwrap_or_default(),
+                    chan_elem_name.unwrap_or_default()
+                ),
+                "array sizes must match when sending to an array channel",
+            );
+        }
+    }
+
     fn check_assign_operands(
         &mut self,
         targets: &[Place],
