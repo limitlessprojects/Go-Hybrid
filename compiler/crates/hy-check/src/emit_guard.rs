@@ -1621,7 +1621,7 @@ impl<'a> Checker<'a> {
             Expr::Call { callee, .. } => {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                     // `len`/`cap` are integers, and so is every integer conversion.
-                    return name == "len" || name == "cap" || self.resolve_int_conversion_name(name);
+                    return name == "len" || name == "cap" || self.resolve_int_conversion_name(name).is_some();
                 }
                 false
             }
