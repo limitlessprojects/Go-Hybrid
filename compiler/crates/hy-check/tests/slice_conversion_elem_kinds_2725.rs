@@ -43,6 +43,10 @@ fn slice_conversions_with_mismatched_element_kinds_reject_e1002() {
             "[]float64([]string)",
             "fn main() {\n    s := []string{\"a\"}\n    _ = []float64(s)\n}\n",
         ),
+        (
+            "[]int([]string) declared var (#1838)",
+            "fn main() {\n    var s []string = []string{\"alpha\", \"beta\"}\n    var numbers = []int(s)\n    println(numbers[0])\n}\n",
+        ),
     ] {
         let r = check(src);
         assert_eq!(r.verdict, Verdict::Reject, "{name}");
