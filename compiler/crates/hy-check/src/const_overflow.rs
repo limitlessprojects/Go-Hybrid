@@ -507,6 +507,13 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Stmt::TaskBlock { body, .. } | Stmt::Auto { body, .. } => {
+                if deep {
+                    for s in &body.stmts {
+                        self.check_stmt_type_conversions_inner(s, true);
+                    }
+                }
+            }
             Stmt::Select { arms, .. } => {
                 for arm in arms {
                     match &arm.kind {

@@ -1079,3 +1079,49 @@ companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.| local-composite-cha
 
 ### n5-zero-map-allocation-sites (the #645 follow-up, #1206 part 1) — ACCEPT
 `make([]T, n[, c])` elements (and the spare capacity a reslice exposes), `make([]map[K]V, n)` elements, and `[N]T` arrays (var, literal, const length, partial literal) are N5 zero values: their maps allocate, so the first write works instead of panicking `assignment to entry in nil map`. No check-site; ACCEPT with a byte-exact EXPECTED-OUTPUT (`spec_n5_zero_maps.rs` diffs it). Corpus: **130 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 88**.
+
+-------------------------------------------------------------------------------
+
+## Additive corpus registration — `auto { ... }` automatic fork-join scheduling (issue #1962)
+
+Seven programs register the closed `auto` scope, derived from the issue text
+before the scheduler was written: four ACCEPT shapes that pin the layering
+(independent roots run together, conflicting ones serialize), and three
+REJECT shapes that break the region's statically-known task set. Verdict
+codes: `HYB-E3201` AUTO-RECV, `HYB-E3203` AUTO-SPAWN, `HYB-E3204` AUTO-TASK
+(`HYB-E3202` AUTO-SELECT and `HYB-E3205` auto-escaped-reference are enforced
+by the checker's unit tests, not by a corpus fixture here).
+
+### 130-auto-basic-disjoint (issue #1962) — ACCEPT
+Two inline `task { ... }` blocks whose writes are disjoint (`x` / `y`): the
+effect sets do not overlap, so both tasks sit in layer 0 and run concurrently.
+
+### 131-auto-serialize-conflict (issue #1962) — ACCEPT
+Two tasks both writing `counter` — write/write. Unknown independence is
+ordered, not rejected: the region still compiles and stays race-free, it is
+just serial. This is the row the old checker would have refused.
+
+### 132-auto-read-write-conflict (issue #1962) — ACCEPT
+Task 0 writes `total`, task 1 reads it — write/read dependency, serialized in
+program order. The positive control that serial-by-default also preserves
+results, not only races.
+
+### 133-auto-blocking-recv-rejected (issue #1962) — REJECT
+`auto { task { result = <-ch } }`: a blocking receive can never be proven to
+reach its join, so the scheduler refuses the region (HYB-E3201 / AUTO-RECV).
+
+### 134-auto-dynamic-spawn-rejected (issue #1962) — REJECT
+A `task { ... }` inside a loop spawns a runtime-counted task set — there is
+no static layer schedule to emit (HYB-E3203 / AUTO-SPAWN).
+
+### 135-auto-escaped-task-call-rejected (issue #1962) — REJECT
+`auto { task helper() }`: a non-inline task's callee effects are unanalyzable,
+so the region cannot prove its state stays closed (HYB-E3204 / AUTO-TASK).
+
+### 136-auto-three-layer-schedule (issue #1962) — ACCEPT
+Four tasks over `a`/`b`/`c`/`d` that must fall into three layers — `[0, 1]`
+(disjoint writes), then `[2]` (reads `a`, writes `c`), then `[3]` (reads `c`,
+writes `d`). Pins the greedy layering itself, not just the two-task case.
+
+With this registration the corpus is **137 programs: ACCEPT 44 ·
+ACCEPT-MANAGED 2 · REJECT 91** — main's 130 plus these seven.
