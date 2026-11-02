@@ -221,6 +221,35 @@ fn canonical_numeric_name(name: &str) -> Option<&'static str> {
 
 /// #2771 — `[3]int` yes; `[]int` (slice), `[N]int` (non-constant length), and
 /// named types no — so only genuinely sized arrays are compared.
+fn parse_map_type_name(tname: &str) -> (Option<String>, Option<String>) {
+    let s = tname.trim();
+    if !s.starts_with("map[") {
+        return (None, None);
+    }
+    let rest = &s[4..];
+    let mut depth = 1;
+    let mut close_idx = None;
+    for (i, c) in rest.char_indices() {
+        if c == '[' {
+            depth += 1;
+        } else if c == ']' {
+            depth -= 1;
+            if depth == 0 {
+                close_idx = Some(i);
+                break;
+            }
+        }
+    }
+    let Some(ci) = close_idx else {
+        return (None, None);
+    };
+    let key_ty = rest[..ci].trim().to_string();
+    let val_ty = rest[ci + 1..].trim().to_string();
+    let key_opt = if key_ty.is_empty() { None } else { Some(key_ty) };
+    let val_opt = if val_ty.is_empty() { None } else { Some(val_ty) };
+    (key_opt, val_opt)
+}
+
 fn is_sized_array_spelling(s: &str) -> bool {
     let t = s.trim();
     if !t.starts_with('[') {
@@ -697,6 +726,32 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn map_key_value_type_names(&self, e: &Expr) -> (Option<String>, Option<String>) {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    return parse_map_type_name(&tname);
+                }
+                (None, None)
+            }
+            Expr::MapLit { key, value, .. } => {
+                (Some(key.render()), Some(value.render()))
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.map_key_value_type_names(&first.value);
+                        }
+                    }
+                }
+                (None, None)
+            }
+            _ => (None, None),
+        }
+    }
+
     /// A name that shadows checked defines but is not itself checked.
     fn exempt(&mut self, name: &str) {
         if name != "_" {
@@ -873,7 +928,11 @@ impl<'a> Collector<'a> {
     /// Only identifiers bound with an explicit type name are known; everything
     /// else (literals, conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
-        match unwrap_parens(e) {
+        let bare = unwrap_parens(e);
+        if let Some((_, _, array_ty)) = bare.as_array_lit() {
+            return Some(array_ty.render());
+        }
+        match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             _ => None,
         }
@@ -5332,16 +5391,36 @@ impl<'a> Collector<'a> {
                 let is_untyped_int_to_float = **key_kind == OpKind::Float
                     && *ik == OpKind::Int
                     && self.is_untyped_int_const(index);
+                let (key_type_name, _) = base_expr
+                    .map(|b| self.map_key_value_type_names(b))
+                    .unwrap_or((None, None));
+                let scalar_mismatch = match (
+                    key_type_name.as_deref().and_then(canonical_numeric_name),
+                    self.typed_value_scalar(index),
+                ) {
+                    (Some(k), Some(i)) => k != i,
+                    _ => false,
+                };
+                let array_mismatch = self.sized_array_names_differ(
+                    key_type_name.as_deref(),
+                    self.typed_value_type_name(index).as_deref(),
+                );
                 let conflict = (**key_kind == OpKind::Float && *ik == OpKind::Int && !is_untyped_int_to_float)
-                    || kinds_conflict(key_kind, ik);
+                    || kinds_conflict(key_kind, ik)
+                    || scalar_mismatch
+                    || array_mismatch;
                 if conflict {
+                    let k_label = key_type_name.unwrap_or_else(|| key_kind.label());
+                    let i_label = self
+                        .typed_value_type_name(index)
+                        .unwrap_or_else(|| ik.label().to_string());
                     self.emit_e1002(
                         index.span(),
                         format!(
                             "cannot use `{}` (type `{}`) as `{}` value in map index on `{}` (HYB-E1002)",
                             index.render(),
-                            ik.label(),
-                            key_kind.label(),
+                            i_label,
+                            k_label,
                             bk.label()
                         ),
                         "map index expression must match the map's key type",
@@ -5928,19 +6007,27 @@ impl<'a> Collector<'a> {
                 // #2788: a typed key of another concrete numeric width.
                 let scalar_mismatch = self
                     .scalar_names_conflict(self.scalar_of_ty(&resolved_key), self.typed_value_scalar(k));
+                let array_mismatch = self.sized_array_names_differ(
+                    Some(&resolved_key.render()),
+                    self.typed_value_type_name(k).as_deref(),
+                );
                 let is_untyped_int_to_float = exp_key == OpKind::Float
                     && kk == OpKind::Int
                     && self.is_untyped_int_const(k);
                 let conflict = (exp_key == OpKind::Float && kk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_key, &kk)
-                    || scalar_mismatch;
+                    || scalar_mismatch
+                    || array_mismatch;
                 if kk != OpKind::Unknown && conflict {
+                    let k_label = self
+                        .typed_value_type_name(k)
+                        .unwrap_or_else(|| kk.label().to_string());
                     self.emit_e1002(
                         k.span(),
                         format!(
                             "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
                             k.render(),
-                            kk.label(),
+                            k_label,
                             key_ty.render()
                         ),
                         "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
@@ -5956,19 +6043,27 @@ impl<'a> Collector<'a> {
                 // #2788: a typed value of another concrete numeric width.
                 let scalar_mismatch = self
                     .scalar_names_conflict(self.scalar_of_ty(&resolved_val), self.typed_value_scalar(v));
+                let array_mismatch = self.sized_array_names_differ(
+                    Some(&resolved_val.render()),
+                    self.typed_value_type_name(v).as_deref(),
+                );
                 let is_untyped_int_to_float = exp_val == OpKind::Float
                     && vk == OpKind::Int
                     && self.is_untyped_int_const(v);
                 let conflict = (exp_val == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_val, &vk)
-                    || scalar_mismatch;
+                    || scalar_mismatch
+                    || array_mismatch;
                 if vk != OpKind::Unknown && conflict {
+                    let v_label = self
+                        .typed_value_type_name(v)
+                        .unwrap_or_else(|| vk.label().to_string());
                     self.emit_e1002(
                         v.span(),
                         format!(
                             "cannot use `{}` (type `{}`) as `{}` value in map value (HYB-E1002)",
                             v.render(),
-                            vk.label(),
+                            v_label,
                             val_ty.render()
                         ),
                         "every value of a map composite literal `map[K]V{...}` must be assignable to the value type `V`",
@@ -6628,18 +6723,36 @@ impl<'a> Collector<'a> {
                         let is_untyped_int_to_float = **k_expected == OpKind::Float
                             && kk == OpKind::Int
                             && self.is_untyped_int_const(key_arg);
-                        if **k_expected != OpKind::Unknown
+                        let (key_type_name, _) = self.map_key_value_type_names(map_arg);
+                        let scalar_mismatch = match (
+                            key_type_name.as_deref().and_then(canonical_numeric_name),
+                            self.typed_value_scalar(key_arg),
+                        ) {
+                            (Some(k), Some(i)) => k != i,
+                            _ => false,
+                        };
+                        let array_mismatch = self.sized_array_names_differ(
+                            key_type_name.as_deref(),
+                            self.typed_value_type_name(key_arg).as_deref(),
+                        );
+                        let conflict = (**k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
                             && kk != **k_expected
-                            && !is_untyped_int_to_float
-                        {
+                            && !is_untyped_int_to_float)
+                            || scalar_mismatch
+                            || array_mismatch;
+                        if conflict {
+                            let k_label = key_type_name.unwrap_or_else(|| k_expected.label());
+                            let kk_label = self
+                                .typed_value_type_name(key_arg)
+                                .unwrap_or_else(|| kk.label().to_string());
                             self.emit_e2005(
                                 span,
                                 format!(
                                     "cannot use `{}` (type `{}`) as key type `{}` in `delete` (HYB-E2005)",
                                     key_arg.render(),
-                                    kk.label(),
-                                    k_expected.label()
+                                    kk_label,
+                                    k_label
                                 ),
                                 "the second argument to `delete(m, k)` must match the map's key type",
                             );
