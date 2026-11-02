@@ -38,11 +38,11 @@ pub extern "C" fn hy_sha3_digest256(
     len: usize,
     out: *mut u8, /* 32 */
 ) -> i32 {
-    if out.is_null() || (len > 0 && data.is_null()) {
+    if out.is_null() || (len > 0 && data.is_null()) || len > isize::MAX as usize {
         return 1;
     }
     use sha3::{Digest, Sha3_256};
-    let slice = unsafe { std::slice::from_raw_parts(data, len) };
+    let slice: &[u8] = if len == 0 { &[] } else { unsafe { std::slice::from_raw_parts(data, len) } };
     let digest = Sha3_256::digest(slice);
     unsafe {
         ptr::copy_nonoverlapping(digest.as_ptr(), out, 32);
@@ -126,7 +126,7 @@ const ERR_TABLE: i32 = 1; // table poisoned / slot invalid
 const ERR_JSON: i32 = 2; // the JSON operation itself failed
 
 fn next_gen(g: u32) -> u32 {
-    if g == u32::MAX {
+    if g >= u32::MAX - 1 {
         1
     } else {
         g + 1
@@ -201,7 +201,7 @@ impl HyStr {
         if self.len == 0 {
             return Ok("");
         }
-        if self.ptr.is_null() {
+        if self.ptr.is_null() || self.len > isize::MAX as usize {
             return Err(ERR_TABLE);
         }
         let bytes = unsafe { std::slice::from_raw_parts(self.ptr, self.len) };
@@ -220,7 +220,7 @@ impl HyStr {
     unsafe fn from_raw(ptr: u64, len: u64) -> Self {
         HyStr {
             ptr: ptr as *const u8,
-            len: len as usize,
+            len: usize::try_from(len).unwrap_or(usize::MAX),
         }
     }
 }
@@ -284,12 +284,10 @@ pub extern "C" fn hy_json_get_array(v: u64, kptr: u64, klen: u64, out_handle: *m
     if out_handle.is_null() {
         return ERR_TABLE;
     }
-    let k = match unsafe { HyStr::from_raw(kptr, klen) }.as_str() {
-        Ok(k) => k,
-        Err(e) => return e,
-    };
     with_table(|t| {
-        let arr = table_get(t, v)?
+        let obj = table_get(t, v)?;
+        let k = unsafe { HyStr::from_raw(kptr, klen) }.as_str()?;
+        let arr = obj
             .get(k)
             .ok_or(ERR_JSON)?
             .as_array()
@@ -308,12 +306,10 @@ pub extern "C" fn hy_json_get_int(v: u64, kptr: u64, klen: u64, out: *mut i64) -
     if out.is_null() {
         return ERR_TABLE;
     }
-    let k = match unsafe { HyStr::from_raw(kptr, klen) }.as_str() {
-        Ok(k) => k,
-        Err(e) => return e,
-    };
     with_table(|t| {
-        let n = table_get(t, v)?
+        let obj = table_get(t, v)?;
+        let k = unsafe { HyStr::from_raw(kptr, klen) }.as_str()?;
+        let n = obj
             .get(k)
             .ok_or(ERR_JSON)?
             .as_i64()
@@ -333,12 +329,10 @@ pub extern "C" fn hy_json_get_string(v: u64, kptr: u64, klen: u64, out_handle: *
     if out_handle.is_null() {
         return ERR_TABLE;
     }
-    let k = match unsafe { HyStr::from_raw(kptr, klen) }.as_str() {
-        Ok(k) => k,
-        Err(e) => return e,
-    };
     with_table(|t| {
-        let s = table_get(t, v)?
+        let obj = table_get(t, v)?;
+        let k = unsafe { HyStr::from_raw(kptr, klen) }.as_str()?;
+        let s = obj
             .get(k)
             .ok_or(ERR_JSON)?
             .as_str()
@@ -373,10 +367,11 @@ pub extern "C" fn hy_json_array_get(arr: u64, i: u64, out_handle: *mut u64) -> i
         return ERR_TABLE;
     }
     with_table(|t| {
+        let idx = usize::try_from(i).map_err(|_| ERR_JSON)?;
         let elem = table_get(t, arr)?
             .as_array()
             .ok_or(ERR_JSON)?
-            .get(i as usize)
+            .get(idx)
             .ok_or(ERR_JSON)?
             .clone();
         let h = table_insert(t, elem);
@@ -390,12 +385,9 @@ pub extern "C" fn hy_json_array_get(arr: u64, i: u64, out_handle: *mut u64) -> i
 /// `arr.push_string(s)`.
 #[no_mangle]
 pub extern "C" fn hy_json_array_push_string(arr: u64, sptr: u64, slen: u64) -> i32 {
-    let sv = match unsafe { HyStr::from_raw(sptr, slen) }.as_str() {
-        Ok(s) => s.to_string(),
-        Err(e) => return e,
-    };
     with_table(|t| {
         let a = table_get_mut(t, arr)?.as_array_mut().ok_or(ERR_JSON)?;
+        let sv = unsafe { HyStr::from_raw(sptr, slen) }.as_str()?.to_string();
         a.push(Json::String(sv));
         Ok(())
     })
@@ -404,13 +396,7 @@ pub extern "C" fn hy_json_array_push_string(arr: u64, sptr: u64, slen: u64) -> i
 /// `v.set(key, value_handle)` — moves the value handle's payload into `v`.
 #[no_mangle]
 pub extern "C" fn hy_json_set(v: u64, kptr: u64, klen: u64, value: u64) -> i32 {
-    let k = match unsafe { HyStr::from_raw(kptr, klen) }.as_str() {
-        Ok(k) => k.to_string(),
-        Err(e) => return e,
-    };
     with_table(|t| {
-        // Validate both `value` (live handle) and `v` (distinct live JSON Object)
-        // before removing `value` from the table so a failed `Set` never consumes `value`.
         let (vidx, vgen) = handle_unpack(value).ok_or(ERR_TABLE)?;
         let (tidx, tgen) = handle_unpack(v).ok_or(ERR_TABLE)?;
         if vidx == tidx {
@@ -430,6 +416,7 @@ pub extern "C" fn hy_json_set(v: u64, kptr: u64, klen: u64, value: u64) -> i32 {
                 return Err(ERR_JSON);
             }
         }
+        let k = unsafe { HyStr::from_raw(kptr, klen) }.as_str()?.to_string();
         let val = t.slots[vidx].val.take().ok_or(ERR_TABLE)?;
         t.slots[vidx].gen = next_gen(t.slots[vidx].gen);
         t.free.push(vidx);
@@ -536,7 +523,7 @@ pub extern "C" fn hy_regex_is_match(
     tptr: *const u8,
     tlen: usize,
 ) -> i64 {
-    if (plen > 0 && pptr.is_null()) || (tlen > 0 && tptr.is_null()) {
+    if (plen > 0 && pptr.is_null()) || (tlen > 0 && tptr.is_null()) || plen > isize::MAX as usize || tlen > isize::MAX as usize {
         return -1;
     }
     let pat = if plen == 0 {
@@ -571,7 +558,7 @@ pub extern "C" fn hy_regex_is_match(
 /// channel (example 09's simple_pattern surface: validity as a bool).
 #[no_mangle]
 pub extern "C" fn hy_regex_is_valid(pptr: *const u8, plen: usize) -> i64 {
-    if plen > 0 && pptr.is_null() {
+    if (plen > 0 && pptr.is_null()) || plen > isize::MAX as usize {
         return 0;
     }
     let pat = if plen == 0 {
