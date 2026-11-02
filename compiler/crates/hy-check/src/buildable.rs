@@ -873,7 +873,14 @@ impl<'a> Collector<'a> {
     /// Only identifiers bound with an explicit type name are known; everything
     /// else (literals, conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
-        match unwrap_parens(e) {
+        let bare = match unwrap_parens(e) {
+            Expr::Move { operand, .. } => unwrap_parens(operand),
+            other => other,
+        };
+        if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+            return Some(arr_ty.render());
+        }
+        match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             _ => None,
         }
@@ -1564,7 +1571,9 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                if let Some((_, _, arr_ty)) = val.as_array_lit() {
+                    self.bind_type_name(name, arr_ty.render());
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
                 }
             }
@@ -5725,10 +5734,14 @@ impl<'a> Collector<'a> {
             // or slice literal`).
             let scalar_mismatch = self
                 .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            let array_mismatch = self.sized_array_names_differ(
+                Some(elem_ty.render().as_str()),
+                self.typed_value_type_name(item).as_deref(),
+            );
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch {
+            if ik == expected && !scalar_mismatch && !array_mismatch {
                 continue;
             }
             let is_untyped_int_to_float = expected == OpKind::Float
@@ -5736,7 +5749,8 @@ impl<'a> Collector<'a> {
                 && self.is_untyped_int_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
-                || scalar_mismatch;
+                || scalar_mismatch
+                || array_mismatch;
             if !conflict {
                 continue;
             }
@@ -5801,10 +5815,14 @@ impl<'a> Collector<'a> {
             // #2788: same width-collapse escape as the array arm above.
             let scalar_mismatch = self
                 .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            let array_mismatch = self.sized_array_names_differ(
+                Some(elem_ty.render().as_str()),
+                self.typed_value_type_name(item).as_deref(),
+            );
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch {
+            if ik == expected && !scalar_mismatch && !array_mismatch {
                 continue;
             }
             if expected == OpKind::Float
@@ -5818,7 +5836,8 @@ impl<'a> Collector<'a> {
                 && self.is_untyped_int_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
-                || scalar_mismatch;
+                || scalar_mismatch
+                || array_mismatch;
             if !conflict {
                 continue;
             }
