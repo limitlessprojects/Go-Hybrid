@@ -194,6 +194,17 @@ class DownloadIntegrityTests(unittest.TestCase):
              contextlib.redirect_stdout(io.StringIO()):
             job.actions_fetch(123, str(directory))
 
+    def test_unsafe_artifact_name_rejected_without_filesystem_writes(self):
+        for name in ("", ".", "..", "../escape", "sub/nested", r"..\escape", r"sub\nested", None, 123):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                artifact = {"name": name, "archive_download_url": "https://example.invalid/archive", "size_in_bytes": 9}
+                with mock.patch.object(job, "gh_api", return_value={"artifacts": [artifact]}), \
+                     mock.patch.object(job, "gh_token", return_value="offline-fixture"), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    rc = job.actions_fetch(123, str(tmp))
+                    self.assertEqual(rc, 1)
+                    self.assertFalse(list((Path(tmp) / "result").iterdir()))
+
     def test_interrupted_read_preserves_existing_archive(self):
         for existing in (None, b"previous validated archive"):
             with self.subTest(existing=existing), tempfile.TemporaryDirectory() as tmp:
