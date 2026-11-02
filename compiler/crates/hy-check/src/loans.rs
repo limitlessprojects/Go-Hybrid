@@ -6788,11 +6788,35 @@ impl<'a> Checker<'a> {
                 } else {
                     let root = t.root();
                     if !root.is_empty() && self.binding_may_share(st, root) {
+                        if !info.is_fresh_copy {
+                            self.record_storage_from_snapshot(
+                                st,
+                                &pre_st,
+                                root,
+                                v,
+                                &overwritten,
+                                false,
+                                false,
+                            );
+                        }
                         self.record_may_share(st, root, v);
+                        self.record_move_const_and_a3_loans(st, root, v, idx);
+                        if let Some(origin) = info
+                            .non_owned
+                            .or_else(|| self.moved_non_owned_origin_in_expr(st, v))
+                        {
+                            if let Some(b) = st.env_lookup_mut(root) {
+                                if b.non_owned_origin.is_none() || origin.contains("`const ") {
+                                    b.non_owned_origin = Some(origin);
+                                }
+                            }
+                        }
                     }
                 }
             }
         } else if values.len() == 1 && targets.len() > 1 {
+            let pre_st = st.clone();
+            let mut overwritten = Vec::new();
             let moved_non_owned = self.moved_non_owned_origin_in_expr(st, &values[0]);
             let shapes = self.multi_value_shapes(st, &values[0], targets.len());
             let tys = self.multi_value_tys(st, &values[0], targets.len());
