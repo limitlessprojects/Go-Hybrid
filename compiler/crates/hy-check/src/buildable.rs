@@ -5867,6 +5867,14 @@ impl<'a> Collector<'a> {
             return;
         }
         let Some(head) = untyped_slice_head_ty(first) else {
+            self.emit_e1002(
+                first.span(),
+                format!(
+                    "untyped slice literal of `{}` — spell the element type (HYB-E1002)",
+                    first.render()
+                ),
+                "an untyped `[...]` takes its element type from a literal first item; spell the element type explicitly (`[]T{...}`)",
+            );
             return;
         };
         let head_text = head.render();
