@@ -28,7 +28,7 @@ LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 INLINE_CORPUS_RE = re.compile(r"`(\d{2}-[a-z0-9][a-z0-9-]*(?:\.hy)?)`")
 CORPUS_NUM_RE = re.compile(r"\bcorpus\s+(\d{1,3})\b")
 MARKER_RE = re.compile(r"^\s*\((reject|accept|managed)\)", re.IGNORECASE)
-VERDICT_RE = re.compile(r"EXPECTED-VERDICT:\s*([A-Za-z-]+)")
+VERDICT_RE = re.compile(r"^//[ \t]*EXPECTED-VERDICT:[ \t]*(ACCEPT-MANAGED|ACCEPT|REJECT)(?![-\w])", re.M)
 CHECKED_SUFFIXES = {
     ".md", ".py", ".rs", ".go", ".hy", ".yml", ".yaml", ".json", ".txt", ".toml",
 }
@@ -78,7 +78,7 @@ def marker_matches(marker, verdict):
     if marker == "reject":
         return verdict == "REJECT"
     if marker == "accept":
-        return verdict.startswith("ACCEPT")
+        return verdict == "ACCEPT"
     if marker == "managed":
         return verdict == "ACCEPT-MANAGED"
     return True
@@ -108,15 +108,15 @@ def check(root):
                 continue
             if resolved.suffix.lower() != ".hy":
                 continue
+            verdict = verdict_of(resolved)
+            if verdict is None:
+                issues.append({"row": row_number, "kind": "no-verdict-header", "target": path})
+                continue
             follow = evidence[match.end():]
             marker_match = MARKER_RE.match(follow)
             if not marker_match:
                 continue
             marker = marker_match.group(1).lower()
-            verdict = verdict_of(resolved)
-            if verdict is None:
-                issues.append({"row": row_number, "kind": "no-verdict-header", "target": path})
-                continue
             if not marker_matches(marker, verdict):
                 issues.append({
                     "row": row_number,
