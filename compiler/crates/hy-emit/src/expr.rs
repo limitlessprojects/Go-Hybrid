@@ -675,7 +675,12 @@ impl Emitter {
     pub(crate) fn user_struct_name_of(&self, e: &Expr) -> Option<&str> {
         match Self::unwrap_parens(e) {
             Expr::Ident { name, .. } => self.var_struct.get(name).map(String::as_str),
-            Expr::AddrOf { operand, .. } => self.user_struct_name_of(operand),
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => self.user_struct_name_of(operand),
             Expr::Field { base, name, .. } => {
                 let sn = self.user_struct_name_of(base)?;
                 let fty = self
@@ -765,7 +770,14 @@ impl Emitter {
                 }
                 None
             }
-            Expr::Try { operand, .. } | Expr::Move { operand, .. } => self.type_of_expr(operand),
+            Expr::Try { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => self.type_of_expr(operand),
             // A zero-arg/method call's result type is the member's result;
             // package constructors and user functions returning shape-known
             // foreign types resolve to their descriptor keys.
@@ -834,6 +846,14 @@ impl Emitter {
                 };
             }
         }
+        if let Expr::Ident { name: root, .. } = Self::unwrap_parens_and_addr(base) {
+            if matches!(
+                self.bindings.get(root),
+                Some(BindingKind::Foreign) | Some(BindingKind::ForeignTy(_))
+            ) {
+                return to_go_name(name);
+            }
+        }
         self.member_name(base, name)
     }
 
@@ -842,6 +862,21 @@ impl Emitter {
             e = inner;
         }
         e
+    }
+
+    fn unwrap_parens_and_addr(mut e: &Expr) -> &Expr {
+        loop {
+            match e {
+                Expr::Paren { inner, .. } => e = inner,
+                Expr::AddrOf { operand, .. }
+                | Expr::Unary {
+                    op: UnOp::Addr,
+                    operand,
+                    ..
+                } => e = operand,
+                _ => return e,
+            }
+        }
     }
 
     fn assoc_index_type_arg(e: &Expr) -> Option<String> {
@@ -880,7 +915,12 @@ impl Emitter {
         match Self::unwrap_parens(e) {
             Expr::Ident { name, .. } => self.var_struct.contains_key(name),
             Expr::StructLit { .. } => true,
-            Expr::AddrOf { operand, .. } => self.is_user_struct_expr(operand),
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => self.is_user_struct_expr(operand),
             // Recursive since #1553: `o.sub` AND `o.sub.deep` are user
             // structs, not just `o.f`. The old single-hop read made a
             // three-level `o.sub.thing.pop()` look like a builtin pop and
@@ -955,7 +995,7 @@ impl Emitter {
                     // — a clean failure, never a wrong emission.
                 }
             }
-            if let Expr::Ident { name: root, .. } = base {
+            if let Expr::Ident { name: root, .. } = Self::unwrap_parens_and_addr(base) {
                 if let Some(BindingKind::Foreign) = self.bindings.get(root) {
                     let b = self.emit_expr(base, ATOM)?;
                     let mut parts = Vec::new();
