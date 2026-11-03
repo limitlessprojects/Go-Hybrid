@@ -12,6 +12,7 @@ No tokens, no secrets, no pushing — worker output is data.
 """
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -64,12 +65,14 @@ def main():
     # 2. clone the public repo at the pinned SHA
     repo = job.get("repo", "https://github.com/limitlessprojects/Go-Hybrid.git")
     sha = job.get("sha", "HEAD")
-    rc, _ = sh("git clone --quiet {} repo 2>&1 | tail -2".format(repo), 300)
+    rc, _ = sh("git clone --quiet {} repo 2>&1".format(shlex.quote(repo)), 300)
     if rc == 0:
-        sh("cd repo && git checkout --quiet {} 2>&1 | tail -2".format(sha), 60)
-    else:
+        rc, _ = sh("cd repo && git checkout --quiet {} 2>&1".format(shlex.quote(sha)), 60)
+    if rc != 0:
         # fall back to codeload tarball (sometimes git is restricted but https works)
-        sh("rm -rf repo && mkdir repo && curl -sL --max-time 240 https://codeload.github.com/limitlessprojects/Go-Hybrid/tar.gz/{} | tar xz --strip-components=1 -C repo".format(sha), 300)
+        rc, _ = sh("rm -rf repo && mkdir repo && curl -fsSL --max-time 240 https://codeload.github.com/limitlessprojects/Go-Hybrid/tar.gz/{} | tar xz --strip-components=1 -C repo".format(shlex.quote(sha)), 300)
+        if rc != 0:
+            sys.exit(rc)
 
     # 3. run the repo's runner
     rc, _ = sh("python3 repo/tools/runner/runner.py {} --results-dir {}/results --repo-dir repo".format(job_path, WORK), 7200)
