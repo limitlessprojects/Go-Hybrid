@@ -52,7 +52,10 @@ pub struct Span {
 
 impl Span {
     pub fn new(start: Pos, end: Pos) -> Self {
-        Span { start, end }
+        Span {
+            start: start.min(end),
+            end: start.max(end),
+        }
     }
 
     pub fn point(pos: Pos) -> Self {
@@ -153,7 +156,7 @@ impl Diagnostic {
         Diagnostic {
             code: entry
                 .map(|e| e.code.clone())
-                .unwrap_or_else(|| code.to_string()),
+                .unwrap_or_else(|| code.trim().to_string()),
             name: entry.map(|e| e.name.clone()).unwrap_or_default(),
             severity,
             file,
@@ -277,7 +280,7 @@ impl ManagedReport {
         if self.total_sites == 0 {
             0.0
         } else {
-            100.0 * self.sites_via_managed as f64 / self.total_sites as f64
+            (100.0 * self.sites_via_managed as f64 / self.total_sites as f64).min(100.0)
         }
     }
 }
@@ -401,7 +404,7 @@ impl Registry {
 /// an error, and a non-`E8nnn` code can never be constructed as a warning.
 /// Runs as a debug assert AND is unit-tested in release (`#[test]`).
 pub fn assert_severity_code_coherence(code: &str, severity: Severity) {
-    let canonical = Registry::global().lookup(code).map(|e| e.code.as_str()).unwrap_or(code);
+    let canonical = Registry::global().lookup(code).map(|e| e.code.as_str()).unwrap_or_else(|| code.trim());
     let is_lint = canonical.contains("-E8") || canonical.to_ascii_uppercase().starts_with("E8") || canonical.starts_with("8");
     let is_err = severity == Severity::Error;
     debug_assert!(
