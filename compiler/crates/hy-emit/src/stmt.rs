@@ -362,13 +362,26 @@ impl Emitter {
     /// `(closure name, loan name)` for every name this declaration binds to
     /// a function literal whose body mentions an active slot loan (or one of
     /// its aliases) in the current loan frames.
+
+    /// Leading identifier of a call's callee (`mk()` -> `mk`,
+    /// `ns.mk()` -> None), used to recognise a second-order closure (#3227).
+    fn call_callee_ident(e: &Expr) -> Option<String> {
+        match Self::peel_parens(e) {
+            Expr::Call { callee, .. } => match Self::peel_parens(callee) {
+                Expr::Ident { name, .. } => Some(name.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn closure_captured_loans(&self, l: &LocalDecl) -> Vec<(String, String)> {
         let mut out = Vec::new();
         if l.names.len() != l.values.len() {
             return out;
         }
         for (name, v) in l.names.iter().zip(l.values.iter()) {
-            if name == "_" || !matches!(Self::peel_parens(v), Expr::FnLit { .. }) {
+            if name == "_" {
                 continue;
             }
             for frame in &self.loan_frames {
@@ -376,10 +389,18 @@ impl Emitter {
                     if loan.is_empty() || loan == name {
                         continue;
                     }
+                    // #3227: also treat the binding as an alias of the loan
+                    // when its value CALLS a binding already known to be an
+                    // alias of that loan (`h := mk()` where `mk` returns the
+                    // writer). A literal-only test misses that shape, and the
+                    // store-back would then flush before the writer runs.
+                    let aliases = self.loan_aliases.get(loan);
                     let mentions = Self::expr_mentions_ident(v, loan)
-                        || self.loan_aliases.get(loan).is_some_and(|aliases| {
-                            aliases.iter().any(|a| Self::expr_mentions_ident(v, a))
-                        });
+                        || aliases.is_some_and(|a| {
+                            a.iter().any(|x| Self::expr_mentions_ident(v, x))
+                        })
+                        || Self::call_callee_ident(v)
+                            .is_some_and(|c| aliases.is_some_and(|a| a.contains(&c)));
                     if mentions {
                         out.push((name.clone(), loan.clone()));
                     }
