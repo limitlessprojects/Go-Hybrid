@@ -42,3 +42,5 @@
 - Contributor #1518 (2026-10-30): rebased to main `5435169`; all 11 fresh Linux checks pass on Rust 1.99.0/Go 1.26.9: runtime 4/4, real Go bridge, workspace 1891/1891, corpus 127/127, differential 41/41+86/86, format/clippy. CI/review/merge/award/payment pending; details in PLAN.md.
 
 Contributor candidate: plain-string parser allocation spike pre-registered on77b97fa4; implementation/measurements pending, no result/reward claimed.
+
+Contributor result: plain-string fast path, 169 exact AST/diagnostic comparisons and 2,655 local tests pass; corpus/differential/ten examples pass. Parse-only short-string sample saves 4,000 allocation calls (~10% faster); interpolation control ~1.4% slower. Hosted CI/merge/award/payment pending.

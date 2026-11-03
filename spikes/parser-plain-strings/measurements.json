@@ -1,0 +1,399 @@
+{
+  "at": "2026-11-03T17:10:37.719744+00:00",
+  "base": "77b97fa4fa2c4c33ecffbdff6c183505e8a3d333",
+  "candidate": "43ce8334fe3e8e28460a1e47f4f7418e3a2beab7",
+  "snapshot_cases": 169,
+  "snapshot_ok": 165,
+  "snapshot_err": 4,
+  "exact_AST_diagnostics_parity": true,
+  "environment": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64",
+    "rust": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "instrumented_system_allocator": true
+  },
+  "measurements": [
+    {
+      "case": "interpolation-control",
+      "source_bytes": 57801,
+      "input_sha256": "835ffd8bb62bc9fc8277cb300ba10efc73014c2ebe6af0f3480b2be5e64f1f2f",
+      "samples": {
+        "baseline": [
+          {
+            "iterations": 20,
+            "elapsed_ns": 24929125,
+            "alloc_calls": 29941,
+            "requested_bytes": 4805738,
+            "source_bytes": 57801,
+            "ns_per_parse": 1246456.25
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 24843125,
+            "alloc_calls": 29941,
+            "requested_bytes": 4805738,
+            "source_bytes": 57801,
+            "ns_per_parse": 1242156.25
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 24850667,
+            "alloc_calls": 29941,
+            "requested_bytes": 4805738,
+            "source_bytes": 57801,
+            "ns_per_parse": 1242533.35
+          }
+        ],
+        "candidate": [
+          {
+            "iterations": 20,
+            "elapsed_ns": 25202625,
+            "alloc_calls": 29941,
+            "requested_bytes": 4805738,
+            "source_bytes": 57801,
+            "ns_per_parse": 1260131.25
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 25363584,
+            "alloc_calls": 29941,
+            "requested_bytes": 4805738,
+            "source_bytes": 57801,
+            "ns_per_parse": 1268179.2
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 25168833,
+            "alloc_calls": 29941,
+            "requested_bytes": 4805738,
+            "source_bytes": 57801,
+            "ns_per_parse": 1258441.65
+          }
+        ]
+      },
+      "baseline": {
+        "median_ns_per_parse": 1242533.35,
+        "min_ns_per_parse": 1242156.25,
+        "max_ns_per_parse": 1246456.25,
+        "alloc_calls": 29941,
+        "requested_bytes": 4805738
+      },
+      "candidate": {
+        "median_ns_per_parse": 1260131.25,
+        "min_ns_per_parse": 1258441.65,
+        "max_ns_per_parse": 1268179.2,
+        "alloc_calls": 29941,
+        "requested_bytes": 4805738
+      },
+      "median_change_pct": 1.416291965121097,
+      "alloc_calls_saved": 0,
+      "requested_bytes_saved": 0
+    },
+    {
+      "case": "numeric-control",
+      "source_bytes": 63801,
+      "input_sha256": "dea68c86c3e43b21c18db3e6254aa73431e97f7833a3de4fec6138430bdc9078",
+      "samples": {
+        "baseline": [
+          {
+            "iterations": 20,
+            "elapsed_ns": 23737917,
+            "alloc_calls": 26040,
+            "requested_bytes": 4341306,
+            "source_bytes": 63801,
+            "ns_per_parse": 1186895.85
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 23716083,
+            "alloc_calls": 26040,
+            "requested_bytes": 4341306,
+            "source_bytes": 63801,
+            "ns_per_parse": 1185804.15
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 23729500,
+            "alloc_calls": 26040,
+            "requested_bytes": 4341306,
+            "source_bytes": 63801,
+            "ns_per_parse": 1186475.0
+          }
+        ],
+        "candidate": [
+          {
+            "iterations": 20,
+            "elapsed_ns": 23816834,
+            "alloc_calls": 26040,
+            "requested_bytes": 4341306,
+            "source_bytes": 63801,
+            "ns_per_parse": 1190841.7
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 23275542,
+            "alloc_calls": 26040,
+            "requested_bytes": 4341306,
+            "source_bytes": 63801,
+            "ns_per_parse": 1163777.1
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 23211916,
+            "alloc_calls": 26040,
+            "requested_bytes": 4341306,
+            "source_bytes": 63801,
+            "ns_per_parse": 1160595.8
+          }
+        ]
+      },
+      "baseline": {
+        "median_ns_per_parse": 1186475.0,
+        "min_ns_per_parse": 1185804.15,
+        "max_ns_per_parse": 1186895.85,
+        "alloc_calls": 26040,
+        "requested_bytes": 4341306
+      },
+      "candidate": {
+        "median_ns_per_parse": 1163777.1,
+        "min_ns_per_parse": 1160595.8,
+        "max_ns_per_parse": 1190841.7,
+        "alloc_calls": 26040,
+        "requested_bytes": 4341306
+      },
+      "median_change_pct": -1.9130533723845766,
+      "alloc_calls_saved": 0,
+      "requested_bytes_saved": 0
+    },
+    {
+      "case": "plain-long",
+      "source_bytes": 525735,
+      "input_sha256": "0e9cbcd3c477f13fa1935f350d54b243d40dca1ecc46c116fc29cf9c03047835",
+      "samples": {
+        "baseline": [
+          {
+            "iterations": 20,
+            "elapsed_ns": 34213416,
+            "alloc_calls": 2465,
+            "requested_bytes": 6046264,
+            "source_bytes": 525735,
+            "ns_per_parse": 1710670.8
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 34613000,
+            "alloc_calls": 2465,
+            "requested_bytes": 6046264,
+            "source_bytes": 525735,
+            "ns_per_parse": 1730650.0
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 34589167,
+            "alloc_calls": 2465,
+            "requested_bytes": 6046264,
+            "source_bytes": 525735,
+            "ns_per_parse": 1729458.35
+          }
+        ],
+        "candidate": [
+          {
+            "iterations": 20,
+            "elapsed_ns": 34214541,
+            "alloc_calls": 2209,
+            "requested_bytes": 5464632,
+            "source_bytes": 525735,
+            "ns_per_parse": 1710727.05
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 34305833,
+            "alloc_calls": 2209,
+            "requested_bytes": 5464632,
+            "source_bytes": 525735,
+            "ns_per_parse": 1715291.65
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 34225209,
+            "alloc_calls": 2209,
+            "requested_bytes": 5464632,
+            "source_bytes": 525735,
+            "ns_per_parse": 1711260.45
+          }
+        ]
+      },
+      "baseline": {
+        "median_ns_per_parse": 1729458.35,
+        "min_ns_per_parse": 1710670.8,
+        "max_ns_per_parse": 1730650.0,
+        "alloc_calls": 2465,
+        "requested_bytes": 6046264
+      },
+      "candidate": {
+        "median_ns_per_parse": 1711260.45,
+        "min_ns_per_parse": 1710727.05,
+        "max_ns_per_parse": 1715291.65,
+        "alloc_calls": 2209,
+        "requested_bytes": 5464632
+      },
+      "median_change_pct": -1.0522311797795059,
+      "alloc_calls_saved": 256,
+      "requested_bytes_saved": 581632
+    },
+    {
+      "case": "plain-short",
+      "source_bytes": 84911,
+      "input_sha256": "f16885a53e8f19868c8f54945fb69bf01e33b0d78b5d97ad97f78b2dd7dcb984",
+      "samples": {
+        "baseline": [
+          {
+            "iterations": 20,
+            "elapsed_ns": 22823542,
+            "alloc_calls": 24040,
+            "requested_bytes": 4325800,
+            "source_bytes": 84911,
+            "ns_per_parse": 1141177.1
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 22761208,
+            "alloc_calls": 24040,
+            "requested_bytes": 4325800,
+            "source_bytes": 84911,
+            "ns_per_parse": 1138060.4
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 22632167,
+            "alloc_calls": 24040,
+            "requested_bytes": 4325800,
+            "source_bytes": 84911,
+            "ns_per_parse": 1131608.35
+          }
+        ],
+        "candidate": [
+          {
+            "iterations": 20,
+            "elapsed_ns": 20595208,
+            "alloc_calls": 20040,
+            "requested_bytes": 3369800,
+            "source_bytes": 84911,
+            "ns_per_parse": 1029760.4
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 20488666,
+            "alloc_calls": 20040,
+            "requested_bytes": 3369800,
+            "source_bytes": 84911,
+            "ns_per_parse": 1024433.3
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 20406083,
+            "alloc_calls": 20040,
+            "requested_bytes": 3369800,
+            "source_bytes": 84911,
+            "ns_per_parse": 1020304.15
+          }
+        ]
+      },
+      "baseline": {
+        "median_ns_per_parse": 1138060.4,
+        "min_ns_per_parse": 1131608.35,
+        "max_ns_per_parse": 1141177.1,
+        "alloc_calls": 24040,
+        "requested_bytes": 4325800
+      },
+      "candidate": {
+        "median_ns_per_parse": 1024433.3,
+        "min_ns_per_parse": 1020304.15,
+        "max_ns_per_parse": 1029760.4,
+        "alloc_calls": 20040,
+        "requested_bytes": 3369800
+      },
+      "median_change_pct": -9.984276757191434,
+      "alloc_calls_saved": 4000,
+      "requested_bytes_saved": 956000
+    },
+    {
+      "case": "plain-unicode-escapes",
+      "source_bytes": 39801,
+      "input_sha256": "cc11b377232a220efc7499d2e9e857f11176ee0c180e9c0849e8a809a2a0ec80",
+      "samples": {
+        "baseline": [
+          {
+            "iterations": 20,
+            "elapsed_ns": 11292458,
+            "alloc_calls": 13028,
+            "requested_bytes": 2127284,
+            "source_bytes": 39801,
+            "ns_per_parse": 564622.9
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 11284083,
+            "alloc_calls": 13028,
+            "requested_bytes": 2127284,
+            "source_bytes": 39801,
+            "ns_per_parse": 564204.15
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 11232333,
+            "alloc_calls": 13028,
+            "requested_bytes": 2127284,
+            "source_bytes": 39801,
+            "ns_per_parse": 561616.65
+          }
+        ],
+        "candidate": [
+          {
+            "iterations": 20,
+            "elapsed_ns": 10456834,
+            "alloc_calls": 11028,
+            "requested_bytes": 1661394,
+            "source_bytes": 39801,
+            "ns_per_parse": 522841.7
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 10302250,
+            "alloc_calls": 11028,
+            "requested_bytes": 1661394,
+            "source_bytes": 39801,
+            "ns_per_parse": 515112.5
+          },
+          {
+            "iterations": 20,
+            "elapsed_ns": 10278083,
+            "alloc_calls": 11028,
+            "requested_bytes": 1661394,
+            "source_bytes": 39801,
+            "ns_per_parse": 513904.15
+          }
+        ]
+      },
+      "baseline": {
+        "median_ns_per_parse": 564204.15,
+        "min_ns_per_parse": 561616.65,
+        "max_ns_per_parse": 564622.9,
+        "alloc_calls": 13028,
+        "requested_bytes": 2127284
+      },
+      "candidate": {
+        "median_ns_per_parse": 515112.5,
+        "min_ns_per_parse": 513904.15,
+        "max_ns_per_parse": 522841.7,
+        "alloc_calls": 11028,
+        "requested_bytes": 1661394
+      },
+      "median_change_pct": -8.701043762262294,
+      "alloc_calls_saved": 2000,
+      "requested_bytes_saved": 465890
+    }
+  ],
+  "limits": "Parse-only, one Mac, three paired process samples; no RSS/statistical/universal/end-to-end claim. Allocation counts measured separately from timed parses."
+}
