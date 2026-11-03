@@ -15,6 +15,37 @@ use hy_diag::{Diagnostic, Span};
 use hy_syntax::{ChanDir, Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
 use std::collections::HashMap;
 
+
+/// Collect every call expression reachable from `e`, so a forwarding call is
+/// found wherever it sits - statement, `_ =` right side, `:=` initializer, or
+/// a return operand (#3314).
+fn collect_calls<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match e {
+        Expr::Call { callee, args, .. } => {
+            out.push(e);
+            collect_calls(callee, out);
+            for a in args {
+                collect_calls(&a.value, out);
+            }
+        }
+        Expr::Paren { inner, .. }
+        | Expr::Unary { operand: inner, .. }
+        | Expr::AddrOf { operand: inner, .. }
+        | Expr::Move { operand: inner, .. }
+        | Expr::Try { operand: inner, .. } => collect_calls(inner, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_calls(lhs, out);
+            collect_calls(rhs, out);
+        }
+        Expr::Field { base, .. } => collect_calls(base, out),
+        Expr::Index { base, index, .. } => {
+            collect_calls(base, out);
+            collect_calls(index, out);
+        }
+        _ => {}
+    }
+}
+
 impl<'a> Checker<'a> {
     /// Pass-B entry: HYB-E2001 on `defer` + HYB-E2005 on builtin calls.
     /// Nested block bodies are NOT recursed — `walk::flatten` already lists
@@ -666,7 +697,29 @@ impl<'a> Checker<'a> {
         args: &[hy_syntax::CallArg],
         span: Span,
     ) {
-        if self.in_managed() || !self.is_foreign_escape_callee(st, callee) {
+        if self.in_managed() {
+            return;
+        }
+        // #3314: a user function that forwards its parameter into foreign Go
+        // code is an escape site too. Wrapping the closure in one local
+        // function used to launder the write past this check.
+        let foreign = self.is_foreign_escape_callee(st, callee);
+        let laundering = match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                !self.packages.contains(name.as_str())
+                    && self.fns.contains_key(name.as_str())
+                    && self.fn_forwards_escape(name, 0)
+            }
+            // A user METHOD whose receiver it writes through (`s.incr()` with
+            // `fn (s *stats) incr() { s.n = s.n + 1 }`) mutates the receiver.
+            Expr::Field { name, .. } => {
+                !self.packages.contains(name.as_str())
+                    && self.method_decl(name).is_some()
+                    && self.fn_forwards_escape(name, 0)
+            }
+            _ => false,
+        };
+        if !foreign && !laundering {
             return;
         }
         let Some(name) = args
@@ -691,6 +744,150 @@ impl<'a> Checker<'a> {
                     .to_string(),
             ]),
         );
+    }
+
+    /// Find a METHOD declaration by its bare name. `fns` deliberately holds
+    /// only top-level functions (a method must not impersonate one), so method
+    /// bodies are reached through the existing `method_decls` table.
+    fn method_decl(&self, name: &str) -> Option<&'a hy_syntax::FnDecl> {
+        self.method_decls
+            .iter()
+            .find(|((_, m), _)| m == name)
+            .map(|(_, d)| *d)
+    }
+
+    /// Does calling the USER function `name` forward a closure argument into
+    /// foreign Go code (#3314, SPEC-LANGUAGE \u00a78.5 C9)?
+    ///
+    /// The direct site - `pkg.f(fn() {...})`, a foreign receiver method - was
+    /// already covered by `is_foreign_escape_callee`. The laundering route was
+    /// not: a user function whose parameter reaches `time.after_func` in its
+    /// own body is not a foreign callee, so `later(fn() { m[k] = 1 })` walked
+    /// past the check and the checker accepted a program with a real data
+    /// race. One local function in between must not change the verdict.
+    ///
+    /// Decided structurally, without instantiating anything: a parameter (or
+    /// the receiver) escapes when the callee body passes it - or a local alias
+    /// of it - to a foreign escape callee or to another escape-reachable user
+    /// function, or writes through it. Depth-bounded so mutual recursion
+    /// terminates.
+    fn fn_forwards_escape(&self, name: &str, depth: u32) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        let Some(decl) = self
+            .fns
+            .get(name)
+            .copied()
+            .or_else(|| self.method_decl(name))
+        else {
+            return false;
+        };
+        let Some(body) = decl.body.as_ref() else {
+            return false;
+        };
+        // Local `g := f` aliases inside this body, so a forward through an
+        // alias is still seen.
+        let mut aliases: HashMap<String, String> = HashMap::new();
+        for (stmt, _) in crate::walk::flatten(body).stmts {
+            if let hy_syntax::Stmt::Local(d) = stmt {
+                if let (Some(n), Some(v)) = (d.names.first(), d.values.first()) {
+                    if let Expr::Ident { name: src, .. } = unwrap_parens(v) {
+                        aliases.insert(n.clone(), src.clone());
+                    }
+                }
+            }
+        }
+        let mut calls: Vec<&Expr> = Vec::new();
+        for (stmt, _) in crate::walk::flatten(body).stmts {
+            // A forwarding call can sit anywhere an expression can: as a
+            // statement, behind `_ =`, as a `:=` initializer, or in a return.
+            match stmt {
+                hy_syntax::Stmt::Expr { expr, .. } => collect_calls(expr, &mut calls),
+                hy_syntax::Stmt::Assign { values, .. } => {
+                    for v in values {
+                        collect_calls(v, &mut calls);
+                    }
+                }
+                hy_syntax::Stmt::Send { value, .. } => collect_calls(value, &mut calls),
+                hy_syntax::Stmt::Local(d) => {
+                    for v in &d.values {
+                        collect_calls(v, &mut calls);
+                    }
+                }
+                hy_syntax::Stmt::Return { values, .. } => {
+                    for v in values {
+                        collect_calls(v, &mut calls);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for expr in calls {
+            let Expr::Call { callee, args, .. } = unwrap_parens(expr) else {
+                continue;
+            };
+            let carries = match unwrap_parens(callee) {
+                // `pkg.f(...)` - the foreign call itself.
+                Expr::Field { base, .. } => matches!(unwrap_parens(base), Expr::Ident { name, .. }
+                    if self.packages.contains(name.as_str())),
+                // A user function that itself forwards.
+                Expr::Ident { name, .. } => {
+                    !self.packages.contains(name.as_str())
+                        && self.fns.contains_key(name.as_str())
+                        && self.fn_forwards_escape(name, depth + 1)
+                }
+                _ => false,
+            };
+            if !carries {
+                continue;
+            }
+            for a in args {
+                let Expr::Ident { name, .. } = unwrap_parens(&a.value) else {
+                    continue;
+                };
+                let resolved = aliases
+                    .get(name.as_str())
+                    .map(String::as_str)
+                    .unwrap_or(name.as_str());
+                if decl.params.iter().any(|p| p.name == resolved) {
+                    return true;
+                }
+            }
+        }
+        // A callee that writes THROUGH a parameter or its receiver makes that
+        // value escape too: `bump(m, k)` doing `m[k] = m[k] + 1`, or
+        // `s.incr()` doing `s.n = s.n + 1`. Only these writes count - a plain
+        // local write is not an escape.
+        for (stmt, _) in crate::walk::flatten(body).stmts {
+            let hy_syntax::Stmt::Assign { targets, .. } = stmt else {
+                continue;
+            };
+            for t in targets {
+                let mut base = t;
+                loop {
+                    base = match &base.kind {
+                        PlaceKind::Index { base, .. }
+                        | PlaceKind::Field { base, .. }
+                        | PlaceKind::AddrOf { base } => base,
+                        PlaceKind::Ident(_) => break,
+                    };
+                }
+                if let PlaceKind::Ident(name) = &base.kind {
+                    let resolved = aliases
+                        .get(name.as_str())
+                        .map(String::as_str)
+                        .unwrap_or(name.as_str());
+                    if decl.params.iter().any(|p| p.name == resolved) {
+                        return true;
+                    }
+                    if decl.receiver.as_ref().is_some_and(|r| r.name == resolved) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     fn is_foreign_escape_callee(&self, st: &FnState, callee: &Expr) -> bool {
@@ -905,6 +1102,24 @@ impl<'a> Checker<'a> {
                     && matches!(name.as_str(), "delete" | "clear" | "copy") =>
             {
                 return args.first().and_then(|a| ref_of(&a.value));
+            }
+            // #3314: a user function whose parameter it writes through makes
+            // that argument's binding mutated from the caller's view, exactly
+            // like `delete(m, k)`.
+            Expr::Ident { name, .. }
+                if !sc.contains_key(name.as_str())
+                    && self.fns.contains_key(name.as_str())
+                    && self.fn_forwards_escape(name, 0) =>
+            {
+                return args.iter().find_map(|a| ref_of(&a.value));
+            }
+            // A user METHOD that writes through its receiver.
+            Expr::Field { base, name, .. }
+                if !sc.contains_key(name.as_str())
+                    && self.method_decl(name).is_some()
+                    && self.fn_forwards_escape(name, 0) =>
+            {
+                return ref_of(base);
             }
             Expr::Field { base, name, .. } => {
                 let base = unwrap_parens(base);
