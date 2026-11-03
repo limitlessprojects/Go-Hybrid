@@ -1527,3 +1527,17 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 342 -> 345 (#3462, #3458, #3310). Final main e7fe187a, tree clean.
 - NEXT TICK QUEUE: #3336 (chusmias258-dev folded array/fn type args, +233) -> #1740 (wminno int->float64 provenance, 8.5d, +294) -> #1718 (ubelai O8/A3, behind 3) -> #1719 (ubelai A7/A2, behind 11) -> #3441 (behind 11) -> #3428 (+682) -> #3435. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978. (3449, 3466 resolved.)
+
+## Session 74 — 2026-11-03 15:10 tick (4 landed: #3479/#3481/#3480/#3336/#3143 — five, recount below; dup #3485 noted superseded in 3481 reply)
+
+- Recycle + restore (cache hits, 5.7G avail). scan + approve healthy: approve 13/13, 4982 remaining.
+- LANDED:
+  9406637f Merge PR #3479 (aswadi, fixes #3476) — diag lookup accepts HYB-<digits>, blank notes filtered; 346 suites.
+  fe23c2a3 Merge PR #3481 (aswadi, fixes #3478) — lexer rejects 2.e+/- and trailing exponent letters; 347 suites. (#3485 superseded, noted in reply.)
+  12de9564 Merge PR #3480 (aswadi, fixes #3477) — WideInt 512-bit min/max precision kept; 348 suites.
+  7dd1f084 Merge PR #3336 (chusmias258-dev, fixes #3335) — folded array/fn type args expanded + composite keys declaration-ordered; 349 suites.
+  7c0dcafc Merge PR #3143 (gorky117-cell, fixes #3090) — nil patterns on non-nilable + out-of-range int match patterns rejected; 350 suites.
+- All remote asserts green; reply per PR; no silent closes. aswadi 3 more (total 11 ladder entries this cycle by himself — flag for maintainer in #295).
+- Suite trajectory: 345 -> 350. Final main 7c0dcafc, tree clean.
+- NEXT TICK QUEUE: #3145 (copy() scalar mismatches — DUP WATCH vs #3153 first!) -> #3154 (struct fields) -> #2874 (typed ints via index/map/field) -> #1740 (int->float64 provenance, 8.5d) -> #1718 (behind 3) -> #1719 (behind 11) -> #3441 (behind 11) -> #3428 (+682) -> #3435. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833. New dups to watch: #3485 (vs landed #3481), #3473 (behind 9, "address #3467").
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978. (3485 resolved-by-reply.)
