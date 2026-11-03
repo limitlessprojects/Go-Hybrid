@@ -1541,3 +1541,17 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 345 -> 350. Final main 7c0dcafc, tree clean.
 - NEXT TICK QUEUE: #3145 (copy() scalar mismatches — DUP WATCH vs #3153 first!) -> #3154 (struct fields) -> #2874 (typed ints via index/map/field) -> #1740 (int->float64 provenance, 8.5d) -> #1718 (behind 3) -> #1719 (behind 11) -> #3441 (behind 11) -> #3428 (+682) -> #3435. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833. New dups to watch: #3485 (vs landed #3481), #3473 (behind 9, "address #3467").
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978. (3485 resolved-by-reply.)
+
+## Session 75 — 2026-11-03 16:10 tick (3 landed: #3145/#3154/#2874; dup #3153 superseded)
+
+- Recycle + full restore from scratch (go tarball re-downloaded, rustup 1.99.0 cold install, target dir rebuilt cold 2.9G, 6.7G avail pre-build).
+- GitHub API primary rate limit exhausted (0 remaining, reset 09:11 UTC): scan timed out twice (cap-or-skip, 780-800/984), approve 403'd. Worked from Session 74 queue; git-protocol fetches unaffected.
+- LANDED (all gauravatwork117 — 3 ladder entries, flag in #295):
+  e9ada4a3 Merge PR #3145 (fixes #3085) — copy() slice elem scalar mismatch + non-byte string copy; slice_element_type_name unpacks [N]T/typed SliceLit; complex64/128 canonical; stricter than #3153 (typed-Int unresolved rejected per Go). 351 suites.
+  26c8f90d Merge PR #3154 (fixes #3066) — non-existent fields / non-struct base selectors E1002; whitelist + same-span dedup fail-open. 352 suites.
+  a1713d8d Merge PR #2874 (fixes #2858, + #3065 interaction) — typed-int scalar provenance through index/map/field reads; for-in Str = rune scalar. 353 suites.
+- DUP RESOLVED: #3153 superseded by landed #3145 (superset, stricter unknown-Int); replied with reopen-on-repro offer.
+- Suite trajectory: 350 -> 353. Final main a1713d8d, tree clean. All remote asserts green; replies posted per PR.
+- NEXT TICK QUEUE: scan FIRST (fresh queue missing this tick) -> #1740 (wminno int->float64 provenance, 8.5d, +294) -> #1718 (ubelai O8/A3, behind 3) -> #1719 (behind 11) -> #3441 (behind 11) -> #3428 (+682) -> #3435 -> #3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978. (3145/3153 resolved.)
+- OPS NOTE: verify_pr.sh still carries the deprecated worktree protocol + --no-keep-memory RUSTFLAGS; kept using in-repo trial merge per S69 binding protocol. Consider updating the script or the cron text next tick.
