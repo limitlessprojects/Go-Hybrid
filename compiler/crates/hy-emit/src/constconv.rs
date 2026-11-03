@@ -48,10 +48,10 @@ pub fn width_of(spec_name: &str) -> Option<(u32, bool)> {
 /// decimal, `0x`/`0o`/`0b` prefixed, legacy leading-zero octal (`0755`), and
 /// `_` digit separators.
 pub fn parse_int(text: &str) -> Option<i128> {
-    let t = text.replace('_', "");
+    let t = text.trim().replace('_', "");
     let (neg, t) = match t.strip_prefix('-') {
         Some(rest) => (true, rest.to_string()),
-        None => (false, t),
+        None => (false, t.strip_prefix('+').unwrap_or(&t).to_string()),
     };
     let v = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         i128::from_str_radix(h, 16).ok()?
@@ -262,7 +262,11 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
             ..
         } => const_int_expr(operand)?.checked_neg(),
         Expr::Call { callee, args, .. } => {
-            let Expr::Ident { name, .. } = callee.as_ref() else { return None };
+            let mut callee = callee.as_ref();
+            while let Expr::Paren { inner, .. } = callee {
+                callee = inner;
+            }
+            let Expr::Ident { name, .. } = callee else { return None };
             if let Some((bits, signed)) = width_of(name) {
                 if args.len() == 1 && !args[0].spread {
                     let v = const_int_expr(&args[0].value)?;
@@ -402,6 +406,8 @@ mod tests {
         assert_eq!(parse_int("0b1010"), Some(10));
         assert_eq!(parse_int("1_000"), Some(1000));
         assert_eq!(parse_int("0o17"), Some(15));
+        assert_eq!(parse_int(" +42 "), Some(42));
+        assert_eq!(parse_int("+0x10"), Some(16));
     }
 
     #[test]
