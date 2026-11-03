@@ -925,26 +925,7 @@ impl<'a> Collector<'a> {
                 }
                 None
             }
-            Expr::SliceLit { elem: Some(t), .. } => {
-                match t.as_ref() {
-                    TypeExpr::Array { elem, .. } => Some(elem.render()),
-                    TypeExpr::Slice { elem, .. } => Some(elem.render()),
-                    _ => {
-                        let r = t.render();
-                        if let Some(elem) = r.strip_prefix("[]") {
-                            Some(elem.to_string())
-                        } else if let Some(elem) = r.strip_prefix("[") {
-                            if let Some(close) = elem.find(']') {
-                                Some(elem[close + 1..].to_string())
-                            } else {
-                                Some(r)
-                            }
-                        } else {
-                            Some(r)
-                        }
-                    }
-                }
-            }
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
             Expr::Slice { base, .. } => self.slice_element_type_name(base),
             Expr::Try { operand, .. } => self.slice_element_type_name(operand),
             Expr::Call { callee, args, .. } => {
@@ -1197,10 +1178,125 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn resolve_type_spelling(&self, spelling: &str) -> String {
+        let mut curr = spelling.trim().to_string();
+        for _ in 0..16 {
+            let base = Checker::base_named_type_str(&curr);
+            if let Some(target) = self.ck.type_aliases.get(base) {
+                curr = target.render();
+            } else {
+                break;
+            }
+        }
+        curr
+    }
+
+    fn resolve_deep_type_spelling(&self, s: &str) -> String {
+        let s = s.trim();
+        let resolved = self.resolve_type_spelling(s);
+        if let Some(rest) = resolved.strip_prefix("[]") {
+            let inner = self.resolve_deep_type_spelling(rest);
+            return format!("[]{}", inner);
+        }
+        if resolved.starts_with('[') {
+            if let Some(close) = resolved.find(']') {
+                let head = &resolved[1..close];
+                if !head.is_empty() && head.chars().all(|c| c.is_ascii_digit()) {
+                    let rest = resolved[close + 1..].trim();
+                    let inner = self.resolve_deep_type_spelling(rest);
+                    return format!("[{}]{}", head, inner);
+                }
+            }
+        }
+        if resolved.starts_with("map[") {
+            if let Some(close) = resolved.find(']') {
+                let key = &resolved[4..close];
+                let val = resolved[close + 1..].trim();
+                let key_res = self.resolve_deep_type_spelling(key);
+                let val_res = self.resolve_deep_type_spelling(val);
+                return format!("map[{}]{}", key_res, val_res);
+            }
+        }
+        if let Some(rest) = resolved.strip_prefix('*') {
+            let inner = self.resolve_deep_type_spelling(rest);
+            return format!("*{}", inner);
+        }
+        resolved
+    }
+
+    fn type_names_conflict(&self, want_raw: &str, got_raw: &str) -> bool {
+        let w = self.resolve_deep_type_spelling(want_raw);
+        let g = self.resolve_deep_type_spelling(got_raw);
+        if w == g {
+            return false;
+        }
+        if w.starts_with("[]") || g.starts_with("[]") {
+            if let (Some(w_inner), Some(g_inner)) = (w.strip_prefix("[]"), g.strip_prefix("[]")) {
+                return self.type_names_conflict(w_inner, g_inner);
+            }
+            return true;
+        }
+        if is_sized_array_spelling(&w) || is_sized_array_spelling(&g) {
+            if is_sized_array_spelling(&w) && is_sized_array_spelling(&g) {
+                let close_w = w.find(']').unwrap();
+                let close_g = g.find(']').unwrap();
+                let dim_w = &w[1..close_w];
+                let dim_g = &g[1..close_g];
+                if dim_w != dim_g {
+                    return true;
+                }
+                return self.type_names_conflict(&w[close_w + 1..], &g[close_g + 1..]);
+            }
+            return true;
+        }
+        if w.starts_with("map[") || g.starts_with("map[") {
+            if let (Some(close_w), Some(close_g)) = (w.find(']'), g.find(']')) {
+                let key_w = &w[4..close_w];
+                let key_g = &g[4..close_g];
+                let val_w = &w[close_w + 1..];
+                let val_g = &g[close_g + 1..];
+                return self.type_names_conflict(key_w, key_g) || self.type_names_conflict(val_w, val_g);
+            }
+            return true;
+        }
+        let sc_w = canonical_numeric_name(&w);
+        let sc_g = canonical_numeric_name(&g);
+        match (sc_w, sc_g) {
+            (Some(sw), Some(sg)) => sw != sg,
+            _ => w != g,
+        }
+    }
+
+    fn array_conversion_conflict(&self, target_raw: &str, arg_raw: &str) -> bool {
+        let target_deep = self.resolve_deep_type_spelling(target_raw);
+        let arg_deep = self.resolve_deep_type_spelling(arg_raw);
+        if !is_sized_array_spelling(&target_deep) {
+            return false;
+        }
+        let close_target = target_deep.find(']').unwrap();
+        let target_len = &target_deep[1..close_target];
+        let target_elem = target_deep[close_target + 1..].trim();
+
+        if is_sized_array_spelling(&arg_deep) {
+            let close_arg = arg_deep.find(']').unwrap();
+            let arg_len = &arg_deep[1..close_arg];
+            let arg_elem = arg_deep[close_arg + 1..].trim();
+            if target_len != arg_len {
+                return true;
+            }
+            return self.type_names_conflict(target_elem, arg_elem);
+        }
+        if arg_deep.starts_with("[]") {
+            let arg_elem = arg_deep[2..].trim();
+            return self.type_names_conflict(target_elem, arg_elem);
+        }
+        false
+    }
+
     /// #2771 — the declared Go spelling of a value whose type carries detail
     /// that `OpKind` drops, notably an array's length (`[3]int` vs `[4]int`).
-    /// Identifiers bound with an explicit type name or explicit array literals
-    /// are known; everything else (conversions, calls) fails open.
+    /// Identifiers bound with an explicit type name, slice literals, array
+    /// literals, and call expressions are known; everything else fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
         if let Some((len_opt, inner_elem, array_ty)) = bare.as_array_lit() {
@@ -1226,6 +1322,22 @@ impl<'a> Collector<'a> {
                 self.struct_field_type_name(&bk, name)
             }
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
+            Expr::Call { callee, .. } => {
+                let callee_bare = unwrap_parens(callee);
+                if let Expr::Ident { name, .. } = callee_bare {
+                    if let Some(target) = self.ck.type_aliases.get(name.as_str()) {
+                        return Some(target.render());
+                    }
+                    if let Some(fn_def) = self.ck.fns.get(name.as_str()) {
+                        if fn_def.results.len() == 1 {
+                            return Some(fn_def.results[0].ty.render());
+                        }
+                    }
+                } else if let Some((_, _, arr_ty)) = callee_bare.as_array_lit() {
+                    return Some(arr_ty.render());
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -1307,8 +1419,15 @@ impl<'a> Collector<'a> {
     /// #2771 — two KNOWN and DIFFERENT sized-array spellings. Slices, named
     /// types and unparsed lengths fail open so aliases never false-reject.
     fn sized_array_names_differ(&self, a: Option<&str>, b: Option<&str>) -> bool {
-        matches!((a, b), (Some(x), Some(y))
-            if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
+        let (Some(x), Some(y)) = (a, b) else {
+            return false;
+        };
+        let x_deep = self.resolve_deep_type_spelling(x);
+        let y_deep = self.resolve_deep_type_spelling(y);
+        if is_sized_array_spelling(&x_deep) && is_sized_array_spelling(&y_deep) {
+            return self.type_names_conflict(&x_deep, &y_deep);
+        }
+        false
     }
 
     /// #3412 — deep composite-element conflict: the kind model collapses
@@ -2208,6 +2327,8 @@ impl<'a> Collector<'a> {
                     self.bind_type_name(name, format!("[]{}", elem));
                 } else if let Some(tp) = self.expr_type_param(val) {
                     self.bind_type_name(name, tp);
+                } else if let Some(tn) = self.typed_value_type_name(val) {
+                    self.bind_type_name(name, tn);
                 }
             }
         }
@@ -4560,7 +4681,25 @@ impl<'a> Collector<'a> {
         // #2811: `string`↔slice conversions are restricted to byte/rune
         // elements; `OpKind::Int` cannot tell `int64` from `uint8`.
         let element_mismatch = self.string_slice_conversion_element_mismatch(name, &k, arg, &arg_k);
-        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch {
+        let array_conflict = self
+            .typed_value_type_name(arg)
+            .is_some_and(|atn| self.array_conversion_conflict(name, &atn));
+        let slice_conflict = if matches!(k, OpKind::Slice(_)) {
+            if let Some(atn) = self.typed_value_type_name(arg) {
+                let target_deep = self.resolve_deep_type_spelling(name);
+                let arg_deep = self.resolve_deep_type_spelling(&atn);
+                if target_deep.starts_with("[]") && arg_deep.starts_with("[]") {
+                    self.type_names_conflict(&target_deep[2..], &arg_deep[2..])
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch || array_conflict || slice_conflict {
             let note = if matches!(k, OpKind::Struct(_)) {
                 "structs cannot be instantiated via function-call conversions; write a struct literal like `T{...}` instead"
             } else {
@@ -7550,6 +7689,21 @@ impl<'a> Collector<'a> {
                             ),
                             "array type conversions require a slice or array operand",
                         );
+                        return;
+                    }
+                    if let Some(atn) = self.typed_value_type_name(arg) {
+                        if self.array_conversion_conflict(&target_str, &atn) {
+                            self.emit_e1002(
+                                arg.span(),
+                                format!(
+                                    "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
+                                    arg.render(),
+                                    ak.label(),
+                                    target_str
+                                ),
+                                "array type conversions require matching array lengths and identical element types",
+                            );
+                        }
                     }
                     return;
                 }
@@ -7609,7 +7763,17 @@ impl<'a> Collector<'a> {
                 // `go build` (`cannot convert ... to type ...`, Row 13 BUILDABLE).
                 if let OpKind::Slice(arg_elem) = &ak {
                     let target_elem = self.kind_of_ty(elem_ty, 0);
-                    if copy_element_kinds_conflict(&target_elem, arg_elem) {
+                    let mut mismatch = copy_element_kinds_conflict(&target_elem, arg_elem);
+                    if !mismatch {
+                        if let Some(atn) = self.typed_value_type_name(arg) {
+                            let target_deep = self.resolve_deep_type_spelling(&target_str);
+                            let arg_deep = self.resolve_deep_type_spelling(&atn);
+                            if target_deep.starts_with("[]") && arg_deep.starts_with("[]") {
+                                mismatch = self.type_names_conflict(&target_deep[2..], &arg_deep[2..]);
+                            }
+                        }
+                    }
+                    if mismatch {
                         self.emit_e1002(
                             arg.span(),
                             format!(
