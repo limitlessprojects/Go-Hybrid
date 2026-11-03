@@ -1,5 +1,6 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor candidate (2026-11-03): Actions artifact downloads now stream in 1 MiB reads while retaining atomic publication and truncated-transfer detection; 13 download tests and all 501 Python 3.12 tooling tests pass. Hosted CI/review and any award pending; see PLAN.md.
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
 
 - Contributor #1165: range bounds spelled as different names of one Go integer type no longer raise a false HYB-E2009 (shared canonicaliser in `hy-check` + regression pin); workspace/corpus/differential/CI remain delivery gates.

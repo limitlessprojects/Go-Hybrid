@@ -245,6 +245,76 @@ class DownloadIntegrityTests(unittest.TestCase):
             self.assertEqual(dest.read_bytes(), b"old")
             self.assertEqual([p.name for p in result.iterdir()], ["results.zip"])
 
+    def test_large_response_is_read_in_bounded_chunks(self):
+        # Generate 8 MiB without retaining a complete response in memory.
+        total = 8 * 1024 * 1024 + 17
+        requests = []
+
+        class Response:
+            remaining = total
+            headers = {"Content-Length": str(total)}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, size=-1):
+                self_check.assertGreater(size, 0, "archive must not use an unbounded read")
+                self_check.assertLessEqual(size, 1024 * 1024)
+                requests.append(size)
+                count = min(size, self.remaining)
+                self.remaining -= count
+                return b"x" * count
+
+        self_check = self
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.fetch(root, Response())
+            dest = root / "result/results.zip"
+            self.assertEqual(dest.stat().st_size, total)
+            with dest.open("rb") as archive:
+                while chunk := archive.read(65536):
+                    self.assertEqual(chunk, b"x" * len(chunk))
+            self.assertGreater(len(requests), 1)
+            self.assertEqual([p.name for p in dest.parent.iterdir()], ["results.zip"])
+
+    def test_failure_after_first_chunk_preserves_archive_and_removes_partial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = root / "result"
+            result.mkdir()
+            dest = result / "results.zip"
+            dest.write_bytes(b"previous validated archive")
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.read.side_effect = [b"first chunk", OSError("connection lost")]
+            with self.assertRaisesRegex(OSError, "connection lost"):
+                self.fetch(root, response)
+            self.assertEqual(dest.read_bytes(), b"previous validated archive")
+            self.assertEqual([p.name for p in result.iterdir()], ["results.zip"])
+
+    def test_truncated_http_response_is_not_published(self):
+        # A sized HTTPResponse.read() can return EOF without raising, whereas
+        # read() without a size raises IncompleteRead for this exact response.
+        class Socket:
+            def makefile(self, *args):
+                return io.BytesIO(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = root / "result"
+            result.mkdir()
+            dest = result / "results.zip"
+            dest.write_bytes(b"old complete archive")
+            response = http.client.HTTPResponse(Socket())
+            response.begin()
+            with self.assertRaises(http.client.IncompleteRead):
+                self.fetch(root, response)
+            self.assertEqual(dest.read_bytes(), b"old complete archive")
+            self.assertEqual([p.name for p in result.iterdir()], ["results.zip"])
+
     def test_success_creates_new_archive(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

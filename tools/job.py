@@ -16,6 +16,7 @@ Kaggle kernel slug: from worker/kernel-metadata.json (id field).
 Exit codes: 0 = success, 1 = the fetch retrieved nothing (failed download,
 no artifacts, or no summary.json), 2 = usage error.
 """
+import http.client
 import json
 import math
 import os
@@ -373,16 +374,20 @@ def actions_fetch(run_id, jobdir):
         # GitHub redirects archive downloads to a signed storage URL. urllib
         # forwards normal headers across hosts; do not send our token there.
         req.add_unredirected_header("Authorization", "token " + tok)
-        # Finish the response before touching a previous valid archive. Publish
-        # via a sibling temporary file so write/replace failures preserve it too.
-        with urllib.request.urlopen(req, timeout=120) as r:
-            data = r.read()
+        # Stream to a sibling file: archive size must not determine peak RAM.
+        # Publish only after the complete response and file close succeed.
         temporary = None
         try:
-            with tempfile.NamedTemporaryFile(dir=os.path.dirname(dest),
-                                             prefix=".artifact-", delete=False) as f:
-                temporary = f.name
-                f.write(data)
+            with urllib.request.urlopen(req, timeout=120) as r:
+                with tempfile.NamedTemporaryFile(dir=os.path.dirname(dest),
+                                                 prefix=".artifact-", delete=False) as f:
+                    temporary = f.name
+                    shutil.copyfileobj(r, f, length=1024 * 1024)
+                    # HTTPResponse.read(size) may silently return EOF on a
+                    # short Content-Length body, unlike an unbounded read.
+                    remaining = getattr(r, "length", None)
+                    if isinstance(remaining, int) and remaining > 0:
+                        raise http.client.IncompleteRead(b"", remaining)
             os.replace(temporary, dest)
         finally:
             if temporary is not None and os.path.exists(temporary):

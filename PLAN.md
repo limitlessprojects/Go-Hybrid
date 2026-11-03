@@ -1,5 +1,11 @@
 # Hybrid Language: Development Plan
 
+## Contributor candidate — bounded artifact downloads (2026-11-03)
+
+- `actions_fetch` streams archives to its existing sibling temporary file in 1 MiB reads, then atomically publishes after the response and output file close. A short Content-Length response remains an `IncompleteRead`; connection/write/publish failures retain the previous archive and remove partial files. Authentication and redirect handling are unchanged.
+- Baseline `b803f5556f4f75e8400bffe137f30717ae2e7831`: the extended download suite has two failures out of 13 tests. Patched Python 3.12.14: 13/13 download tests and 501/501 tooling tests pass; Python 3.10.12: 7/7 integrity tests pass. Registration and conflict-marker guards pass. No live GitHub/Kaggle requests or compiler/runtime changes in the tests.
+- Separate synthetic 64 MiB transfer: identical byte count and SHA-256 before/after; peak traced Python allocations 67,121,573 bytes on baseline versus 2,107,289 bytes patched. This is a local allocation measurement, not an RSS or production workload claim. Hosted CI, maintainer review and any discretionary award remain pending.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.
