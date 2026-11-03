@@ -144,6 +144,36 @@ fn malformed_prefixed_and_octal_integer_literals_fail_closed() {
 }
 
 #[test]
+fn malformed_float_exponents_fail_closed() {
+    for src in [
+        "fn main() { e := 1; x := 1.5e }",
+        "fn main() { e := 1; x := 1.5e+ }",
+        "fn main() { e := 1; x := 1e- }",
+        "fn main() { e_2 := 1; x := 1.5e_2 }",
+    ] {
+        let errs = lex_errs(src);
+        assert!(
+            errs.iter().any(|d| d.code == "HYB-E0002"
+                && d.tier0_rule.as_deref() == Some("LX6")
+                && d.message.contains("malformed float literal: exponent has no digits")),
+            "expected HYB-E0002 [LX6] for `{src}`, got: {errs:?}"
+        );
+        assert!(parse_file("test.hy", src).is_err());
+    }
+
+    for valid in [
+        "fn main() { x := 1e9 }",
+        "fn main() { x := 1.5e+2 }",
+        "fn main() { x := 2.e-3 }",
+    ] {
+        assert!(
+            parse_file("test.hy", valid).is_ok(),
+            "expected valid exponent to parse cleanly: {valid}"
+        );
+    }
+}
+
+#[test]
 fn empty_and_multichar_char_literals_fail_closed_without_quote_desync() {
     let errs = lex_errs("fn main() { a := '' b := 'x' }");
     assert_eq!(
