@@ -1078,4 +1078,22 @@ companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.| local-composite-cha
 | local-composite-chan-recv-reject-e2008 | REJECT | BUILDABLE | `HYB-E2008` | same shape, send-only channels: `sub` previously carried no `ty`, so `<-sub[0]` in a type position passed with 0 diagnostics; the composite_type_expr fallback in process_local projects `chan<- int` through the Index arm and the direction check fires (rows added in-merge) |
 
 ### n5-zero-map-allocation-sites (the #645 follow-up, #1206 part 1) — ACCEPT
-`make([]T, n[, c])` elements (and the spare capacity a reslice exposes), `make([]map[K]V, n)` elements, and `[N]T` arrays (var, literal, const length, partial literal) are N5 zero values: their maps allocate, so the first write works instead of panicking `assignment to entry in nil map`. No check-site; ACCEPT with a byte-exact EXPECTED-OUTPUT (`spec_n5_zero_maps.rs` diffs it). Corpus: **130 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 88**.
+`make([]T, n[, c])` elements (and the spare capacity a reslice exposes), `make([]map[K]V, n)` elements, and `[N]T` arrays (var, literal, const length, partial literal) are N5 zero values: their maps allocate, so the first write works instead of panicking `assignment to entry in nil map`. No check-site; ACCEPT with a byte-exact EXPECTED-OUTPUT (`spec_n5_zero_maps.rs` diffs it). Corpus: **135 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 93**.
+
+-------------------------------------------------------------------------------
+
+### option-map-alias-at-spawn, closure-struct-capture-freeze, param-derived-alias-move-reject, method-return-alias-freeze, call-return-subslice-freeze (additive registration 2026-11-01) — REJECT
+
+Five freeze/alias surfaces the corpus did not yet pin, each derived from the
+rule text (O5.1 / O5.2 / O5.4, T21, the closure-capture link) before running:
+
+| # | program | verdict | rule violated | one-line rationale |
+|---|---------|---------|---------------|--------------------|
+| option-map-alias-at-spawn | REJECT | A1b | `some(shared)` embeds the map header; `move o` freezes the payload storage, so `shared["main"]++` is a write through a live alias (T21 + O5.2) |
+| closure-struct-capture-freeze | REJECT | A1b | a closure stored in a struct field keeps its capture edge; moving the container freezes the captured map (closure link + O5.2) |
+| param-derived-alias-move-reject | REJECT | A1b (`HYB-E3004`) | `alias := m` from a parameter is not exclusively owned; `move alias` cannot transfer storage the caller still retains (O5.1 / O5.4) |
+| method-return-alias-freeze | REJECT | A1b | a method returning the receiver's map field returns an aliasing header (call-return edge); after `move h` the write through it is use-after-move (O5.2) |
+| call-return-subslice-freeze | REJECT | A1b | a function returning `xs[1:]` returns a view over the caller's array (call-return edge); after `move xs` the element write is use-after-move (O5.2) |
+
+With this registration the corpus is **135 programs: ACCEPT 40 ·
+ACCEPT-MANAGED 2 · REJECT 93** — main's 130 plus these five.
