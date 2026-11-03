@@ -233,6 +233,12 @@ fn is_sized_array_spelling(s: &str) -> bool {
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
+/// #3264 — Extracts element type from `[]T` slice spelling.
+fn slice_elem_type_name_from_str(s: &str) -> Option<String> {
+    let rest = s.trim().strip_prefix("[]")?;
+    Some(rest.trim().to_string())
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -543,6 +549,8 @@ struct Collector<'a> {
     /// signature (`None` = not a predeclared numeric spelling). Swapped
     /// together with `fn_results`.
     fn_result_scalars: Vec<Option<&'static str>>,
+    /// #3264 — exact declared result type spellings for return verification.
+    fn_result_type_names: Vec<String>,
     /// Lexical nesting depth within loops (`for` / `loop`).
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
@@ -581,6 +589,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_results_error_tail: false,
             scalar_scopes: Vec::new(),
             fn_result_scalars: Vec::new(),
+            fn_result_type_names: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
             defines: Vec::new(),
@@ -874,8 +883,78 @@ impl<'a> Collector<'a> {
     /// else (literals, conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         match unwrap_parens(e) {
-            Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                if let Some(underlying) = self.underlying_type_spelling(&tn) {
+                    Some(underlying)
+                } else {
+                    Some(tn)
+                }
+            }
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
             _ => None,
+        }
+    }
+
+    /// #3264 — Resolves underlying type of a type alias.
+    fn underlying_type_spelling(&self, name: &str) -> Option<String> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            Some(self.ck.resolve_type_alias(ty).render())
+        } else {
+            None
+        }
+    }
+
+    /// #3264 — Checks if a parameter/result TypeExpr and an argument/return Expr have mismatched slice element scalars.
+    fn type_expr_and_value_slice_elem_mismatch(&self, declared_ty: &TypeExpr, val_expr: &Expr) -> bool {
+        let resolved = self.ck.resolve_type_alias(declared_ty);
+        let want_scalar = match &resolved {
+            TypeExpr::Slice { elem, .. } => self.scalar_of_ty(elem),
+            _ => None,
+        };
+        let Some(want) = want_scalar else {
+            return false;
+        };
+        let Some(got_tn) = self.typed_value_type_name(val_expr) else {
+            return false;
+        };
+        let Some(got_elem) = slice_elem_type_name_from_str(&got_tn) else {
+            return false;
+        };
+        let Some(got) = canonical_numeric_name(&got_elem) else {
+            return false;
+        };
+        want != got
+    }
+
+    /// #3264 — Checks and reports slice element scalar or array length mismatches on return values.
+    fn report_slice_and_array_return_mismatch(&mut self, v: &Expr, idx: usize, span: Span) {
+        let Some(raw_want) = self.fn_result_type_names.get(idx).cloned() else {
+            return;
+        };
+        let Some(raw_got) = self.typed_value_type_name(v) else {
+            return;
+        };
+        let want_name = self.underlying_type_spelling(&raw_want).unwrap_or(raw_want.clone());
+        let got_name = self.underlying_type_spelling(&raw_got).unwrap_or(raw_got.clone());
+        let array_dim_mismatch = self.sized_array_names_differ(Some(&want_name), Some(&got_name));
+        let slice_elem_mismatch = if let (Some(ws), Some(gs)) = (slice_elem_type_name_from_str(&want_name), slice_elem_type_name_from_str(&got_name)) {
+            matches!((canonical_numeric_name(&ws), canonical_numeric_name(&gs)), (Some(w), Some(g)) if w != g)
+        } else {
+            false
+        };
+        if array_dim_mismatch || slice_elem_mismatch {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `{}` (value of type `{}`) as `{}` value in return statement — Go refuses mismatched return types (HYB-E1002)",
+                    v.render(),
+                    raw_got,
+                    raw_want,
+                ),
+                "return statement values must match declared function result types",
+            );
         }
     }
 
@@ -1373,6 +1452,8 @@ impl<'a> Collector<'a> {
         let result_scalars: Vec<Option<&'static str>> =
             f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
         let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
+        let result_type_names: Vec<String> = f.results.iter().map(|r| r.ty.render()).collect();
+        let outer_type_names = std::mem::replace(&mut self.fn_result_type_names, result_type_names);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -1389,6 +1470,7 @@ impl<'a> Collector<'a> {
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
         self.fn_result_scalars = outer_scalars;
+        self.fn_result_type_names = outer_type_names;
         self.fn_type_params = outer_tp;
         self.pop_scope();
     }
@@ -2384,6 +2466,8 @@ impl<'a> Collector<'a> {
                 let result_scalars: Vec<Option<&'static str>> =
                     results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
                 let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
+                let result_type_names: Vec<String> = results.iter().map(|r| r.ty.render()).collect();
+                let outer_type_names = std::mem::replace(&mut self.fn_result_type_names, result_type_names);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -2396,6 +2480,7 @@ impl<'a> Collector<'a> {
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
                 self.fn_result_scalars = outer_scalars;
+                self.fn_result_type_names = outer_type_names;
                 self.pop_scope();
             }
             Expr::Paren { inner, .. } => self.expr(inner),
@@ -3998,9 +4083,11 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
+            let slice_elem_mismatch = self.type_expr_and_value_slice_elem_mismatch(&p.ty, &a.value);
             if kinds_conflict(&want, &got)
                 || int_to_float_conflict
                 || scalar_mismatch
+                || slice_elem_mismatch
                 || self.sized_array_names_differ(
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
@@ -4053,9 +4140,11 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
+            let slice_elem_mismatch = self.type_expr_and_value_slice_elem_mismatch(&p.ty, &a.value);
             if kinds_conflict(&want, &got)
                 || int_to_float_conflict
                 || scalar_mismatch
+                || slice_elem_mismatch
                 || self.sized_array_names_differ(
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
@@ -4191,6 +4280,7 @@ impl<'a> Collector<'a> {
                     if !self.report_return_conflict(v, &got, w, v.span()) {
                         let got_s = self.typed_value_scalar(v);
                         self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                        self.report_slice_and_array_return_mismatch(v, i, v.span());
                     }
                 }
                 return;
@@ -4223,6 +4313,7 @@ impl<'a> Collector<'a> {
             if !self.report_return_conflict(v, &got, w, v.span()) {
                 let got_s = self.typed_value_scalar(v);
                 self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                self.report_slice_and_array_return_mismatch(v, i, v.span());
             }
         }
     }
