@@ -9030,6 +9030,9 @@ impl<'a> Checker<'a> {
                 );
             } else {
                 self.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
+            // #3228: a slot loan captured by a returned (escaping) closure
+            // loses its store-back — reject with HYB-E3104 (LOAN-ESCAPE, O2).
+            self.check_escaping_closure_captures_slot_loan(st, v, span);
             }
         }
         for (slot, name) in st.named_results.iter().enumerate() {
@@ -9049,7 +9052,114 @@ impl<'a> Checker<'a> {
             }
         }
     }
+
+    /// #3228: LOAN-ESCAPE (O2, HYB-E3104) for a slot loan that escapes via a
+    /// returned closure.
+    fn check_escaping_closure_captures_slot_loan(
+        &mut self,
+        st: &FnState,
+        v: &Expr,
+        _span: Span,
+    ) {
+        use std::collections::HashSet;
+        
+        // Gather the closures to scan
+        let caps = match unwrap_parens(v) {
+            Expr::FnLit { params, results, body, .. } => {
+                let mut bound = HashSet::new();
+                for p in params {
+                    bound.insert(p.name.clone());
+                }
+                for r in results {
+                    if let Some(name) = &r.name {
+                        bound.insert(name.clone());
+                    }
+                }
+                let mut caps = Vec::new();
+                collect_capture_idents_block(body, &mut bound, &mut caps);
+                caps
+            }
+            Expr::Ident { name, .. } => {
+                let resolved = crate::freeze::resolve_alias(st, name);
+                let Some(closure_data) = st
+                    .closure_defs
+                    .get(name)
+                    .or_else(|| st.closure_defs.get(&resolved))
+                    .cloned()
+                else {
+                    return;
+                };
+                // closure_defs stores (Vec<Param>, Vec<FnResult>, Block)
+                let (_, _, body) = closure_data;
+                let mut bound = HashSet::new();
+                let mut caps = Vec::new();
+                collect_capture_idents_block(&body, &mut bound, &mut caps);
+                caps
+            }
+            _ => return,
+        };
+
+        let loan_names: HashSet<String> = st
+            .loans
+            .iter()
+            .filter_map(|l| match &l.target {
+                LoanTarget::MapSlot { binding, .. } => Some(binding.clone()),
+                _ => None,
+            })
+            .collect();
+        
+        if loan_names.is_empty() {
+            let has_slot = caps.iter().any(|cap| {
+                let r = crate::freeze::resolve_alias(st, cap);
+                self.lookup_binding(st, cap)
+                    .or_else(|| self.lookup_binding(st, &r))
+                    .is_some_and(|b| b.slot_loan)
+            });
+            if !has_slot {
+                return;
+            }
+        }
+
+        let capturing = caps.iter().find_map(|cap| {
+            let r = crate::freeze::resolve_alias(st, cap);
+            if loan_names.contains(cap) || loan_names.contains(&r) {
+                return Some(cap.clone());
+            }
+            if self
+                .lookup_binding(st, cap)
+                .or_else(|| self.lookup_binding(st, &r))
+                .is_some_and(|b| b.slot_loan)
+            {
+                return Some(cap.clone());
+            }
+            None
+        });
+
+        if let Some(cap_name) = capturing {
+            if self.diags.iter().any(|d| {
+                d.code == "HYB-E3104"
+                    && d.message.contains("a slot loan captured by a returned")
+            }) {
+                return;
+            }
+            let msg = format!(
+                "a slot loan captured by a returned closure cannot escape the function (`{}`)",
+                cap_name
+            );
+            let notes = vec![
+                format!(
+                    "`{}` is (or aliases) a slot loan whose store-back runs before return",
+                    cap_name
+                ),
+                "return the index/key and write through the container inside the closure".to_string(),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E3104", self.path.clone(), v.span(), msg).with_notes(notes),
+            );
+        }
+    }
 }
+
 
 /// Collect root identifiers of `move` operands inside `expr` (including
 /// top-level `move x` and `move` expressions nested inside composite literals
