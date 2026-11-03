@@ -1,5 +1,7 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor refresh (2026-11-03, PR #3343): integrated upstream `212af67e5df6452452c061e3dc3d3251faee790f` without conflicts. Python 3.12.14 top-level tooling: 505/505 passed; test-registration, conflict-marker and diff checks passed. Existing fix and regression tests preserved. Full Rust/Go verification on this refreshed head remains a hosted-CI/review gate; no award or payment claimed.
+
 - Contributor #3342 (2026-11-02): explicit Markdown evidence links must resolve inside the repository; 13 focused and 129 adjacent Python tests pass. Pinned compiler, corpus/differential, ten examples and hosted quick/compiler CI pass at c4e0b6f; PR #3343 ready for review. Review, award and payment pending. See PLAN.md.
 
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
