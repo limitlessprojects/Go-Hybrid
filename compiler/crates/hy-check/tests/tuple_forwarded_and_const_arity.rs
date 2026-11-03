@@ -95,10 +95,10 @@ fn file_level_const_closures_and_composites_reject_multi_value_binds() {
     // Untyped slice literal in file-level `const` holding a closure with a 1-target bind of a 2-value call.
     assert_only_e2002(
         "fn minmax(a int, b int) (int, int) { return a, b }\n\
-         const fns = [fn() {\n\
+         const fns = []fn(){fn() {\n\
              p := minmax(3, 9)\n\
              _ = p\n\
-         }]\n\
+         }}\n\
          fn main() {\n\
              _ = fns\n\
          }\n",
@@ -168,7 +168,7 @@ fn single_value_return_and_forwarded_calls_reject_move_foreign_indirect_and_alia
     );
     assert_only_e2002(
         "fn minmax(a int, b int) (int, int) { return a, b }\n\
-         const fns = [minmax]\n\
+         const fns = []fn(){ fn() { _ = minmax(3, 9) } }\n\
          fn bad() int {\n\
              return fns[0](3, 9)\n\
          }\n\
@@ -215,11 +215,11 @@ fn valid_forwarding_and_const_destructuring_stay_accepted() {
          fn minmax(a int, b int) (int, int) { return a, b }\n\
          fn w(x int, y int) { _ = x\n _ = y }\n\
          fn fwd() (i64, error) { return strconv.parse_int(\"42\", 10, 64) }\n\
-         const fns = [fn() {\n\
+         const fns = []fn(){fn() {\n\
              a, b := minmax(3, 9)\n\
              _ = a\n\
              _ = b\n\
-         }]\n\
+         }}\n\
          fn main() {\n\
              (fn(x int, y int) { _ = x\n _ = y })(minmax(1, 2))\n\
              w(minmax(1, 2))\n\
