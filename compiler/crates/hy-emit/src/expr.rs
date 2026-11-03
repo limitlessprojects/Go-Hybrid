@@ -72,22 +72,53 @@ impl Emitter {
             while let Expr::Paren { inner, .. } = lit {
                 lit = inner;
             }
+            let resolved = self.n5_resolve_alias(exp);
             match lit {
                 Expr::StructLit {
                     ty: None, fields, ..
                 } => {
+                    if let TypeExpr::Pointer { to, .. } = &resolved {
+                        let body = self.struct_lit_body(to, fields)?;
+                        let s = format!("&{}{{{}}}", self.type_text(to), body);
+                        return Ok(if min_prec > 50 { format!("({})", s) } else { s });
+                    }
+                    if let (true, Some(init)) = (fields.is_empty(), self.n5_zero_init(exp)) {
+                        return Ok(init);
+                    }
                     let head = self.type_text(exp);
                     let body = self.struct_lit_body(exp, fields)?;
                     return Ok(format!("{}{{{}}}", head, body)); // atomic head
                 }
                 Expr::SliceLit {
                     elem: None, items, ..
-                } => match exp {
+                } => match &resolved {
                     TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
                         let head = self.type_text(exp);
                         let mut parts = Vec::new();
                         for i in items {
                             parts.push(self.emit_expr_exp(i, 0, Some(elem))?);
+                        }
+                        if let (
+                            TypeExpr::Array {
+                                len:
+                                    Some(
+                                        len_expr,
+                                    ),
+                                ..
+                            },
+                            Some(init),
+                        ) = (&resolved, self.n5_zero_init(elem))
+                        {
+                            if let Expr::Lit {
+                                kind: LitKind::Int(n),
+                                ..
+                            } = len_expr.as_ref()
+                            {
+                                parts.resize(
+                                    n.replace('_', "").parse().unwrap_or(0).max(parts.len()),
+                                    init,
+                                );
+                            }
                         }
                         return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                     }
@@ -220,10 +251,13 @@ impl Emitter {
 
             Expr::StructLit { ty, fields, .. } => {
                 if let Some(t) = ty {
-                    if matches!(t, TypeExpr::Chan { .. }) {
+                    if matches!(self.resolve_type_alias(t), TypeExpr::Chan { .. }) {
                         return Err(EmitError::unsupported(
                             "channel type is not a value expression — construct a channel with `make(chan T)`",
                         ));
+                    }
+                    if let (true, Some(init)) = (fields.is_empty(), self.n5_zero_init(t)) {
+                        return Ok(init);
                     }
                     let head = self.type_text(t);
                     let body = self.struct_lit_body(t, fields)?;
@@ -236,11 +270,19 @@ impl Emitter {
             }
 
             Expr::SliceLit { elem, items, .. } => {
-                if let Some((_, inner_elem, arr_ty)) = e.as_array_lit() {
+                if let Some((len, inner_elem, arr_ty)) = e.as_array_lit() {
+                    // N5: `[N]T{}` and the trailing elements of a partial `[N]T{…}`
+                    // are zero values — allocate their maps (zeroinit.rs).
+                    if let (true, Some(init)) = (items.is_empty(), self.n5_zero_init(arr_ty)) {
+                        return Ok(init);
+                    }
                     let head = self.type_text(arr_ty);
                     let mut parts = Vec::new();
                     for i in items {
                         parts.push(self.emit_expr_exp(i, 0, Some(inner_elem))?);
+                    }
+                    if let (Some(Expr::Lit { kind: LitKind::Int(n), .. }), Some(init)) = (len, self.n5_zero_init(inner_elem)) {
+                        parts.resize(n.replace('_', "").parse().unwrap_or(0).max(parts.len()), init);
                     }
                     return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                 }
@@ -266,7 +308,7 @@ impl Emitter {
                 let head = format!("map[{}]{}", self.type_text(key), self.type_text(value));
                 let mut parts = Vec::new();
                 for (k, v) in entries {
-                    let kt = self.emit_expr(k, 0)?;
+                    let kt = self.emit_expr_exp(k, 0, Some(key))?;
                     // Elided struct values inherit the map's VALUE type
                     // (Batch I, corpus 09: `map[string]service{"k": {…}}`).
                     let vt = self.emit_expr_exp(v, 0, Some(value))?;
@@ -341,7 +383,7 @@ impl Emitter {
                     if let Some(n) = &r.name {
                         if n != "_" {
                             self.shadow_local_name(n);
-                            if matches!(r.ty, TypeExpr::Pointer { .. }) {
+                            if self.is_pointer_ty(&r.ty) {
                                 self.pointer_vars.insert(n.clone());
                             }
                             if let Some(kind) = self.binding_kind_of_ty(&r.ty) {
@@ -354,7 +396,7 @@ impl Emitter {
                 for (i, p) in params.iter().enumerate() {
                     if p.name != "_" {
                         self.shadow_local_name(&p.name);
-                        if matches!(p.ty, TypeExpr::Pointer { .. }) {
+                        if self.is_pointer_ty(&p.ty) {
                             self.pointer_vars.insert(p.name.clone());
                         }
                     }
@@ -382,7 +424,38 @@ impl Emitter {
                         .unwrap_or_else(|| w.to_string());
                     self.handler_writer = Some(name);
                 }
-                self.fnlit_depth += 1;
+                // E4: a closure's `?` binds to the closure's OWN results,
+                // never the enclosing fn's — not main's wrapper `hyErr` (an
+                // assignment to it from here returned from the closure only
+                // and let main keep running), not the outer fn's zero-value
+                // return list (the wrong arity for this literal).
+                let saved_main_closure = std::mem::replace(&mut self.in_main_closure, false);
+                let closure_err_returns = if matches!(
+                    results.last().map(|r| &r.ty),
+                    Some(TypeExpr::Named { name, .. }) if name == "error"
+                ) {
+                    let mut texts: Vec<String> = results[..results.len() - 1]
+                        .iter()
+                        .map(|r| self.zero_value(&r.ty))
+                        .collect();
+                    texts.push(String::new()); // filled by propagate_error
+                    Some(texts)
+                } else {
+                    None
+                };
+                let saved_err_returns =
+                    std::mem::replace(&mut self.cur_fn_error_returns, closure_err_returns);
+                let mut closure_opt = None;
+                let mut closure_conv = None;
+                if results.len() == 1 && results[0].name.is_none() {
+                    let rt = self.type_text(&results[0].ty);
+                    if rt.starts_with("option[") {
+                        closure_opt = Some(rt);
+                    }
+                    closure_conv = self.result_conv_key(&results[0].ty);
+                }
+                let saved_opt = std::mem::replace(&mut self.cur_option_result, closure_opt);
+                let saved_conv = std::mem::replace(&mut self.cur_fn_conv_result, closure_conv);
                 // Labels do not cross func boundaries: a labeled break/continue
                 // must find its loop INSIDE the literal — reset the depth so
                 // an outer loop's count cannot bless a closure-nested label.
@@ -411,7 +484,10 @@ impl Emitter {
                 self.loop_labels = saved_loop_labels;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
-                self.fnlit_depth -= 1;
+                self.in_main_closure = saved_main_closure;
+                self.cur_fn_error_returns = saved_err_returns;
+                self.cur_option_result = saved_opt;
+                self.cur_fn_conv_result = saved_conv;
                 self.for_depth = saved_for_depth;
                 self.handler_writer = saved_writer;
                 self.restore_scope(saved_scope);
@@ -525,6 +601,39 @@ impl Emitter {
                 "empty `[]` literal — write `[]T{}` with the element type",
             ));
         };
+        // Parentheses and a sign on a numeric literal are transparent:
+        // `[-1, 2]` is `[]int`, `[(2.5), 1]` is `[]float64` — the same head
+        // hy-check's untyped-slice item check infers.
+        let mut first = first;
+        let mut negated = false;
+        loop {
+            match first {
+                Expr::Paren { inner, .. } => first = inner,
+                Expr::Unary {
+                    op: UnOp::Neg,
+                    operand,
+                    ..
+                } => {
+                    negated = true;
+                    first = operand;
+                }
+                _ => break,
+            }
+        }
+        if negated
+            && !matches!(
+                first,
+                Expr::Lit {
+                    kind: LitKind::Int(_) | LitKind::Float(_),
+                    ..
+                }
+            )
+        {
+            return Err(EmitError::unsupported(format!(
+                "untyped slice literal of `-{}` — spell the element type",
+                first.render()
+            )));
+        }
         let elem = match first {
             Expr::Lit { kind, .. } => match kind {
                 LitKind::Int(_) => "int",
@@ -552,6 +661,63 @@ impl Emitter {
     // -----------------------------------------------------------------------
     // Calls — builtins, package specials, foreign methods
     // -----------------------------------------------------------------------
+
+    /// The user-declared struct type name an expression evaluates to, when
+    /// the whole chain resolves through declared fields: `o`, `(&o)`,
+    /// `o.sub`, `o.sub.deep`, parenthesized links included. None the moment
+    /// a link is not a user struct (foreign shape, slice, `set[T]`, …).
+    ///
+    /// This is the recursive form of the single-hop `var_struct[Ident].field`
+    /// lookup the emitters used to inline. `stats.mu.lock()` resolved one
+    /// hop only; `o.sub.mu.lock()` dropped the shape, emitted the hy name
+    /// verbatim, and died in `go build` with
+    /// `has no field or method lock, but does have method Lock` (#1553).
+    pub(crate) fn user_struct_name_of(&self, e: &Expr) -> Option<&str> {
+        match Self::unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.var_struct.get(name).map(String::as_str),
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => self.user_struct_name_of(operand),
+            Expr::Field { base, name, .. } => {
+                let sn = self.user_struct_name_of(base)?;
+                let fty = self
+                    .struct_fields
+                    .get(sn)?
+                    .iter()
+                    .find(|(f, _)| f == name)
+                    .map(|(_, t)| t.as_str())?;
+                self.resolve_to_struct_name(fty)
+            }
+            _ => None,
+        }
+    }
+
+    /// Map a type name to a declared struct, following `type alias = …`
+    /// links (#1553 review): a field declared `sub wrapper` where
+    /// `type wrapper = inner` still carries `inner`'s member shapes — the
+    /// old `contains_key(fty)` test only accepted the spelled name, so an
+    /// aliased hop dropped the chain exactly like a missing recursion did.
+    /// A cycle (`type a = b; type b = a`) is not resolvable by Go either;
+    /// bounded walk returns None.
+    fn resolve_to_struct_name(&self, start: &str) -> Option<&str> {
+        let mut cur = std::borrow::Cow::Borrowed(start);
+        for _ in 0..16 {
+            if let Some((k, _)) = self.struct_fields.get_key_value(cur.as_ref()) {
+                return Some(k.as_str());
+            }
+            match self.n5_aliases.get::<str>(cur.as_ref()) {
+                Some(ty) => match super::base_ty_name(ty) {
+                    Some(next) if next.as_str() != cur.as_ref() => cur = std::borrow::Cow::Owned(next),
+                    _ => return None,
+                },
+                None => return None,
+            }
+        }
+        None
+    }
 
     /// Descriptor type of an expression, when the shape table knows it
     /// (Batch E chain resolution):
@@ -587,26 +753,79 @@ impl Emitter {
                         return m.result;
                     }
                 }
-                // Batch I: user-struct field typing — `stats.mu` resolves
-                // through var_struct + struct_fields when the field's
-                // declared type is shape-known (18: sync.mutex).
-                if let Expr::Ident { name: vn, .. } = Self::unwrap_parens(base.as_ref()) {
-                    if let Some(sn) = self.var_struct.get(vn) {
-                        if let Some(fields) = self.struct_fields.get(sn) {
-                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                                if let Some((k, _)) =
-                                    super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
-                                {
-                                    return Some(k);
-                                }
+                // Batch I (recursive since #1553): user-struct field
+                // typing — `stats.mu` and `o.sub.mu` resolve through
+                // var_struct + struct_fields when the field's declared
+                // type is shape-known (18: sync.mutex).
+                if let Some(sn) = self.user_struct_name_of(base.as_ref()) {
+                    if let Some(fields) = self.struct_fields.get(sn) {
+                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                            if let Some((k, _)) =
+                                super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
+                            {
+                                return Some(k);
                             }
                         }
                     }
                 }
                 None
             }
-            // A zero-arg/method call's result type is the member's result.
-            Expr::Call { callee, .. } => self.type_of_expr(callee),
+            Expr::Try { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => self.type_of_expr(operand),
+            // A zero-arg/method call's result type is the member's result;
+            // package constructors and user functions returning shape-known
+            // foreign types resolve to their descriptor keys.
+            Expr::Call { callee, .. } => {
+                if let Some(t) = self.type_of_expr(callee) {
+                    return Some(t);
+                }
+                match Self::unwrap_parens(callee) {
+                    Expr::Ident { name, .. } => {
+                        let (fn_head, _) = split_type_args(name);
+                        if !self.local_vars.contains(fn_head) {
+                            if let Some((_, _, Some(BindingKind::ForeignTy(t)), _)) =
+                                self.fn_shapes.get(fn_head)
+                            {
+                                return Some(t);
+                            }
+                        }
+                        None
+                    }
+                    Expr::Field { base, name, .. } => {
+                        if let Expr::Ident { name: pkg, .. } = Self::unwrap_parens(base) {
+                            if self.is_unshadowed_pkg_root(pkg) {
+                                return match (pkg.as_str(), name.as_str()) {
+                                    (
+                                        "time",
+                                        "since"
+                                        | "until"
+                                        | "milliseconds"
+                                        | "seconds"
+                                        | "minutes"
+                                        | "hours"
+                                        | "parse_duration",
+                                    ) => Some("time.duration"),
+                                    ("time", "now" | "parse") => Some("time.time"),
+                                    ("serde_json", "parse" | "new_object" | "new_array") => {
+                                        Some("serde_json.value")
+                                    }
+                                    ("http", "new_serve_mux") => Some("http.serve_mux"),
+                                    ("url", "parse") => Some("url.url"),
+                                    _ => None,
+                                };
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -627,6 +846,14 @@ impl Emitter {
                 };
             }
         }
+        if let Expr::Ident { name: root, .. } = Self::unwrap_parens_and_addr(base) {
+            if matches!(
+                self.bindings.get(root),
+                Some(BindingKind::Foreign) | Some(BindingKind::ForeignTy(_))
+            ) {
+                return to_go_name(name);
+            }
+        }
         self.member_name(base, name)
     }
 
@@ -635,6 +862,36 @@ impl Emitter {
             e = inner;
         }
         e
+    }
+
+    fn unwrap_parens_and_addr(mut e: &Expr) -> &Expr {
+        loop {
+            match e {
+                Expr::Paren { inner, .. } => e = inner,
+                Expr::AddrOf { operand, .. }
+                | Expr::Unary {
+                    op: UnOp::Addr,
+                    operand,
+                    ..
+                } => e = operand,
+                _ => return e,
+            }
+        }
+    }
+
+    fn assoc_index_type_arg(e: &Expr) -> Option<String> {
+        match Self::unwrap_parens(e) {
+            Expr::Ident { name, .. } => Some(name.clone()),
+            Expr::Field { base, name, .. } => {
+                Self::assoc_index_type_arg(base).map(|b| format!("{b}.{name}"))
+            }
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                ..
+            } if items.is_empty() => Some(format!("[]{}", t.render())),
+            _ => None,
+        }
     }
 
     /// A selector's base never needs parentheses when its inner expression is
@@ -658,35 +915,42 @@ impl Emitter {
         match Self::unwrap_parens(e) {
             Expr::Ident { name, .. } => self.var_struct.contains_key(name),
             Expr::StructLit { .. } => true,
-            Expr::AddrOf { operand, .. } => self.is_user_struct_expr(operand),
-            Expr::Field { base, name, .. } => {
-                if let Expr::Ident { name: vn, .. } = Self::unwrap_parens(base) {
-                    if let Some(sn) = self.var_struct.get(vn) {
-                        if let Some(fields) = self.struct_fields.get(sn) {
-                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                                return self.struct_fields.contains_key(fty.as_str());
-                            }
-                        }
-                    }
-                }
-                false
-            }
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => self.is_user_struct_expr(operand),
+            // Recursive since #1553: `o.sub` AND `o.sub.deep` are user
+            // structs, not just `o.f`. The old single-hop read made a
+            // three-level `o.sub.thing.pop()` look like a builtin pop and
+            // rewrite to `hy_pop(&o.sub.thing)` — Go has no such method on
+            // a user struct field.
+            Expr::Field { .. } => self.user_struct_name_of(e).is_some(),
             _ => false,
         }
     }
 
+    fn is_unshadowed_builtin(&self, name: &str) -> bool {
+        !self.local_vars.contains(name) && !self.fn_shapes.contains_key(name)
+    }
+
     pub(crate) fn emit_call(
         &mut self,
-        callee: &Expr,
+        raw_callee: &Expr,
         args: &[CallArg],
     ) -> Result<String, EmitError> {
+        let callee = Self::unwrap_parens(raw_callee);
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
-        if matches!(callee, Expr::Ident { name, .. } if name == "make") {
+        if matches!(callee, Expr::Ident { name, .. } if name == "make")
+            && self.is_unshadowed_builtin("make")
+        {
             return self.emit_make(args);
         }
         // --- new(T) whose zero value allocates maps (N5, issue #645) ---
-        let is_new = matches!(callee, Expr::Ident { name, .. } if name == "new");
-        if is_new && !self.local_vars.contains("new") && !self.fn_shapes.contains_key("new") {
+        if matches!(callee, Expr::Ident { name, .. } if name == "new")
+            && self.is_unshadowed_builtin("new")
+        {
             if let Some(alloc) = self.n5_new(args) {
                 return Ok(alloc);
             }
@@ -731,7 +995,7 @@ impl Emitter {
                     // — a clean failure, never a wrong emission.
                 }
             }
-            if let Expr::Ident { name: root, .. } = base {
+            if let Expr::Ident { name: root, .. } = Self::unwrap_parens_and_addr(base) {
                 if let Some(BindingKind::Foreign) = self.bindings.get(root) {
                     let b = self.emit_expr(base, ATOM)?;
                     let mut parts = Vec::new();
@@ -762,13 +1026,32 @@ impl Emitter {
 
         // --- associated-fn calls: `lru_cache.new[string, int](2)` →
         //     `lru_cache_new[string, int](2)` (Go has no dotted idents) ---
-        if let Expr::Field { base, name, .. } = callee {
-            if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base.as_ref()) {
+        let assoc_field_and_ta: Option<(&Expr, &str, Option<String>)> = match callee {
+            Expr::Field { base, name, .. } => {
+                let (head, ta) = split_type_args(name);
+                Some((base.as_ref(), head, ta.map(str::to_string)))
+            }
+            Expr::Index {
+                base: idx_base,
+                index,
+                ..
+            } => {
+                if let Expr::Field { base, name, .. } = Self::unwrap_parens(idx_base.as_ref()) {
+                    Self::assoc_index_type_arg(index)
+                        .map(|ta| (base.as_ref(), name.as_str(), Some(format!("[{ta}]"))))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((base, head, type_args)) = assoc_field_and_ta {
+            if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base) {
                 if !self.is_unshadowed_pkg_root(root) && !self.bindings.contains_key(root) {
-                    let (head, type_args) = split_type_args(name);
                     let full = format!("{}.{}", root, head);
                     if self.assoc_fns.contains(&full) {
                         let translated_ta = type_args
+                            .as_deref()
                             .map(|ta| self.translate_type_args_suffix(ta))
                             .unwrap_or_default();
                         let mut parts = Vec::new();
@@ -791,10 +1074,15 @@ impl Emitter {
         while let Expr::Paren { inner, .. } = bare_callee {
             bare_callee = inner;
         }
-        if matches!(bare_callee, Expr::Ident { name, .. } if name == "make") {
+        if matches!(bare_callee, Expr::Ident { name, .. } if name == "make")
+            && self.is_unshadowed_builtin("make")
+        {
             return self.emit_make(args);
         }
-        if matches!(bare_callee, Expr::Ident { name, .. } if name == "new") && args.len() == 1 {
+        if matches!(bare_callee, Expr::Ident { name, .. } if name == "new")
+            && self.is_unshadowed_builtin("new")
+            && args.len() == 1
+        {
             return self.emit_new(&args[0]);
         }
 
@@ -804,33 +1092,35 @@ impl Emitter {
         //     name used to fall through to the verbatim emission below and
         //     die in Go as `undefined: u8`. Issue #147. ---
         if let Expr::Ident { name, .. } = callee {
-            if let Some(go) = super::shapes::go_primitive_name(name) {
-                if args.len() != 1 {
-                    return Err(EmitError::unsupported(format!(
-                        "`{}` conversion takes exactly one argument",
-                        name
-                    )));
+            if self.is_unshadowed_builtin(name) {
+                if let Some(go) = super::shapes::go_primitive_name(name) {
+                    if args.len() != 1 {
+                        return Err(EmitError::unsupported(format!(
+                            "`{}` conversion takes exactly one argument",
+                            name
+                        )));
+                    }
+                    // A CONSTANT operand that does not fit the target has to
+                    // be folded here: Go rejects `uint8(300)` outright (the
+                    // truncation Go does is only for a variable operand), yet
+                    // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
+                    // executable test-claim. The fold computes that same
+                    // two's-complement truncation at emit time.
+                    if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
+                        return Ok(format!("{}({})", go, folded));
+                    }
+                    let a = self.emit_call_arg(&args[0])?;
+                    return Ok(format!("{}({})", go, a));
                 }
-                // A CONSTANT operand that does not fit the target has to
-                // be folded here: Go rejects `uint8(300)` outright (the
-                // truncation Go does is only for a variable operand), yet
-                // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
-                // executable test-claim. The fold computes that same
-                // two's-complement truncation at emit time.
-                if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
-                    return Ok(format!("{}({})", go, folded));
+                if name == "len" && args.len() == 1 && self.is_set_expr(&args[0].value) {
+                    let a = self.emit_call_arg(&args[0])?;
+                    return Ok(format!("{}.len()", a));
                 }
-                let a = self.emit_call_arg(&args[0])?;
-                return Ok(format!("{}({})", go, a));
-            }
-            if name == "len" && args.len() == 1 && self.is_set_expr(&args[0].value) {
-                let a = self.emit_call_arg(&args[0])?;
-                return Ok(format!("{}.len()", a));
-            }
-            if name == "delete" && args.len() == 2 && self.is_set_expr(&args[0].value) {
-                let s = self.emit_call_arg(&args[0])?;
-                let v = self.emit_call_arg(&args[1])?;
-                return Ok(format!("{}.remove({})", s, v));
+                if name == "delete" && args.len() == 2 && self.is_set_expr(&args[0].value) {
+                    let s = self.emit_call_arg(&args[0])?;
+                    let v = self.emit_call_arg(&args[1])?;
+                    return Ok(format!("{}.remove({})", s, v));
+                }
             }
         }
 
@@ -872,7 +1162,7 @@ impl Emitter {
                 ptr_params = params.iter().map(|p| p.is_some()).collect();
             }
         }
-        let c = self.emit_expr(callee, ATOM)?;
+        let c = self.emit_expr(raw_callee, ATOM)?;
         let mut parts = Vec::new();
         for (i, a) in args.iter().enumerate() {
             let t = self.emit_call_arg(a)?;
@@ -942,6 +1232,26 @@ impl Emitter {
         let mut parts = vec![ty_text];
         for a in &args[1..] {
             parts.push(self.emit_call_arg(a)?);
+        }
+        // N5: `make([]T, n[, c])` elements are zero values too — allocate their
+        // maps through hy_n5_make (zeroinit.rs, N5_MAKE_PRELUDE). Go's `make`
+        // takes any integer type for the sizes; the helper takes `int`.
+        let elem = match first_val {
+            Expr::SliceLit { elem: Some(t), items, .. } if items.is_empty() && first_val.as_array_lit().is_none() => Some(t.as_ref().clone()),
+            Expr::Ident { name, span } => match self.n5_resolve_alias(&TypeExpr::Named { name: name.clone(), span: *span }) {
+                TypeExpr::Slice { elem, .. } => Some(*elem),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((elem, init)) = elem.and_then(|t| self.n5_zero_init(&t).map(|init| (t, init))) {
+            parts[0] = format!("func() {} {{ return {} }}", self.type_text(&elem), init);
+            for (a, s) in args[1..].iter().zip(&mut parts[1..]) {
+                if !matches!(a.value, Expr::Lit { kind: LitKind::Int(_), .. }) {
+                    *s = format!("int({})", s);
+                }
+            }
+            return Ok(format!("hy_n5_make({})", parts.join(", ")));
         }
         Ok(format!("make({})", parts.join(", ")))
     }

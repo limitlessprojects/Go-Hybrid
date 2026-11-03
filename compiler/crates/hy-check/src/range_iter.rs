@@ -44,11 +44,12 @@ impl<'a> Checker<'a> {
                 if self.diags.len() == before {
                     let shape = self.shape_of_expr(st, expr);
                     let is_chan = matches!(shape, TypeShape::Chan(_));
-                    let is_set = matches!(
-                        shape,
-                        TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set"
-                    );
-                    if vars.len() > 1 && (is_chan || is_set) {
+                    let is_set = !self.structs.contains_key("set")
+                        && matches!(
+                            shape,
+                            TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set"
+                        );
+                    if vars.len() > 1 && (is_chan || is_set || shape.is_handle()) {
                         let kind_str = if is_chan { "channel" } else { "set" };
                         let why_note = if is_chan {
                             "why: Go permits only a single iteration variable when ranging over a channel (`range over … permits only one iteration variable`), so an accepted Hybrid program would emit unbuildable Go (LX13)".to_string()
@@ -136,6 +137,22 @@ impl<'a> Checker<'a> {
     }
 
     fn non_integer_bound_kind(&self, st: &FnState, expr: &Expr) -> Option<String> {
+        self.non_integer_bound_kind_at(st, expr, 0)
+    }
+
+    /// Issue #1554: file `const` initializers can be compound expressions
+    /// (`const hi = 1.5 + 0.5`, `const flag = !false`). Resolve them through
+    /// the same classifier instead of only classifying bare literals; the
+    /// depth cap keeps a `const a = b; const b = a` cycle finite.
+    fn non_integer_bound_kind_at(
+        &self,
+        st: &FnState,
+        expr: &Expr,
+        depth: usize,
+    ) -> Option<String> {
+        if depth > 32 {
+            return None;
+        }
         match unwrap_parens(expr) {
             Expr::Lit {
                 kind: LitKind::Float(_),
@@ -164,7 +181,7 @@ impl<'a> Checker<'a> {
                 if matches!(op, hy_syntax::UnOp::Not) {
                     return Some("bool".to_string());
                 }
-                if let Some(k) = self.non_integer_bound_kind(st, operand) {
+                if let Some(k) = self.non_integer_bound_kind_at(st, operand, depth + 1) {
                     return Some(k);
                 }
             }
@@ -185,8 +202,8 @@ impl<'a> Checker<'a> {
                     return Some("bool".to_string());
                 }
                 if let Some(k) = self
-                    .non_integer_bound_kind(st, lhs)
-                    .or_else(|| self.non_integer_bound_kind(st, rhs))
+                    .non_integer_bound_kind_at(st, lhs, depth + 1)
+                    .or_else(|| self.non_integer_bound_kind_at(st, rhs, depth + 1))
                 {
                     return Some(k);
                 }
@@ -195,11 +212,70 @@ impl<'a> Checker<'a> {
                 // Issue #827: `&x` is a pointer — never an integer bound.
                 return Some("pointer".to_string());
             }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if st.env_lookup(name).is_none()
+                        && !self.fns.contains_key(name.as_str())
+                        && !self.structs.contains_key(name.as_str())
+                        && !self.enums.contains_key(name.as_str())
+                        && !self.type_aliases.contains_key(name.as_str())
+                    {
+                        if name == "complex"
+                            && args.len() == 2
+                            && !args[0].spread
+                            && !args[1].spread
+                        {
+                            return Some("complex".to_string());
+                        }
+                        if (name == "real" || name == "imag")
+                            && args.len() == 1
+                            && !args[0].spread
+                        {
+                            return Some("float".to_string());
+                        }
+                    }
+                }
+            }
             _ => {}
         }
         if let Some(ty) = self.ty_of_expr(st, expr) {
-            let resolved = self.resolve_type_alias(&ty);
-            if let TypeExpr::Named { name, .. } = &resolved {
+            if let Some(desc) = self.non_integer_type_desc(&ty) {
+                return Some(desc);
+            }
+        }
+        // Issue #827: an untyped const identifier carries no type
+        // ascription, so `ty_of_expr`/`shape_of_expr` see nothing. Resolve
+        // the initializer through the file const map (#998 pattern) and
+        // classify the literal. Block-scoped consts stay fail-open (no
+        // const-value map in FnState — the #998 precedent).
+        if let Expr::Ident { name, .. } = unwrap_parens(expr) {
+            if st.env_lookup(name).is_none() {
+                if let Some(b) = self.consts.get(name.as_str()) {
+                    if let Some(ty) = &b.ty {
+                        if let Some(desc) = self.non_integer_type_desc(ty) {
+                            return Some(desc);
+                        }
+                    }
+                }
+                if let Some(init) = self.const_values.get(name.as_str()) {
+                    if let Some(k) = self.non_integer_bound_kind_at(st, init, depth + 1) {
+                        return Some(k);
+                    }
+                }
+            }
+        }
+        let shape = self.shape_of_expr(st, expr);
+        match shape {
+            TypeShape::Primitive | TypeShape::Unknown => None,
+            other => Some(other.render()),
+        }
+    }
+
+    fn non_integer_type_desc(&self, ty: &TypeExpr) -> Option<String> {
+        let resolved = self.resolve_type_alias(ty);
+        match &resolved {
+            TypeExpr::Option { .. } => Some(resolved.render()),
+            TypeExpr::Named { name, .. }
                 if matches!(
                     name.as_str(),
                     "bool"
@@ -211,45 +287,13 @@ impl<'a> Checker<'a> {
                         | "complex128"
                         | "string"
                         | "error"
-                ) {
-                    return Some(resolved.render());
-                }
+                        | "any"
+                        | "interface{}"
+                ) =>
+            {
+                Some(resolved.render())
             }
-        }
-        // Issue #827: an untyped const identifier carries no type
-        // ascription, so `ty_of_expr`/`shape_of_expr` see nothing. Resolve
-        // the initializer through the file const map (#998 pattern) and
-        // classify the literal. Block-scoped consts stay fail-open (no
-        // const-value map in FnState — the #998 precedent).
-        if let Expr::Ident { name, .. } = unwrap_parens(expr) {
-            if st.env_lookup(name).is_none() {
-                if let Some(init) = self.const_values.get(name.as_str()) {
-                    match unwrap_parens(init) {
-                        Expr::Lit {
-                            kind: LitKind::Float(_),
-                            ..
-                        } => return Some("float".to_string()),
-                        Expr::Lit {
-                            kind: LitKind::Bool(_),
-                            ..
-                        } => return Some("bool".to_string()),
-                        Expr::Lit {
-                            kind: LitKind::Str(_) | LitKind::RawStr(_),
-                            ..
-                        } => return Some("string".to_string()),
-                        Expr::Lit {
-                            kind: LitKind::Nil,
-                            ..
-                        } => return Some("nil".to_string()),
-                        _ => {}
-                    }
-                }
-            }
-        }
-        let shape = self.shape_of_expr(st, expr);
-        match shape {
-            TypeShape::Primitive | TypeShape::Unknown => None,
-            other => Some(other.render()),
+            _ => None,
         }
     }
 
@@ -270,10 +314,18 @@ impl<'a> Checker<'a> {
     ) {
         let tl = self.typed_int_bound(st, lo);
         let th = self.typed_int_bound(st, hi);
-        let mismatch = match (&tl, &th) {
+        // Issue #1165: compare the two bounds as *Go types*, not as spellings.
+        // `byte` and `rune` are Go aliases of `uint8`/`int32`, and `u8`/`i32`
+        // are the SPEC spellings the emitter maps onto those same Go types, so
+        // `var a u8 = 0; var b uint8 = 10; for i in a..b` is a legal loop that
+        // was rejected with a false HYB-E2009. Canonicalise before comparing;
+        // the diagnostic still prints the spellings the author wrote.
+        let tl_c = tl.as_deref().map(crate::const_overflow::canonical_int_type_name);
+        let th_c = th.as_deref().map(crate::const_overflow::canonical_int_type_name);
+        let mismatch = match (&tl_c, &th_c) {
             (Some(a), Some(b)) => a != b,
-            (None, Some(b)) => b != "int",
-            (Some(a), None) => inclusive && a != "int",
+            (None, Some(b)) => *b != "int",
+            (Some(a), None) => inclusive && *a != "int",
             (None, None) => false,
         };
         if mismatch {
@@ -350,12 +402,60 @@ impl<'a> Checker<'a> {
                 let ty = self.ty_of_expr(st, e)?;
                 self.named_int_of(&ty)
             }
-            Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
+            Expr::Unary {
+                op: hy_syntax::UnOp::Neg,
+                operand,
+                ..
+            } => self.typed_int_bound(st, operand),
+            Expr::Binary { op, lhs, rhs, .. } => match op {
+                hy_syntax::BinOp::Add
+                | hy_syntax::BinOp::Sub
+                | hy_syntax::BinOp::Mul
+                | hy_syntax::BinOp::Div
+                | hy_syntax::BinOp::Mod
+                | hy_syntax::BinOp::BitAnd
+                | hy_syntax::BinOp::BitOr
+                | hy_syntax::BinOp::BitXor => self
+                    .typed_int_bound(st, lhs)
+                    .or_else(|| self.typed_int_bound(st, rhs)),
+                hy_syntax::BinOp::Shl | hy_syntax::BinOp::Shr => self.typed_int_bound(st, lhs),
+                _ => None,
+            },
+            Expr::Call { callee, args, .. } => {
                 // a fixed-width conversion names its own type: `u32(0)`
                 // is a u32 bound regardless of what ty_of_expr infers.
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
-                    if crate::const_overflow::fixed_width_int_range(name).is_some() {
-                        return Some(name.clone());
+                    if st.env_lookup(name).is_none()
+                        && !self.fns.contains_key(name.as_str())
+                        && !self.structs.contains_key(name.as_str())
+                        && !self.enums.contains_key(name.as_str())
+                    {
+                        if args.len() == 1
+                            && !args[0].spread
+                            && !self.type_aliases.contains_key(name.as_str())
+                            && crate::const_overflow::fixed_width_int_range(name).is_some()
+                        {
+                            return Some(name.clone());
+                        }
+                        if name == "copy"
+                            && args.len() == 2
+                            && !args[0].spread
+                            && !args[1].spread
+                            && !self.type_aliases.contains_key("copy")
+                        {
+                            return Some("int".to_string());
+                        }
+                        if (name == "len" || name == "cap")
+                            && args.len() == 1
+                            && !args[0].spread
+                            && !self.type_aliases.contains_key(name.as_str())
+                            && matches!(
+                                self.shape_of_expr(st, &args[0].value),
+                                TypeShape::Slice(_) | TypeShape::Map(_, _) | TypeShape::Chan(_)
+                            )
+                        {
+                            return Some("int".to_string());
+                        }
                     }
                 }
                 let ty = self.ty_of_expr(st, e)?;
@@ -392,10 +492,10 @@ impl<'a> Checker<'a> {
         // only pointer-to-ARRAY is rangeable (`*struct` / `*slice` /
         // `*string` are not), so normalize exactly one Pointer level for
         // arrays and leave every other shape as classified.
-        let shape = match self.shape_of_expr(st, expr) {
+        let shape = if matches!(self.ty_of_expr(st, expr).map(|t| self.resolve_type_alias(&t)), Some(TypeExpr::Option { .. })) { TypeShape::Struct(None) } else { match self.shape_of_expr(st, expr) {
             TypeShape::Pointer(inner) if matches!(*inner, TypeShape::Array(_)) => *inner,
             other => other,
-        };
+        } };
         match shape {
             TypeShape::Slice(_)
             | TypeShape::Array(_)
@@ -405,16 +505,21 @@ impl<'a> Checker<'a> {
             // view the emitter iterates; corpus 05/07/11/12). Corpus-driven,
             // NOT a Go range shape — Go cannot range the view struct itself.
             | TypeShape::BorrowHandle(_) => {}
-            TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set" => {}
+            TypeShape::Struct(Some(ref n))
+                if !self.structs.contains_key("set")
+                    && (n.starts_with("set[") || n == "set") => {}
             TypeShape::Chan(_) => {
-                let chan_ty = self.ty_of_expr(st, expr).or_else(|| {
-                    if let Expr::Ident { name, .. } = unwrap_parens(expr) {
-                        let root = crate::freeze::resolve_alias(st, name);
-                        self.lookup_binding(st, &root).and_then(|b| b.ty.clone())
-                    } else {
-                        None
-                    }
-                });
+                let chan_ty = self
+                    .ty_of_expr(st, expr)
+                    .or_else(|| {
+                        if let Expr::Ident { name, .. } = unwrap_parens(expr) {
+                            let root = crate::freeze::resolve_alias(st, name);
+                            self.lookup_binding(st, &root).and_then(|b| b.ty.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| self.composite_type_expr(st, expr));
                 if let Some(ty) = chan_ty {
                     let resolved = self.resolve_type_alias(&ty);
                     if matches!(

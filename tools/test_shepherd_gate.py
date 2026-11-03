@@ -117,5 +117,73 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+class WorkflowWorkspacePaths(unittest.TestCase):
+    """Shepherd workflows run from repo root, while Cargo workspaces live under
+    compiler/ and runtime/rust/hyrt/ and Go runtime packages live under
+    runtime/go (assembled as module hybrid.program, no root go.mod) (#2487)."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def test_shepherd_setup_caches_actual_workspaces(self):
+        src = (self.ROOT / ".github" / "actions" / "shepherd-setup" / "action.yml").read_text(encoding="utf-8")
+        self.assertIn("compiler/target", src)
+        self.assertIn("runtime/rust/hyrt/target", src)
+        self.assertIn("compiler/Cargo.lock", src)
+        self.assertIn("runtime/rust/hyrt/Cargo.lock", src)
+
+    def test_shepherd_preflight_targets_compiler_and_synthesized_go_module(self):
+        src = (self.ROOT / ".github" / "workflows" / "shepherd-preflight.yml").read_text(encoding="utf-8")
+        self.assertIn("--manifest-path compiler/Cargo.toml -p hyb", src)
+        self.assertIn("--manifest-path runtime/rust/hyrt/Cargo.toml", src)
+        self.assertIn("module hybrid.program", src)
+        self.assertNotIn("if go build ./... ; then", src)
+        self.assertNotIn("if cargo build -p hyb --quiet ; then", src)
+
+    def test_shepherd_verify_passes_manifest_and_hyb_bin(self):
+        src = (self.ROOT / ".github" / "workflows" / "shepherd-verify.yml").read_text(encoding="utf-8")
+        self.assertIn("cargo test --manifest-path compiler/Cargo.toml --workspace", src)
+        self.assertIn("cargo build --manifest-path compiler/Cargo.toml -p hyb", src)
+        self.assertIn("tools/corpus_harness.py --bin compiler/target/debug/hyb", src)
+        self.assertIn("tools/differential_loop.py --bin compiler/target/debug/hyb", src)
+
+
+class CmdProbeTests(unittest.TestCase):
+    """cmd_probe must not crash with NameError on unmatched diffs or TypeError
+    subscripting subprocess.CompletedProcess after a matched probe (#2809)."""
+
+    def test_unmatched_diff_prints_no_premise_patterns(self):
+        import io, tempfile
+        from contextlib import redirect_stdout
+        from types import SimpleNamespace
+        with tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False) as tf:
+            tf.write("diff --git a/x.hy b/x.hy\n+++ b/x.hy\n+let a = 42\n")
+            p = tf.name
+        try:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                sh.cmd_probe(SimpleNamespace(diff_file=p, go="go"))
+            self.assertIn("no premise patterns matched in diff", out.getvalue())
+        finally:
+            Path(p).unlink(missing_ok=True)
+
+    def test_matched_probe_rejected_does_not_subscript_completed_process(self):
+        import io, subprocess, tempfile
+        from contextlib import redirect_stdout
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        with tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False) as tf:
+            tf.write("+let c = make(<-chan int, 1)\n")
+            p = tf.name
+        try:
+            fake = subprocess.CompletedProcess(["go"], 1, "", "cannot make <-chan int\n")
+            out = io.StringIO()
+            with patch.object(sh.subprocess, "run", return_value=fake), redirect_stdout(out):
+                sh.cmd_probe(SimpleNamespace(diff_file=p, go="go"))
+            self.assertIn("probe-ok: make-directional-buffered", out.getvalue())
+            self.assertNotIn("no premise patterns matched in diff", out.getvalue())
+        finally:
+            Path(p).unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     unittest.main()
