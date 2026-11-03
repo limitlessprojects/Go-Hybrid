@@ -495,13 +495,12 @@ impl<'a> Lexer<'a> {
                     break;
                 }
             }
-            if self.at(0) == Some('.') && self.at(1) != Some('.') {
+            if (self.at(0) == Some('.') && self.at(1) != Some('.')) || (s.ends_with(['p', 'P']) && matches!(self.at(0), Some('+') | Some('-'))) {
                 // A prefixed base literal (0x, 0b, 0o) cannot have a fractional part
                 // (SPEC-LANGUAGE.md LX6). Consume the dot and subsequent characters so
                 // it fails as a single malformed literal instead of leaking as an orphan
                 // leading-dot float on the same line (issue #1168).
-                s.push('.');
-                self.bump();
+                s.push(self.bump().unwrap());
                 while let Some(c) = self.at(0) {
                     if c == '_' || c.is_ascii_alphanumeric() || c == '+' || c == '-' {
                         s.push(c);
@@ -564,10 +563,8 @@ impl<'a> Lexer<'a> {
         //    UNLESS that starts an exponent (`2.e3`, `2.e+3`, `2.e-3`).
         if self.at(0) == Some('.') {
             let is_range = self.at(1) == Some('.');
-            let is_exp = matches!(self.at(1), Some('e') | Some('E')) && {
-                let k = if matches!(self.at(2), Some('+') | Some('-')) { 3 } else { 2 };
-                self.at(k).map(|d| d.is_ascii_digit()) == Some(true)
-            };
+            let is_exp = matches!(self.at(1), Some('e') | Some('E'))
+                && matches!(self.at(2), Some('+') | Some('-') | Some('0'..='9'));
             let is_ident_start = self.at(1).map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false);
 
             if !is_range && (!is_ident_start || is_exp) {
@@ -624,16 +621,24 @@ impl<'a> Lexer<'a> {
         }
         if is_float {
             if self.at(0) == Some('.') && self.at(1) != Some('.') {
-                s.push('.');
-                self.bump();
-                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric() || (c == '.' && self.at(1) != Some('.'))) {
                     s.push(self.bump().unwrap());
                 }
                 self.escape_diag(start, false, "malformed float literal: unexpected second . in float literal (SPEC-LANGUAGE.md LX6)");
+            } else if self.at(0).is_some_and(|c| c.is_ascii_alphabetic()) {
+                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                    s.push(self.bump().unwrap());
+                }
+                self.escape_diag(start, false, "malformed float literal: invalid character in float literal (SPEC-LANGUAGE.md LX6)");
             }
             self.tok(start, Tok::Float(s))
         } else {
-            if s.starts_with('0') && s.len() > 1 {
+            if self.at(0).is_some_and(|c| c.is_ascii_alphabetic()) {
+                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                    s.push(self.bump().unwrap());
+                }
+                self.escape_diag(start, false, "malformed integer literal: invalid trailing suffix (SPEC-LANGUAGE.md LX6)");
+            } else if s.starts_with('0') && s.len() > 1 {
                 if let Some(bad) = s.chars().find(|&c| !matches!(c, '0'..='7')) {
                     self.escape_diag(
                         start,
