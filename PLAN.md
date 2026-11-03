@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor current-main refresh
+
+- Contributor refresh (2026-11-03, PR #3486): integrated upstream `212af67e5df6452452c061e3dc3d3251faee790f` without conflicts. Python 3.12.14 top-level tooling: 506/506 passed; test-registration, conflict-marker and diff checks passed. Existing fix and regression tests preserved. Full Rust/Go verification on this refreshed head remains a hosted-CI/review gate; no award or payment claimed.
+
 ## Contributor validation — Kaggle wait deadline (2026-11-03)
 
 - Follow-up: the real status CLI survived its timeout because `sh` killed only the intermediate shell. A new POSIX subprocess regression fails on `b7c2feb` (the CLI PID remains alive), then passes when the polling command uses `exec` to replace the shell. The regression checks both the timeout result and that the CLI was reaped, including a CLI path/slug containing quotes. All **504 Python 3.12.14 tooling tests pass**; the 12 wait/argument tests also pass on Python 3.10.12. No live Kaggle request. Earlier full fork CI belongs to the previous head and is historical evidence, not a run of this follow-up.
