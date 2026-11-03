@@ -221,6 +221,31 @@ fn canonical_numeric_name(name: &str) -> Option<&'static str> {
     })
 }
 
+/// #3412 — names whose Go spelling is fixed by the emitter and therefore safe
+/// to compare literally in the container signature. `usize`, `isize` and `char`
+/// are deliberately absent: they have no fixed Go spelling, so a difference in
+/// the written name is not evidence of a different Go type.
+fn is_spelling_free_name(n: &str) -> bool {
+    matches!(
+        n.trim(),
+        "usize" | "isize" | "uintptr" | "char" | "any" | "interface{}"
+    )
+}
+
+/// #3412 — the digits of an array length that is a plain integer literal.
+/// `None` for anything else (a constant expression, a named constant, `[...]`),
+/// so the caller fails open rather than comparing unequal renderings of the
+/// same length.
+fn int_literal_text(e: &Expr) -> Option<String> {
+    match unwrap_parens(e) {
+        Expr::Lit {
+            kind: LitKind::Int(v),
+            ..
+        } => Some(v.replace('_', "")),
+        _ => None,
+    }
+}
+
 /// #2771 — `[3]int` yes; `[]int` (slice), `[N]int` (non-constant length), and
 /// named types no — so only genuinely sized arrays are compared.
 fn is_sized_array_spelling(s: &str) -> bool {
@@ -534,6 +559,15 @@ struct Collector<'a> {
     kind_scopes: Vec<HashMap<String, OpKind>>,
     /// Parallel lexical scope stack tracking declared concrete type names (#2738).
     type_name_scopes: Vec<HashMap<String, String>>,
+    /// Parallel lexical scope stack tracking the DECLARED `TypeExpr` of a
+    /// binding (#3412). `type_name_scopes` keeps the rendered text, which is
+    /// enough for the sized-array comparison but not for a structural one: a
+    /// composite literal's element/key/value compared through `OpKind`
+    /// collapses `chan int32` and `chan int64`, `[3]int` and `[4]int`, and
+    /// `map[string]int32` and `map[string]int64` into one node, so a literal
+    /// whose inner container type differs produced 0 diagnostics and then
+    /// failed `go build`. The parsed type lets the arm compare signatures.
+    ty_expr_scopes: Vec<HashMap<String, TypeExpr>>,
     /// `set[T]` bindings -> their element type text (`"int"`), scoped like
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
@@ -611,6 +645,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
             type_name_scopes: Vec::new(),
+            ty_expr_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
@@ -681,6 +716,7 @@ impl<'a> Collector<'a> {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
         self.type_name_scopes.push(HashMap::new());
+        self.ty_expr_scopes.push(HashMap::new());
         self.scalar_scopes.push(HashMap::new());
         self.container_elem_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
@@ -691,6 +727,7 @@ impl<'a> Collector<'a> {
         self.scopes.pop();
         self.kind_scopes.pop();
         self.type_name_scopes.pop();
+        self.ty_expr_scopes.pop();
         self.scalar_scopes.pop();
         self.container_elem_scopes.pop();
         self.set_elem_scopes.pop();
@@ -702,6 +739,39 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.type_name_scopes.last_mut() {
                 top.insert(name.to_string(), type_name);
             }
+        }
+    }
+
+    /// #3412 — record the parsed declared type alongside the rendered one so
+    /// the composite-literal arms can compare container signatures instead of
+    /// the width-collapsed `OpKind`.
+    fn bind_ty_expr(&mut self, name: &str, ty: &TypeExpr) {
+        if name != "_" {
+            if let Some(top) = self.ty_expr_scopes.last_mut() {
+                top.insert(name.to_string(), ty.clone());
+            }
+        }
+    }
+
+    /// #3412 — the declared `TypeExpr` of an identifier, if it was bound with
+    /// an explicit type in reach.
+    fn lookup_ty_expr(&self, name: &str) -> Option<&TypeExpr> {
+        for layer in self.ty_expr_scopes.iter().rev() {
+            if let Some(t) = layer.get(name) {
+                return Some(t);
+            }
+        }
+        None
+    }
+
+    /// #3412 — the declared `TypeExpr` of a value that is provably typed by an
+    /// explicit declaration. Everything else (literals, conversions, calls,
+    /// composite literals) fails open: only a declaration carries the inner
+    /// spelling the comparison needs, and guessing would false-reject.
+    fn typed_value_ty_expr(&self, e: &Expr) -> Option<TypeExpr> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.lookup_ty_expr(name).cloned(),
+            _ => None,
         }
     }
 
@@ -1025,6 +1095,141 @@ impl<'a> Collector<'a> {
         matches!((a, b), (Some(x), Some(y))
             if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
     }
+
+    /// #3412 — is this declared type a container whose INNER type `OpKind`
+    /// drops? Only these take part in the signature comparison below; every
+    /// scalar width is already owned by `scalar_names_conflict`, and widening
+    /// that comparison to bare names would false-reject a program Go builds
+    /// (`usize`/`isize`/`char` have no fixed Go spelling).
+    fn is_container_ty(ty: &TypeExpr) -> bool {
+        matches!(
+            ty,
+            TypeExpr::Slice { .. }
+                | TypeExpr::Array { .. }
+                | TypeExpr::Map { .. }
+                | TypeExpr::Chan { .. }
+        )
+    }
+
+    /// #3412 — do `want` (the literal's declared element/key/value type) and
+    /// `got` (the declared type of the value placed there) name the same Go
+    /// type, as far as the model can prove?
+    ///
+    /// `OpKind` is a shape model: it collapses every integer width into `Int`,
+    /// both float widths into `Float`, and an array's length away entirely, so
+    /// `chan int32` and `chan int64` are both `Chan(Int)` and a literal whose
+    /// inner container type differs passed the kind check and then failed
+    /// `go build` with `cannot use bad_chan (variable of type chan int64) as
+    /// chan int32 value in array or slice literal`.
+    ///
+    /// Both sides here are DECLARED types, so a difference is evidence rather
+    /// than a guess. `true` means "proved the same"; every construct this model
+    /// cannot decide answers `true` as well, so the check can only ever fire on
+    /// a difference it can demonstrate.
+    fn ty_expr_signatures_match(&self, want: &TypeExpr, got: &TypeExpr) -> bool {
+        let want = self.ck.resolve_type_alias(want);
+        let got = self.ck.resolve_type_alias(got);
+        match (&want, &got) {
+            // A bare `any` / `interface{}` target accepts any value.
+            (TypeExpr::Named { name, .. }, _)
+                if matches!(name.trim(), "any" | "interface{}") =>
+            {
+                true
+            }
+            // Predeclared numerics compare by canonical name, so `byte`/`uint8`
+            // and `rune`/`int32` are one type. `usize`/`isize`/`char` have no
+            // fixed Go spelling, so they stay undecided.
+            (TypeExpr::Named { name: a, .. }, TypeExpr::Named { name: b, .. }) => {
+                match (canonical_numeric_name(a), canonical_numeric_name(b)) {
+                    (Some(x), Some(y)) => x == y,
+                    (None, None) if is_spelling_free_name(a) || is_spelling_free_name(b) => true,
+                    _ => a.trim() == b.trim(),
+                }
+            }
+            (TypeExpr::Pointer { to: a, .. }, TypeExpr::Pointer { to: b, .. }) => {
+                self.ty_expr_signatures_match(a, b)
+            }
+            (TypeExpr::Slice { elem: a, .. }, TypeExpr::Slice { elem: b, .. }) => {
+                self.ty_expr_signatures_match(a, b)
+            }
+            // An array's length is part of its Go type: `[3]int` is not
+            // `[4]int`. Compare the digits only when both lengths are plain
+            // integer literals; a constant expression or `[...]` stays
+            // undecided.
+            (
+                TypeExpr::Array {
+                    len: la, elem: a, ..
+                },
+                TypeExpr::Array {
+                    len: lb, elem: b, ..
+                },
+            ) => {
+                let la = la.as_deref().and_then(int_literal_text);
+                let lb = lb.as_deref().and_then(int_literal_text);
+                match (la, lb) {
+                    (Some(x), Some(y)) => x == y && self.ty_expr_signatures_match(a, b),
+                    _ => true,
+                }
+            }
+            (
+                TypeExpr::Map {
+                    key: ka, value: va, ..
+                },
+                TypeExpr::Map {
+                    key: kb, value: vb, ..
+                },
+            ) => self.ty_expr_signatures_match(ka, kb) && self.ty_expr_signatures_match(va, vb),
+            (
+                TypeExpr::Chan { dir: da, elem: a, .. },
+                TypeExpr::Chan { dir: db, elem: b, .. },
+            ) => {
+                // A direction mismatch is owned by HYB-E3012 (chan-dir
+                // coercion), which reports it with the direction-specific
+                // advice; reporting it here too would double-diagnose one
+                // defect. Only a SAME-direction pair with a different element
+                // signature is this check's business.
+                if *da != *db {
+                    return true;
+                }
+                self.ty_expr_signatures_match(a, b)
+            }
+            (TypeExpr::Option { elem: a, .. }, TypeExpr::Option { elem: b, .. }) => {
+                self.ty_expr_signatures_match(a, b)
+            }
+            // Different constructors (`[]T` vs `map[K]V`) are a genuine
+            // mismatch — but `kinds_conflict` already owns that arm, and
+            // answering `false` here would double-report it.
+            _ => true,
+        }
+    }
+
+    /// #3412 — the diagnostic label for a value's type. `OpKind::label()` is
+    /// the shape model, which prints `chan int` for both `chan int32` and
+    /// `chan int64` and `[N]int` for `[4]int`; when the value's declared type
+    /// is in reach, print that instead so the message names the type Go names.
+    fn actual_type_label(&self, item: &Expr, kind: &OpKind) -> String {
+        match self.typed_value_ty_expr(item) {
+            Some(t) => t.render(),
+            None => kind.label().to_string(),
+        }
+    }
+
+    /// #3412 — two container types the kind model cannot tell apart. Fires only
+    /// when the literal side is a container, the value side is a DECLARED
+    /// container, and the structural comparison proves them different.
+    fn container_signature_conflict(&self, want: &TypeExpr, item: &Expr) -> bool {
+        if !Self::is_container_ty(want) {
+            return false;
+        }
+        let Some(got) = self.typed_value_ty_expr(item) else {
+            return false;
+        };
+        if !Self::is_container_ty(&got) {
+            return false;
+        }
+        !self.ty_expr_signatures_match(want, &got)
+    }
+
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
@@ -1571,6 +1776,7 @@ impl<'a> Collector<'a> {
             self.set_container_elem_scalar(&p.name, ces);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
             self.bind_type_name(&p.name, p.ty.render());
+            self.bind_ty_expr(&p.name, &p.ty);
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -1582,6 +1788,7 @@ impl<'a> Collector<'a> {
                 let ces = self.container_elem_scalar_of_ty(&r.ty);
                 self.set_container_elem_scalar(rname, ces);
                 self.bind_type_name(rname, r.ty.render());
+                self.bind_ty_expr(rname, &r.ty);
             }
         }
         for r in &f.results {
@@ -1788,6 +1995,7 @@ impl<'a> Collector<'a> {
             let tname = t.render();
             for name in &l.names {
                 self.bind_type_name(name, tname.clone());
+                self.bind_ty_expr(name, t);
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
@@ -2657,6 +2865,7 @@ impl<'a> Collector<'a> {
                     self.set_container_elem_scalar(&p.name, ces);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
                     self.bind_type_name(&p.name, p.ty.render());
+                    self.bind_ty_expr(&p.name, &p.ty);
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -2668,6 +2877,7 @@ impl<'a> Collector<'a> {
                         let ces = self.container_elem_scalar_of_ty(&r.ty);
                         self.set_container_elem_scalar(rname, ces);
                         self.bind_type_name(rname, r.ty.render());
+                        self.bind_ty_expr(rname, &r.ty);
                     }
                 }
                 for r in results {
@@ -6277,8 +6487,13 @@ impl<'a> Collector<'a> {
             // into `float32`) slipped through and failed `go build`
             // (`cannot use i (variable of type int) as int64 value in array
             // or slice literal`).
+            // #3412: and it collapses a container's INNER type, so a TYPED
+            // element whose container signature differs (`chan int64` into
+            // `chan int32`, `[4]int` into `[3]int`) slipped through the same
+            // way.
             let scalar_mismatch = self
-                .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+                .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item))
+                || self.container_signature_conflict(&resolved_ty, item);
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
@@ -6299,7 +6514,7 @@ impl<'a> Collector<'a> {
                 format!(
                     "cannot use `{}` (type `{}`) as `{}` value in array literal (HYB-E1002)",
                     item.render(),
-                    ik.label(),
+                    self.actual_type_label(item, &ik),
                     elem_ty.render()
                 ),
                 "every element of an array composite literal `[N]T{...}` / `[...]T{...}` must be assignable to the element type `T`",
@@ -6362,8 +6577,10 @@ impl<'a> Collector<'a> {
             }
             let ik = self.kind_of_expr(item);
             // #2788: same width-collapse escape as the array arm above.
+            // #3412: same inner-container collapse as the array arm above.
             let scalar_mismatch = self
-                .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+                .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item))
+                || self.container_signature_conflict(&resolved_ty, item);
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
@@ -6390,7 +6607,7 @@ impl<'a> Collector<'a> {
                 format!(
                     "cannot use `{}` (type `{}`) as `{}` value in slice literal (HYB-E1002)",
                     item.render(),
-                    ik.label(),
+                    self.actual_type_label(item, &ik),
                     elem_ty.render()
                 ),
                 "every element of a slice composite literal `[]T{...}` must be assignable to the element type `T`",
@@ -6533,8 +6750,10 @@ impl<'a> Collector<'a> {
             {
                 let kk = self.kind_of_expr(k);
                 // #2788: a typed key of another concrete numeric width.
+                // #3412: a typed key whose container signature differs.
                 let scalar_mismatch = self
-                    .scalar_names_conflict(self.scalar_of_ty(&resolved_key), self.typed_value_scalar(k));
+                    .scalar_names_conflict(self.scalar_of_ty(&resolved_key), self.typed_value_scalar(k))
+                    || self.container_signature_conflict(&resolved_key, k);
                 let is_untyped_int_to_float = exp_key == OpKind::Float
                     && kk == OpKind::Int
                     && self.is_untyped_int_const(k);
@@ -6547,7 +6766,7 @@ impl<'a> Collector<'a> {
                         format!(
                             "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
                             k.render(),
-                            kk.label(),
+                            self.actual_type_label(k, &kk),
                             key_ty.render()
                         ),
                         "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
@@ -6590,8 +6809,10 @@ impl<'a> Collector<'a> {
                 }
                 let vk = self.kind_of_expr(v);
                 // #2788: a typed value of another concrete numeric width.
+                // #3412: a typed value whose container signature differs.
                 let scalar_mismatch = self
-                    .scalar_names_conflict(self.scalar_of_ty(&resolved_val), self.typed_value_scalar(v));
+                    .scalar_names_conflict(self.scalar_of_ty(&resolved_val), self.typed_value_scalar(v))
+                    || self.container_signature_conflict(&resolved_val, v);
                 let is_untyped_int_to_float = exp_val == OpKind::Float
                     && vk == OpKind::Int
                     && self.is_untyped_int_const(v);
@@ -6604,7 +6825,7 @@ impl<'a> Collector<'a> {
                         format!(
                             "cannot use `{}` (type `{}`) as `{}` value in map value (HYB-E1002)",
                             v.render(),
-                            vk.label(),
+                            self.actual_type_label(v, &vk),
                             val_ty.render()
                         ),
                         "every value of a map composite literal `map[K]V{...}` must be assignable to the value type `V`",
