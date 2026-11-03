@@ -1,6 +1,6 @@
 # STATUS (for the human — 15 lines max)
 
-- Contributor Make-path repair (2026-11-03): unique exit-cleaned self-test scratch and quoted routine path values; four focused offline methods pass, baseline/quote-only controls fail. Full pinned Make gates and hosted review remain pending.
+- Contributor Make-path repair (2026-11-03): unique exit-cleaned self-test scratch and quoted routine path values; four focused offline methods pass, baseline/quote-only controls fail. Real pinned Make gates pass (workspace2556, corpus130, differential42+88, ten examples); hosted CI/review/merge/award pending.
 
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
 
