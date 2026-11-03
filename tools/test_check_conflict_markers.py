@@ -255,6 +255,51 @@ class CliTests(unittest.TestCase):
             self.assertEqual(res.returncode, 1)
             self.assertIn("conflict marker", res.stderr.lower())
 
+    def test_valid_bom_and_non_bom_workflow_first_lines(self):
+        first_lines = (
+            "name: ci",
+            "# generated workflow",
+            "---",
+            "'on': push",
+        )
+        for bom in ("", "\ufeff"):
+            for first_line in first_lines:
+                with self.subTest(bom=bool(bom), first_line=first_line):
+                    with tempfile.TemporaryDirectory() as td:
+                        d = Path(td, ".github", "workflows")
+                        d.mkdir(parents=True)
+                        Path(d, "ci.yml").write_text(
+                            bom + first_line + "\nname: ci\non: push\njobs: {}\n",
+                            encoding="utf-8")
+                        res = self._run(td)
+                        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_first_line_bom_and_non_bom_conflict_blocks_are_found(self):
+        for bom in ("", "\ufeff"):
+            with self.subTest(bom=bool(bom)):
+                with tempfile.TemporaryDirectory() as td:
+                    Path(td, "source.go").write_text(
+                        bom + "<<<<<<< HEAD\nold\n=======\nnew\n>>>>>>> main\n",
+                        encoding="utf-8")
+                    res = self._run(td)
+                    self.assertEqual(res.returncode, 1)
+                    self.assertIn("source.go:1", res.stderr)
+                    self.assertIn("conflict marker", res.stderr.lower())
+
+    def test_invalid_bom_and_non_bom_workflow_first_lines_are_rejected(self):
+        for bom in ("", "\ufeff"):
+            with self.subTest(bom=bool(bom)):
+                with tempfile.TemporaryDirectory() as td:
+                    d = Path(td, ".github", "workflows")
+                    d.mkdir(parents=True)
+                    Path(d, "ci.yml").write_text(
+                        bom + "python3 -m py_compile tools/job.py\n",
+                        encoding="utf-8")
+                    res = self._run(td)
+                    self.assertEqual(res.returncode, 1)
+                    self.assertIn("ci.yml", res.stderr)
+                    self.assertIn("column zero", res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
