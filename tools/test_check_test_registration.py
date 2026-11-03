@@ -84,11 +84,28 @@ class PatternExtractionTests(unittest.TestCase):
             "tests/test_live.py", "  run: python3 tests/test_live.py\n"))
 
     def test_later_shell_command_does_not_supply_discovery_patterns(self):
-        for separator in (" && ", "&&", ";", " || ", " | "):
+        for separator in (" && ", "&&", ";"):
             with self.subTest(separator=separator):
                 self.assertEqual(guard.registered_patterns(
                     "python3 -m unittest discover -s tools -p test_live.py"
                     + separator + "echo -p test_disabled.py\n"), ["test_live.py"])
+
+    def test_exit_masking_operators_do_not_register_tests(self):
+        for separator in (" || ", "||", " | ", "|", " & ", "&"):
+            with self.subTest(separator=separator):
+                self.assertEqual(guard.registered_patterns(
+                    "python3 -m unittest discover -s tools -p test_failing.py"
+                    + separator + "true\n"), [])
+                self.assertFalse(guard.is_registered_direct(
+                    "tests/test_direct.py",
+                    "python3 tests/test_direct.py" + separator + "true\n"))
+        # Chained `&& ... || true` also swallows a failure of the first command.
+        self.assertEqual(guard.registered_patterns(
+            "python3 -m unittest discover -s tools -p test_failing.py && echo ok || true\n"),
+            [])
+        self.assertFalse(guard.is_registered_direct(
+            "tests/test_direct.py",
+            "python3 tests/test_direct.py && echo ok || true\n"))
 
     def test_interpreter_flags_preserve_real_invocations(self):
         self.assertEqual(guard.registered_patterns(
@@ -265,6 +282,18 @@ class RegistrationTests(unittest.TestCase):
             self.assertEqual(shell.returncode, 0, shell.stderr)
         self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
                          ["tools/test_disabled.py", "tests/test_disabled.py"])
+
+    def test_or_list_and_pipeline_masked_failures_are_rejected(self):
+        fixtures = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
+        or_workflow = (fixtures / "workflow_or_list_reject.yml").read_text(encoding="utf-8")
+        and_workflow = (fixtures / "workflow_and_list_accept.yml").read_text(encoding="utf-8")
+        root, _ = self.build(
+            or_workflow, ["tools/test_failing.py", "tests/test_direct.py"])
+        self.assertEqual(
+            [rel for rel, _ in guard.unregistered(root, or_workflow)],
+            ["tools/test_failing.py", "tests/test_direct.py"])
+        self.assertEqual(guard.unregistered(root, and_workflow), [])
+
 
 
 class GuardMisuseTests(unittest.TestCase):

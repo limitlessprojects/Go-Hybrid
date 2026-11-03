@@ -605,6 +605,461 @@ impl<'a> Checker<'a> {
     /// loop-carried moves active; local definitions (`chunk := ...`, corpus 15)
     /// live in inner scopes and are discarded when `scopes` is truncated to
     /// `outer_depth`.
+    fn is_single_iteration_loop(for_stmt: Option<&hy_syntax::Stmt>) -> bool {
+        let Some(hy_syntax::Stmt::For { kind, body, .. }) = for_stmt else {
+            return false;
+        };
+        if let hy_syntax::ForKind::Range { var, lo, hi, inclusive } = kind {
+            if Self::is_loop_var_mutated(var, &body.stmts) {
+                return false;
+            }
+            if let (Some(lo_val), Some(hi_val)) = (Self::as_int_lit(lo), Self::as_int_lit(hi)) {
+                let count = if *inclusive {
+                    if hi_val >= lo_val {
+                        hi_val.checked_sub(lo_val).and_then(|d| d.checked_add(1))
+                    } else {
+                        Some(0)
+                    }
+                } else {
+                    if hi_val > lo_val {
+                        hi_val.checked_sub(lo_val)
+                    } else {
+                        Some(0)
+                    }
+                };
+                if let Some(c) = count {
+                    if c <= 1 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn is_loop_var_mutated(var: &str, stmts: &[hy_syntax::Stmt]) -> bool {
+        stmts.iter().any(|s| Self::stmt_mutates_var(s, var))
+    }
+
+    fn stmt_mutates_var(stmt: &hy_syntax::Stmt, var: &str) -> bool {
+        match stmt {
+            hy_syntax::Stmt::Assign { targets, values, .. } => {
+                if targets.iter().any(|t| t.root() == var) {
+                    return true;
+                }
+                values.iter().any(|v| Self::expr_mutates_var(v, var))
+            }
+            hy_syntax::Stmt::Local(l) => {
+                l.values.iter().any(|v| Self::expr_mutates_var(v, var))
+            }
+            hy_syntax::Stmt::Expr { expr, .. } => Self::expr_mutates_var(expr, var),
+            hy_syntax::Stmt::Send { chan, value, .. } => {
+                Self::expr_mutates_var(chan, var) || Self::expr_mutates_var(value, var)
+            }
+            hy_syntax::Stmt::If { init, cond, then, otherwise, .. } => {
+                init.as_ref().map_or(false, |s| Self::stmt_mutates_var(s, var))
+                    || Self::expr_mutates_var(cond, var)
+                    || Self::is_loop_var_mutated(var, &then.stmts)
+                    || otherwise.as_ref().map_or(false, |s| Self::stmt_mutates_var(s, var))
+            }
+            hy_syntax::Stmt::For { kind, body, .. } => {
+                match kind {
+                    hy_syntax::ForKind::While { cond } => {
+                        if Self::expr_mutates_var(cond, var) {
+                            return true;
+                        }
+                    }
+                    hy_syntax::ForKind::Range { lo, hi, .. } => {
+                        if Self::expr_mutates_var(lo, var) || Self::expr_mutates_var(hi, var) {
+                            return true;
+                        }
+                    }
+                    hy_syntax::ForKind::Iterate { expr, .. } => {
+                        if Self::expr_mutates_var(expr, var) {
+                            return true;
+                        }
+                    }
+                    hy_syntax::ForKind::Infinite => {}
+                }
+                Self::is_loop_var_mutated(var, &body.stmts)
+            }
+            hy_syntax::Stmt::Return { values, .. } => {
+                values.iter().any(|v| Self::expr_mutates_var(v, var))
+            }
+            hy_syntax::Stmt::Task { callee, args, .. } => {
+                Self::expr_mutates_var(callee, var)
+                    || args.iter().any(|a| Self::expr_mutates_var(&a.value, var))
+            }
+            hy_syntax::Stmt::Managed { body, .. } => {
+                Self::is_loop_var_mutated(var, &body.stmts)
+            }
+            hy_syntax::Stmt::Match { subject, arms, .. } => {
+                Self::expr_mutates_var(subject, var)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().map_or(false, |g| Self::expr_mutates_var(g, var))
+                            || Self::is_loop_var_mutated(var, &arm.body.stmts)
+                    })
+            }
+            hy_syntax::Stmt::Defer { call, .. } => Self::expr_mutates_var(call, var),
+            hy_syntax::Stmt::Block { block, .. } => Self::is_loop_var_mutated(var, &block.stmts),
+            hy_syntax::Stmt::Select { arms, .. } => arms.iter().any(|arm| {
+                let kind_mutates = match &arm.kind {
+                    hy_syntax::SelectArmKind::Send { chan, value, .. } => {
+                        Self::expr_mutates_var(chan, var) || Self::expr_mutates_var(value, var)
+                    }
+                    hy_syntax::SelectArmKind::Recv { chan, .. } => {
+                        Self::expr_mutates_var(chan, var)
+                    }
+                    hy_syntax::SelectArmKind::Default => false,
+                };
+                kind_mutates || Self::is_loop_var_mutated(var, &arm.body.stmts)
+            }),
+            hy_syntax::Stmt::Break { .. } | hy_syntax::Stmt::Continue { .. } => false,
+        }
+    }
+
+    fn expr_mutates_var(expr: &hy_syntax::Expr, var: &str) -> bool {
+        match expr {
+            hy_syntax::Expr::Ident { .. } | hy_syntax::Expr::Lit { .. } => false,
+            hy_syntax::Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                hy_syntax::InterpPart::Expr(e) => Self::expr_mutates_var(e, var),
+                hy_syntax::InterpPart::Lit(_) => false,
+            }),
+            hy_syntax::Expr::Binary { lhs, rhs, .. } => {
+                Self::expr_mutates_var(lhs, var) || Self::expr_mutates_var(rhs, var)
+            }
+            hy_syntax::Expr::Unary { op, operand, .. } => {
+                if *op == hy_syntax::UnOp::Addr && Self::expr_is_or_touches_var(operand, var) {
+                    return true;
+                }
+                Self::expr_mutates_var(operand, var)
+            }
+            hy_syntax::Expr::AddrOf { operand, .. } => {
+                if Self::expr_is_or_touches_var(operand, var) {
+                    return true;
+                }
+                Self::expr_mutates_var(operand, var)
+            }
+            hy_syntax::Expr::Move { operand, .. } => {
+                if Self::expr_is_or_touches_var(operand, var) {
+                    return true;
+                }
+                Self::expr_mutates_var(operand, var)
+            }
+            hy_syntax::Expr::Try { operand, .. } => Self::expr_mutates_var(operand, var),
+            hy_syntax::Expr::Receive { chan, .. } => Self::expr_mutates_var(chan, var),
+            hy_syntax::Expr::Index { base, index, .. } => {
+                Self::expr_mutates_var(base, var) || Self::expr_mutates_var(index, var)
+            }
+            hy_syntax::Expr::Slice { base, lo, hi, .. } => {
+                Self::expr_mutates_var(base, var)
+                    || lo.as_ref().map_or(false, |e| Self::expr_mutates_var(e, var))
+                    || hi.as_ref().map_or(false, |e| Self::expr_mutates_var(e, var))
+            }
+            hy_syntax::Expr::Field { base, .. } => Self::expr_mutates_var(base, var),
+            hy_syntax::Expr::Call { callee, args, .. } => {
+                Self::expr_mutates_var(callee, var)
+                    || args.iter().any(|a| Self::expr_mutates_var(&a.value, var))
+            }
+            hy_syntax::Expr::StructLit { fields, .. } => {
+                fields.iter().any(|f| Self::expr_mutates_var(&f.value, var))
+            }
+            hy_syntax::Expr::SliceLit { items, .. } => {
+                items.iter().any(|e| Self::expr_mutates_var(e, var))
+            }
+            hy_syntax::Expr::MapLit { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| Self::expr_mutates_var(k, var) || Self::expr_mutates_var(v, var)),
+            hy_syntax::Expr::FnLit { body, .. } => {
+                Self::is_loop_var_mutated(var, &body.stmts)
+            }
+            hy_syntax::Expr::Paren { inner, .. } => Self::expr_mutates_var(inner, var),
+        }
+    }
+
+    fn expr_is_or_touches_var(expr: &hy_syntax::Expr, var: &str) -> bool {
+        match expr {
+            hy_syntax::Expr::Ident { name, .. } => name == var,
+            hy_syntax::Expr::Field { base, .. } => Self::expr_is_or_touches_var(base, var),
+            hy_syntax::Expr::Index { base, .. } => Self::expr_is_or_touches_var(base, var),
+            hy_syntax::Expr::Paren { inner, .. } => Self::expr_is_or_touches_var(inner, var),
+            _ => false,
+        }
+    }
+
+    fn as_int_lit(expr: &hy_syntax::Expr) -> Option<i64> {
+        match expr {
+            hy_syntax::Expr::Lit {
+                kind: hy_syntax::LitKind::Int(s),
+                ..
+            } => crate::arith::int_lit_value(s).and_then(|v| i64::try_from(v).ok()),
+            hy_syntax::Expr::Paren { inner, .. } => Self::as_int_lit(inner),
+            hy_syntax::Expr::Unary {
+                op: hy_syntax::UnOp::Neg,
+                operand,
+                ..
+            } => Self::as_int_lit(operand).and_then(|v| v.checked_neg()),
+            _ => None,
+        }
+    }
+
+    fn check_loop_backedge_replay(
+        &mut self,
+        iter_st: &FnState,
+        loop_stmts: &[(&hy_syntax::Stmt, usize)],
+        events: &std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>>,
+        in_managed: &dyn Fn(usize) -> bool,
+    ) {
+        let has_loop_carried_state = iter_st
+            .env
+            .iter()
+            .chain(iter_st.scopes.iter().flat_map(|s| s.iter()))
+            .any(|(name, b)| {
+                b.moved.is_some()
+                    || b.slot_loan
+                    || self.non_owned_origin_of(iter_st, name).is_some()
+                    || iter_st.aliases.contains_key(name)
+                    || !iter_st.share_group(name).is_empty()
+            });
+        if !has_loop_carried_state {
+            return;
+        }
+
+        let mut replay_st = iter_st.clone();
+        let diags_len_before = self.diags.len();
+        let managed_blocks_before = self.managed_blocks;
+        let sites_via_managed_before = self.sites_via_managed;
+        let total_sites_before = self.total_sites;
+        let managed_audit_len_before = self.managed_audit.len();
+
+        for (i, (stmt, stmt_idx)) in loop_stmts.iter().enumerate() {
+            let idx = *stmt_idx;
+            let managed = in_managed(idx);
+
+            if let Some(evs) = events.get(&idx) {
+                for ev in evs {
+                    match ev {
+                        crate::walk::ScopeEvent::Push => replay_st.scope_push(),
+                        crate::walk::ScopeEvent::Pop => replay_st.scope_pop(),
+                        crate::walk::ScopeEvent::SelectRecv { names, chan } => {
+                            let elem = match self.shape_of_expr(&replay_st, chan) {
+                                crate::model::TypeShape::Chan(e) => *e,
+                                _ => crate::model::TypeShape::Unknown,
+                            };
+                            for (j, n) in names.iter().enumerate() {
+                                let shape = if j == 0 {
+                                    elem.clone()
+                                } else {
+                                    crate::model::TypeShape::Primitive
+                                };
+                                self.define_binding(
+                                    &mut replay_st,
+                                    n,
+                                    shape,
+                                    None,
+                                    false,
+                                    managed,
+                                    false,
+                                );
+                            }
+                        }
+                        crate::walk::ScopeEvent::MatchBind { name, subject } => {
+                            self.bind_match_arm(&mut replay_st, name, subject, managed);
+                        }
+                    }
+                }
+            }
+
+            if i == 0 {
+                if let hy_syntax::Stmt::For { kind, .. } = stmt {
+                    match kind {
+                        hy_syntax::ForKind::Iterate { vars, expr, .. } => {
+                            let elem = match self.shape_of_expr(&replay_st, expr) {
+                                crate::model::TypeShape::Slice(e) | crate::model::TypeShape::Array(e) => *e,
+                                crate::model::TypeShape::Chan(e) => *e,
+                                crate::model::TypeShape::Map(_, v) => *v,
+                                _ => crate::model::TypeShape::Unknown,
+                            };
+                            for (idx_var, v) in vars.iter().enumerate() {
+                                let shape = if idx_var == 0 && vars.len() > 1 {
+                                    crate::model::TypeShape::Primitive
+                                } else {
+                                    elem.clone()
+                                };
+                                self.define_binding(&mut replay_st, v, shape, None, false, managed, false);
+                            }
+                        }
+                        hy_syntax::ForKind::Range { var, .. } => {
+                            self.define_binding(
+                                &mut replay_st,
+                                var,
+                                crate::model::TypeShape::Primitive,
+                                None,
+                                false,
+                                managed,
+                                false,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+
+            let mut uses = Vec::new();
+            crate::walk::own_uses_with_results(stmt, &replay_st.named_results, &mut uses);
+            self.check_uses(&replay_st, &uses);
+            self.check_addr_of_loan(&replay_st, &uses);
+            self.check_slot_loan_rebind(&replay_st, stmt);
+            self.check_stmt_addr_of_loan_projections(&replay_st, stmt, false);
+
+            match stmt {
+                hy_syntax::Stmt::Local(l) => {
+                    self.process_local(&mut replay_st, l, idx, managed);
+                    self.record_local_borrow_aliases(&mut replay_st, l);
+                    self.mark_slot_loans_local(&mut replay_st, l);
+                }
+                hy_syntax::Stmt::Assign {
+                    targets,
+                    op,
+                    values,
+                    span,
+                } => {
+                    self.process_assign(&mut replay_st, targets, *op, values, *span, idx);
+                    self.record_assign_borrow_aliases(&mut replay_st, targets, *op, values);
+                    self.mark_slot_loans_assign(&mut replay_st, targets, *op, values);
+                }
+                hy_syntax::Stmt::Task { callee, args, span } => {
+                    self.mark_move_in_value(
+                        &mut replay_st,
+                        callee,
+                        format!("the spawn callee `{}`", callee.render()),
+                    );
+                    let desc = format!("the spawn `task {}(...)`", callee.render());
+                    let vals: Vec<&hy_syntax::Expr> = args.iter().map(|a| &a.value).collect();
+                    let targets = self.spawn_param_shapes(&replay_st, callee, args.len());
+                    self.check_site(
+                        &mut replay_st,
+                        *span,
+                        "HYB-E3001",
+                        &vals,
+                        managed,
+                        &desc,
+                        false,
+                        Some(callee),
+                        targets.as_deref(),
+                    );
+                }
+                hy_syntax::Stmt::Send {
+                    chan,
+                    value,
+                    is_move,
+                    span,
+                } => {
+                    self.mark_move_in_value(
+                        &mut replay_st,
+                        chan,
+                        format!("the send target `{}`", chan.render()),
+                    );
+                    if self.check_send_target(&replay_st, chan, *span) {
+                        let desc = if *is_move {
+                            format!(
+                                "the move-send `{} <- move {}`",
+                                chan.render(),
+                                value.render()
+                            )
+                        } else {
+                            format!("the send `{} <- {}`", chan.render(), value.render())
+                        };
+                        self.check_site(
+                            &mut replay_st,
+                            *span,
+                            "HYB-E3002",
+                            &[value],
+                            managed,
+                            &desc,
+                            *is_move,
+                            None,
+                            None,
+                        );
+                    }
+                }
+                hy_syntax::Stmt::Select { arms, .. } => {
+                    for arm in arms {
+                        if let hy_syntax::SelectArmKind::Send {
+                            chan,
+                            value,
+                            is_move,
+                            ..
+                        } = &arm.kind
+                        {
+                            self.mark_move_in_value(
+                                &mut replay_st,
+                                chan,
+                                format!("the select-send target `{}`", chan.render()),
+                            );
+                            let span = chan.span().to(value.span());
+                            if self.check_send_target(&replay_st, chan, span) {
+                                let desc = if *is_move {
+                                    format!(
+                                        "the move-send `{} <- move {}`",
+                                        chan.render(),
+                                        value.render()
+                                    )
+                                } else {
+                                    format!(
+                                        "the select-send `{} <- {}`",
+                                        chan.render(),
+                                        value.render()
+                                    )
+                                };
+                                let vals: Vec<&hy_syntax::Expr> = vec![value];
+                                let targets = self.chan_elem_shape(&replay_st, chan);
+                                self.check_site(
+                                    &mut replay_st,
+                                    span,
+                                    "HYB-E3002",
+                                    &vals,
+                                    managed,
+                                    &desc,
+                                    *is_move,
+                                    None,
+                                    targets.as_ref().map(|v| &**v),
+                                );
+                            }
+                        }
+                    }
+                }
+                hy_syntax::Stmt::Defer { call, .. } => {
+                    self.mark_move_in_value(
+                        &mut replay_st,
+                        call,
+                        format!("the deferred call `defer {}`", call.render()),
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        self.managed_blocks = managed_blocks_before;
+        self.sites_via_managed = sites_via_managed_before;
+        self.total_sites = total_sites_before;
+        self.managed_audit.truncate(managed_audit_len_before);
+
+        let new_diags = self.diags.split_off(diags_len_before);
+        for d in new_diags {
+            if d.code == "HYB-E3003" || d.code == "HYB-E3004" || d.code == "HYB-E3104" {
+                if !self
+                    .diags
+                    .iter()
+                    .any(|existing| existing.code == d.code && existing.span == d.span)
+                {
+                    self.diags.push(d);
+                }
+            }
+        }
+    }
+
     pub(crate) fn check_loop_backedge(
         &mut self,
         st: &FnState,
@@ -614,6 +1069,7 @@ impl<'a> Checker<'a> {
         loop_body: &hy_syntax::Block,
         pre_moved: &HashSet<String>,
         reported_backedge: &mut HashSet<String>,
+        in_managed: &dyn Fn(usize) -> bool,
     ) {
         if matches!(
             loop_body.stmts.last(),
@@ -623,10 +1079,17 @@ impl<'a> Checker<'a> {
             return;
         }
 
+        if Self::is_single_iteration_loop(loop_stmts.first().map(|(s, _)| *s)) {
+            return;
+        }
+
         let mut iter_st = st.clone();
         while iter_st.scopes.len() > outer_depth {
             iter_st.scope_pop();
         }
+
+        self.check_loop_backedge_replay(&iter_st, loop_stmts, events, in_managed);
+
         let popped_st = iter_st.clone();
         let mut any_loop_carried = false;
         for (name, b) in iter_st
@@ -1074,16 +1537,10 @@ impl<'a> Checker<'a> {
                 self.shape_is_proven_pure_value(inner, depth + 1)
             }
             crate::model::TypeShape::Struct(Some(sname)) => {
-                if self.file.decls.iter().any(|d| {
-                    matches!(
-                        d,
-                        hy_syntax::Decl::Struct(s)
-                            if s.name == *sname && !s.type_params.is_empty()
-                    )
-                }) {
+                if self.struct_has_unresolved_type_param(sname) {
                     return false;
                 }
-                let Some(fields) = self.structs.get(sname.as_str()) else {
+                let Some(fields) = self.struct_fields_for_sname(sname) else {
                     return false;
                 };
                 fields.iter().all(|(_, fty)| {

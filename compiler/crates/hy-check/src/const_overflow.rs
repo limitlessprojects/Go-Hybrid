@@ -325,6 +325,11 @@ impl<'a> Checker<'a> {
         value: &Expr,
         st: Option<&FnState>,
     ) {
+        if let Some(st) = st {
+            if self.fixed_width_int_ty_of(st, value).is_some() {
+                return;
+            }
+        }
         let (lo, hi) = target_int_range();
         match const_int_fold_with(value, &self.const_values, 0, st) {
             ConstFold::NotConst => return,
@@ -630,8 +635,14 @@ impl<'a> Checker<'a> {
             ..
         } = callee
         {
-            if items.is_empty() && callee.as_array_lit().is_none() {
-                self.check_slice_conversion(t, arg, span);
+            if items.is_empty() {
+                if let Some((_, _, arr_ty)) = callee.as_array_lit() {
+                    if let Some(c) = conv_const(arg) {
+                        self.emit_conv_kind_error(&arr_ty.render(), &c, arg, span);
+                    }
+                } else {
+                    self.check_slice_conversion(t, arg, span);
+                }
                 return;
             }
         }
@@ -814,7 +825,7 @@ impl<'a> Checker<'a> {
             // exceeds i128's max (1.7e38), so integer/runes always fit.
             // Past-i128 literals carry their f64 reading and still have to
             // respect f32's max (`float32(1e40)` overflows f32 in Go).
-            "f32" | "f64" | "float32" | "float64" => match c {
+            "f32" | "f64" | "float32" | "float64" | "c64" | "c128" | "complex64" | "complex128" => match c {
                 ConvConst::Float(f) | ConvConst::Huge { f, .. } => {
                     let overflows = !f.is_finite()
                         || (is_f32_target(target) && f.abs() > f32::MAX as f64);
@@ -880,6 +891,11 @@ impl<'a> Checker<'a> {
                     self.emit_conv_kind_error(target, c, arg, span)
                 }
             },
+            "bool" => {
+                if !matches!(c, ConvConst::Bool) {
+                    self.emit_conv_kind_error(target, c, arg, span);
+                }
+            }
             _ => {}
         }
     }
@@ -984,7 +1000,13 @@ fn conv_const(e: &Expr) -> Option<ConvConst> {
             ConvConst::Huge { f, lt_512 } => Some(ConvConst::Huge { f: -f, lt_512 }),
             other => Some(other),
         },
-        _ => None,
+        _ => {
+            if let Some(v) = crate::arith::const_eval_int(e) {
+                Some(ConvConst::Int(v))
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -997,9 +1019,14 @@ const TWO_POW_512: &str = "13407807929942597099574024998205846127479365820592393
 
 fn lit_below_2_512(s: &str) -> bool {
     let t = s.replace('_', "");
+    let t = t.strip_prefix('-').unwrap_or(&t);
+    for (p, max, hi) in [("0x", 129, b'1'), ("0X", 129, b'1'), ("0b", 513, b'1'), ("0B", 513, b'1'), ("0o", 171, b'4'), ("0O", 171, b'4')] {
+        if let Some(d) = t.strip_prefix(p).map(|d| d.trim_start_matches('0')) {
+            return (d.len(), d.as_bytes().first().copied().unwrap_or(0)) < (max, hi);
+        }
+    }
     let t = t.trim_start_matches('0');
     let t = if t.is_empty() { "0" } else { t };
-    let t = t.strip_prefix('-').unwrap_or(t);
     match t.len().cmp(&TWO_POW_512.len()) {
         std::cmp::Ordering::Less => true,
         std::cmp::Ordering::Greater => false,
@@ -1022,6 +1049,11 @@ fn huge_int_as_f64(s: &str) -> f64 {
             if let Ok(v) = u128::from_str_radix(rest, radix) {
                 return v as f64;
             }
+            if !rest.is_empty() && rest.chars().all(|c| c.is_digit(radix)) {
+                return rest.chars().fold(0.0_f64, |acc, c| {
+                    acc * (radix as f64) + (c.to_digit(radix).unwrap_or(0) as f64)
+                });
+            }
         }
     }
     f64::INFINITY
@@ -1030,7 +1062,10 @@ fn huge_int_as_f64(s: &str) -> f64 {
 /// True when `name` is a built-in conversion target of `Type(const)` calls.
 fn is_conversion_target(name: &str) -> bool {
     fixed_width_int_range(name).is_some()
-        || matches!(name, "f32" | "f64" | "float32" | "float64" | "string")
+        || matches!(
+            name,
+            "f32" | "f64" | "float32" | "float64" | "c64" | "c128" | "complex64" | "complex128" | "string" | "bool"
+        )
 }
 
 /// Targets the emitter's SPEC X4 fold skips (`bits >= 64`) — constants here
@@ -1043,7 +1078,7 @@ fn is_64bit_int_target(name: &str) -> bool {
 }
 
 fn is_f32_target(name: &str) -> bool {
-    matches!(name, "f32" | "float32")
+    matches!(name, "f32" | "float32" | "c64" | "complex64")
 }
 
 /// The built-in float TYPES as spelled in an ascription: `Some(true)` =
@@ -1104,6 +1139,31 @@ pub(crate) fn fixed_width_int_range(name: &str) -> Option<(i128, i128)> {
         "uint" | "usize" | "uintptr" => target_uint_range(),
         _ => return None,
     })
+}
+
+/// Canonical Go type name for a Hybrid integer spelling (issue #1165).
+///
+/// Only the aliases that Go itself treats as *one type* collapse: `byte` and
+/// `rune` are Go builtins that alias `uint8`/`int32`, and `u8`/`i8`/`u16`/…
+/// are the SPEC-LANGUAGE spellings that `hy_emit::shapes::go_primitive_name`
+/// emits as `uint8`/`int8`/`uint16`/…. Everything else keeps its own identity:
+/// `int`/`uint` stay word-sized (Go gives them their own type — `int` is not
+/// `int64`), and `uintptr` is deliberately not folded into `uint` even though
+/// `fixed_width_int_range` groups their *ranges*, because Go keeps them
+/// distinct. `usize`/`isize` are absent by design (SPEC-LANGUAGE §402: the
+/// language does not define them) and are left untouched here.
+pub(crate) fn canonical_int_type_name(name: &str) -> &str {
+    match name {
+        "u8" | "byte" => "uint8",
+        "i8" => "int8",
+        "u16" => "uint16",
+        "i16" => "int16",
+        "u32" => "uint32",
+        "i32" | "rune" => "int32",
+        "u64" => "uint64",
+        "i64" => "int64",
+        other => other,
+    }
 }
 
 /// Parsed integer literal, retaining the fact that a syntactically valid
@@ -1390,16 +1450,11 @@ pub(crate) fn const_float_fold_with(
         Expr::Lit {
             kind: LitKind::Int(s),
             ..
-        } => {
-            let clean: String = s.chars().filter(|c| *c != '_').collect();
-            if let Some(ConstInt::Value(v)) = parse_int_lit(s) {
-                Some(v as f64)
-            } else if let Ok(f) = clean.parse::<f64>() {
-                Some(f)
-            } else {
-                None
-            }
-        }
+        } => match parse_int_lit(s) {
+            Some(ConstInt::Value(v)) => Some(v as f64),
+            Some(ConstInt::PosOverflow | ConstInt::NegOverflow) => Some(huge_int_as_f64(s)),
+            None => s.replace('_', "").parse::<f64>().ok(),
+        },
         Expr::Lit {
             kind: LitKind::Char(c),
             ..
@@ -1546,5 +1601,51 @@ mod unit {
         );
         assert_eq!(target_int_range(), (i64::MIN as i128, i64::MAX as i128));
         assert_eq!(target_uint_range(), (0, u64::MAX as i128));
+    }
+}
+
+#[cfg(test)]
+mod map_lit_duplicate_tests {
+    use crate::{check_file, Verdict};
+    use hy_syntax::parse_file;
+
+    fn check(src: &str) -> crate::CheckResult {
+        let ast = parse_file("test.hy", src).expect("test snippet must parse");
+        check_file(&ast)
+    }
+
+    #[test]
+    fn map_lit_duplicate_constant_keys_rejected() {
+        let cases = [
+            "fn main() {\n    m := map[int]string{1: \"a\", 1: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\": 1, \"a\": 2}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\" + \"b\": 1, \"ab\": 2}\n    fmt.println(m)\n}\n",
+            "const k = 1\nfn main() {\n    m := map[int]string{k: \"a\", 1: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[bool]int{true: 1, true: 2}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[int]int{1 + 1: 0, 2: 0}\n    fmt.println(m)\n}\n",
+        ];
+        for src in cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                r.diagnostics.iter().any(|d| d.code == "HYB-E1002" && d.message.contains("duplicate key")),
+                "expected HYB-E1002 duplicate key diagnostic, got {:?} for:\n{src}",
+                r.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn map_lit_distinct_constant_keys_accepted() {
+        let cases = [
+            "fn main() {\n    m := map[int]string{1: \"a\", 2: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\": 1, \"b\": 2}\n    fmt.println(m)\n}\n",
+            "const k = 1\nfn main() {\n    m := map[int]string{k: \"a\", 2: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[bool]int{true: 1, false: 2}\n    fmt.println(m)\n}\n",
+        ];
+        for src in cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Accept, "expected accept for:\n{src}");
+        }
     }
 }
