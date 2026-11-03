@@ -870,10 +870,14 @@ impl<'a> Collector<'a> {
 
     /// #2771 — the declared Go spelling of a value whose type carries detail
     /// that `OpKind` drops, notably an array's length (`[3]int` vs `[4]int`).
-    /// Only identifiers bound with an explicit type name are known; everything
-    /// else (literals, conversions, calls) fails open.
+    /// Identifiers bound with an explicit type name or explicit array literals
+    /// are known; everything else (conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
-        match unwrap_parens(e) {
+        let bare = unwrap_parens(e);
+        if let Some((_, _, array_ty)) = bare.as_array_lit() {
+            return Some(array_ty.render());
+        }
+        match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             _ => None,
         }
@@ -883,6 +887,27 @@ impl<'a> Collector<'a> {
     fn place_type_name(&self, p: &Place) -> Option<String> {
         match &p.kind {
             PlaceKind::Ident(n) => self.lookup_type_name(n),
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                self.struct_field_type_name(&bk, name)
+            }
+            PlaceKind::Index { base, .. } => {
+                if let Some(base_tname) = self.place_type_name(base) {
+                    let s = base_tname.trim();
+                    if let Some(elem) = s.strip_prefix("[]") {
+                        return Some(elem.trim().to_string());
+                    }
+                    if s.starts_with('[') {
+                        if let Some(close) = s.find(']') {
+                            let elem = s[close + 1..].trim();
+                            if !elem.is_empty() {
+                                return Some(elem.to_string());
+                            }
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -2923,6 +2948,16 @@ impl<'a> Collector<'a> {
             .map(|(_, ty)| self.kind_of_ty_with_subst(ty, &subst, 0))
     }
 
+    fn struct_field_type_name(&self, k: &OpKind, field: &str) -> Option<String> {
+        let full_name = self.struct_name(k)?;
+        let base_name = Checker::base_named_type_str(&full_name);
+        let fields = self.ck.structs.get(base_name)?;
+        let subst = self.struct_type_arg_map(&full_name);
+        let (_, ty) = fields.iter().find(|(n, _)| n == field)?;
+        let rendered = ty.render();
+        Some(subst.get(&rendered).cloned().unwrap_or(rendered))
+    }
+
     pub(crate) fn kind_of_expr(&self, e: &Expr) -> OpKind {
         match e {
             Expr::Ident { name, .. } => {
@@ -3382,21 +3417,27 @@ impl<'a> Collector<'a> {
                     // `float32`) — Go refuses that in a struct literal.
                     let scalar_mismatch =
                         self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
-                    let fty_name = fty.render();
+                    let rendered_fty = fty.render();
+                    let field_type_name = subst.get(&rendered_fty).map(String::as_str).unwrap_or(&rendered_fty);
                     let got_type_name = self.typed_value_type_name(&f.value);
                     let container_or_alias_mismatch = match (&got_type_name, &want, &got) {
                         (Some(gname), OpKind::Chan(_), OpKind::Chan(_))
                         | (Some(gname), OpKind::Map(_, _), OpKind::Map(_, _))
                         | (Some(gname), OpKind::Slice(_), OpKind::Slice(_))
                         | (Some(gname), OpKind::Pointer(_), OpKind::Pointer(_))
-                        | (Some(gname), OpKind::Array(_), OpKind::Array(_)) => fty_name != *gname,
-                        (Some(gname), _, _) => self.sized_array_names_differ(Some(fty_name.as_str()), Some(gname.as_str())),
+                        | (Some(gname), OpKind::Array(_), OpKind::Array(_)) => field_type_name != gname.as_str(),
+                        (Some(gname), _, _) => self.sized_array_names_differ(Some(field_type_name), Some(gname.as_str())),
                         _ => false,
                     };
+                    let array_mismatch = self.sized_array_names_differ(
+                        Some(field_type_name),
+                        got_type_name.as_deref(),
+                    );
                     let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
                         || kinds_conflict(&want, &got)
                         || scalar_mismatch
-                        || container_or_alias_mismatch;
+                        || container_or_alias_mismatch
+                        || array_mismatch;
                     let already_diagnosed_e3012 = self
                         .ck
                         .diags
