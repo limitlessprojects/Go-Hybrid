@@ -3840,22 +3840,25 @@ impl<'a> Collector<'a> {
         ) {
             return t_num != a_num;
         }
-        if let (Some(t_elem), Some(a_elem)) = (
-            t_trim.strip_prefix("chan "),
-            a_trim.strip_prefix("chan "),
-        ) {
-            return self.var_decl_type_str_conflict(t_elem, a_elem);
-        }
-        if let (Some(t_elem), Some(a_elem)) = (
-            t_trim.strip_prefix("<-chan "),
-            a_trim.strip_prefix("<-chan "),
-        ) {
-            return self.var_decl_type_str_conflict(t_elem, a_elem);
-        }
-        if let (Some(t_elem), Some(a_elem)) = (
-            t_trim.strip_prefix("chan<- "),
-            a_trim.strip_prefix("chan<- "),
-        ) {
+        let t_chan = if let Some(r) = t_trim.strip_prefix("chan ") {
+            Some(r)
+        } else if let Some(r) = t_trim.strip_prefix("<-chan ") {
+            Some(r)
+        } else if let Some(r) = t_trim.strip_prefix("chan<- ") {
+            Some(r)
+        } else {
+            None
+        };
+        let a_chan = if let Some(r) = a_trim.strip_prefix("chan ") {
+            Some(r)
+        } else if let Some(r) = a_trim.strip_prefix("<-chan ") {
+            Some(r)
+        } else if let Some(r) = a_trim.strip_prefix("chan<- ") {
+            Some(r)
+        } else {
+            None
+        };
+        if let (Some(t_elem), Some(a_elem)) = (t_chan, a_chan) {
             return self.var_decl_type_str_conflict(t_elem, a_elem);
         }
         if let (Some(t_base), Some(a_base)) = (
@@ -3939,7 +3942,20 @@ impl<'a> Collector<'a> {
     /// #3448 — checks whether the declared type of a variable conflicts with the initializer value.
     fn var_decl_value_conflict(&self, declared_ty: &TypeExpr, val: &Expr) -> bool {
         let target_str = self.ck.resolve_type_alias(declared_ty).render();
-        let val_str = match unwrap_parens(val) {
+        let bare = unwrap_parens(val);
+        if let Some((len_expr, elem_ty, array_ty)) = bare.as_array_lit() {
+            let lit_type_str = if len_expr.is_none() {
+                if let Expr::SliceLit { items, .. } = bare {
+                    format!("[{}]{}", items.len(), self.ck.resolve_type_alias(elem_ty).render())
+                } else {
+                    self.ck.resolve_type_alias(array_ty).render()
+                }
+            } else {
+                self.ck.resolve_type_alias(array_ty).render()
+            };
+            return self.var_decl_type_str_conflict(&target_str, &lit_type_str);
+        }
+        let val_str = match bare {
             Expr::Ident { name, .. } => {
                 let tn = match self.lookup_type_name(name) {
                     Some(tn) => tn,
