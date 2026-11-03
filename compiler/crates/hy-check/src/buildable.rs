@@ -3977,16 +3977,39 @@ impl<'a> Collector<'a> {
         if let Some(n) = self.multi_value_arg_count(args) {
             if f.params.len() == n {
                 let got_kinds = self.multi_value_kinds(&args[0].value);
-                for (p, got) in f.params.iter().zip(got_kinds.iter()) {
+                // #3293: `kinds_conflict` alone cannot see int32 vs int64 or
+                // float32 vs float64 -- `OpKind` collapses both. Ask the
+                // callee's own result scalars for the exact widths; a
+                // non-named callee or an untyped result gives None and the
+                // check fails open.
+                let got_scalars = match unwrap_parens(&args[0].value) {
+                    Expr::Call { callee, args, .. } => self.call_result_scalars(callee, args),
+                    _ => None,
+                };
+                for (i, (p, got)) in f.params.iter().zip(got_kinds.iter()).enumerate() {
                     let want = self.kind_of_ty(&p.ty, 0);
-                    if kinds_conflict(&want, got) {
+                    let want_scalar = self.scalar_of_ty(&p.ty);
+                    let got_scalar = got_scalars
+                        .as_ref()
+                        .and_then(|v| v.get(i).copied().flatten());
+                    let width_conflict = matches!(
+                        (want_scalar, got_scalar),
+                        (Some(w), Some(g)) if w != g
+                    );
+                    if kinds_conflict(&want, got) || width_conflict {
+                        let got_label = got_scalar
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| got.label());
+                        let want_label = want_scalar
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| want.label());
                         self.emit_e1002(
                             args[0].value.span(),
                             format!(
                                 "cannot use `{}` result of type `{}` as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
                                 args[0].value.render(),
-                                got.label(),
-                                want.label(),
+                                got_label,
+                                want_label,
                                 name
                             ),
                             "argument types must match declared parameter types",
