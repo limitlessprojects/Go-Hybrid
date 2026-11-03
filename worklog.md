@@ -1527,3 +1527,102 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 342 -> 345 (#3462, #3458, #3310). Final main e7fe187a, tree clean.
 - NEXT TICK QUEUE: #3336 (chusmias258-dev folded array/fn type args, +233) -> #1740 (wminno int->float64 provenance, 8.5d, +294) -> #1718 (ubelai O8/A3, behind 3) -> #1719 (ubelai A7/A2, behind 11) -> #3441 (behind 11) -> #3428 (+682) -> #3435. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978. (3449, 3466 resolved.)
+
+## Session 74 — 2026-11-03 15:10 tick (4 landed: #3479/#3481/#3480/#3336/#3143 — five, recount below; dup #3485 noted superseded in 3481 reply)
+
+- Recycle + restore (cache hits, 5.7G avail). scan + approve healthy: approve 13/13, 4982 remaining.
+- LANDED:
+  9406637f Merge PR #3479 (aswadi, fixes #3476) — diag lookup accepts HYB-<digits>, blank notes filtered; 346 suites.
+  fe23c2a3 Merge PR #3481 (aswadi, fixes #3478) — lexer rejects 2.e+/- and trailing exponent letters; 347 suites. (#3485 superseded, noted in reply.)
+  12de9564 Merge PR #3480 (aswadi, fixes #3477) — WideInt 512-bit min/max precision kept; 348 suites.
+  7dd1f084 Merge PR #3336 (chusmias258-dev, fixes #3335) — folded array/fn type args expanded + composite keys declaration-ordered; 349 suites.
+  7c0dcafc Merge PR #3143 (gorky117-cell, fixes #3090) — nil patterns on non-nilable + out-of-range int match patterns rejected; 350 suites.
+- All remote asserts green; reply per PR; no silent closes. aswadi 3 more (total 11 ladder entries this cycle by himself — flag for maintainer in #295).
+- Suite trajectory: 345 -> 350. Final main 7c0dcafc, tree clean.
+- NEXT TICK QUEUE: #3145 (copy() scalar mismatches — DUP WATCH vs #3153 first!) -> #3154 (struct fields) -> #2874 (typed ints via index/map/field) -> #1740 (int->float64 provenance, 8.5d) -> #1718 (behind 3) -> #1719 (behind 11) -> #3441 (behind 11) -> #3428 (+682) -> #3435. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833. New dups to watch: #3485 (vs landed #3481), #3473 (behind 9, "address #3467").
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978. (3485 resolved-by-reply.)
+
+## Session 75 — 2026-11-03 16:10 tick (3 landed: #3145/#3154/#2874; dup #3153 superseded)
+
+- Recycle + full restore from scratch (go tarball re-downloaded, rustup 1.99.0 cold install, target dir rebuilt cold 2.9G, 6.7G avail pre-build).
+- GitHub API primary rate limit exhausted (0 remaining, reset 09:11 UTC): scan timed out twice (cap-or-skip, 780-800/984), approve 403'd. Worked from Session 74 queue; git-protocol fetches unaffected.
+- LANDED (all gauravatwork117 — 3 ladder entries, flag in #295):
+  e9ada4a3 Merge PR #3145 (fixes #3085) — copy() slice elem scalar mismatch + non-byte string copy; slice_element_type_name unpacks [N]T/typed SliceLit; complex64/128 canonical; stricter than #3153 (typed-Int unresolved rejected per Go). 351 suites.
+  26c8f90d Merge PR #3154 (fixes #3066) — non-existent fields / non-struct base selectors E1002; whitelist + same-span dedup fail-open. 352 suites.
+  a1713d8d Merge PR #2874 (fixes #2858, + #3065 interaction) — typed-int scalar provenance through index/map/field reads; for-in Str = rune scalar. 353 suites.
+- DUP RESOLVED: #3153 superseded by landed #3145 (superset, stricter unknown-Int); replied with reopen-on-repro offer.
+- Suite trajectory: 350 -> 353. Final main a1713d8d, tree clean. All remote asserts green; replies posted per PR.
+- NEXT TICK QUEUE: scan FIRST (fresh queue missing this tick) -> #1740 (wminno int->float64 provenance, 8.5d, +294) -> #1718 (ubelai O8/A3, behind 3) -> #1719 (behind 11) -> #3441 (behind 11) -> #3428 (+682) -> #3435 -> #3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978. (3145/3153 resolved.)
+- OPS NOTE: verify_pr.sh still carries the deprecated worktree protocol + --no-keep-memory RUSTFLAGS; kept using in-repo trial merge per S69 binding protocol. Consider updating the script or the cron text next tick.
+
+## Session 76 — 2026-11-03 17:10 tick (3 landed: #3491/#3490/#3501)
+
+- Recycle + restore (go from cache; rustup bg install hung on installer download again — foreground sync install is the reliable path, 2nd confirmation). scan healthy (REAL_EXIT=0), approve 21/21 (4974 remaining).
+- LANDED:
+  b3158063 Merge PR #3491 (aswadi, fixes #3488) — lexer float suffix check out of exponent branch + 3+ dot consumption; float hardening arc complete. 354 suites.
+  d6469bcd Merge PR #3490 (aswadi, fixes #3487) — diag lookup `_`->`-` normalization + HYB-8nnn coherence (`-8` arm); diag arc complete. 355 suites.
+  3d6aa6fd Merge PR #3501 (chusmias258-dev, fixes #3500) — is_unshadowed_builtin gates make/new/primitive-conversion fast paths. 356 suites.
+- Suite trajectory: 353 -> 356. Final main 3d6aa6fd, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #1740 (wminno int->float64 provenance, 8.5d, +294, approve shepherded) -> #937 (magomedta make/new/void validation, 14.5d, +449) -> #3499 (pedromino wildcard loan slices, +52, no tests — scrutinize) -> #1718 (behind 3) -> #1719 -> #3441 -> #3428 -> #3435 -> #3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
+- OPS NOTE (repeat): verify_pr.sh worktree protocol + --no-keep-memory deprecated since S69; cron text should point at in-repo trial merge. rustup-init.sh in nohup hangs ~50% of runs — run it foreground.
+
+## Session 77 — 2026-11-03 18:10 tick (3 landed: #3507/#3506/#3475; dup #3508 superseded)
+
+- Recycle + restore (go cache hit; rustup foreground — reliable). scan healthy (REAL_EXIT=0), approve 19/19 (4979 remaining).
+- LANDED:
+  3092b331 Merge PR #3507 (aswadi, fixes #3505) — diag lookup strips [ ] : ' " ` delimiters + with_notes trims after filter; diag arc complete. 357 suites.
+  9a4c0288 Merge PR #3506 (aswadi, fixes #3504) — integer-literal trailing suffix rejection + dotless hex exponent sign; literal hardening complete. 358 suites.
+  ca7fdaea Merge PR #3475 (seenorht, fixes #3467) — bare nil -> non-nilable param rejected in fn/method/func-literal calls. 359 suites.
+- DUP RESOLVED: #3508 (Dimank92, fixes #3498) superseded by landed #3506 (same integer-suffix scope + hex exponent superset; textual conflict in lex_number). Replied with reopen-on-repro offer.
+- Suite trajectory: 356 -> 359. Final main ca7fdaea, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #1740 (wminno int->float64 provenance, 8.5d, +294) -> #937 (magomedta make/new/void validation, 14.5d, +449) -> #3499 (pedromineo wildcard loan slices, +52, NO tests — scrutinize hard) -> #3503 (zc composite literal mismatch, +?) -> #1718 (behind 3) -> #1719 -> #3441 -> #3428 -> #3435 -> #3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 78 — 2026-11-03 19:10 tick (2 landed: #3515/#3514; 1 gate-fail: #3517)
+
+- Recycle + restore (cache hits). scan healthy, approve 17/17 (4983 remaining).
+- LANDED:
+  452fbd0a Merge PR #3515 (aswadi, fixes #3513) — sync.wait_group/once method surfaces + waitgroup alias. 360 suites.
+  d8f28577 Merge PR #3514 (aswadi, fixes #3512) — emit shapes add->Add/done->Done/wait->Wait/do->Do + DEDUP of duplicate "filepath"/"url" import_path_of arms (out-of-title scope, disclosed in reply; duplicate match arms were unreachable; url_and_filepath test green post-dedup). 361 suites.
+- GATE FAIL: #3517 (Oepjdihc2008, fixes #3516) — 8/8 own tests fail: fixtures use uppercase `T` generic param, violating LX2 snake_case (HYB-E0001), so `must parse` helper dies before the check is exercised. Evidence reply posted; round-2 = rename T -> elem/t in fixtures. Logic itself untouched.
+- Suite trajectory: 359 -> 361. Final main d8f28577, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #3511 (produckq-boop E3013 mutating method values, +390/-181 big) -> #1740 (wminno, 8.5d, +294) -> #937 (magomedta, 14.5d, +449) -> #3499 (NO tests — scrutinize) -> #3503 -> #2867/#2940 (resurfaced on Pareto) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833 + now #3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 79 — 2026-11-03 21:10 tick (2 landed: #3511/#1740)
+
+- Recycle + restore (cache hits). scan TIMED OUT again (cap-or-skip, REAL_EXIT=124); approve healthy 12/12 (4988 remaining). Worked from Session 78 queue.
+- LANDED:
+  9617f8a6 Merge PR #3511 (produckq-boop, fixes #3510) — escape analysis StateAt(span)-scoped; in_managed_at; closure_writes_captured (root,depth); expr_escape_root fallback; E3013 on mutating method values -> foreign calls. Deep refactor, full battery green. 363 suites.
+  f607dd50 Merge PR #1740 (wminno, fixes #1112; rebased by gamma-5) — check_send_elem on stmt+select arms (E1002 go-parity), typed-int->float64 surface, untyped-const exempt, O6.1 managed hatch (managed_depth). 8.5d saga closed. 364 suites.
+- PROTOCOL: #1740 body again carried a wallet address — replied with #3439-precedent rail reminder (bounty only via BOUNTY.md/discussion #295); address NOT propagated to repo text.
+- Suite trajectory: 361 -> 364. Final main f607dd50, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #937 (magomedta make/new/void validation, 14.5d, +449) -> #3499 (pedromineo wildcard loan slices, +52, NO tests — scrutinize hard) -> #3503 (zc composite literal) -> #2867 (channel send assignability — NOTE may overlap #1740's check_send_elem; DUP CHECK) -> #2940 (copy exact widths — may overlap landed #3145; DUP CHECK) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517 (T fixture rename).
+- DUP WATCH remaining: #2982 vs #2976 vs #2978. NEW: #2867 vs landed-#1740; #2940 vs landed-#3145.
+
+## Session 80 — 2026-11-03 22:10 tick (4 landed: #3524/#3522/#3497/#3526)
+
+- Recycle + restore (cache hits). scan healthy, approve 8/8 (4978 remaining). New wave of score-9 PRs (#3524/#3522/#3497/#3526/#591/#2285/#2284).
+- LANDED:
+  3edb5cff Merge PR #3524 (aswadi, fixes #3521) — foreign_named_type uses is_curated_package_root (sync.* -> ForeignOpaque). 365 suites.
+  5ba4c809 Merge PR #3522 (aswadi, fixes #3520) — Go-cased sync spellings normalize to canonical shapes; waitgroup->WaitGroup export. sync arc complete. 366 suites.
+  f305b802 Merge PR #3497 (chusmias258-dev, fixes #3496) — checker E11 return classification aligned with emit (main excluded; unshadowed http gate). 367 suites.
+  029c0e88 Merge PR #3526 (chusmias258-dev, fixes #3525) — addr-of receivers keep foreign shapes (both &x forms). 368 suites.
+- Suite trajectory: 364 -> 368. Final main 029c0e88, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #591 (score 9, constant-folding/type-alias/slice-index family) -> #2285 (match-arm nesting emit) -> #2284 (map key comparability, fixes #1565) -> #937 (magomedta, 14.5d, +449) -> #3499 (NO tests — scrutinize) -> #3503 -> DUP CHECKS: #2867 vs landed #1740 (chan-send), #2940 vs landed #3145 (copy widths) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978; #2867 vs #1740; #2940 vs #3145.
+
+## Session 82 — 2026-11-04 02:10 tick (4 landed: #2758/#2759/#3534/#3533) — covers missed 23:10 tick (tool-infra outage, nothing lost)
+
+- Recycle + restore (cache hits). scan healthy, approve 9/9 (4991 remaining).
+- LANDED:
+  1e3ee199 Merge PR #2758 (ryder777777, fixes #1123) — author_stage diff_paths deletion rows + `..`/absolute traversal guards; tools.test_runner_sha 9 OK. 368 suites (tools-layer).
+  71441398 Merge PR #2759 (ryder777777, fixes #1125) — autoland bundle pre-validation (NO-BUNDLE) + revert_on_failure in finally; env_report 8 OK. 368 suites (tools-layer).
+  207e6579 Merge PR #3534 (aswadi, fixes #3532) — no_zero_value_reason resolves generic-substituted struct fields. 369 suites.
+  2d4d33b6 Merge PR #3533 (aswadi, fixes #3531) — type_of_place sees through nested/addr-of chains (place-side twin of #3526). 370 suites.
+- OPS: one transient "origin not a repository" fetch error mid-tick — retry succeeded, remotes intact (many fork remotes exist in config from contributor automation; origin healthy).
+- Suite trajectory: 368 -> 370. Final main 2d4d33b6, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #2757 (ryder, differential_loop fail-closed) -> #2760/#2761/#2766 (ryder batch) -> #591 (score 9) -> #2285 -> #2284 -> #937 -> #3499 (NO tests) -> #3503 -> DUP CHECKS: #2867 vs landed #1740; #2940 vs landed #3145. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978; #2867 vs #1740; #2940 vs #3145.
