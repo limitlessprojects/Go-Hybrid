@@ -1429,3 +1429,14 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 324 (unchanged; #1818 test-only). Final main 16df42dc, tree clean.
 - NEXT TICK QUEUE: #3169 (hy-emit, 6 files) -> #3415 ([N]T(s) array conversions) -> #3299 -> #3296 -> #3347 (dup-check vs #3346) -> #3308 -> #3384 -> #3389 -> #3362 -> #3393 -> old tail. #3409 round-2 if author suppresses the double-report. #3300 still behind.
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
+
+## Session 67 — 2026-11-03 08:10 tick (1 landed: #3169; #3409 round-2 still double-reporting)
+
+- Recycle + restore (full evaporate again; cold rebuild one call). scan OK (4th tick running); approve 26/26 (4974 remaining).
+- LANDED:
+  e8b717df Merge PR #3169 (aswadi, fixes #2969 + #2972) — hy-emit: FnLit frames save/restore cur_option_result + cur_fn_conv_result (closure `?` zero-fills error tail via own result ctx); fnlit_depth bypass+field removed; const_int_expr folds width convs, len("lit"), min/max; has_out_of_range_subexpr conservative on Calls. New constconv_int_fold_3084 suite. ALL-GREEN vs 23beca2e, 325 suites.
+- GATE FAIL round-2 (evidence posted):
+  #3409 (alexrayyandev, fixes #3405) — author force-pushed rewrite (r1 head 7a23523f GONE, single commit e5803870). Same 2 failures byte-identical: [E3012, E1002] vs [E3012] (repro_06), [E3012, E3012, E1002] vs [E3012, E3012] (repro_10). ROOT CAUSE LOCATED in r2 diff: container_or_alias_mismatch was fed into the conflict condition that emits E1002 — but E3012 already fires from the direction site. One-line fix given: drop `|| container_or_alias_mismatch` from the E1002 conflict arm (or emit E3012 there + dedup guard). issuecomment-6592000540.
+- Suite trajectory: 324 -> 325 (#3169). Final main e8b717df, tree clean.
+- NEXT TICK QUEUE: #3299 (multi-value call arg widths) -> #3296 -> #3347 (dup-check vs #3346) -> #3308 -> #3229 (slot loan via call) -> #3298 (append dims) -> #3196 (fn lit scalar widths) -> tools flood (#3384/#3389/#3362/#3393) -> old tail. #3409 round-3 if author applies the one-line fix.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
