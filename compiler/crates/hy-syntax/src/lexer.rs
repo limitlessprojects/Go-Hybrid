@@ -609,12 +609,6 @@ impl<'a> Lexer<'a> {
                         break;
                     }
                 }
-                if self.at(0).is_some_and(|c| c.is_ascii_alphabetic()) {
-                    while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
-                        s.push(self.bump().unwrap());
-                    }
-                    self.escape_diag(start, false, "malformed float literal: invalid character in exponent (SPEC-LANGUAGE.md LX6)");
-                }
             } else {
                 is_float = true;
                 for _ in 0..k {
@@ -627,13 +621,25 @@ impl<'a> Lexer<'a> {
             }
         }
         if is_float {
-            if self.at(0) == Some('.') && self.at(1) != Some('.') {
+            while self.at(0) == Some('.') && self.at(1) != Some('.') {
                 s.push('.');
                 self.bump();
-                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                while self
+                    .at(0)
+                    .is_some_and(|c| c == '_' || c.is_ascii_alphanumeric())
+                {
                     s.push(self.bump().unwrap());
                 }
                 self.escape_diag(start, false, "malformed float literal: unexpected second . in float literal (SPEC-LANGUAGE.md LX6)");
+            }
+            if self.at(0).is_some_and(|c| c.is_ascii_alphabetic()) {
+                while self
+                    .at(0)
+                    .is_some_and(|c| c == '_' || c.is_ascii_alphanumeric())
+                {
+                    s.push(self.bump().unwrap());
+                }
+                self.escape_diag(start, false, "malformed float literal: alphabetic suffix is not supported (SPEC-LANGUAGE.md LX6)");
             }
             self.tok(start, Tok::Float(s))
         } else {
@@ -1326,6 +1332,33 @@ mod tests {
         let r2 = toks("1..=8");
         assert_eq!(r2[0], Tok::Int("1".into()));
         assert_eq!(r2[1], Tok::Punct("..="));
+    }
+
+    #[test]
+    fn float_suffixes_and_multi_dot_recovery_issue_3488() {
+        for src in ["1.5f", "1.5f64", ".5f", "1.5e2f"] {
+            let errs = lex_errs(src);
+            assert!(
+                errs.iter().any(|d| {
+                    d.code == PARSE_ERR_CODE
+                        && d.tier0_rule.as_deref() == Some("LX6")
+                        && d.message.contains("suffix")
+                }),
+                "expected suffix diagnostic for `{src}`, got: {errs:?}"
+            );
+        }
+
+        let mut lx = Lexer::new("test.hy", "1.2.3.4");
+        assert_eq!(
+            lx.produce().expect("float token").tok,
+            Tok::Float("1.2.3.4".into())
+        );
+        assert!(matches!(lx.produce().expect("EOF token").tok, Tok::Eof));
+        assert!(
+            lx.diags
+                .iter()
+                .any(|d| d.code == PARSE_ERR_CODE && d.tier0_rule.as_deref() == Some("LX6"))
+        );
     }
 
     #[test]
