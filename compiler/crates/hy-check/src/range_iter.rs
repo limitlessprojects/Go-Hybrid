@@ -42,7 +42,12 @@ impl<'a> Checker<'a> {
                 let before = self.diags.len();
                 self.check_range_iterable(st, expr, span);
                 if self.diags.len() == before {
-                    let shape = self.shape_of_expr(st, expr);
+                    let mut shape = self.shape_of_expr(st, expr);
+                    if matches!(shape, TypeShape::Unknown) {
+                        if let Some(ty) = self.range_expr_type(st, expr) {
+                            shape = self.shape_of_type(&ty);
+                        }
+                    }
                     let is_chan = matches!(shape, TypeShape::Chan(_));
                     let is_set = matches!(
                         shape,
@@ -213,8 +218,11 @@ impl<'a> Checker<'a> {
             }
             _ => {}
         }
-        if let Some(ty) = self.ty_of_expr(st, expr) {
+        if let Some(ty) = self.range_expr_type(st, expr) {
             let resolved = self.resolve_type_alias(&ty);
+            if matches!(resolved, TypeExpr::Option { .. }) {
+                return Some(resolved.render());
+            }
             if let TypeExpr::Named { name, .. } = &resolved {
                 if matches!(
                     name.as_str(),
@@ -236,7 +244,7 @@ impl<'a> Checker<'a> {
         // ascription, so `ty_of_expr`/`shape_of_expr` see nothing. Resolve
         // the initializer through the file const map (#998 pattern) and
         // classify the literal. Block-scoped consts stay fail-open (no
-        // const-value map in FnState — the #998 precedent).
+        // const-value map in FnState ��� the #998 precedent).
         if let Expr::Ident { name, .. } = unwrap_parens(expr) {
             if st.env_lookup(name).is_none() {
                 if let Some(init) = self.const_values.get(name.as_str()) {
@@ -246,7 +254,12 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        let shape = self.shape_of_expr(st, expr);
+        let mut shape = self.shape_of_expr(st, expr);
+        if matches!(shape, TypeShape::Unknown) {
+            if let Some(ty) = self.range_expr_type(st, expr) {
+                shape = self.shape_of_type(&ty);
+            }
+        }
         match shape {
             TypeShape::Primitive | TypeShape::Unknown => None,
             other => Some(other.render()),
@@ -340,39 +353,21 @@ impl<'a> Checker<'a> {
     fn typed_int_bound(&self, st: &FnState, e: &Expr) -> Option<String> {
         match unwrap_parens(e) {
             Expr::Lit { .. } => None,
-            Expr::Ident { name, .. } => {
-                if st.env_lookup(name).is_none() {
-                    if let Some(b) = self.consts.get(name.as_str()) {
-                        // a file-level const: a TYPED const fixes the
-                        // bound's type; an untyped const adapts.
-                        let ty = b.ty.as_ref()?;
-                        let resolved = self.resolve_type_alias(ty);
-                        if let TypeExpr::Named { name: rn, .. } = resolved {
-                            if crate::const_overflow::fixed_width_int_range(&rn).is_some() {
-                                return Some(rn);
-                            }
-                        }
-                        return None;
-                    }
-                }
-                let ty = self.ty_of_expr(st, e)?;
-                self.named_int_of(&ty)
-            }
             Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
-                // a fixed-width conversion names its own type: `u32(0)`
-                // is a u32 bound regardless of what ty_of_expr infers.
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
-                    if crate::const_overflow::fixed_width_int_range(name).is_some() {
+                    if self.lookup_binding(st, name).is_none()
+                        && !self.fns.contains_key(name.as_str())
+                        && crate::const_overflow::fixed_width_int_range(name).is_some()
+                    {
                         return Some(name.clone());
                     }
                 }
-                let ty = self.ty_of_expr(st, e)?;
-                self.named_int_of(&ty)
+                self.range_expr_type(st, e)
+                    .and_then(|ty| self.named_int_of(&ty))
             }
-            _ => {
-                let ty = self.ty_of_expr(st, e)?;
-                self.named_int_of(&ty)
-            }
+            _ => self
+                .range_expr_type(st, e)
+                .and_then(|ty| self.named_int_of(&ty)),
         }
     }
 
@@ -384,6 +379,163 @@ impl<'a> Checker<'a> {
             }
         }
         None
+    }
+
+    fn range_expr_type(&self, st: &FnState, expr: &Expr) -> Option<TypeExpr> {
+        if let Some(ty) = self.ty_of_expr(st, expr) {
+            let is_opaque_some = matches!(
+                &ty,
+                TypeExpr::Option { elem, .. }
+                    if matches!(elem.as_ref(), TypeExpr::Named { name, .. } if name == "any")
+            );
+            if !is_opaque_some {
+                return Some(ty);
+            }
+        }
+        match unwrap_parens(expr) {
+            Expr::Move { operand: inner, .. } | Expr::Try { operand: inner, .. } => {
+                self.range_expr_type(st, inner)
+            }
+            Expr::Unary {
+                op: hy_syntax::UnOp::Neg,
+                operand,
+                ..
+            } => self.range_expr_type(st, operand),
+            Expr::Binary { op, lhs, rhs, .. } => match op {
+                hy_syntax::BinOp::Shl | hy_syntax::BinOp::Shr => self.range_expr_type(st, lhs),
+                hy_syntax::BinOp::Add
+                | hy_syntax::BinOp::Sub
+                | hy_syntax::BinOp::Mul
+                | hy_syntax::BinOp::Div
+                | hy_syntax::BinOp::Mod
+                | hy_syntax::BinOp::BitAnd
+                | hy_syntax::BinOp::BitOr
+                | hy_syntax::BinOp::BitXor => self
+                    .range_expr_type(st, lhs)
+                    .or_else(|| self.range_expr_type(st, rhs)),
+                _ => None,
+            },
+            Expr::Receive { chan, .. } => {
+                let outer_ty = self.range_expr_type(st, chan)?;
+                match self.resolve_type_alias(&outer_ty) {
+                    TypeExpr::Chan { elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            Expr::Field { base, name, .. } => {
+                let base_ty = self.range_expr_type(st, base)?;
+                let resolved = self.resolve_type_alias(&base_ty);
+                if let Some(fields) = self.struct_fields_for_type(&resolved) {
+                    return fields.into_iter().find(|(n, _)| n == name).map(|(_, t)| t);
+                }
+                let sname = Self::base_named_type(&resolved)?;
+                self.structs
+                    .get(&sname)
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == name))
+                    .map(|(_, t)| t.clone())
+            }
+            Expr::Index { base, .. } => {
+                let base_ty = self.range_expr_type(st, base)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. }
+                    | TypeExpr::Array { elem, .. }
+                    | TypeExpr::Map { value: elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            Expr::Slice { base, span, .. } => {
+                let base_ty = self.range_expr_type(st, base)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        Some(TypeExpr::Slice { elem, span: *span })
+                    }
+                    _ => None,
+                }
+            }
+            Expr::Ident { name, .. } => {
+                if let Some(ty) = st.env_lookup(name).and_then(|b| b.ty.clone()) {
+                    return Some(ty);
+                }
+                let root = crate::freeze::resolve_alias(st, name);
+                if let Some(ty) = self.lookup_binding(st, &root).and_then(|b| b.ty.clone()) {
+                    return Some(ty);
+                }
+                if st.env_lookup(name).is_none() {
+                    if let Some(b) = self.consts.get(name.as_str()) {
+                        return b.ty.clone();
+                    }
+                }
+                None
+            }
+            Expr::Call { callee, args, span } => match unwrap_parens(callee) {
+                Expr::Ident { name, .. } => {
+                    if self.lookup_binding(st, name).is_some()
+                        || self.fns.contains_key(name.as_str())
+                    {
+                        return None;
+                    }
+                    if name == "append" {
+                        let first = args.first()?;
+                        return self.range_expr_type(st, &first.value);
+                    }
+                    if name == "some" {
+                        let elem = args
+                            .first()
+                            .and_then(|a| self.range_expr_type(st, &a.value))
+                            .unwrap_or_else(|| TypeExpr::Named {
+                                name: "any".to_string(),
+                                span: *span,
+                            });
+                        return Some(TypeExpr::Option {
+                            elem: Box::new(elem),
+                            span: *span,
+                        });
+                    }
+                    if matches!(name.as_str(), "real" | "imag") && args.len() == 1 {
+                        return Some(TypeExpr::Named {
+                            name: "float64".to_string(),
+                            span: *span,
+                        });
+                    }
+                    if name == "complex" && args.len() == 2 {
+                        return Some(TypeExpr::Named {
+                            name: "complex128".to_string(),
+                            span: *span,
+                        });
+                    }
+                    None
+                }
+                Expr::Field { base, name, .. } => {
+                    let base_ty = self.range_expr_type(st, base)?;
+                    let resolved = self.resolve_type_alias(&base_ty);
+                    if name == "pop" && args.is_empty() {
+                        if let TypeExpr::Slice { elem, .. } = resolved {
+                            return Some(*elem);
+                        }
+                    }
+                    if let TypeExpr::Option { elem: elem_ty, .. } =
+                        self.peel_pointer_and_alias(&base_ty)
+                    {
+                        let elem_ty = *elem_ty;
+                        let is_any =
+                            matches!(&elem_ty, TypeExpr::Named { name: n, .. } if n == "any");
+                        match name.as_str() {
+                            "unwrap" if args.is_empty() && !is_any => return Some(elem_ty),
+                            "or" if args.len() == 1 => {
+                                if !is_any {
+                                    return Some(elem_ty);
+                                }
+                                return self.range_expr_type(st, &args[0].value);
+                            }
+                            _ => {}
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Classify a range's ITERABLE — the mirror of `check_send_target`
@@ -400,10 +552,23 @@ impl<'a> Checker<'a> {
         // only pointer-to-ARRAY is rangeable (`*struct` / `*slice` /
         // `*string` are not), so normalize exactly one Pointer level for
         // arrays and leave every other shape as classified.
-        let shape = if matches!(self.ty_of_expr(st, expr).map(|t| self.resolve_type_alias(&t)), Some(TypeExpr::Option { .. })) { TypeShape::Struct(None) } else { match self.shape_of_expr(st, expr) {
-            TypeShape::Pointer(inner) if matches!(*inner, TypeShape::Array(_)) => *inner,
-            other => other,
-        } };
+        let projected_ty = self
+            .range_expr_type(st, expr)
+            .map(|t| self.resolve_type_alias(&t));
+        let shape = if matches!(projected_ty, Some(TypeExpr::Option { .. })) {
+            TypeShape::Struct(None)
+        } else {
+            let mut raw = self.shape_of_expr(st, expr);
+            if matches!(raw, TypeShape::Unknown) {
+                if let Some(ref ty) = projected_ty {
+                    raw = self.shape_of_type(ty);
+                }
+            }
+            match raw {
+                TypeShape::Pointer(inner) if matches!(*inner, TypeShape::Array(_)) => *inner,
+                other => other,
+            }
+        };
         match shape {
             TypeShape::Slice(_)
             | TypeShape::Array(_)
@@ -415,16 +580,7 @@ impl<'a> Checker<'a> {
             | TypeShape::BorrowHandle(_) => {}
             TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set" => {}
             TypeShape::Chan(_) => {
-                let chan_ty = self.ty_of_expr(st, expr).or_else(|| {
-                    if let Expr::Ident { name, .. } = unwrap_parens(expr) {
-                        let root = crate::freeze::resolve_alias(st, name);
-                        self.lookup_binding(st, &root).and_then(|b| b.ty.clone())
-                    } else {
-                        None
-                    }
-                });
-                if let Some(ty) = chan_ty {
-                    let resolved = self.resolve_type_alias(&ty);
+                if let Some(resolved) = projected_ty {
                     if matches!(
                         resolved,
                         hy_syntax::TypeExpr::Chan {
