@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — release Cargo defaults (2026-11-03)
+
+- Base `e7fe187`: inherited `CARGO_BUILD_TARGET_DIR` or `CARGO_BUILD_TARGET` redirects builds away from the paths native packaging copies. Clear both alongside the existing packaging overrides; `HYB_RUST_TARGET` remains the explicit cross-build switch. Three new packaging regressions fail before the fix; all seven packaging tests and all 501 top-level Python tooling tests pass after it on Python 3.11+. Real Rust 1.99.0 builds of dependency-free fixture crates confirm the unchanged script exits 0 while shipping seeded stale CLI/staticlib bytes for both settings; patched runs ship fresh ELF/archive artifacts. This is packaging correctness; a full Hybrid release build and upstream CI/review remain pending.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.

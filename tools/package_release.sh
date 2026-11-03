@@ -29,7 +29,11 @@ set -eu
 # crate-local lib, and cargo_bin() still prefers HYB_CARGO_BIN. A smoke that
 # inherits any of them can pass against a runtime, staticlib, or cargo that
 # is not in the tarball.
-unset CARGO_TARGET_DIR HYB_RUNTIME_DIR HYB_CARGO_BIN
+# Cargo also reads build.target-dir through CARGO_BUILD_TARGET_DIR. An
+# inherited CARGO_BUILD_TARGET adds a target/<triple>/ level even when it
+# names the host, while native packaging below copies target/release/.
+# Keep the documented HYB_RUST_TARGET as the explicit cross-build switch.
+unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_BUILD_TARGET HYB_RUNTIME_DIR HYB_CARGO_BIN
 
 VER="${1:?usage: package_release.sh <version-tag, e.g. v0.1.0>}"
 # The version is a single path component in both the staging directory

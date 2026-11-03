@@ -15,6 +15,9 @@ What the current script must guarantee:
 - CARGO_TARGET_DIR must not redirect those artifacts away from the
   crate-local paths step 3 copies. Otherwise the stale files seeded at
   target/release/ ship.
+- CARGO_BUILD_TARGET_DIR is the configuration-variable alias for the same
+  output setting. CARGO_BUILD_TARGET changes the output layout even for
+  the host triple. Neither may redirect a documented native build.
 - `HYB_RUST_TARGET` ships that triple's build, re-laid at
   runtime/rust/hyrt/target/release/, not the native tree.
 - The rustless smoke executes hyb from the extracted tarball. Its PATH has
@@ -58,11 +61,11 @@ printf '#!/bin/sh\necho "hello, Hybrid!"\n' > "$out"
 chmod +x "$out"
 """
 
-# Fake cargo: writes under ${CARGO_TARGET_DIR:-./target}, and under
-# target/<triple>/release when `--target` is set.
+# Fake cargo: honours both target-dir environment spellings and the
+# default platform, with an explicit --target taking precedence.
 FAKE_CARGO = r"""#!/bin/sh
-target="${CARGO_TARGET_DIR:-$PWD/target}"
-triple=""
+target="${CARGO_TARGET_DIR:-${CARGO_BUILD_TARGET_DIR:-$PWD/target}}"
+triple="${CARGO_BUILD_TARGET:-}"
 pkg=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -231,6 +234,44 @@ class PackageReleaseIsolationTests(unittest.TestCase):
         shipped_hyb = self.shipped("hyb")
         self.assertIn(f"FRESH-HYB {triple}", shipped_hyb)
         self.assertNotIn("STALE-HYB", shipped_hyb)
+
+    def test_build_target_dir_alias_does_not_ship_stale_artifacts(self):
+        redirected = self.root / "configured-target"
+        self.package(CARGO_BUILD_TARGET_DIR=str(redirected))
+        self.assertEqual(
+            self.shipped("runtime/rust/hyrt/target/release/libhyrt.a"),
+            "FRESH-LIB\n",
+        )
+        self.assertIn("FRESH-HYB", self.shipped("hyb"))
+        self.assertNotIn("STALE-HYB", self.shipped("hyb"))
+        self.assertFalse(redirected.exists())
+
+    def test_default_build_target_does_not_ship_stale_native_artifacts(self):
+        # Even the host triple changes Cargo's layout to target/<triple>/.
+        triple = "x86_64-unknown-linux-gnu"
+        self.package(CARGO_BUILD_TARGET=triple)
+        self.assertEqual(
+            self.shipped("runtime/rust/hyrt/target/release/libhyrt.a"),
+            "FRESH-LIB\n",
+        )
+        self.assertIn("FRESH-HYB", self.shipped("hyb"))
+        self.assertNotIn("STALE-HYB", self.shipped("hyb"))
+
+    def test_explicit_cross_target_wins_over_inherited_cargo_defaults(self):
+        triple = "aarch64-unknown-linux-gnu"
+        redirected = self.root / "configured-target"
+        self.package(
+            HYB_RUST_TARGET=triple,
+            HYB_CC="cc",
+            CARGO_BUILD_TARGET="x86_64-unknown-linux-gnu",
+            CARGO_BUILD_TARGET_DIR=str(redirected),
+        )
+        self.assertEqual(
+            self.shipped("runtime/rust/hyrt/target/release/libhyrt.a"),
+            f"FRESH-LIB {triple}\n",
+        )
+        self.assertIn(f"FRESH-HYB {triple}", self.shipped("hyb"))
+        self.assertFalse(redirected.exists())
 
     def test_smoke_runs_tarball_hyb_without_external_overrides(self):
         # A caller runtime, an absolute cargo, or a shared target dir would

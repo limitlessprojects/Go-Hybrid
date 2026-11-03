@@ -1,5 +1,7 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor (2026-11-03): release packaging clears both Cargo configuration environment aliases that redirected new builds while old artifacts shipped. Seven packaging tests and 501 top-level Python tooling tests pass; real dependency-free Cargo fixtures reproduce stale-before/fresh-after for both settings. Full Hybrid release/CI/review remain pending; see PLAN.md.
+
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
 
 - Contributor #1165: range bounds spelled as different names of one Go integer type no longer raise a false HYB-E2009 (shared canonicaliser in `hy-check` + regression pin); workspace/corpus/differential/CI remain delivery gates.
