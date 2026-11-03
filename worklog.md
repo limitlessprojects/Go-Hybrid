@@ -1453,3 +1453,19 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 325 -> 326 (#3409). Final main c6b6e31c, tree clean.
 - NEXT TICK QUEUE: #3299 -> #3296 -> #3347 (dup-check vs #3346) -> #3229 (slot loan via call) -> #3196 (fn lit widths) -> #2948 -> #2977 -> #2863 -> tools flood (#3384/#3389/#3362/#3393) -> old tail. #3308/#3298 round-2 on re-push.
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
+
+## Session 69 — 2026-11-03 10:10 tick (3 landed: #3299/#3296/#3347; 1 gate-fail: #3346; disk crisis + protocol fix)
+
+- Recycle + restore (full evaporate; go tarball re-downloaded + cache backfilled). scan SKIPPED: RateGuard at 149 remaining (reset ~11:00), queue carried from S68 worklog; approve skipped same reason.
+- DISK CRISIS: rootfs 9.9G hit 100% -> cc Bus error during link. Root cause: worktree path /tmp/verify-wt keys a SECOND full cargo artifact set (workspace-internal crate fingerprints bake the workspace root path) — main-set 3.2G + merged-set 3.1G + base 3.1G > 9.9G. Freed 2.1G stale /tmp/my-project copy + 1.2G browser caches + 6.3G target.
+- PROTOCOL FIX (binding for future ticks): drop per-PR worktrees. verify stages now run as in-repo trial merge at /home/z/my-project/hybrid: git merge --no-ff --no-commit <PR-head> -> battery -> corpus -> differential -> commit on green / merge --abort on fail. Stable path = one artifact set (2.7G with CARGO_INCREMENTAL=0), deps stay warm ACROSS PRs (~12 min/PR, was ~20+ cold). Also: drop RUSTFLAGS=-C link-arg=-Wl,--no-keep-memory (lld mmap SIGBUS suspect on overlay fs), keep jobs=1. 0/42 differential was self-inflicted: missing go PATH export in manual stage — always export PATH in every stage call.
+- LANDED:
+  767b5ca5 Merge PR #3299 (coast9x72, fixes #3293) — multi-value call arg scalar widths vs callee result scalars, fail-open on untyped; 327 suites.
+  648c136b Merge PR #3296 (coast9x72, fixes #3292) — map key width compared on index AND delete, fail-open; 328 suites.
+  2070f668 Merge PR #3347 (coast9x72, fixes #3330) — untyped slice non-literal head E1002, mirrors hy-emit infer_slice_head; 329 suites. DUP resolved vs #3346.
+- GATE FAIL (evidence + superseded follow-up posted):
+  #3346 (Dimank92, fixes #3330, opened 4 min before #3347) — over-broad: rejects named-constant heads the emitter accepts; spike6 08-graph-ownership.hy false-positive E1002. Battery stopped 233/329. issuecomment-6594407789 + 6594435430.
+- All remote asserts green: ls-remote == HEAD after each push (767b5ca5, 648c136b, 2070f668). Reply posted per PR incl. dup notes; no silent closes.
+- Suite trajectory: 326 -> 329 (#3299, #3296, #3347). Final main 2070f668, tree clean.
+- NEXT TICK QUEUE: #3229 (slot loan via call) -> #3196 (fn lit scalar widths) -> #2948 -> #2977 -> #2863 -> tools flood (#3384/#3389/#3362/#3393) -> old tail (#2982/#3182/#3176/#3184/#2977). #3346 round-2 on re-push. #3308/#3298 round-2 on re-push.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978. (3346 vs 3347 RESOLVED.)
