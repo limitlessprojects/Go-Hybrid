@@ -1579,3 +1579,14 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 356 -> 359. Final main ca7fdaea, tree clean. All remote asserts green; replies posted per PR; no silent closes.
 - NEXT TICK QUEUE: #1740 (wminno int->float64 provenance, 8.5d, +294) -> #937 (magomedta make/new/void validation, 14.5d, +449) -> #3499 (pedromineo wildcard loan slices, +52, NO tests — scrutinize hard) -> #3503 (zc composite literal mismatch, +?) -> #1718 (behind 3) -> #1719 -> #3441 -> #3428 -> #3435 -> #3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
 - DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 78 — 2026-11-03 19:10 tick (2 landed: #3515/#3514; 1 gate-fail: #3517)
+
+- Recycle + restore (cache hits). scan healthy, approve 17/17 (4983 remaining).
+- LANDED:
+  452fbd0a Merge PR #3515 (aswadi, fixes #3513) — sync.wait_group/once method surfaces + waitgroup alias. 360 suites.
+  d8f28577 Merge PR #3514 (aswadi, fixes #3512) — emit shapes add->Add/done->Done/wait->Wait/do->Do + DEDUP of duplicate "filepath"/"url" import_path_of arms (out-of-title scope, disclosed in reply; duplicate match arms were unreachable; url_and_filepath test green post-dedup). 361 suites.
+- GATE FAIL: #3517 (Oepjdihc2008, fixes #3516) — 8/8 own tests fail: fixtures use uppercase `T` generic param, violating LX2 snake_case (HYB-E0001), so `must parse` helper dies before the check is exercised. Evidence reply posted; round-2 = rename T -> elem/t in fixtures. Logic itself untouched.
+- Suite trajectory: 359 -> 361. Final main d8f28577, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #3511 (produckq-boop E3013 mutating method values, +390/-181 big) -> #1740 (wminno, 8.5d, +294) -> #937 (magomedta, 14.5d, +449) -> #3499 (NO tests — scrutinize) -> #3503 -> #2867/#2940 (resurfaced on Pareto) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833 + now #3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
