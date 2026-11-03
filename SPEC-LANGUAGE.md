@@ -1366,9 +1366,20 @@ under the 25% adoption-cost tripwire. D5 adoption cost accepted.
 **C10 — `scope { ... }` blocks provide lexically-bounded structured concurrency.**
 Every `task` spawned inside a `scope` yields an affine `JoinHandle[T]` in state
 `UNJOINED`. A `scope` block cannot exit until all child handles are joined,
-cancelled, or drained. This transforms GUARANTEES.md Row 12 from "no claim about
-cancellation semantics" into a provable compile-time invariant: **Zero Orphan
-Tasks, Zero Goroutine Leaks, Complete Structured Concurrency** in the checked subset.
+cancelled, or drained. That is the containment half Row 12 declines to claim: it
+would turn "no claim about cancellation semantics" into a compile-time invariant —
+**Zero Orphan Tasks, Zero Goroutine Leaks, Complete Structured Concurrency** in the
+checked subset.
+
+**Landing status (2026-11-01): this clause is specified, not enforced.** `scope` is
+not in the grammar, and `hyb check` does not call `hy_check::task_scope`, so no
+program is rejected on `HYB-E3501`/`E3502`/`E3503` today and those codes are
+deliberately **absent from the diagnostics registry** — registering a code nothing
+emits would make the registry claim a rule it cannot produce. Row 12 therefore keeps
+its **No claim** cell. The claims table is now generated from `guarantees.json` and
+guarded by `tools/check_guarantees.py`, which will not let a row name a rule without
+a `tests/checker-corpus` fixture pinning the verdict: flipping Row 12 requires parser
+support plus CLI wiring, not a doc edit.
 
 **Surface syntax:**
 

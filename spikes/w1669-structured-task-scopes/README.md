@@ -15,10 +15,15 @@ with the foreign-Go boundary named explicitly rather than hidden.
 
 ✓ **M1**: Formal specification in SPEC-LANGUAGE.md §8.6 (clause C10)  
 ✓ **M2**: 25 canonical leaky patterns + 10 valid patterns (100% separation)  
-✓ **GUARANTEES.md Row 12**: Updated from "no claim" to a scoped guarantee  
+✓ **GUARANTEES.md Row 12**: NOT flipped — the claims table is generated from
+`guarantees.json` and a row cannot name `HYB-E3501`–`E3503` without a
+`tests/checker-corpus` fixture pinning them, which needs parser + CLI wiring this
+spike does not do. Row 12 stays **No claim**; see SPEC §8.6 "Landing status".  
 ✓ **66 tests**: 52 Python (37 core + 15 edge) + 14 Rust (8 unit + 6 integration), all passing  
 ✓ **Rust integration**: `compiler/crates/hy-check/src/task_scope.rs`  
-✓ **10 Examples**: Working .hy programs demonstrating all patterns  
+✓ **10 Examples**: `.hy` programs written against the §8.6 surface — they do NOT
+parse on today's `hyb` (no `scope` in the grammar); they are spec illustrations, not
+verified acceptance.  
 ✓ **Performance**: <100µs per scope check; lowering measured, not assumed  
 ✓ **Documentation**: Migration guide, formal types, cross-language comparison  
 
@@ -190,7 +195,7 @@ fail on HYB-E350x in the CLI path. That wiring is the next step.
 ## References
 
 - [SPEC-LANGUAGE.md §8.6](../../SPEC-LANGUAGE.md) — Formal specification
-- [GUARANTEES.md Row 12](../../GUARANTEES.md) — Compile-time guarantee
+- [GUARANTEES.md Row 12](../../GUARANTEES.md) — still **No claim**; the flip is gated on parser + CLI wiring (SPEC §8.6 Landing status)
 - [Issue #1669](https://github.com/limitlessprojects/Go-Hybrid/issues/1669) — Original proposal
 - [Nathaniel J. Smith](https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/) — Structured concurrency manifesto
 - [Martin Sustrik](http://250bpm.com/blog:71) — libmill/libdill structured concurrency

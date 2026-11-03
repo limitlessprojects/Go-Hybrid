@@ -167,7 +167,7 @@ Extension to dependent types could allow:
 ## References
 
 - SPEC-LANGUAGE.md §8.6 — Surface syntax and diagnostics
-- GUARANTEES.md Row 12 — Compile-time guarantee statement
+- GUARANTEES.md Row 12 — **No claim** today; the typing rules above are what would justify flipping it once enforced
 - spikes/w1669-structured-task-scopes/ — Reference implementation
 - Nathaniel J. Smith — Trio/structured concurrency in Python
 - Martin Sustrik — libmill/libdill structured concurrency in C

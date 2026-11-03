@@ -9,7 +9,7 @@ This transforms the Python prototype into a production-ready compiler feature wi
 - ✓ 8 unit tests + 6 integration tests (14 total, all passing)
 - ✓ Leak-free lowering to `sync.WaitGroup` (one heap allocation per scope; see "Lowering cost" below)
 - ✓ Three diagnostic codes: HYB-E3501, HYB-E3502, HYB-E3503
-- ✓ Complete SPEC-LANGUAGE.md §8.6 and GUARANTEES.md Row 12 updates
+- ✓ SPEC-LANGUAGE.md §8.6 (specified, not enforced); GUARANTEES.md Row 12 deliberately left at **No claim** — the generated claims table will not carry a rule with no corpus fixture
 
 ## Implementation Details
 
@@ -202,7 +202,7 @@ Phase 2.
 ## References
 
 - SPEC-LANGUAGE.md §8.6 — Formal specification
-- GUARANTEES.md Row 12 — Compile-time guarantee
+- GUARANTEES.md Row 12 — **No claim** (flip pending wiring)
 - compiler/crates/hy-check/src/task_scope.rs — Rust implementation
 - compiler/crates/hy-check/tests/task_scope_integration.rs — Integration tests
 - spikes/w1669-structured-task-scopes/ — Python prototype (reference)

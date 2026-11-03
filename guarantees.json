@@ -294,13 +294,13 @@
     },
     {
       "id": 12,
-      "surface": "`context.Context` cancellation trees",
-      "does": "Not modeled; the value itself is classified like any other at a check-site",
-      "claim": "**No claim** about cancellation semantics — the claim is about value sharing, not protocol liveness",
+      "surface": "`context.Context` cancellation trees; structured task scopes (§8.6, proposed)",
+      "does": "Not modeled; the value itself is classified like any other at a check-site. §8.6 (clause C10) specifies `scope { ... }` and an affine `JoinHandle[T]` with `HYB-E3501`/`E3502`/`E3503`, and a `hy-check` module implements the rules — but `scope` is not in the grammar and `hyb check` does not call the module, so no program is rejected on those codes today.",
+      "claim": "**No claim** about cancellation semantics — the claim is about value sharing, not protocol liveness. The containment half (§8.6) stays **unclaimed** until `hyb check` emits the codes and a `tests/checker-corpus` fixture pins each verdict; a claim with no fixture is an unbacked promise.",
       "strength": "no-claim",
       "rules": [],
       "fixtures": [],
-      "evidence_md": "§9.2 scope"
+      "evidence_md": "§9.2 scope; §8.6 (C10, proposed — not yet enforced); spike [spikes/w1669-structured-task-scopes/](spikes/w1669-structured-task-scopes/README.md) (25 leaky shapes + 10 valid programs, checked by `hy_check::task_scope`, not by the CLI)"
     },
     {
       "id": 13,
