@@ -891,6 +891,10 @@ impl Emitter {
         }
     }
 
+    fn is_unshadowed_builtin(&self, name: &str) -> bool {
+        !self.local_vars.contains(name) && !self.fn_shapes.contains_key(name)
+    }
+
     pub(crate) fn emit_call(
         &mut self,
         raw_callee: &Expr,
@@ -898,12 +902,15 @@ impl Emitter {
     ) -> Result<String, EmitError> {
         let callee = Self::unwrap_parens(raw_callee);
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
-        if matches!(callee, Expr::Ident { name, .. } if name == "make") {
+        if matches!(callee, Expr::Ident { name, .. } if name == "make")
+            && self.is_unshadowed_builtin("make")
+        {
             return self.emit_make(args);
         }
         // --- new(T) whose zero value allocates maps (N5, issue #645) ---
-        let is_new = matches!(callee, Expr::Ident { name, .. } if name == "new");
-        if is_new && !self.local_vars.contains("new") && !self.fn_shapes.contains_key("new") {
+        if matches!(callee, Expr::Ident { name, .. } if name == "new")
+            && self.is_unshadowed_builtin("new")
+        {
             if let Some(alloc) = self.n5_new(args) {
                 return Ok(alloc);
             }
@@ -1027,10 +1034,15 @@ impl Emitter {
         while let Expr::Paren { inner, .. } = bare_callee {
             bare_callee = inner;
         }
-        if matches!(bare_callee, Expr::Ident { name, .. } if name == "make") {
+        if matches!(bare_callee, Expr::Ident { name, .. } if name == "make")
+            && self.is_unshadowed_builtin("make")
+        {
             return self.emit_make(args);
         }
-        if matches!(bare_callee, Expr::Ident { name, .. } if name == "new") && args.len() == 1 {
+        if matches!(bare_callee, Expr::Ident { name, .. } if name == "new")
+            && self.is_unshadowed_builtin("new")
+            && args.len() == 1
+        {
             return self.emit_new(&args[0]);
         }
 
@@ -1040,33 +1052,35 @@ impl Emitter {
         //     name used to fall through to the verbatim emission below and
         //     die in Go as `undefined: u8`. Issue #147. ---
         if let Expr::Ident { name, .. } = callee {
-            if let Some(go) = super::shapes::go_primitive_name(name) {
-                if args.len() != 1 {
-                    return Err(EmitError::unsupported(format!(
-                        "`{}` conversion takes exactly one argument",
-                        name
-                    )));
+            if self.is_unshadowed_builtin(name) {
+                if let Some(go) = super::shapes::go_primitive_name(name) {
+                    if args.len() != 1 {
+                        return Err(EmitError::unsupported(format!(
+                            "`{}` conversion takes exactly one argument",
+                            name
+                        )));
+                    }
+                    // A CONSTANT operand that does not fit the target has to
+                    // be folded here: Go rejects `uint8(300)` outright (the
+                    // truncation Go does is only for a variable operand), yet
+                    // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
+                    // executable test-claim. The fold computes that same
+                    // two's-complement truncation at emit time.
+                    if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
+                        return Ok(format!("{}({})", go, folded));
+                    }
+                    let a = self.emit_call_arg(&args[0])?;
+                    return Ok(format!("{}({})", go, a));
                 }
-                // A CONSTANT operand that does not fit the target has to
-                // be folded here: Go rejects `uint8(300)` outright (the
-                // truncation Go does is only for a variable operand), yet
-                // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
-                // executable test-claim. The fold computes that same
-                // two's-complement truncation at emit time.
-                if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
-                    return Ok(format!("{}({})", go, folded));
+                if name == "len" && args.len() == 1 && self.is_set_expr(&args[0].value) {
+                    let a = self.emit_call_arg(&args[0])?;
+                    return Ok(format!("{}.len()", a));
                 }
-                let a = self.emit_call_arg(&args[0])?;
-                return Ok(format!("{}({})", go, a));
-            }
-            if name == "len" && args.len() == 1 && self.is_set_expr(&args[0].value) {
-                let a = self.emit_call_arg(&args[0])?;
-                return Ok(format!("{}.len()", a));
-            }
-            if name == "delete" && args.len() == 2 && self.is_set_expr(&args[0].value) {
-                let s = self.emit_call_arg(&args[0])?;
-                let v = self.emit_call_arg(&args[1])?;
-                return Ok(format!("{}.remove({})", s, v));
+                if name == "delete" && args.len() == 2 && self.is_set_expr(&args[0].value) {
+                    let s = self.emit_call_arg(&args[0])?;
+                    let v = self.emit_call_arg(&args[1])?;
+                    return Ok(format!("{}.remove({})", s, v));
+                }
             }
         }
 
