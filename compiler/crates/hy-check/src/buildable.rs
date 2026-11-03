@@ -543,6 +543,10 @@ struct Collector<'a> {
     /// signature (`None` = not a predeclared numeric spelling). Swapped
     /// together with `fn_results`.
     fn_result_scalars: Vec<Option<&'static str>>,
+    /// #3264 — exact predeclared numeric scalar type of each slice result of the
+    /// enclosing signature (`None` = not a slice or not a numeric element). Swapped
+    /// together with `fn_results`.
+    fn_result_slice_elem_scalars: Vec<Option<&'static str>>,
     /// Lexical nesting depth within loops (`for` / `loop`).
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
@@ -581,6 +585,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_results_error_tail: false,
             scalar_scopes: Vec::new(),
             fn_result_scalars: Vec::new(),
+            fn_result_slice_elem_scalars: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
             defines: Vec::new(),
@@ -679,15 +684,27 @@ impl<'a> Collector<'a> {
                         return Some(elem.to_string());
                     }
                 }
+                if let Some(target) = self.ck.type_aliases.get(name.as_str()) {
+                    if let TypeExpr::Slice { elem, .. } = target {
+                        return Some(elem.render());
+                    }
+                }
                 None
             }
             Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
             Expr::Slice { base, .. } => self.slice_element_type_name(base),
             Expr::Call { callee, args, .. } => {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
-                    if name == "make" {
+                    if name == "make" || name == "append" {
                         if let Some(first) = args.first() {
                             return self.slice_element_type_name(&first.value);
+                        }
+                    }
+                    if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                        if fd.results.len() == 1 {
+                            if let TypeExpr::Slice { elem, .. } = &fd.results[0].ty {
+                                return Some(elem.render());
+                            }
                         }
                     }
                 }
@@ -907,6 +924,74 @@ impl<'a> Collector<'a> {
             return None;
         }
         canonical_numeric_name(name)
+    }
+
+    /// #3264 — extracts the canonical numeric scalar name of a slice type's
+    /// element (e.g. `[]int64` -> `Some("int64")`, `[]f32` -> `Some("float32")`,
+    /// `[]byte` -> `Some("uint8")`). Returns `None` for non-slice types or
+    /// slices of non-numeric types.
+    fn slice_elem_scalar_of_ty(&self, ty: &TypeExpr) -> Option<&'static str> {
+        let TypeExpr::Slice { elem, .. } = ty else {
+            return None;
+        };
+        self.scalar_of_ty(elem).or_else(|| {
+            if let TypeExpr::Named { name, .. } = elem.as_ref() {
+                canonical_numeric_name(name)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// #3264 — extracts the canonical numeric scalar name of an expression's
+    /// slice element type, if known (via `slice_element_type_name`).
+    fn slice_elem_scalar_of_expr(&self, e: &Expr) -> Option<&'static str> {
+        let elem_name = self.slice_element_type_name(e)?;
+        canonical_numeric_name(&elem_name)
+    }
+
+    /// #3264 — returns true if `want_ty` is a slice with a known numeric scalar
+    /// element and `got_expr` is a slice with a known numeric scalar element,
+    /// but their element scalar widths differ (`int32` vs `int64`, etc.).
+    fn slice_elem_scalar_conflict(&self, want_ty: &TypeExpr, got_expr: &Expr) -> bool {
+        matches!(
+            (
+                self.slice_elem_scalar_of_ty(want_ty),
+                self.slice_elem_scalar_of_expr(got_expr)
+            ),
+            (Some(w), Some(g)) if w != g
+        )
+    }
+
+    /// #3264 — exact slice element scalar types of a call whose callee is
+    /// provably known (a non-generic top-level function).
+    fn call_result_slice_elem_scalars(
+        &self,
+        callee: &Expr,
+        _args: &[CallArg],
+    ) -> Option<Vec<Option<&'static str>>> {
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+            return None;
+        };
+        if self
+            .scopes
+            .iter()
+            .any(|layer| layer.contains_key(name.as_str()))
+        {
+            return None;
+        }
+        if let Some(fd) = self.ck.fns.get(name.as_str()) {
+            if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                return None;
+            }
+            return Some(
+                fd.results
+                    .iter()
+                    .map(|r| self.slice_elem_scalar_of_ty(&r.ty))
+                    .collect(),
+            );
+        }
+        None
     }
 
     /// #1031 — exact result types of a call whose callee is provably known:
@@ -1372,7 +1457,11 @@ impl<'a> Collector<'a> {
         }
         let result_scalars: Vec<Option<&'static str>> =
             f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+        let result_slice_elem_scalars: Vec<Option<&'static str>> =
+            f.results.iter().map(|r| self.slice_elem_scalar_of_ty(&r.ty)).collect();
         let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
+        let outer_slice_elem_scalars =
+            std::mem::replace(&mut self.fn_result_slice_elem_scalars, result_slice_elem_scalars);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -1389,6 +1478,7 @@ impl<'a> Collector<'a> {
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
         self.fn_result_scalars = outer_scalars;
+        self.fn_result_slice_elem_scalars = outer_slice_elem_scalars;
         self.fn_type_params = outer_tp;
         self.pop_scope();
     }
@@ -2383,7 +2473,11 @@ impl<'a> Collector<'a> {
                 );
                 let result_scalars: Vec<Option<&'static str>> =
                     results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+                let result_slice_elem_scalars: Vec<Option<&'static str>> =
+                    results.iter().map(|r| self.slice_elem_scalar_of_ty(&r.ty)).collect();
                 let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
+                let outer_slice_elem_scalars =
+                    std::mem::replace(&mut self.fn_result_slice_elem_scalars, result_slice_elem_scalars);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -2396,6 +2490,7 @@ impl<'a> Collector<'a> {
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
                 self.fn_result_scalars = outer_scalars;
+                self.fn_result_slice_elem_scalars = outer_slice_elem_scalars;
                 self.pop_scope();
             }
             Expr::Paren { inner, .. } => self.expr(inner),
@@ -3986,6 +4081,10 @@ impl<'a> Collector<'a> {
                     Expr::Call { callee, args, .. } => self.call_result_scalars(callee, args),
                     _ => None,
                 };
+                let got_slice_elem_scalars = match unwrap_parens(&args[0].value) {
+                    Expr::Call { callee, args: cargs, .. } => self.call_result_slice_elem_scalars(callee, cargs),
+                    _ => None,
+                };
                 for (i, (p, got)) in f.params.iter().zip(got_kinds.iter()).enumerate() {
                     let want = self.kind_of_ty(&p.ty, 0);
                     let want_scalar = self.scalar_of_ty(&p.ty);
@@ -3996,13 +4095,37 @@ impl<'a> Collector<'a> {
                         (want_scalar, got_scalar),
                         (Some(w), Some(g)) if w != g
                     );
-                    if kinds_conflict(&want, got) || width_conflict {
-                        let got_label = got_scalar
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| got.label());
-                        let want_label = want_scalar
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| want.label());
+                    let slice_elem_scalar_mismatch = matches!(
+                        (
+                            self.slice_elem_scalar_of_ty(&p.ty),
+                            got_slice_elem_scalars.as_ref().and_then(|s| s.get(i).copied().flatten())
+                        ),
+                        (Some(w), Some(g)) if w != g
+                    );
+                    if kinds_conflict(&want, got) || width_conflict || slice_elem_scalar_mismatch {
+                        let (got_label, want_label) = if slice_elem_scalar_mismatch {
+                            (
+                                got_slice_elem_scalars
+                                    .as_ref()
+                                    .and_then(|s| s.get(i).copied().flatten())
+                                    .map(|s| format!("[]{}", s))
+                                    .unwrap_or_else(|| got.label().to_string()),
+                                self.slice_elem_scalar_of_ty(&p.ty)
+                                    .map(|s| format!("[]{}", s))
+                                    .unwrap_or_else(|| want.label().to_string()),
+                            )
+                        } else if width_conflict {
+                            (
+                                got_scalar
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| got.label().to_string()),
+                                want_scalar
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| want.label().to_string()),
+                            )
+                        } else {
+                            (got.label().to_string(), want.label().to_string())
+                        };
                         self.emit_e1002(
                             args[0].value.span(),
                             format!(
@@ -4039,21 +4162,37 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
+            // #3264: both sides share `OpKind::Slice(Int)` / `Slice(Float)`
+            // but differ in element scalar width (`[]int32` vs `[]int64`).
+            let slice_elem_scalar_mismatch = self.slice_elem_scalar_conflict(&p.ty, &a.value);
             if kinds_conflict(&want, &got)
                 || int_to_float_conflict
                 || scalar_mismatch
+                || slice_elem_scalar_mismatch
                 || self.sized_array_names_differ(
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
                 )
             {
+                let (got_label, want_label) = if slice_elem_scalar_mismatch {
+                    (
+                        self.slice_elem_scalar_of_expr(&a.value)
+                            .map(|s| format!("[]{}", s))
+                            .unwrap_or_else(|| got.label().to_string()),
+                        self.slice_elem_scalar_of_ty(&p.ty)
+                            .map(|s| format!("[]{}", s))
+                            .unwrap_or_else(|| want.label().to_string()),
+                    )
+                } else {
+                    (got.label().to_string(), want.label().to_string())
+                };
                 self.emit_e1002(
                     a.value.span(),
                     format!(
                         "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
                         a.value.render(),
-                        got.label(),
-                        want.label(),
+                        got_label,
+                        want_label,
                         name
                     ),
                     "argument types must match declared parameter types",
@@ -4094,21 +4233,36 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
+            // #3264: slice element scalar width mismatch.
+            let slice_elem_scalar_mismatch = self.slice_elem_scalar_conflict(&p.ty, &a.value);
             if kinds_conflict(&want, &got)
                 || int_to_float_conflict
                 || scalar_mismatch
+                || slice_elem_scalar_mismatch
                 || self.sized_array_names_differ(
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
                 )
             {
+                let (got_label, want_label) = if slice_elem_scalar_mismatch {
+                    (
+                        self.slice_elem_scalar_of_expr(&a.value)
+                            .map(|s| format!("[]{}", s))
+                            .unwrap_or_else(|| got.label().to_string()),
+                        self.slice_elem_scalar_of_ty(&p.ty)
+                            .map(|s| format!("[]{}", s))
+                            .unwrap_or_else(|| want.label().to_string()),
+                    )
+                } else {
+                    (got.label().to_string(), want.label().to_string())
+                };
                 self.emit_e1002(
                     a.value.span(),
                     format!(
                         "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
                         a.value.render(),
-                        got.label(),
-                        want.label(),
+                        got_label,
+                        want_label,
                         sn,
                         name
                     ),
@@ -4136,14 +4290,27 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let slice_elem_scalar_mismatch = self.slice_elem_scalar_conflict(&p.ty, &a.value);
+            if kinds_conflict(&want, &got) || slice_elem_scalar_mismatch {
+                let (got_label, want_label) = if slice_elem_scalar_mismatch {
+                    (
+                        self.slice_elem_scalar_of_expr(&a.value)
+                            .map(|s| format!("[]{}", s))
+                            .unwrap_or_else(|| got.label().to_string()),
+                        self.slice_elem_scalar_of_ty(&p.ty)
+                            .map(|s| format!("[]{}", s))
+                            .unwrap_or_else(|| want.label().to_string()),
+                    )
+                } else {
+                    (got.label().to_string(), want.label().to_string())
+                };
                 self.emit_e1002(
                     a.value.span(),
                     format!(
                         "cannot use `{}` (value of type `{}`) as `{}` value in argument to func literal (HYB-E1002)",
                         a.value.render(),
-                        got.label(),
-                        want.label()
+                        got_label,
+                        want_label
                     ),
                     "argument types must match closure parameter types",
                 );
@@ -4164,11 +4331,14 @@ impl<'a> Collector<'a> {
             if let Expr::Call { callee, args, .. } = unwrap_parens(&values[0]) {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     let res_scalars = self.call_result_scalars(callee, args);
+                    let res_slice_elem_scalars = self.call_result_slice_elem_scalars(callee, args);
                     if res.len() == want.len() {
                         for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
                             if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
                                 let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
                                 self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
+                                let got_slice_elem = res_slice_elem_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
+                                self.report_slice_elem_return_mismatch_scalar(got_slice_elem, i, values[0].span());
                             }
                         }
                         return;
@@ -4181,6 +4351,8 @@ impl<'a> Collector<'a> {
                             if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
                                 let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
                                 self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
+                                let got_slice_elem = res_slice_elem_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
+                                self.report_slice_elem_return_mismatch_scalar(got_slice_elem, i, values[0].span());
                             }
                         }
                         return;
@@ -4232,6 +4404,8 @@ impl<'a> Collector<'a> {
                     if !self.report_return_conflict(v, &got, w, v.span()) {
                         let got_s = self.typed_value_scalar(v);
                         self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                        let got_slice_elem = self.slice_elem_scalar_of_expr(v);
+                        self.report_slice_elem_return_mismatch_scalar(got_slice_elem, i, v.span());
                     }
                 }
                 return;
@@ -4264,6 +4438,8 @@ impl<'a> Collector<'a> {
             if !self.report_return_conflict(v, &got, w, v.span()) {
                 let got_s = self.typed_value_scalar(v);
                 self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                let got_slice_elem = self.slice_elem_scalar_of_expr(v);
+                self.report_slice_elem_return_mismatch_scalar(got_slice_elem, i, v.span());
             }
         }
     }
@@ -4300,6 +4476,32 @@ impl<'a> Collector<'a> {
                 "cannot return a value of type `{got}` from a function declaring `{want}` — Go refuses `cannot use ... (variable of type {got}) as {want} value in return statement` (HYB-E1002)"
             ),
             "Go has no implicit conversion between typed numeric values; write an explicit conversion (`float64(n)`) when a conversion is intended",
+        );
+    }
+
+    /// #3264 — a TYPED slice value returned into a slice result of a different
+    /// element scalar width (`[]int32` → `[]int64`, `[]float32` → `[]float64`, etc.).
+    /// `kinds_conflict` cannot see these because `OpKind::Slice(Int)` equals
+    /// `OpKind::Slice(Int)`.
+    fn report_slice_elem_return_mismatch_scalar(
+        &mut self,
+        got: Option<&'static str>,
+        idx: usize,
+        span: Span,
+    ) {
+        let Some(got) = got else { return };
+        let Some(want) = self.fn_result_slice_elem_scalars.get(idx).copied().flatten() else {
+            return;
+        };
+        if got == want {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "cannot return a value of type `[]{got}` from a function declaring `[]{want}` — Go refuses `cannot use ... (variable of type []{got}) as []{want} value in return statement` (HYB-E1002)"
+            ),
+            "Go has no implicit conversion between slice types with different element types; elements must match the declared slice element type",
         );
     }
 
