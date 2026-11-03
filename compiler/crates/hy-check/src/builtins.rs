@@ -9,7 +9,7 @@
 //! Literal-only scope mirrors the landed #149 / #148 const-arith checks:
 //! variable operands stay a run-time concern, matching Go.
 
-use crate::const_overflow::{const_int_fold_with, ConstFold};
+use crate::const_overflow::ConstFold;
 use crate::model::{unwrap_parens, unwrap_parens_and_move, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{ChanDir, Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
@@ -22,9 +22,18 @@ impl<'a> Checker<'a> {
     pub(crate) fn check_stmt_builtins(&mut self, st: &FnState, stmt: &Stmt) {
         self.check_stmt_defer_call(stmt);
         self.zd_defined.clear();
-        self.zd_defined.extend(st.env.keys().cloned());
+        self.zd_defined.extend(
+            st.env
+                .iter()
+                .filter(|(_, b)| !b.immutable)
+                .map(|(k, _)| k.clone()),
+        );
         for sc in &st.scopes {
-            self.zd_defined.extend(sc.keys().cloned());
+            self.zd_defined.extend(
+                sc.iter()
+                    .filter(|(_, b)| !b.immutable)
+                    .map(|(k, _)| k.clone()),
+            );
         }
         self.check_stmt_builtin_args_inner(st, stmt, /*deep=*/ false);
         self.zd_defined.clear();
@@ -1188,7 +1197,7 @@ fn classify_make_size(&self, e: &Expr) -> MakeSize {
         _ if expr_mentions_bound(bare, &self.zd_defined, &self.closure_bound) => {
             MakeSize::NonLiteral
         }
-        _ => match const_int_fold_with(bare, &self.const_values, 0, None) {
+        _ => match self.const_int_fold_expr(bare, None) {
             ConstFold::Val(n) if n < 0 => MakeSize::Negative,
             ConstFold::Val(n) if n > i64::MAX as i128 => MakeSize::Overflow,
             ConstFold::Val(n) => MakeSize::Ok(n),
