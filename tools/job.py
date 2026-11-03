@@ -171,7 +171,9 @@ def kaggle_wait(minutes, slug=None):
         if remaining <= 0:
             break
         try:
-            rc, out = sh("{} kernels status {}".format(
+            # Replace the shell so its timeout kills and reaps the status CLI,
+            # rather than leaving the CLI running as an orphan.
+            rc, out = sh("exec {} kernels status {}".format(
                 shlex.quote(KAGGLE_CLI), shlex.quote(slug)), timeout=min(60, remaining))
         except subprocess.TimeoutExpired:
             # A stalled status request is unknown, not a kernel failure.

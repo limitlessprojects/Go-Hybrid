@@ -1,6 +1,6 @@
 # STATUS (for the human — 15 lines max)
 
-- Contributor candidate (2026-11-03): Kaggle wait uses a monotonic budget for polls/sleeps and handles status timeouts; 5 deadline regressions and 503 Python 3.12 tooling tests pass. Full compiler/hosted CI and review remain pending; see PLAN.md.
+- Contributor candidate (2026-11-03): Kaggle wait bounds polls/sleeps and reaps a timed-out status CLI via shell exec; 6 deadline/process regressions and all 504 Python 3.12 tooling tests pass. Prior full fork CI is historical; follow-up hosted checks/review pending. See PLAN.md.
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
 
 - Contributor #1165: range bounds spelled as different names of one Go integer type no longer raise a false HYB-E2009 (shared canonicaliser in `hy-check` + regression pin); workspace/corpus/differential/CI remain delivery gates.

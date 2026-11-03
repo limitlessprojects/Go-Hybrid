@@ -3,8 +3,13 @@
 import contextlib
 import importlib.util
 import io
+import os
 from pathlib import Path
+import signal
 import subprocess
+import sys
+import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -94,6 +99,41 @@ class KaggleWaitDeadlineTests(unittest.TestCase):
              mock.patch.object(job, "sh", return_value=(1, "temporary status failure")):
             self.assertEqual(job.kaggle_wait(0.01, "owner/kernel"), 2)
         self.assertAlmostEqual(self.clock.now, 0.6)
+
+
+class KaggleWaitSubprocessTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "job.py uses /bin/sh")
+    def test_real_stalled_cli_is_terminated_at_the_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            started = root / "started"
+            cli = root / "fake kaggle's cli"
+            cli.write_text(
+                "#!{}\n".format(sys.executable)
+                + "from pathlib import Path\nimport os\nimport time\n"
+                + "Path({!r}).write_text(str(os.getpid()))\n".format(str(started))
+                + "time.sleep(1.5)\n",
+                encoding="utf-8",
+            )
+            cli.chmod(0o700)
+            output = io.StringIO()
+            before = time.monotonic()
+            with mock.patch.object(job, "KAGGLE_CLI", str(cli)), contextlib.redirect_stdout(output):
+                result = job.kaggle_wait(1 / 240, "owner/kernel with 'quotes'")
+            elapsed = time.monotonic() - before
+            self.assertTrue(started.exists(), "the real CLI must have started")
+            self.assertEqual(result, 2)
+            self.assertIn("TIMEOUT", output.getvalue())
+            self.assertLess(elapsed, 1.0, "the overall deadline was exceeded")
+            pid = int(started.read_text())
+            try:
+                with self.assertRaises(ProcessLookupError, msg="the CLI survived its timeout"):
+                    os.kill(pid, 0)
+            finally:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
 
 
 if __name__ == "__main__":
