@@ -736,8 +736,8 @@ impl Emitter {
                 "`defer <expr>?` — the `?` operand of a defer must be a call (HYB-E2001)",
             ));
         };
-        let target = match (&self.defer_err_target, self.fnlit_depth) {
-            (Some(t), 0) => t.clone(),
+        let target = match &self.defer_err_target {
+            Some(t) => t.clone(),
             _ => {
                 return Err(EmitError::unsupported(
                     "`defer f()?` here has no error result to propagate into at function exit \

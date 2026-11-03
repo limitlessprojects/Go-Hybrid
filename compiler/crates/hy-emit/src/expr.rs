@@ -430,6 +430,8 @@ impl Emitter {
                 // and let main keep running), not the outer fn's zero-value
                 // return list (the wrong arity for this literal).
                 let saved_main_closure = std::mem::replace(&mut self.in_main_closure, false);
+                // `defer f()?` inside a closure has no landing spot in its own results.
+                let saved_defer_target = self.defer_err_target.take();
                 let closure_err_returns = if matches!(
                     results.last().map(|r| &r.ty),
                     Some(TypeExpr::Named { name, .. }) if name == "error"
@@ -485,6 +487,7 @@ impl Emitter {
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.in_main_closure = saved_main_closure;
+                self.defer_err_target = saved_defer_target;
                 self.cur_fn_error_returns = saved_err_returns;
                 self.cur_option_result = saved_opt;
                 self.cur_fn_conv_result = saved_conv;
