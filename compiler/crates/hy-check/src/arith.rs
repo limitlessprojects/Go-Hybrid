@@ -99,7 +99,8 @@ impl<'a> Checker<'a> {
                             &self.const_values,
                             st,
                             &self.zd_defined,
-                        ))
+                        )
+                        || self.local_const_divisor_is_zero(&values[0], st))
                 {
                     self.emit_const_zero_divisor(*span, assign_op_txt(*op));
                 }
@@ -240,6 +241,7 @@ impl<'a> Checker<'a> {
                     // names defined inside a deep-walked closure body fail open
                     // (`self.zd_defined`). Runtime divisors stay out of scope.
                     if divisor_int_fold_is_zero(rhs, &self.const_values, st, &self.zd_defined)
+                        || self.local_const_divisor_is_zero(rhs, st)
                         || is_float_literal_zero(rhs) && is_const_expr(lhs)
                         || divisor_float_fold_is_zero(rhs, &self.const_values, st, &self.zd_defined)
                             && is_const_map_expr(lhs, &self.const_values, st, &self.zd_defined)
@@ -348,6 +350,14 @@ impl<'a> Checker<'a> {
                 "fix: use a non-zero constant, or bind the divisor to a variable if a run-time panic is the intended behaviour".to_string(),
             ]),
         );
+    }
+
+    fn local_const_divisor_is_zero(&self, e: &Expr, st: &crate::model::FnState) -> bool {
+        self.zd_defined.is_empty()
+            && matches!(
+                self.const_int_fold_expr(e, Some(st)),
+                crate::const_overflow::ConstFold::Val(0)
+            )
     }
 }
 
