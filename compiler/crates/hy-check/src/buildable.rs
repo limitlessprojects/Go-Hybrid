@@ -718,40 +718,30 @@ impl<'a> Collector<'a> {
 
     fn slice_element_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
+        if let Some((_, elem, _)) = bare.as_array_lit() {
+            return Some(elem.render());
+        }
         match bare {
             Expr::Ident { name, .. } => {
                 if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(elem) = self.named_slice_element_name(&tname) {
+                        return Some(elem);
+                    }
                     if let Some(elem) = tname.strip_prefix("[]") {
                         return Some(elem.to_string());
                     }
-                    if let Some(elem) = tname.strip_prefix("[") {
+                    if let Some(elem) = tname.strip_prefix('[') {
                         if let Some(close) = elem.find(']') {
-                            return Some(elem[close + 1..].to_string());
-                        }
-                    }
-                }
-                None
-            }
-            Expr::SliceLit { elem: Some(t), .. } => {
-                match t.as_ref() {
-                    TypeExpr::Array { elem, .. } => Some(elem.render()),
-                    TypeExpr::Slice { elem, .. } => Some(elem.render()),
-                    _ => {
-                        let r = t.render();
-                        if let Some(elem) = r.strip_prefix("[]") {
-                            Some(elem.to_string())
-                        } else if let Some(elem) = r.strip_prefix("[") {
-                            if let Some(close) = elem.find(']') {
-                                Some(elem[close + 1..].to_string())
-                            } else {
-                                Some(r)
+                            let inner = elem[close + 1..].trim();
+                            if !inner.is_empty() {
+                                return Some(inner.to_string());
                             }
-                        } else {
-                            Some(r)
                         }
                     }
                 }
+                self.named_slice_element_name(name)
             }
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
             Expr::Slice { base, .. } => self.slice_element_type_name(base),
             Expr::Call { callee, args, .. } => {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
@@ -1813,7 +1803,12 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                let bare_val = unwrap_parens(val);
+                if let Some((_, _, array_ty)) = bare_val.as_array_lit() {
+                    self.bind_type_name(name, array_ty.render());
+                } else if let Expr::SliceLit { elem: Some(t), .. } = bare_val {
+                    self.bind_type_name(name, format!("[]{}", t.render()));
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
                 }
             }
