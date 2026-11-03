@@ -609,12 +609,6 @@ impl<'a> Lexer<'a> {
                         break;
                     }
                 }
-                if self.at(0).is_some_and(|c| c.is_ascii_alphabetic()) {
-                    while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
-                        s.push(self.bump().unwrap());
-                    }
-                    self.escape_diag(start, false, "malformed float literal: invalid character in exponent (SPEC-LANGUAGE.md LX6)");
-                }
             } else {
                 is_float = true;
                 for _ in 0..k {
@@ -628,12 +622,15 @@ impl<'a> Lexer<'a> {
         }
         if is_float {
             if self.at(0) == Some('.') && self.at(1) != Some('.') {
-                s.push('.');
-                self.bump();
-                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric() || (c == '.' && self.at(1) != Some('.'))) {
                     s.push(self.bump().unwrap());
                 }
                 self.escape_diag(start, false, "malformed float literal: unexpected second . in float literal (SPEC-LANGUAGE.md LX6)");
+            } else if self.at(0).is_some_and(|c| c.is_ascii_alphabetic()) {
+                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                    s.push(self.bump().unwrap());
+                }
+                self.escape_diag(start, false, "malformed float literal: invalid character in float literal (SPEC-LANGUAGE.md LX6)");
             }
             self.tok(start, Tok::Float(s))
         } else {
