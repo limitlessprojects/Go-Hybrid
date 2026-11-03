@@ -151,12 +151,13 @@ impl Diagnostic {
     }
 
     fn build(code: &str, severity: Severity, file: String, span: Span, message: String) -> Self {
-        assert_severity_code_coherence(code, severity);
-        let entry = Registry::global().lookup(code);
+        let normalized_code = code.trim().replace('_', "-");
+        assert_severity_code_coherence(&normalized_code, severity);
+        let entry = Registry::global().lookup(&normalized_code);
         Diagnostic {
             code: entry
                 .map(|e| e.code.clone())
-                .unwrap_or_else(|| code.trim().to_ascii_uppercase()),
+                .unwrap_or_else(|| normalized_code.to_ascii_uppercase()),
             name: entry.map(|e| e.name.clone()).unwrap_or_default(),
             severity,
             file,
@@ -354,12 +355,16 @@ impl Registry {
     /// Resolve a code by any of its accepted spellings:
     /// `HYB-E3001`, `E3001`, `3001` (case-insensitive), or machine name.
     pub fn lookup(&self, query: &str) -> Option<&RegistryEntry> {
-        let raw = query.trim();
+        let raw = query.trim().replace('_', "-");
         let q = raw.to_ascii_uppercase();
         self.data.codes.iter().find(|c| {
             let short = c.code.strip_prefix("HYB-").unwrap_or(&c.code);
             let digits = short.strip_prefix('E').unwrap_or(short);
-            c.code == q || short == q || digits == q || q.strip_prefix("HYB-") == Some(digits) || c.name.eq_ignore_ascii_case(raw)
+            c.code == q
+                || short == q
+                || digits == q
+                || q.strip_prefix("HYB-") == Some(digits)
+                || c.name.eq_ignore_ascii_case(&raw)
         })
     }
 
@@ -405,8 +410,15 @@ impl Registry {
 /// an error, and a non-`E8nnn` code can never be constructed as a warning.
 /// Runs as a debug assert AND is unit-tested in release (`#[test]`).
 pub fn assert_severity_code_coherence(code: &str, severity: Severity) {
-    let canonical = Registry::global().lookup(code).map(|e| e.code.clone()).unwrap_or_else(|| code.trim().to_ascii_uppercase());
-    let is_lint = canonical.contains("-E8") || canonical.starts_with("E8") || canonical.starts_with("8");
+    let normalized_code = code.trim().replace('_', "-");
+    let canonical = Registry::global()
+        .lookup(&normalized_code)
+        .map(|e| e.code.clone())
+        .unwrap_or_else(|| normalized_code.to_ascii_uppercase());
+    let is_lint = canonical.contains("-E8")
+        || canonical.contains("-8")
+        || canonical.starts_with("E8")
+        || canonical.starts_with("8");
     let is_err = severity == Severity::Error;
     debug_assert!(
         !(is_lint && is_err),
@@ -530,7 +542,8 @@ mod tests {
         assert_severity_code_coherence("HYB-E3001", Severity::Error);
         assert!(Registry::global().lookup("HYB-HYB-E3003").is_none());
         assert!(Registry::global().lookup("USE-AFTER-MOVE").is_some());
-        let s = Span::new(Pos::new(5, 1), Pos::new(5, 8)).to(Span::new(Pos::new(2, 4), Pos::new(2, 10)));
+        let s = Span::new(Pos::new(5, 1), Pos::new(5, 8))
+            .to(Span::new(Pos::new(2, 4), Pos::new(2, 10)));
         assert_eq!((s.start, s.end), (Pos::new(2, 4), Pos::new(5, 8)));
     }
 }
