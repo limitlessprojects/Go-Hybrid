@@ -519,6 +519,15 @@ impl<'a> Checker<'a> {
                                     sub_items,
                                     *sub_span,
                                 );
+                            } else if let TypeExpr::Slice { elem: sub_elem, .. } = &resolved_elem {
+                                for sub_i in sub_items {
+                                    self.check_const_overflow_init(
+                                        "slice literal element",
+                                        sub_elem,
+                                        sub_i,
+                                        Some(st),
+                                    );
+                                }
                             }
                         }
                     }
@@ -537,10 +546,60 @@ impl<'a> Checker<'a> {
                 self.check_type_expr_with_state(Some(st), value);
                 let key_ty = *key.clone();
                 let val_ty = *value.clone();
+                let resolved_key = self.resolve_type_alias(&key_ty);
+                let resolved_val = self.resolve_type_alias(&val_ty);
                 self.check_map_literal_duplicate_keys(entries, Some(st));
                 for (k, v) in entries {
                     self.check_const_overflow_init("map literal key", &key_ty, k, Some(st));
                     self.check_const_overflow_init("map literal value", &val_ty, v, Some(st));
+                    if let Expr::SliceLit {
+                        elem: None,
+                        items: sub_items,
+                        span: sub_span,
+                    } = unwrap_parens(k)
+                    {
+                        if matches!(resolved_key, TypeExpr::Array { .. }) {
+                            self.check_array_lit_emit_guard(
+                                Some(st),
+                                &resolved_key,
+                                sub_items,
+                                *sub_span,
+                            );
+                        } else if let TypeExpr::Slice { elem: sub_elem, .. } = &resolved_key {
+                            for sub_k in sub_items {
+                                self.check_const_overflow_init(
+                                    "map literal key element",
+                                    sub_elem,
+                                    sub_k,
+                                    Some(st),
+                                );
+                            }
+                        }
+                    }
+                    if let Expr::SliceLit {
+                        elem: None,
+                        items: sub_items,
+                        span: sub_span,
+                    } = unwrap_parens(v)
+                    {
+                        if matches!(resolved_val, TypeExpr::Array { .. }) {
+                            self.check_array_lit_emit_guard(
+                                Some(st),
+                                &resolved_val,
+                                sub_items,
+                                *sub_span,
+                            );
+                        } else if let TypeExpr::Slice { elem: sub_elem, .. } = &resolved_val {
+                            for sub_v in sub_items {
+                                self.check_const_overflow_init(
+                                    "map literal value element",
+                                    sub_elem,
+                                    sub_v,
+                                    Some(st),
+                                );
+                            }
+                        }
+                    }
                     self.check_expr_emit_guard(st, k);
                     self.check_expr_emit_guard(st, v);
                 }
