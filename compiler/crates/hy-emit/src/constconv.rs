@@ -255,12 +255,37 @@ impl WideInt {
 fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
     use hy_syntax::{BinOp, Expr, UnOp};
     match expr {
-        Expr::Paren { inner, .. } => const_int_expr(inner),
+        Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => const_int_expr(inner),
         Expr::Unary {
             op: UnOp::Neg,
             operand,
             ..
         } => const_int_expr(operand)?.checked_neg(),
+        Expr::Call { callee, args, .. } => {
+            let Expr::Ident { name, .. } = callee.as_ref() else { return None };
+            if let Some((bits, signed)) = width_of(name) {
+                if args.len() == 1 && !args[0].spread {
+                    let v = const_int_expr(&args[0].value)?;
+                    return Some(WideInt::from_i128(v.truncate_to_width(bits, signed)));
+                }
+            } else if name == "len" && args.len() == 1 && !args[0].spread {
+                let mut a = &args[0].value;
+                while let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = a {
+                    a = inner;
+                }
+                if let Expr::Lit { kind: LitKind::Str(st) | LitKind::RawStr(st), .. } = a {
+                    return Some(WideInt::from_i128(st.len() as i128));
+                }
+            } else if (name == "min" || name == "max") && !args.is_empty() && args.iter().all(|a| !a.spread) {
+                let mut acc = const_int_expr(&args[0].value)?.to_i128()?;
+                for a in &args[1..] {
+                    let v = const_int_expr(&a.value)?.to_i128()?;
+                    acc = if name == "min" { acc.min(v) } else { acc.max(v) };
+                }
+                return Some(WideInt::from_i128(acc));
+            }
+            None
+        }
         Expr::Lit {
             kind: LitKind::Int(t),
             ..
@@ -300,9 +325,12 @@ fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool) -> 
         return true;
     }
     match expr {
-        Expr::Paren { inner, .. } | Expr::Unary { operand: inner, .. } => {
+        Expr::Paren { inner, .. }
+        | Expr::Move { operand: inner, .. }
+        | Expr::Unary { operand: inner, .. } => {
             has_out_of_range_subexpr(inner, bits, signed)
         }
+        Expr::Call { .. } => true,
         Expr::Binary { lhs, rhs, .. } => {
             has_out_of_range_subexpr(lhs, bits, signed)
                 || has_out_of_range_subexpr(rhs, bits, signed)

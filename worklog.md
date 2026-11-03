@@ -1418,3 +1418,38 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 321 -> 322 -> 323 -> 324. Final main 7e0a1688, tree clean.
 - NEXT TICK QUEUE: #3169 (hy-emit closure error-tail, 6 files — budget it first) -> #3299 -> #3296 -> #3347 (dup-check vs #3346 which dropped off Pareto) -> #3308 -> #3384 -> #3389 -> #3362 -> #3393 -> old tail (#2982/#3182/#3176/#3184/#2948/#2977/#1811/#2863/#3207/#2517). #3300 still behind — awaiting harness fix.
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
+
+## Session 66 — 2026-11-03 07:10 tick (1 landed: #1818; 1 gate-fail: #3409 double-report)
+
+- Recycle + restore (full evaporate again: go tarball re-downloaded + backfilled, CARGO_TARGET_DIR cold rebuild one call). scan OK (3rd tick running); approve 30/30 (4970 remaining).
+- LANDED:
+  16df42dc Merge PR #1818 (gorky117-cell, fixes #1813) — 7.7d-old test-only PR finally at Pareto top: 4 regression tests pin rejection of int(p)/string(p)/int(arr)/string(arr) with HYB-E1002 + "cannot convert" message. Checker behavior pre-existing on main. ALL-GREEN vs 186745ca, 324 suites.
+- GATE FAIL (evidence posted, not landed):
+  #3409 (alexrayyandev, fixes #3405) — chan_direction_coercion suite 16/18. E3012 fires correctly (repro_06 holder{ch: sc} send-only->recv-only field) but a SECONDARY E1002 is appended for the same operand: left [E3012, E1002] vs right [E3012]; repro_10 left [E3012, E3012, E1002] vs right [E3012, E3012]. Double-reporting: new container-elem check + pre-existing operand/width check both report. Offered (a) suppress secondary E1002 when E3012 already fired (preferred, dedup by span/expr), (b) relax to contains(). issuecomment-6591066318.
+- Suite trajectory: 324 (unchanged; #1818 test-only). Final main 16df42dc, tree clean.
+- NEXT TICK QUEUE: #3169 (hy-emit, 6 files) -> #3415 ([N]T(s) array conversions) -> #3299 -> #3296 -> #3347 (dup-check vs #3346) -> #3308 -> #3384 -> #3389 -> #3362 -> #3393 -> old tail. #3409 round-2 if author suppresses the double-report. #3300 still behind.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
+
+## Session 67 — 2026-11-03 08:10 tick (1 landed: #3169; #3409 round-2 still double-reporting)
+
+- Recycle + restore (full evaporate again; cold rebuild one call). scan OK (4th tick running); approve 26/26 (4974 remaining).
+- LANDED:
+  e8b717df Merge PR #3169 (aswadi, fixes #2969 + #2972) — hy-emit: FnLit frames save/restore cur_option_result + cur_fn_conv_result (closure `?` zero-fills error tail via own result ctx); fnlit_depth bypass+field removed; const_int_expr folds width convs, len("lit"), min/max; has_out_of_range_subexpr conservative on Calls. New constconv_int_fold_3084 suite. ALL-GREEN vs 23beca2e, 325 suites.
+- GATE FAIL round-2 (evidence posted):
+  #3409 (alexrayyandev, fixes #3405) — author force-pushed rewrite (r1 head 7a23523f GONE, single commit e5803870). Same 2 failures byte-identical: [E3012, E1002] vs [E3012] (repro_06), [E3012, E3012, E1002] vs [E3012, E3012] (repro_10). ROOT CAUSE LOCATED in r2 diff: container_or_alias_mismatch was fed into the conflict condition that emits E1002 — but E3012 already fires from the direction site. One-line fix given: drop `|| container_or_alias_mismatch` from the E1002 conflict arm (or emit E3012 there + dedup guard). issuecomment-6592000540.
+- Suite trajectory: 324 -> 325 (#3169). Final main e8b717df, tree clean.
+- NEXT TICK QUEUE: #3299 (multi-value call arg widths) -> #3296 -> #3347 (dup-check vs #3346) -> #3308 -> #3229 (slot loan via call) -> #3298 (append dims) -> #3196 (fn lit scalar widths) -> tools flood (#3384/#3389/#3362/#3393) -> old tail. #3409 round-3 if author applies the one-line fix.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
+
+## Session 68 — 2026-11-03 09:10 tick (1 landed: #3409 round-3; 1 conflict: #3308; 1 gate-fail: #3298 merged-state regression)
+
+- Recycle + restore (full evaporate; cold rebuild one call). scan OK (5th tick running); approve 17/17 (4955 remaining).
+- LANDED:
+  c6b6e31c Merge PR #3409 round-3 (alexrayyandev, fixes #3405) — container elem-type + sized-array dim mismatches reject E3012; round-3 dedup guard `already_diagnosed_e3012` (span match over ck.diags+diags) suppresses the secondary E1002 — the one-root-cause fix from round-1/2 evidence. ALL-GREEN vs 9aad9f84, 326 suites.
+- CONFLICT (rebase requested, reply posted):
+  #3308 (phatloi0010, fixes #3203) — buildable.rs changed both sides (PR branched before the #3165/#3069-era buildable work). Mechanical rebase expected; battery runs immediately on re-push. issuecomment-6592910254.
+- GATE FAIL (evidence posted, not landed):
+  #3298 (phatloi0010, fixes #3280) — MERGED-STATE-ONLY regression: pure PR head passes range_iter_target 14/14, pure main passes, merged tree emits spurious HYB-E1002 on user_method_call_iterable_stays_accepted (`for v in c.keys()`). Interaction between #3298's new append/slice-elem checks and landed #3409's container checks in buildable.rs. Fix offered: rebase + fail-open the elem check for unresolved/generic call results (method_decls convention). issuecomment-6592950416.
+- Suite trajectory: 325 -> 326 (#3409). Final main c6b6e31c, tree clean.
+- NEXT TICK QUEUE: #3299 -> #3296 -> #3347 (dup-check vs #3346) -> #3229 (slot loan via call) -> #3196 (fn lit widths) -> #2948 -> #2977 -> #2863 -> tools flood (#3384/#3389/#3362/#3393) -> old tail. #3308/#3298 round-2 on re-push.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
