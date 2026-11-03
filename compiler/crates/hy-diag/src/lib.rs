@@ -189,7 +189,10 @@ impl Diagnostic {
     }
 
     pub fn with_notes(mut self, notes: Vec<String>) -> Self {
-        self.notes = notes;
+        self.notes = notes
+            .into_iter()
+            .filter(|note| !note.trim().is_empty())
+            .collect();
         self
     }
 
@@ -359,7 +362,11 @@ impl Registry {
         self.data.codes.iter().find(|c| {
             let short = c.code.strip_prefix("HYB-").unwrap_or(&c.code);
             let digits = short.strip_prefix('E').unwrap_or(short);
-            c.code == q || short == q || digits == q || c.name.eq_ignore_ascii_case(raw)
+            c.code == q
+                || short == q
+                || digits == q
+                || q.strip_prefix("HYB-") == Some(digits)
+                || c.name.eq_ignore_ascii_case(raw)
         })
     }
 
@@ -442,6 +449,7 @@ mod tests {
     fn lookup_aliases_work() {
         let reg = Registry::global();
         assert!(reg.lookup("HYB-E3003").is_some());
+        assert!(reg.lookup("HYB-3003").is_some());
         assert!(reg.lookup("E3003").is_some());
         assert!(reg.lookup("3003").is_some());
         assert!(reg.lookup("e3003").is_some());
@@ -521,6 +529,19 @@ mod tests {
         assert_eq!(first["code"].as_str().unwrap(), "HYB-E3003");
         assert_eq!(first["tier0_rule"].as_str().unwrap(), "A1b");
         assert!(!first["fixits"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn with_notes_filters_blank_entries_from_json() {
+        let d = Diagnostic::error(
+            "HYB-E3003",
+            "pool.hy",
+            Span::point(Pos::new(1, 1)),
+            "moved",
+        )
+        .with_notes(vec!["".into(), "   ".into()]);
+        let value = serde_json::to_value(d).unwrap();
+        assert!(value.get("notes").is_none());
     }
 
     #[test]
