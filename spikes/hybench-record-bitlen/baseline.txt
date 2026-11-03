@@ -1,0 +1,14 @@
+goos: darwin
+goarch: arm64
+cpu: Apple M2
+BenchmarkHistogramRecord/nanosecond         	11519206	        26.18 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHistogramRecord/nanosecond         	11745187	        25.78 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHistogramRecord/nanosecond         	11506081	        26.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHistogramRecord/microsecond        	12530041	        23.58 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHistogramRecord/microsecond        	12670167	        25.41 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHistogramRecord/microsecond        	12732477	        24.06 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHistogramRecord/millisecond        	15407232	        19.91 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHistogramRecord/millisecond        	14916652	        19.61 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHistogramRecord/millisecond        	14963650	        19.76 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	_/Volumes/GAME_SSD/Development/JOS/data-v2/scratch/provider/Temporary/task134-hybrid-histogram-source-20261103/runtime/go/hybench	3.142s

@@ -18,7 +18,10 @@
 //   - slow ops (µs and up): record every call directly.
 package hybench
 
-import "fmt"
+import (
+	"fmt"
+	"math/bits"
+)
 
 // SubHalf is the sub-bucket half-count: 2^10 linear sub-buckets per
 // exponent bucket ⇒ ~0.1% resolution (HDR's default).
@@ -76,7 +79,7 @@ func (h *Histogram) Record(ns int64) {
 		h.counts[0]++ // the dedicated zero bucket (e=0, sub=0)
 		return
 	}
-	e := 63 - leadingZeros(uint64(ns)) // magnitude exponent
+	e := bits.Len64(uint64(ns)) - 1 // magnitude exponent
 	if e >= 64 {
 		h.overflow++
 		return
@@ -147,18 +150,4 @@ func (h *Histogram) Summary() string {
 // shape the bench harnesses emit.
 func (h *Histogram) SummaryPrefixed(name string) string {
 	return name + " " + h.Summary()
-}
-
-func leadingZeros(x uint64) int {
-	if x == 0 {
-		return 64
-	}
-	n := 0
-	for i := 63; i >= 0; i-- {
-		if x&(1<<uint(i)) != 0 {
-			break
-		}
-		n++
-	}
-	return n
 }
