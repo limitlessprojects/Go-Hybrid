@@ -1708,23 +1708,20 @@ impl Emitter {
                         return m.result;
                     }
                 }
-                if let PlaceKind::Ident(vn) = &base.kind {
-                    if let Some(sn) = self.var_struct.get(vn) {
-                        if let Some(fields) = self.struct_fields.get(sn) {
-                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                                if let Some((k, _)) =
-                                    super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
-                                {
-                                    return Some(k);
-                                }
-                            }
-                        }
-                    }
-                }
-                None
+                let (_, fty) = self.struct_fields.get(self.user_struct_name_of_place(base)?)?.iter().find(|(f, _)| f == name)?;
+                super::shapes::SHAPES.iter().find(|(k, _)| *k == fty).map(|(k, _)| *k)
             }
             PlaceKind::AddrOf { base } => self.type_of_place(base),
             PlaceKind::Index { .. } => None,
+        }
+    }
+
+    fn user_struct_name_of_place(&self, p: &Place) -> Option<&str> {
+        match &p.kind {
+            PlaceKind::Ident(vn) => self.var_struct.get(vn).map(String::as_str),
+            PlaceKind::AddrOf { base } => self.user_struct_name_of_place(base),
+            PlaceKind::Field { base, name } => self.struct_fields.get(self.user_struct_name_of_place(base)?)?.iter().find(|(f, _)| f == name).and_then(|(_, fty)| self.struct_fields.contains_key(fty).then_some(fty.as_str())),
+            _ => None,
         }
     }
 
@@ -2462,16 +2459,20 @@ impl Emitter {
         // with their zero texts (13: `return v` in a (value, error) fn →
         // `return v, nil`) — Go demands the full arity. An EMPTY slot is
         // the error result (propagate_error fills it at propagation time);
-        // a short explicit return means nil.
-        if let Some(zeros) = &self.cur_fn_error_returns {
-            while vs.len() < zeros.len() {
-                let i = vs.len();
-                let z = &zeros[i];
-                vs.push(if z.is_empty() {
-                    "nil".to_string()
-                } else {
-                    z.clone()
-                });
+        // a short explicit return means nil. When the fn has named results,
+        // bare `return` (`values.is_empty()`) must stay naked so Go returns
+        // the live named result variables instead of clobbering them to zero.
+        if !(values.is_empty() && self.cur_fn_has_named_results) {
+            if let Some(zeros) = &self.cur_fn_error_returns {
+                while vs.len() < zeros.len() {
+                    let i = vs.len();
+                    let z = &zeros[i];
+                    vs.push(if z.is_empty() {
+                        "nil".to_string()
+                    } else {
+                        z.clone()
+                    });
+                }
             }
         }
         if vs.is_empty() {
