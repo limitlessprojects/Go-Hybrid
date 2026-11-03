@@ -116,6 +116,33 @@ impl Emitter {
                 if matches!(operand, Expr::Call { .. }) {
                     self.hoist_tries_expr(operand)?;
                 }
+
+                // #3209: If the deferred call captures an active slot loan (or one of its
+                // aliases), the deferred closure runs at function exit *after* any inline
+                // store-back has already written the old or pre-defer copy. To prevent the
+                // deferred write from being lost, emit a deferred store-back
+                // `defer func() { <store> }()` immediately before the user's deferred call.
+                // Go executes deferred functions in LIFO order, so the user's deferred closure
+                // executes first, followed immediately by this store-back defer.
+                let mut deferred_stores = Vec::new();
+                for frame in &self.loan_frames {
+                    for (loan_name, store) in frame {
+                        if !loan_name.is_empty() {
+                            let mentioned = Self::expr_mentions_ident(call, loan_name)
+                                || self.loan_aliases.get(loan_name).is_some_and(|aliases| {
+                                    aliases.iter().any(|a| Self::expr_mentions_ident(call, a))
+                                });
+                            if mentioned {
+                                deferred_stores.push(store.clone());
+                            }
+                        }
+                    }
+                }
+                deferred_stores.dedup();
+                for store in deferred_stores {
+                    self.push(&format!("defer func() {{ {} }}()", store));
+                }
+
                 let c = self.emit_expr(operand, 0)?;
                 self.push(&format!("defer {}", c));
                 Ok(())
@@ -362,13 +389,26 @@ impl Emitter {
     /// `(closure name, loan name)` for every name this declaration binds to
     /// a function literal whose body mentions an active slot loan (or one of
     /// its aliases) in the current loan frames.
+
+    /// Leading identifier of a call's callee (`mk()` -> `mk`,
+    /// `ns.mk()` -> None), used to recognise a second-order closure (#3227).
+    fn call_callee_ident(e: &Expr) -> Option<String> {
+        match Self::peel_parens(e) {
+            Expr::Call { callee, .. } => match Self::peel_parens(callee) {
+                Expr::Ident { name, .. } => Some(name.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn closure_captured_loans(&self, l: &LocalDecl) -> Vec<(String, String)> {
         let mut out = Vec::new();
         if l.names.len() != l.values.len() {
             return out;
         }
         for (name, v) in l.names.iter().zip(l.values.iter()) {
-            if name == "_" || !matches!(Self::peel_parens(v), Expr::FnLit { .. }) {
+            if name == "_" {
                 continue;
             }
             for frame in &self.loan_frames {
@@ -376,10 +416,18 @@ impl Emitter {
                     if loan.is_empty() || loan == name {
                         continue;
                     }
+                    // #3227: also treat the binding as an alias of the loan
+                    // when its value CALLS a binding already known to be an
+                    // alias of that loan (`h := mk()` where `mk` returns the
+                    // writer). A literal-only test misses that shape, and the
+                    // store-back would then flush before the writer runs.
+                    let aliases = self.loan_aliases.get(loan);
                     let mentions = Self::expr_mentions_ident(v, loan)
-                        || self.loan_aliases.get(loan).is_some_and(|aliases| {
-                            aliases.iter().any(|a| Self::expr_mentions_ident(v, a))
-                        });
+                        || aliases.is_some_and(|a| {
+                            a.iter().any(|x| Self::expr_mentions_ident(v, x))
+                        })
+                        || Self::call_callee_ident(v)
+                            .is_some_and(|c| aliases.is_some_and(|a| a.contains(&c)));
                     if mentions {
                         out.push((name.clone(), loan.clone()));
                     }
@@ -1526,7 +1574,7 @@ impl Emitter {
                 .enumerate()
                 .map(|(i, v)| alias_assigns[i].is_some() || self.expr_is_pointer(v))
                 .collect();
-            for ((t, is_ptr), alias) in targets.iter().zip(ptr_flags).zip(alias_assigns.iter()) {
+            for (((t, is_ptr), alias), v) in targets.iter().zip(ptr_flags).zip(alias_assigns.iter()).zip(values.iter()) {
                 if let PlaceKind::Ident(name) = &t.kind {
                     if name != "_" {
                         for aliases in self.loan_aliases.values_mut() {
@@ -1537,6 +1585,24 @@ impl Emitter {
                                 .entry(loan_root.clone())
                                 .or_default()
                                 .insert(name.clone());
+                        } else if matches!(Self::peel_parens(v), Expr::FnLit { .. }) {
+                            for frame in &self.loan_frames {
+                                for (loan, _) in frame {
+                                    if loan.is_empty() || loan == name {
+                                        continue;
+                                    }
+                                    let mentions = Self::expr_mentions_ident(v, loan)
+                                        || self.loan_aliases.get(loan).is_some_and(|aliases| {
+                                            aliases.iter().any(|a| Self::expr_mentions_ident(v, a))
+                                        });
+                                    if mentions {
+                                        self.loan_aliases
+                                            .entry(loan.clone())
+                                            .or_default()
+                                            .insert(name.clone());
+                                    }
+                                }
+                            }
                         }
                         if is_ptr {
                             self.pointer_vars.insert(name.clone());
