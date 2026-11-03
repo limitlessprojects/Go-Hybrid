@@ -19,8 +19,8 @@
 //! exactly once via `Expr::FnLit`.
 
 use crate::const_overflow::{
-    const_float_value, const_int_fold_with, const_int_value, fixed_width_int_range, fold_bin,
-    parse_int_lit, ConstFold, ConstInt,
+    const_float_value, const_int_value, fixed_width_int_range, fold_bin, parse_int_lit, ConstFold,
+    ConstInt,
 };
 use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
@@ -62,17 +62,17 @@ impl ConstKeyVal {
 /// length resolver must also see `var`/`let`/`:=` bindings, because an array's
 /// length lives in its *type* whether or not the binding is constant.
 #[derive(Debug, Clone, Copy)]
-struct BindingSight<'b> {
-    ty: &'b Option<TypeExpr>,
-    value: Option<&'b Expr>,
-    pos: hy_diag::Pos,
-    is_const: bool,
+pub(crate) struct BindingSight<'b> {
+    pub(crate) ty: &'b Option<TypeExpr>,
+    pub(crate) value: Option<&'b Expr>,
+    pub(crate) pos: hy_diag::Pos,
+    pub(crate) is_const: bool,
 }
 
 impl<'b> BindingSight<'b> {
     /// The initializer the constant folders may fold: only a `const` binding
     /// has one, exactly as the pre-split walk behaved.
-    fn constant_initializer(&self) -> Option<&'b Expr> {
+    pub(crate) fn constant_initializer(&self) -> Option<&'b Expr> {
         if self.is_const {
             self.value
         } else {
@@ -144,7 +144,7 @@ impl<'a> Checker<'a> {
                 }
                 // `x <<= -1` — the compound form of HYB-E6005.
                 if matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) && values.len() == 1 {
-                    self.check_negative_shift(&values[0], *span);
+                    self.check_negative_shift(st, &values[0], *span);
                 }
                 if deep {
                     for (t, v) in targets.iter().zip(values.iter()) {
@@ -424,7 +424,7 @@ impl<'a> Checker<'a> {
                 self.check_expr_emit_guard(st, rhs);
                 match op {
                     BinOp::Eq | BinOp::Ne => self.check_equality(st, lhs, rhs, *span),
-                    BinOp::Shl | BinOp::Shr => self.check_negative_shift(rhs, *span),
+                    BinOp::Shl | BinOp::Shr => self.check_negative_shift(st, rhs, *span),
                     _ => {}
                 }
                 self.check_binary_const_overflow(st, *op, lhs, rhs);
@@ -844,8 +844,8 @@ impl<'a> Checker<'a> {
     // B4 — constant negative shift counts (HYB-E6005)
     // ------------------------------------------------------------------
 
-    fn check_negative_shift(&mut self, rhs: &Expr, span: Span) {
-        let Some(v) = const_int_value(rhs) else {
+    fn check_negative_shift(&mut self, st: &FnState, rhs: &Expr, span: Span) {
+        let ConstFold::Val(v) = self.const_int_fold_expr(rhs, Some(st)) else {
             return;
         };
         if v >= 0 {
@@ -1660,7 +1660,7 @@ impl<'a> Checker<'a> {
         None
     }
 
-    fn is_non_int_type(&self, ty: &TypeExpr) -> bool {
+    pub(crate) fn is_non_int_type(&self, ty: &TypeExpr) -> bool {
         let resolved = self.resolve_type_alias(ty);
         is_non_int_primitive_type(&resolved)
     }
@@ -1687,7 +1687,7 @@ impl<'a> Checker<'a> {
     /// may fold) from a `var`/`let`/`:=` binding; the type ascription is
     /// reported for every local, because a fixed-size array carries its length
     /// in its type.
-    fn resolve_local_binding_at(
+    pub(crate) fn resolve_local_binding_at(
         &self,
         name: &str,
         use_pos: hy_diag::Pos,
@@ -2281,8 +2281,8 @@ impl<'a> Checker<'a> {
             return;
         };
 
-        let l = const_int_fold_with(lhs, &self.const_values, 0, Some(st));
-        let r = const_int_fold_with(rhs, &self.const_values, 0, Some(st));
+        let l = self.const_int_fold_expr(lhs, Some(st));
+        let r = self.const_int_fold_expr(rhs, Some(st));
         match fold_bin(op, l, r) {
             ConstFold::Val(v) if v < lo || v > hi => {
                 self.emit_typed_const_overflow(&ty_name, Some(v), lo, hi, span, expr);
@@ -2301,7 +2301,7 @@ impl<'a> Checker<'a> {
         let Some((ty_name, lo, hi)) = self.fixed_width_int_ty_of(st, operand) else {
             return;
         };
-        let ConstFold::Val(v) = const_int_fold_with(operand, &self.const_values, 0, Some(st))
+        let ConstFold::Val(v) = self.const_int_fold_expr(operand, Some(st))
         else {
             return;
         };
