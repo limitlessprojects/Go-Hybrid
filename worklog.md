@@ -1513,3 +1513,17 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 337 -> 342. Final main a10b891b, tree clean.
 - NEXT TICK QUEUE: #3441 (Shokun123 map key widths inferred bindings, +384) -> #1719 (ubelai A7/A2 use-after-consume, 8.7d, +344) -> #3013 (escapes, behind 11 -> check stale) -> #2996/#2867/#2940 (all behind 11) -> #3435 (behind 5) -> #3160. DUP CHECK FIRST: #3449 vs #3445(landed). Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3449 vs landed #3445.
+
+## Session 73 — 2026-11-03 14:10 tick (4 landed: #3459/#3462/#3458/#3310; 2 dups resolved: #3449/#3466)
+
+- Recycle + restore (cache hits, 5.8G avail). scan + approve healthy: approve 21/21, 4974 remaining.
+- HYRT NOTE: runtime/rust/hyrt is a SEPARATE workspace — compiler cargo test --workspace does NOT run it. #3459's new suite only visible via `cd runtime/rust/hyrt && cargo test` (3 suites ok). Future runtime PRs: run both batteries.
+- LANDED:
+  cbd168e2 Merge PR #3459 (aswadi, fixes #3457) — hyrt rejects 0xFFFF_FFFF handle halves + deterministic array-helper error order; hyrt 3 suites.
+  5bc97bdc Merge PR #3462 (aswadi, fixes #3461) — lexer rejects float exponents without digits; 343 suites.
+  688649a8 Merge PR #3458 (aswadi, fixes #3456) — const_int_expr peels parenthesized callees; 344 suites. DUP #3466 superseded (replied).
+  e7fe187a Merge PR #3310 (chusmias258-dev, fixes #3309) — emit_expr_exp resolves type aliases, N5 array zero-init through aliases; 345 suites.
+- DUP RESOLVED: #3449 (adam123gale-byte, fixes #3444) superseded by landed #3445 — replied. #3466 superseded by landed #3458 — replied. No silent closes.
+- Suite trajectory: 342 -> 345 (#3462, #3458, #3310). Final main e7fe187a, tree clean.
+- NEXT TICK QUEUE: #3336 (chusmias258-dev folded array/fn type args, +233) -> #1740 (wminno int->float64 provenance, 8.5d, +294) -> #1718 (ubelai O8/A3, behind 3) -> #1719 (ubelai A7/A2, behind 11) -> #3441 (behind 11) -> #3428 (+682) -> #3435. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978. (3449, 3466 resolved.)
