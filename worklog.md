@@ -1613,3 +1613,16 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 364 -> 368. Final main 029c0e88, tree clean. All remote asserts green; replies posted per PR; no silent closes.
 - NEXT TICK QUEUE: #591 (score 9, constant-folding/type-alias/slice-index family) -> #2285 (match-arm nesting emit) -> #2284 (map key comparability, fixes #1565) -> #937 (magomedta, 14.5d, +449) -> #3499 (NO tests — scrutinize) -> #3503 -> DUP CHECKS: #2867 vs landed #1740 (chan-send), #2940 vs landed #3145 (copy widths) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
 - DUP WATCH remaining: #2982 vs #2976 vs #2978; #2867 vs #1740; #2940 vs #3145.
+
+## Session 82 — 2026-11-04 02:10 tick (4 landed: #2758/#2759/#3534/#3533) — covers missed 23:10 tick (tool-infra outage, nothing lost)
+
+- Recycle + restore (cache hits). scan healthy, approve 9/9 (4991 remaining).
+- LANDED:
+  1e3ee199 Merge PR #2758 (ryder777777, fixes #1123) — author_stage diff_paths deletion rows + `..`/absolute traversal guards; tools.test_runner_sha 9 OK. 368 suites (tools-layer).
+  71441398 Merge PR #2759 (ryder777777, fixes #1125) — autoland bundle pre-validation (NO-BUNDLE) + revert_on_failure in finally; env_report 8 OK. 368 suites (tools-layer).
+  207e6579 Merge PR #3534 (aswadi, fixes #3532) — no_zero_value_reason resolves generic-substituted struct fields. 369 suites.
+  2d4d33b6 Merge PR #3533 (aswadi, fixes #3531) — type_of_place sees through nested/addr-of chains (place-side twin of #3526). 370 suites.
+- OPS: one transient "origin not a repository" fetch error mid-tick — retry succeeded, remotes intact (many fork remotes exist in config from contributor automation; origin healthy).
+- Suite trajectory: 368 -> 370. Final main 2d4d33b6, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #2757 (ryder, differential_loop fail-closed) -> #2760/#2761/#2766 (ryder batch) -> #591 (score 9) -> #2285 -> #2284 -> #937 -> #3499 (NO tests) -> #3503 -> DUP CHECKS: #2867 vs landed #1740; #2940 vs landed #3145. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978; #2867 vs #1740; #2940 vs #3145.
