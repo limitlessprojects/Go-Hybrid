@@ -102,6 +102,12 @@ def agree_diagnostic(expected_code, diags):
     return actual == expected_code, f"expected first diagnostic {expected_code}, got {actual}"
 
 
+class ManagedReportMissing(RuntimeError):
+    """The checker was asked for a managed report and returned none for a
+    response that was not a parse failure (#3251). The aggregate counters
+    cannot include this case, so they must not print it as a measured zero."""
+
+
 def run_checker(bin_path, hy_path, report_managed=False):
     """Run `hyb check --json` over one file; return (summary, diagnostics)."""
     cmd = [bin_path, "check", hy_path, "--json"]
@@ -173,9 +179,21 @@ def run_checker(bin_path, hy_path, report_managed=False):
         )
     if report_managed:
         managed = summary.get("managed")
-        # Parse failures have no managed report. A report that is present
-        # must carry the usize counters emitted by hy_diag::ManagedReport;
-        # silently defaulting malformed counters to zero hides audit drift.
+        # #3251: a parse failure legitimately has no managed report — the
+        # counters are computed after parsing, so there is nothing to count.
+        # An ACCEPT response that omitted the report is a measurement gap,
+        # not a measured zero: the aggregate must not print 0 blocks and
+        # 0/0 sites for it. Raise here so the case lands as a harness error.
+        # A non-parse REJECT keeps its existing contract (the counters are
+        # only meaningful for a program the checker finished analysing).
+        if managed is None and summary.get("verdict") == "accept":
+            raise ManagedReportMissing(
+                f"checker omitted the requested managed report for {hy_path}: "
+                "--report-managed was passed and the response accepted the program"
+            )
+        # A report that is present must carry the usize counters emitted by
+        # hy_diag::ManagedReport; silently defaulting malformed counters to
+        # zero hides audit drift.
         if managed is not None:
             if not isinstance(managed, dict):
                 raise RuntimeError(f"checker managed report invalid for {hy_path}: expected an object")
@@ -257,6 +275,7 @@ def main():
     managed_sites = 0
     total_sites = 0
     accept_managed_count = 0
+    managed_gap_cases = []
     expected_diagnostics = {}
     got_diagnostics = {}
 
@@ -276,6 +295,10 @@ def main():
         num = fname.split("-", 1)[0]
         try:
             summary, diags = run_checker(args.bin, path, args.report_managed)
+        except ManagedReportMissing as e:
+            managed_gap_cases.append(fname)
+            rows.append((fname, expected, ("harness-error", None, []), False, str(e)))
+            continue
         except RuntimeError as e:
             rows.append((fname, expected, ("harness-error", None, []), False, str(e)))
             continue
@@ -336,11 +359,23 @@ def main():
         print("tripwire: not fired")
 
     if args.report_managed:
-        pct = 100.0 * managed_sites / total_sites if total_sites else 0.0
-        print(
-            f"managed aggregate: {managed_blocks} block(s), "
-            f"{managed_sites}/{total_sites} sites via managed = {pct:.1f}%"
-        )
+        if managed_gap_cases:
+            # #3251: at least one response omitted the report it was asked
+            # for, so these totals under-count by an unknown amount. Printing
+            # a plain number here would read as a measured zero.
+            shown = ", ".join(managed_gap_cases[:5])
+            more = ", ..." if len(managed_gap_cases) > 5 else ""
+            print(
+                "managed aggregate: unavailable, "
+                f"{len(managed_gap_cases)} case(s) omitted the requested report "
+                f"({shown}{more})"
+            )
+        else:
+            pct = 100.0 * managed_sites / total_sites if total_sites else 0.0
+            print(
+                f"managed aggregate: {managed_blocks} block(s), "
+                f"{managed_sites}/{total_sites} sites via managed = {pct:.1f}%"
+            )
 
     return 0 if agreed == total else 1
 
