@@ -371,6 +371,21 @@ FILES = {
 }
 
 
+def _matches_expected(path: pathlib.Path, content: str) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return False
+    if b"\r" in raw:
+        return False
+    try:
+        return raw.decode("utf-8") == content
+    except UnicodeDecodeError:
+        return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0], allow_abbrev=False,
@@ -383,10 +398,11 @@ def main() -> int:
     for rel, content in FILES.items():
         p = ROOT / rel
         if check:
-            if not p.is_file() or p.read_text(encoding="utf-8") != content:
+            if not _matches_expected(p, content):
                 drift.append(rel)
         else:
-            p.write_text(content, encoding="utf-8")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8", newline="\n")
             print(f"wrote {rel}")
     if check:
         if drift:
