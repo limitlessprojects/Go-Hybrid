@@ -413,7 +413,17 @@ impl Emitter {
                 };
                 let saved_err_returns =
                     std::mem::replace(&mut self.cur_fn_error_returns, closure_err_returns);
-                self.fnlit_depth += 1;
+                let mut closure_opt = None;
+                let mut closure_conv = None;
+                if results.len() == 1 && results[0].name.is_none() {
+                    let rt = self.type_text(&results[0].ty);
+                    if rt.starts_with("option[") {
+                        closure_opt = Some(rt);
+                    }
+                    closure_conv = self.result_conv_key(&results[0].ty);
+                }
+                let saved_opt = std::mem::replace(&mut self.cur_option_result, closure_opt);
+                let saved_conv = std::mem::replace(&mut self.cur_fn_conv_result, closure_conv);
                 // Labels do not cross func boundaries: a labeled break/continue
                 // must find its loop INSIDE the literal — reset the depth so
                 // an outer loop's count cannot bless a closure-nested label.
@@ -442,9 +452,10 @@ impl Emitter {
                 self.loop_labels = saved_loop_labels;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
-                self.fnlit_depth -= 1;
                 self.in_main_closure = saved_main_closure;
                 self.cur_fn_error_returns = saved_err_returns;
+                self.cur_option_result = saved_opt;
+                self.cur_fn_conv_result = saved_conv;
                 self.for_depth = saved_for_depth;
                 self.handler_writer = saved_writer;
                 self.restore_scope(saved_scope);

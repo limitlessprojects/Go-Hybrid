@@ -1406,3 +1406,37 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - DUP WATCH NEW: #3346 vs #3347 (both fix #3330, untyped slice literal non-literal heads) — compare before landing either.
 - NEXT TICK QUEUE: #3338 (tools/job fail-closed twin) -> #3214 (chan directions) -> #3226 (TypeExpr array-len walks) -> #3245 (E3104 array lengths) -> #3299 -> #3296 -> #3346/#3347 dup-check -> #3308 -> #3169 -> #1818 -> #1663 -> old tail.
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978.
+
+## Session 65 — 2026-11-03 06:10 tick (4 landed: #3338, #3214, #3226, #3245)
+
+- Recycle + restore (go tarball + cache re-downloaded AGAIN; CARGO_TARGET_DIR gone -> cold rebuild one call). scan OK (REAL_EXIT=0, 2nd tick running); approve 19/19 (4981 remaining). Pareto: #3169 first (deferred — 6 files, needs more budget), then Shokun123 tools flood (#3384/#3389/#3362/#3393 pending).
+- LANDED:
+  e5a7e9fd Merge PR #3338 (Shokun123, fixes #3337) — tools/job fail-closed: job.json object+non-empty "job" field, polling keeps going on CLI error text, artifact names reject path traversal + destination containment check. New test_job_cli suite. ALL-GREEN vs a28ea1e3.
+  9b98eefa Merge PR #3214 (phatloi0010, fixes #3213) — sendability: copy(dst,src) checks src vs dst slice elem (alias-resolved); Fn-Fn type-param inference recurses params/results; single-var map range binds KEY (Go semantics, was value); set[T] iteration binds elem. New sendability_copy_fn_infer_and_map_set_iter suite. ALL-GREEN vs e5a7e9fd, 322 suites.
+  fe58270b Merge PR #3226 (phatloi0010, fixes #3225) — walk.rs walk_type_len_exprs: expr_uses/expr_calls/expr_fnlits descend TypeExpr array-length positions of decls + struct/slice/map lits. New walk_type_expr_uses_calls_and_fnlits suite. ALL-GREEN vs 9b98eefa, 323 suites.
+  7e0a1688 Merge PR #3245 (phatloi0010, fixes #3244) — addr_loan loan-projection checks descend TypeExpr positions (decl types, return types, lit annotations, fnlit sigs); map slot-loan init/rebind only when rooted at place path. New addr_loan_type_return_and_rvalue_map suite. ALL-GREEN vs fe58270b, 324 suites.
+- Suite trajectory: 321 -> 322 -> 323 -> 324. Final main 7e0a1688, tree clean.
+- NEXT TICK QUEUE: #3169 (hy-emit closure error-tail, 6 files — budget it first) -> #3299 -> #3296 -> #3347 (dup-check vs #3346 which dropped off Pareto) -> #3308 -> #3384 -> #3389 -> #3362 -> #3393 -> old tail (#2982/#3182/#3176/#3184/#2948/#2977/#1811/#2863/#3207/#2517). #3300 still behind — awaiting harness fix.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
+
+## Session 66 — 2026-11-03 07:10 tick (1 landed: #1818; 1 gate-fail: #3409 double-report)
+
+- Recycle + restore (full evaporate again: go tarball re-downloaded + backfilled, CARGO_TARGET_DIR cold rebuild one call). scan OK (3rd tick running); approve 30/30 (4970 remaining).
+- LANDED:
+  16df42dc Merge PR #1818 (gorky117-cell, fixes #1813) — 7.7d-old test-only PR finally at Pareto top: 4 regression tests pin rejection of int(p)/string(p)/int(arr)/string(arr) with HYB-E1002 + "cannot convert" message. Checker behavior pre-existing on main. ALL-GREEN vs 186745ca, 324 suites.
+- GATE FAIL (evidence posted, not landed):
+  #3409 (alexrayyandev, fixes #3405) — chan_direction_coercion suite 16/18. E3012 fires correctly (repro_06 holder{ch: sc} send-only->recv-only field) but a SECONDARY E1002 is appended for the same operand: left [E3012, E1002] vs right [E3012]; repro_10 left [E3012, E3012, E1002] vs right [E3012, E3012]. Double-reporting: new container-elem check + pre-existing operand/width check both report. Offered (a) suppress secondary E1002 when E3012 already fired (preferred, dedup by span/expr), (b) relax to contains(). issuecomment-6591066318.
+- Suite trajectory: 324 (unchanged; #1818 test-only). Final main 16df42dc, tree clean.
+- NEXT TICK QUEUE: #3169 (hy-emit, 6 files) -> #3415 ([N]T(s) array conversions) -> #3299 -> #3296 -> #3347 (dup-check vs #3346) -> #3308 -> #3384 -> #3389 -> #3362 -> #3393 -> old tail. #3409 round-2 if author suppresses the double-report. #3300 still behind.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
+
+## Session 67 — 2026-11-03 08:10 tick (1 landed: #3169; #3409 round-2 still double-reporting)
+
+- Recycle + restore (full evaporate again; cold rebuild one call). scan OK (4th tick running); approve 26/26 (4974 remaining).
+- LANDED:
+  e8b717df Merge PR #3169 (aswadi, fixes #2969 + #2972) — hy-emit: FnLit frames save/restore cur_option_result + cur_fn_conv_result (closure `?` zero-fills error tail via own result ctx); fnlit_depth bypass+field removed; const_int_expr folds width convs, len("lit"), min/max; has_out_of_range_subexpr conservative on Calls. New constconv_int_fold_3084 suite. ALL-GREEN vs 23beca2e, 325 suites.
+- GATE FAIL round-2 (evidence posted):
+  #3409 (alexrayyandev, fixes #3405) — author force-pushed rewrite (r1 head 7a23523f GONE, single commit e5803870). Same 2 failures byte-identical: [E3012, E1002] vs [E3012] (repro_06), [E3012, E3012, E1002] vs [E3012, E3012] (repro_10). ROOT CAUSE LOCATED in r2 diff: container_or_alias_mismatch was fed into the conflict condition that emits E1002 — but E3012 already fires from the direction site. One-line fix given: drop `|| container_or_alias_mismatch` from the E1002 conflict arm (or emit E3012 there + dedup guard). issuecomment-6592000540.
+- Suite trajectory: 324 -> 325 (#3169). Final main e8b717df, tree clean.
+- NEXT TICK QUEUE: #3299 (multi-value call arg widths) -> #3296 -> #3347 (dup-check vs #3346) -> #3308 -> #3229 (slot loan via call) -> #3298 (append dims) -> #3196 (fn lit scalar widths) -> tools flood (#3384/#3389/#3362/#3393) -> old tail. #3409 round-3 if author applies the one-line fix.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
