@@ -72,6 +72,7 @@ impl<'a> Checker<'a> {
             .collect();
         for (name, is_loan) in l.names.iter().zip(flags) {
             if is_loan {
+                st.borrow_bindings.insert(name.clone());
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan = true;
                 }
@@ -103,6 +104,9 @@ impl<'a> Checker<'a> {
             .collect();
         for (t, is_loan) in targets.iter().zip(flags) {
             if let PlaceKind::Ident(name) = &t.kind {
+                if is_loan {
+                    st.borrow_bindings.insert(name.clone());
+                }
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan |= is_loan;
                 }
@@ -478,7 +482,12 @@ impl<'a> Checker<'a> {
                         self.emit_addr_of_loan_diag(name, *id_span);
                     }
                 }
-                Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
+                Expr::Field { .. } | Expr::Index { .. } => {
+                    if let Some(root) = self.inline_slot_loan_root(st, operand) {
+                        self.emit_addr_of_loan_diag(root, *span);
+                    }
+                }
+                Expr::Slice { .. } => {
                     if let Some(root) = operand.root_ident() {
                         if self.lookup_binding(st, root).is_some_and(|b| b.slot_loan) {
                             self.emit_addr_of_loan_diag(root, *span);
@@ -610,6 +619,61 @@ impl<'a> Checker<'a> {
                 }
             }
             hy_syntax::TypeExpr::Named { .. } => {}
+        }
+    }
+
+    /// Returns `Some(root)` when `expr` is an inline field or fixed-array index
+    /// projection rooted directly at a live map-slot loan binding (`b.slot_loan`).
+    fn inline_slot_loan_root<'b>(&self, st: &FnState, expr: &'b Expr) -> Option<&'b str> {
+        let is_loan_ident = |e: &Expr| {
+            matches!(
+                unwrap_parens(e),
+                Expr::Ident { name, .. } if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan)
+            )
+        };
+        match unwrap_parens(expr) {
+            Expr::Ident { name, .. } => self
+                .lookup_binding(st, name)
+                .is_some_and(|b| b.slot_loan)
+                .then_some(name.as_str()),
+            Expr::Field { base, .. } => {
+                let base_shape = self.shape_of_expr(st, base);
+                if matches!(
+                    &base_shape,
+                    TypeShape::Pointer(inner) if matches!(inner.as_ref(), TypeShape::Pointer(_))
+                        || (!is_loan_ident(base) && matches!(&base_shape, TypeShape::Pointer(_)))
+                ) {
+                    None
+                } else {
+                    self.inline_slot_loan_root(st, base)
+                }
+            }
+            Expr::Index { base, .. } => {
+                let base_shape = self.shape_of_expr(st, base);
+                let is_array_or_loan_array = matches!(&base_shape, TypeShape::Array(_))
+                    || (matches!(&base_shape, TypeShape::Unknown) && self.ty_of_expr(st, base).is_none())
+                    || (is_loan_ident(base)
+                        && matches!(&base_shape, TypeShape::Pointer(inner) if matches!(inner.as_ref(), TypeShape::Array(_))))
+                    || self
+                        .ty_of_expr(st, base)
+                        .map(|t| self.resolve_type_alias(&t))
+                        .is_some_and(|t| match t {
+                            hy_syntax::TypeExpr::Array { .. } => true,
+                            hy_syntax::TypeExpr::Pointer { to, .. } if is_loan_ident(base) => {
+                                matches!(
+                                    self.resolve_type_alias(&to),
+                                    hy_syntax::TypeExpr::Array { .. }
+                                )
+                            }
+                            _ => false,
+                        });
+                if is_array_or_loan_array {
+                    self.inline_slot_loan_root(st, base)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
