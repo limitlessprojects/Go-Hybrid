@@ -1567,3 +1567,15 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - NEXT TICK QUEUE: #1740 (wminno int->float64 provenance, 8.5d, +294, approve shepherded) -> #937 (magomedta make/new/void validation, 14.5d, +449) -> #3499 (pedromino wildcard loan slices, +52, no tests — scrutinize) -> #1718 (behind 3) -> #1719 -> #3441 -> #3428 -> #3435 -> #3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
 - DUP WATCH remaining: #2982 vs #2976 vs #2978.
 - OPS NOTE (repeat): verify_pr.sh worktree protocol + --no-keep-memory deprecated since S69; cron text should point at in-repo trial merge. rustup-init.sh in nohup hangs ~50% of runs — run it foreground.
+
+## Session 77 — 2026-11-03 18:10 tick (3 landed: #3507/#3506/#3475; dup #3508 superseded)
+
+- Recycle + restore (go cache hit; rustup foreground — reliable). scan healthy (REAL_EXIT=0), approve 19/19 (4979 remaining).
+- LANDED:
+  3092b331 Merge PR #3507 (aswadi, fixes #3505) — diag lookup strips [ ] : ' " ` delimiters + with_notes trims after filter; diag arc complete. 357 suites.
+  9a4c0288 Merge PR #3506 (aswadi, fixes #3504) — integer-literal trailing suffix rejection + dotless hex exponent sign; literal hardening complete. 358 suites.
+  ca7fdaea Merge PR #3475 (seenorht, fixes #3467) — bare nil -> non-nilable param rejected in fn/method/func-literal calls. 359 suites.
+- DUP RESOLVED: #3508 (Dimank92, fixes #3498) superseded by landed #3506 (same integer-suffix scope + hex exponent superset; textual conflict in lex_number). Replied with reopen-on-repro offer.
+- Suite trajectory: 356 -> 359. Final main ca7fdaea, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #1740 (wminno int->float64 provenance, 8.5d, +294) -> #937 (magomedta make/new/void validation, 14.5d, +449) -> #3499 (pedromineo wildcard loan slices, +52, NO tests — scrutinize hard) -> #3503 (zc composite literal mismatch, +?) -> #1718 (behind 3) -> #1719 -> #3441 -> #3428 -> #3435 -> #3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
