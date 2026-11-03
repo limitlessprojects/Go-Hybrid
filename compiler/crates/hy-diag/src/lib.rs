@@ -156,7 +156,7 @@ impl Diagnostic {
         Diagnostic {
             code: entry
                 .map(|e| e.code.clone())
-                .unwrap_or_else(|| code.trim().replace('_', "-").to_ascii_uppercase()),
+                .unwrap_or_else(|| code.trim_matches(|c: char| c.is_whitespace() || matches!(c, '[' | ']' | ':' | '\'' | '"' | '`')).replace('_', "-").to_ascii_uppercase()),
             name: entry.map(|e| e.name.clone()).unwrap_or_default(),
             severity,
             file,
@@ -189,7 +189,7 @@ impl Diagnostic {
     }
 
     pub fn with_notes(mut self, notes: Vec<String>) -> Self {
-        self.notes = notes.into_iter().filter(|n| !n.trim().is_empty()).collect();
+        self.notes = notes.into_iter().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect();
         self
     }
 
@@ -354,7 +354,7 @@ impl Registry {
     /// Resolve a code by any of its accepted spellings:
     /// `HYB-E3001`, `E3001`, `3001` (case-insensitive), or machine name.
     pub fn lookup(&self, query: &str) -> Option<&RegistryEntry> {
-        let raw = query.trim().replace('_', "-");
+        let raw = query.trim_matches(|c: char| c.is_whitespace() || matches!(c, '[' | ']' | ':' | '\'' | '"' | '`')).replace('_', "-");
         let q = raw.to_ascii_uppercase();
         self.data.codes.iter().find(|c| {
             let short = c.code.strip_prefix("HYB-").unwrap_or(&c.code);
@@ -405,7 +405,7 @@ impl Registry {
 /// an error, and a non-`E8nnn` code can never be constructed as a warning.
 /// Runs as a debug assert AND is unit-tested in release (`#[test]`).
 pub fn assert_severity_code_coherence(code: &str, severity: Severity) {
-    let canonical = Registry::global().lookup(code).map(|e| e.code.clone()).unwrap_or_else(|| code.trim().replace('_', "-").to_ascii_uppercase());
+    let canonical = Registry::global().lookup(code).map(|e| e.code.clone()).unwrap_or_else(|| code.trim_matches(|c: char| c.is_whitespace() || matches!(c, '[' | ']' | ':' | '\'' | '"' | '`')).replace('_', "-").to_ascii_uppercase());
     let is_lint = canonical.contains("-E8") || canonical.contains("-8") || canonical.starts_with("E8") || canonical.starts_with("8");
     let is_err = severity == Severity::Error;
     debug_assert!(
