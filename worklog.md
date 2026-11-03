@@ -1601,3 +1601,15 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 361 -> 364. Final main f607dd50, tree clean. All remote asserts green; replies posted per PR; no silent closes.
 - NEXT TICK QUEUE: #937 (magomedta make/new/void validation, 14.5d, +449) -> #3499 (pedromineo wildcard loan slices, +52, NO tests — scrutinize hard) -> #3503 (zc composite literal) -> #2867 (channel send assignability — NOTE may overlap #1740's check_send_elem; DUP CHECK) -> #2940 (copy exact widths — may overlap landed #3145; DUP CHECK) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517 (T fixture rename).
 - DUP WATCH remaining: #2982 vs #2976 vs #2978. NEW: #2867 vs landed-#1740; #2940 vs landed-#3145.
+
+## Session 80 — 2026-11-03 22:10 tick (4 landed: #3524/#3522/#3497/#3526)
+
+- Recycle + restore (cache hits). scan healthy, approve 8/8 (4978 remaining). New wave of score-9 PRs (#3524/#3522/#3497/#3526/#591/#2285/#2284).
+- LANDED:
+  3edb5cff Merge PR #3524 (aswadi, fixes #3521) — foreign_named_type uses is_curated_package_root (sync.* -> ForeignOpaque). 365 suites.
+  5ba4c809 Merge PR #3522 (aswadi, fixes #3520) — Go-cased sync spellings normalize to canonical shapes; waitgroup->WaitGroup export. sync arc complete. 366 suites.
+  f305b802 Merge PR #3497 (chusmias258-dev, fixes #3496) — checker E11 return classification aligned with emit (main excluded; unshadowed http gate). 367 suites.
+  029c0e88 Merge PR #3526 (chusmias258-dev, fixes #3525) — addr-of receivers keep foreign shapes (both &x forms). 368 suites.
+- Suite trajectory: 364 -> 368. Final main 029c0e88, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #591 (score 9, constant-folding/type-alias/slice-index family) -> #2285 (match-arm nesting emit) -> #2284 (map key comparability, fixes #1565) -> #937 (magomedta, 14.5d, +449) -> #3499 (NO tests — scrutinize) -> #3503 -> DUP CHECKS: #2867 vs landed #1740 (chan-send), #2940 vs landed #3145 (copy widths) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978; #2867 vs #1740; #2940 vs #3145.
