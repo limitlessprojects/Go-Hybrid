@@ -167,7 +167,7 @@ class CorpusCompositionTests(unittest.TestCase):
                 "if sys.argv[1] == 'check':\n"
                 f"    print({payload!r})\n    sys.exit(1)\n"
                 "out = pathlib.Path('a.out')\n"
-                f"out.write_text('#!{sys.executable}\\n', encoding='utf-8')\n"
+                f"out.write_text({f'#!{sys.executable}\n'!r}, encoding='utf-8')\n"
                 "out.chmod(0o755)\n", encoding="utf-8")
             checker.chmod(0o755)
             return subprocess.run(
@@ -216,7 +216,7 @@ class RelativeCorpusPathTests(unittest.TestCase):
             "    sys.stderr.write(f'missing source: {src}')\n"
             "    sys.exit(1)\n"
             "out = pathlib.Path('a.out')\n"
-            f"out.write_text('#!{sys.executable}\\n')\n"
+            f"out.write_text({f'#!{sys.executable}\n'!r})\n"
             "out.chmod(0o755)\n",
             encoding="utf-8",
         )
@@ -447,3 +447,7 @@ class TimeoutCorpusTests(unittest.TestCase):
         status, output = self.run_with_timeout(None)
         self.assertEqual(status, 0, output)
         self.assertIn("differential: FULL AGREEMENT", output)
+
+
+from tests.differential_loop_edge_cases import DifferentialLoopEdgeTests  # noqa: E402,F401
+
