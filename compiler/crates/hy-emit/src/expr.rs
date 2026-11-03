@@ -72,14 +72,18 @@ impl Emitter {
             while let Expr::Paren { inner, .. } = lit {
                 lit = inner;
             }
+            let resolved = self.n5_resolve_alias(exp);
             match lit {
                 Expr::StructLit {
                     ty: None, fields, ..
                 } => {
-                    if let TypeExpr::Pointer { to, .. } = exp {
+                    if let TypeExpr::Pointer { to, .. } = &resolved {
                         let body = self.struct_lit_body(to, fields)?;
                         let s = format!("&{}{{{}}}", self.type_text(to), body);
                         return Ok(if min_prec > 50 { format!("({})", s) } else { s });
+                    }
+                    if let (true, Some(init)) = (fields.is_empty(), self.n5_zero_init(exp)) {
+                        return Ok(init);
                     }
                     let head = self.type_text(exp);
                     let body = self.struct_lit_body(exp, fields)?;
@@ -87,12 +91,34 @@ impl Emitter {
                 }
                 Expr::SliceLit {
                     elem: None, items, ..
-                } => match exp {
+                } => match &resolved {
                     TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
                         let head = self.type_text(exp);
                         let mut parts = Vec::new();
                         for i in items {
                             parts.push(self.emit_expr_exp(i, 0, Some(elem))?);
+                        }
+                        if let (
+                            TypeExpr::Array {
+                                len:
+                                    Some(
+                                        len_expr,
+                                    ),
+                                ..
+                            },
+                            Some(init),
+                        ) = (&resolved, self.n5_zero_init(elem))
+                        {
+                            if let Expr::Lit {
+                                kind: LitKind::Int(n),
+                                ..
+                            } = len_expr.as_ref()
+                            {
+                                parts.resize(
+                                    n.replace('_', "").parse().unwrap_or(0).max(parts.len()),
+                                    init,
+                                );
+                            }
                         }
                         return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                     }
@@ -225,10 +251,13 @@ impl Emitter {
 
             Expr::StructLit { ty, fields, .. } => {
                 if let Some(t) = ty {
-                    if matches!(t, TypeExpr::Chan { .. }) {
+                    if matches!(self.resolve_type_alias(t), TypeExpr::Chan { .. }) {
                         return Err(EmitError::unsupported(
                             "channel type is not a value expression — construct a channel with `make(chan T)`",
                         ));
+                    }
+                    if let (true, Some(init)) = (fields.is_empty(), self.n5_zero_init(t)) {
+                        return Ok(init);
                     }
                     let head = self.type_text(t);
                     let body = self.struct_lit_body(t, fields)?;
