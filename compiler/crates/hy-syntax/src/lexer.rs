@@ -565,8 +565,9 @@ impl<'a> Lexer<'a> {
         if self.at(0) == Some('.') {
             let is_range = self.at(1) == Some('.');
             let is_exp = matches!(self.at(1), Some('e') | Some('E')) && {
-                let k = if matches!(self.at(2), Some('+') | Some('-')) { 3 } else { 2 };
-                self.at(k).map(|d| d.is_ascii_digit()) == Some(true)
+                let has_sign = matches!(self.at(2), Some('+') | Some('-'));
+                let k = if has_sign { 3 } else { 2 };
+                self.at(k).map(|d| d.is_ascii_digit()) == Some(true) || has_sign
             };
             let is_ident_start = self.at(1).map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false);
 
@@ -610,6 +611,19 @@ impl<'a> Lexer<'a> {
                     } else {
                         break;
                     }
+                }
+                if self.at(0).is_some_and(|c| c.is_ascii_alphabetic()) {
+                    while self
+                        .at(0)
+                        .is_some_and(|c| c == '_' || c.is_ascii_alphanumeric())
+                    {
+                        s.push(self.bump().unwrap());
+                    }
+                    self.escape_diag(
+                        start,
+                        false,
+                        "malformed float literal: unexpected letter after exponent digits (SPEC-LANGUAGE.md LX6)",
+                    );
                 }
             } else {
                 is_float = true;
