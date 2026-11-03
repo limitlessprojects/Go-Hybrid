@@ -1881,6 +1881,15 @@ impl Parser {
             }
             _ => return self.err("expected string literal"),
         };
+        // Most strings have no interpolation. Avoid allocating a parts vector
+        // and cloning its payload only to discard both when returning Lit::Str.
+        if matches!(self.cur(), Tok::StrEnd) {
+            self.bump();
+            return Ok(Expr::Lit {
+                kind: LitKind::Str(first),
+                span: self.span_from(start),
+            });
+        }
         let mut parts = Vec::new();
         if !first.is_empty() {
             parts.push(InterpPart::Lit(first.clone()));
