@@ -1919,6 +1919,17 @@ impl<'a> Collector<'a> {
                         MatchPattern::Path { segments, binding } => {
                             if let Some(root) = segments.first() {
                                 self.mention(root);
+                                if root == "nil" && is_non_nilable(&subject_kind) {
+                                    self.emit_e1002(
+                                        subject.span(),
+                                        format!(
+                                            "cannot use match pattern `nil` on subject of non-nilable type `{}` — Go refuses `invalid case nil in switch on ... (mismatched types untyped nil and {})` (HYB-E1002)",
+                                            subject_kind.label(),
+                                            subject_kind.label()
+                                        ),
+                                        "`nil` match pattern is only valid on nilable subjects (pointers, interfaces, channels, maps, slices, options)",
+                                    );
+                                }
                             }
                             if let Some(b) = binding {
                                 self.define_elidable(b, subject.span());
@@ -1936,7 +1947,7 @@ impl<'a> Collector<'a> {
                             }
                         }
                         MatchPattern::Lit(lit) => {
-                            self.check_match_lit_pattern(&subject_kind, lit, subject.span());
+                            self.check_match_lit_pattern(subject, &subject_kind, lit, subject.span());
                         }
                         MatchPattern::Wildcard => {}
                     }
@@ -4647,7 +4658,50 @@ impl<'a> Collector<'a> {
         );
     }
 
-    fn check_match_lit_pattern(&mut self, subject_kind: &OpKind, lit: &LitKind, span: Span) {
+    fn check_match_lit_pattern(
+        &mut self,
+        subject: &Expr,
+        subject_kind: &OpKind,
+        lit: &LitKind,
+        span: Span,
+    ) {
+        if matches!(lit, LitKind::Nil) && is_non_nilable(subject_kind) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use match pattern `nil` on subject of non-nilable type `{}` — Go refuses `invalid case nil in switch on ... (mismatched types untyped nil and {})` (HYB-E1002)",
+                    subject_kind.label(),
+                    subject_kind.label(),
+                ),
+                "`nil` match pattern is only valid on nilable subjects (pointers, interfaces, channels, maps, slices, options)",
+            );
+            return;
+        }
+
+        if let LitKind::Int(raw) = lit {
+            if let Some(scalar) = self.typed_value_scalar(subject) {
+                if let Some((lo, hi)) = crate::const_overflow::fixed_width_int_range(scalar) {
+                    let overflows = match crate::const_overflow::parse_int_lit(raw) {
+                        Some(crate::const_overflow::ConstInt::Value(v)) => v < lo || v > hi,
+                        Some(crate::const_overflow::ConstInt::PosOverflow) => true,
+                        Some(crate::const_overflow::ConstInt::NegOverflow) => true,
+                        None => false,
+                    };
+                    if overflows {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot use match pattern `{}` (untyped int constant) as `{}` value in case clause (overflows) (HYB-E1002)",
+                                raw, scalar
+                            ),
+                            "match arm integer pattern must fit within the subject's declared integer range",
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
         let pat_kind = match lit {
             LitKind::Int(_) | LitKind::Char(_) => OpKind::Int,
             LitKind::Float(_) => OpKind::Float,
