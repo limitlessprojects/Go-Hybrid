@@ -294,3 +294,22 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 - Revalidated 2026-10-24 after the queue reset: rebased onto `1f0ff978f4deff78c77bca96db0e3e46f32de71b`; the runtime fix and regression tests retain the original reviewed Git bytes. Fresh local Linux checks on Rust 1.99.0 / Go 1.26.9: all 11 stages pass, 4 direct runtime tests, real Go-to-Rust runtime test/vet/build, compiler workspace 1800/1800, corpus 127/127 and differential 41/41 accepted + 86/86 rejected, format and runtime clippy. Completed 2026-10-24T14:24:32Z; existing warnings remain. This is local validation; hosted CI, maintainer acceptance and any award/payment are pending.
 - Maintainer reopened #1518 on 2026-10-30 and requested a fresh base. Rebased onto `5435169b40f718384cf3b773586efd565c387c65`; the focused runtime change and four regression tests are retained. Current-head Linux workspace/corpus/differential revalidation is pending; earlier passing results above are historical evidence, not results for this new base.
 - Completed the fresh Linux battery at 2026-10-30T15:14:30Z on candidate `1d5a9bf761efc3a60cb83b0ef1ccde2361f8694b`, Rust 1.99.0 and Go 1.26.9: all 11 stages exit 0; runtime tests 4/4; rebuilt Rust archive linked into real Go runtime test/vet/build; compiler workspace 1891 passed, 0 failed/ignored; corpus 127/127; differential 41/41 accepted + 86/86 rejected; runtime format and clippy pass. Existing upstream warnings remain. Only this validation note and the corresponding STATUS line changed after testing; runtime/compiler/test bytes are identical. Hosted CI and maintainer landing/reward decisions remain pending.
+
+
+## Contributor spike plan — plain-string parser allocations (2026-11-04)
+
+Base77b97fa4: measure the unused interpolation-parts/payload copy before an early-return fast path. Preserve tokens, spans, interpolation/diagnostics and rollback. Allocation regression, AST/diagnostic parity, paired release measurements and required full checks planned; no results/reward claimed. See `spikes/parser-plain-strings/RESULTS.md`.
+
+
+## Contributor result — plain-string parser allocation fast path (2026-11-04)
+
+Nine parser lines return the existing plain literal/span before allocating
+interpolation parts. The original regression fails (two payload copies); the
+candidate passes (one). All 169 AST/diagnostic snapshots match. The short-string
+sample saves 4,000 allocation/reallocation calls and 956,000 requested bytes per
+parse, about 10% faster on one arm64 Mac; the interpolation control is 1.4%
+slower, so no universal/end-to-end or RSS claim. On code 43ce8334: workspace
+2,655/0, corpus 130/130, differential 42+88 and ten examples pass, with pinned
+Rust 1.99.0 / Go 1.26.9. Static registration/census/conflict guards pass. Hosted CI,
+maintainer classification, merge and discretionary reward remain pending.
+Full raw data, ranges, reproduction and limitations: `spikes/parser-plain-strings/RESULTS.md`.
