@@ -873,48 +873,12 @@ impl<'a> Checker<'a> {
                             });
                         }
                     }
-                    let head = Self::base_named_type_str(name);
-                    self.fns
-                        .get(name.as_str())
-                        .or_else(|| self.fns.get(head))
-                        .and_then(|f| f.results.first())
-                        .map(|r| r.ty.clone())
+                    self.substituted_call_result_tys(st, callee, args)
+                        .and_then(|v| v.into_iter().next())
                 }
                 Expr::Field { base, name, .. } => {
-                    let head = Self::base_named_type_str(name);
-                    if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
-                        if self.lookup_binding(st, root).is_none() {
-                            let full = format!("{}.{}", root, head);
-                            if let Some(f) = self.fns.get(full.as_str()) {
-                                return f.results.first().map(|r| r.ty.clone());
-                            }
-                        }
-                    }
-                    let recv_base = self
-                        .ty_of_expr(st, base)
-                        .map(|t| self.resolve_type_alias(&t))
-                        .and_then(|t| Self::base_named_type(&t))
-                        .or_else(|| match self.shape_of_expr(st, base) {
-                            TypeShape::Struct(Some(s)) => {
-                                Some(Self::base_named_type_str(&s).to_string())
-                            }
-                            TypeShape::Pointer(inner) => match *inner {
-                                TypeShape::Struct(Some(s)) => {
-                                    Some(Self::base_named_type_str(&s).to_string())
-                                }
-                                _ => None,
-                            },
-                            _ => None,
-                        });
-                    if let Some(rb) = recv_base {
-                        if let Some(ret) = self
-                            .method_decls
-                            .get(&(rb, head.to_string()))
-                            .and_then(|f| f.results.first())
-                            .map(|r| r.ty.clone())
-                        {
-                            return Some(ret);
-                        }
+                    if let Some(res) = self.substituted_call_result_tys(st, callee, args) {
+                        return res.into_iter().next();
                     }
                     if let Some((elem_ty, _)) = self
                         .ty_of_expr(st, base)
@@ -1414,8 +1378,11 @@ impl<'a> Checker<'a> {
             Expr::Try { operand, .. } => (crate::model::unwrap_parens(operand), true),
             other => (other, false),
         };
-        if let Expr::Call { callee, .. } = call_expr {
-            if let Some(results) = self.call_result_tys(st, callee) {
+        if let Expr::Call { callee, args, .. } = call_expr {
+            if let Some(results) = self
+                .substituted_call_result_tys(st, callee, args)
+                .or_else(|| self.call_result_tys(st, callee))
+            {
                 let avail = if is_try {
                     results.len().saturating_sub(1)
                 } else {
@@ -1494,14 +1461,15 @@ impl<'a> Checker<'a> {
         let Some((base, args)) = Self::split_generic_type_args(name) else {
             return Vec::new();
         };
-        if !self.struct_type_params.contains_key(base) {
+        let Some(decl_tparams) = self.struct_type_params.get(base) else {
             return Vec::new();
-        }
+        };
         args.into_iter()
             .filter(|a| {
                 !a.is_empty()
                     && a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    && !self.structs.contains_key(a.as_str())
+                    && (decl_tparams.iter().any(|tp| tp.name == *a)
+                        || (!self.structs.contains_key(a.as_str())
                     && !self.type_aliases.contains_key(a.as_str())
                     && !self.enums.contains_key(a.as_str())
                     && !matches!(
@@ -1535,9 +1503,14 @@ impl<'a> Checker<'a> {
                             | "rune"
                             | "char"
                             | "string"
+                            | "uint"
+                            | "complex64"
+                            | "complex128"
+                            | "c64"
+                            | "c128"
                             | "any"
                             | "error"
-                    )
+                        )))
             })
             .collect()
     }
@@ -1671,6 +1644,92 @@ impl<'a> Checker<'a> {
         self.named_shape_depth(s, depth + 1)
     }
 
+    fn shape_to_type_arg_str(sh: &TypeShape) -> String {
+        match sh {
+            TypeShape::Primitive => "int".to_string(),
+            TypeShape::Str => "string".to_string(),
+            TypeShape::Atomic => "atomic.int64".to_string(),
+            TypeShape::Closure => "fn()".to_string(),
+            TypeShape::OwnHandle(t) | TypeShape::BorrowHandle(t) | TypeShape::ForeignOpaque(t) => {
+                t.clone()
+            }
+            TypeShape::Struct(Some(n)) => n.clone(),
+            TypeShape::Pointer(inner) => format!("*{}", Self::shape_to_type_arg_str(inner)),
+            TypeShape::Slice(inner) => format!("[]{}", Self::shape_to_type_arg_str(inner)),
+            TypeShape::Array(inner) => format!("[1]{}", Self::shape_to_type_arg_str(inner)),
+            TypeShape::Chan(inner) => format!("chan {}", Self::shape_to_type_arg_str(inner)),
+            TypeShape::Map(k, v) => format!(
+                "map[{}]{}",
+                Self::shape_to_type_arg_str(k),
+                Self::shape_to_type_arg_str(v)
+            ),
+            TypeShape::Struct(None) | TypeShape::Unknown => "__hy.unproven".to_string(),
+        }
+    }
+
+    fn subst_shape_in_folded_arg(
+        &self,
+        ty: &TypeExpr,
+        subst: &std::collections::HashMap<String, TypeShape>,
+        depth: usize,
+    ) -> String {
+        if depth > Self::MAX_TYPE_RESOLUTION_DEPTH {
+            return "__hy.unproven".to_string();
+        }
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                if let Some(sh) = subst.get(name.as_str()) {
+                    return Self::shape_to_type_arg_str(sh);
+                }
+                if let Some((base, args)) = Self::parse_generic_type_args(name) {
+                    let inner: Vec<String> = args
+                        .iter()
+                        .map(|a| self.subst_shape_in_folded_arg(a, subst, depth + 1))
+                        .collect();
+                    return format!("{}[{}]", base, inner.join(", "));
+                }
+                name.clone()
+            }
+            TypeExpr::Pointer { to, .. } => {
+                format!("*{}", self.subst_shape_in_folded_arg(to, subst, depth + 1))
+            }
+            TypeExpr::Slice { elem, .. } => {
+                format!("[]{}", self.subst_shape_in_folded_arg(elem, subst, depth + 1))
+            }
+            TypeExpr::Array { len, elem, .. } => match len {
+                Some(e) => format!(
+                    "[{}]{}",
+                    e.render(),
+                    self.subst_shape_in_folded_arg(elem, subst, depth + 1)
+                ),
+                None => format!(
+                    "[...]{}",
+                    self.subst_shape_in_folded_arg(elem, subst, depth + 1)
+                ),
+            },
+            TypeExpr::Map { key, value, .. } => format!(
+                "map[{}]{}",
+                self.subst_shape_in_folded_arg(key, subst, depth + 1),
+                self.subst_shape_in_folded_arg(value, subst, depth + 1)
+            ),
+            TypeExpr::Chan { dir, elem, .. } => {
+                let inner = self.subst_shape_in_folded_arg(elem, subst, depth + 1);
+                match dir {
+                    hy_syntax::ChanDir::Both => format!("chan {}", inner),
+                    hy_syntax::ChanDir::Recv => format!("<-chan {}", inner),
+                    hy_syntax::ChanDir::Send => format!("chan<- {}", inner),
+                }
+            }
+            TypeExpr::Option { elem, .. } => {
+                format!(
+                    "option[{}]",
+                    self.subst_shape_in_folded_arg(elem, subst, depth + 1)
+                )
+            }
+            TypeExpr::Fn { .. } => "fn()".to_string(),
+        }
+    }
+
     pub(crate) fn shape_of_type_with_subst(
         &self,
         ty: &TypeExpr,
@@ -1687,6 +1746,17 @@ impl<'a> Checker<'a> {
             TypeExpr::Named { name, .. } => {
                 if let Some(sh) = subst.get(name.as_str()) {
                     return sh.clone();
+                }
+                if let Some((base, args)) = Self::parse_generic_type_args(name) {
+                    if let Some(target) = self.type_aliases.get(base) {
+                        return self.shape_of_type_with_subst(target, subst, depth + 1);
+                    }
+                    let rendered: Vec<String> = args
+                        .iter()
+                        .map(|a| self.subst_shape_in_folded_arg(a, subst, depth + 1))
+                        .collect();
+                    let inst = format!("{}[{}]", base, rendered.join(", "));
+                    return self.named_shape_depth(&inst, depth);
                 }
                 let base = Self::base_named_type_str(name);
                 if let Some(target) = self.type_aliases.get(base) {
@@ -1717,6 +1787,309 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn render_folded_type_arg(ty: &TypeExpr) -> String {
+        let s = ty.render();
+        if matches!(ty, TypeExpr::Fn { .. })
+            && hy_syntax::parse_file("", &format!("type _t = {}
+", s)).is_err()
+        {
+            return "fn()".to_string();
+        }
+        s
+    }
+
+    fn shape_to_type_expr(sh: &TypeShape, span: hy_diag::Span) -> TypeExpr {
+        let rendered = Self::shape_to_type_arg_str(sh);
+        let snippet = format!("type _t = {}
+", rendered);
+        if let Ok(file) = hy_syntax::parse_file("", &snippet) {
+            if let Some(hy_syntax::Decl::TypeAlias(ta)) = file.decls.into_iter().next() {
+                return ta.ty;
+            }
+        }
+        TypeExpr::Named {
+            name: rendered,
+            span,
+        }
+    }
+
+    fn subst_call_type_expr(
+        ty: &TypeExpr,
+        subst: &std::collections::HashMap<String, TypeExpr>,
+    ) -> TypeExpr {
+        if subst.is_empty() {
+            return ty.clone();
+        }
+        match ty {
+            TypeExpr::Named { name, span } => {
+                if let Some(repl) = subst.get(name.as_str()) {
+                    return repl.clone();
+                }
+                if let Some((base, args)) = Self::parse_generic_type_args(name) {
+                    let joined = args
+                        .iter()
+                        .map(|a| Self::render_folded_type_arg(&Self::subst_call_type_expr(a, subst)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return TypeExpr::Named {
+                        name: format!("{}[{}]", base, joined),
+                        span: *span,
+                    };
+                }
+                ty.clone()
+            }
+            TypeExpr::Pointer { to, span } => TypeExpr::Pointer {
+                to: Box::new(Self::subst_call_type_expr(to, subst)),
+                span: *span,
+            },
+            TypeExpr::Slice { elem, span } => TypeExpr::Slice {
+                elem: Box::new(Self::subst_call_type_expr(elem, subst)),
+                span: *span,
+            },
+            TypeExpr::Array { len, elem, span } => TypeExpr::Array {
+                len: len.clone(),
+                elem: Box::new(Self::subst_call_type_expr(elem, subst)),
+                span: *span,
+            },
+            TypeExpr::Map { key, value, span } => TypeExpr::Map {
+                key: Box::new(Self::subst_call_type_expr(key, subst)),
+                value: Box::new(Self::subst_call_type_expr(value, subst)),
+                span: *span,
+            },
+            TypeExpr::Chan { dir, elem, span } => TypeExpr::Chan {
+                dir: *dir,
+                elem: Box::new(Self::subst_call_type_expr(elem, subst)),
+                span: *span,
+            },
+            TypeExpr::Option { elem, span } => TypeExpr::Option {
+                elem: Box::new(Self::subst_call_type_expr(elem, subst)),
+                span: *span,
+            },
+            TypeExpr::Fn {
+                params,
+                results,
+                span,
+            } => TypeExpr::Fn {
+                params: params
+                    .iter()
+                    .map(|p| hy_syntax::Param {
+                        name: p.name.clone(),
+                        ty: Self::subst_call_type_expr(&p.ty, subst),
+                        span: p.span,
+                    })
+                    .collect(),
+                results: results
+                    .iter()
+                    .map(|r| Self::subst_call_type_expr(r, subst))
+                    .collect(),
+                span: *span,
+            },
+        }
+    }
+
+    fn unify_param_with_arg_ty(
+        &self,
+        param_ty: &TypeExpr,
+        arg_ty: &TypeExpr,
+        tparams: &std::collections::HashSet<String>,
+        out: &mut std::collections::HashMap<String, TypeExpr>,
+        depth: usize,
+    ) {
+        if depth > Self::MAX_TYPE_RESOLUTION_DEPTH {
+            return;
+        }
+        if let TypeExpr::Named { name, .. } = param_ty {
+            if tparams.contains(name.as_str()) {
+                if !matches!(arg_ty, TypeExpr::Named { name: an, .. } if an == "any") {
+                    out.entry(name.clone()).or_insert_with(|| arg_ty.clone());
+                }
+                return;
+            }
+        }
+        let p_res = self.resolve_type_alias(param_ty);
+        let a_res = self.resolve_type_alias(arg_ty);
+        match (&p_res, &a_res) {
+            (TypeExpr::Chan { elem: pe, .. }, TypeExpr::Chan { elem: ae, .. })
+            | (TypeExpr::Slice { elem: pe, .. }, TypeExpr::Slice { elem: ae, .. })
+            | (TypeExpr::Array { elem: pe, .. }, TypeExpr::Array { elem: ae, .. })
+            | (TypeExpr::Pointer { to: pe, .. }, TypeExpr::Pointer { to: ae, .. })
+            | (TypeExpr::Option { elem: pe, .. }, TypeExpr::Option { elem: ae, .. }) => {
+                self.unify_param_with_arg_ty(pe, ae, tparams, out, depth + 1);
+            }
+            (
+                TypeExpr::Map {
+                    key: pk, value: pv, ..
+                },
+                TypeExpr::Map {
+                    key: ak, value: av, ..
+                },
+            ) => {
+                self.unify_param_with_arg_ty(pk, ak, tparams, out, depth + 1);
+                self.unify_param_with_arg_ty(pv, av, tparams, out, depth + 1);
+            }
+            (TypeExpr::Named { name: pn, .. }, TypeExpr::Named { name: an, .. }) => {
+                if let (Some((pb, pargs)), Some((ab, aargs))) = (
+                    Self::parse_generic_type_args(pn),
+                    Self::parse_generic_type_args(an),
+                ) {
+                    if pb == ab && pargs.len() == aargs.len() {
+                        for (pa, aa) in pargs.iter().zip(aargs.iter()) {
+                            self.unify_param_with_arg_ty(pa, aa, tparams, out, depth + 1);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn call_decl_result_tys(
+        &self,
+        st: &FnState,
+        f: &hy_syntax::FnDecl,
+        raw_callee_name: &str,
+        recv_base: Option<&Expr>,
+        args: &[CallArg],
+    ) -> Vec<TypeExpr> {
+        let recv_tparams = f
+            .receiver
+            .as_ref()
+            .map(|r| self.receiver_type_params(&r.ty))
+            .unwrap_or_default();
+        if f.type_params.is_empty() && recv_tparams.is_empty() {
+            return f.results.iter().map(|r| r.ty.clone()).collect();
+        }
+        let mut tparam_set: std::collections::HashSet<String> =
+            f.type_params.iter().map(|tp| tp.name.clone()).collect();
+        tparam_set.extend(recv_tparams);
+
+        let mut ty_subst: std::collections::HashMap<String, TypeExpr> =
+            std::collections::HashMap::new();
+
+        if let (Some(recv), Some(base_expr)) = (&f.receiver, recv_base) {
+            if let TypeExpr::Named { name: rname, .. } = Self::unwrap_pointer_ty(&recv.ty) {
+                if let Some((rbase, rparams)) = Self::split_generic_type_args(rname) {
+                    let inst_name_opt = self
+                        .ty_of_expr(st, base_expr)
+                        .map(|t| self.resolve_type_alias(&t))
+                        .and_then(|t| match Self::unwrap_pointer_ty(&t) {
+                            TypeExpr::Named { name, .. } => Some(name.clone()),
+                            _ => None,
+                        })
+                        .or_else(|| match self.shape_of_expr(st, base_expr) {
+                            TypeShape::Struct(Some(s)) => Some(s),
+                            TypeShape::Pointer(inner) => match *inner {
+                                TypeShape::Struct(Some(s)) => Some(s),
+                                _ => None,
+                            },
+                            _ => None,
+                        });
+                    if let Some(inst_name) = inst_name_opt {
+                        if let Some((ibase, iargs)) = Self::parse_generic_type_args(&inst_name) {
+                            if ibase == rbase {
+                                for (rp, ia_ty) in rparams.iter().zip(iargs.into_iter()) {
+                                    if tparam_set.contains(rp.as_str()) {
+                                        ty_subst.insert(rp.clone(), ia_ty);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((_, explicit_tys)) = Self::parse_generic_type_args(raw_callee_name) {
+            for (tp, arg_ty) in f.type_params.iter().zip(explicit_tys.into_iter()) {
+                ty_subst.insert(tp.name.clone(), arg_ty);
+            }
+        }
+
+        for (param, call_arg) in f.params.iter().zip(args.iter()) {
+            if let Some(arg_ty) = self.ty_of_expr(st, &call_arg.value) {
+                self.unify_param_with_arg_ty(&param.ty, &arg_ty, &tparam_set, &mut ty_subst, 0);
+            }
+        }
+
+        let shape_subst = self.fn_call_shape_subst(st, f, raw_callee_name, recv_base, args);
+        for tp in &tparam_set {
+            if !ty_subst.contains_key(tp) {
+                if let Some(sh) = shape_subst.get(tp) {
+                    if !matches!(sh, TypeShape::Unknown) {
+                        ty_subst.insert(tp.clone(), Self::shape_to_type_expr(sh, f.span));
+                    } else if self.structs.contains_key(tp.as_str())
+                        || self.type_aliases.contains_key(tp.as_str())
+                    {
+                        ty_subst.insert(
+                            tp.clone(),
+                            TypeExpr::Named {
+                                name: "__hy.unproven".to_string(),
+                                span: f.span,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        f.results
+            .iter()
+            .map(|r| Self::subst_call_type_expr(&r.ty, &ty_subst))
+            .collect()
+    }
+
+    fn substituted_call_result_tys(
+        &self,
+        st: &FnState,
+        callee: &Expr,
+        args: &[CallArg],
+    ) -> Option<Vec<TypeExpr>> {
+        match crate::model::unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                if self.lookup_binding(st, name).is_some() {
+                    return None;
+                }
+                let head = Self::base_named_type_str(name);
+                self.fns
+                    .get(name.as_str())
+                    .or_else(|| self.fns.get(head))
+                    .map(|f| self.call_decl_result_tys(st, f, name, None, args))
+            }
+            Expr::Field { base, name, .. } => {
+                let head = Self::base_named_type_str(name);
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, root).is_none() {
+                        let full = format!("{}.{}", root, head);
+                        if let Some(f) = self.fns.get(full.as_str()) {
+                            return Some(self.call_decl_result_tys(st, f, name, None, args));
+                        }
+                    }
+                }
+                let recv = self.shape_of_expr(st, base);
+                let recv_base = self
+                    .ty_of_expr(st, base)
+                    .map(|t| self.resolve_type_alias(&t))
+                    .and_then(|t| Self::base_named_type(&t))
+                    .or_else(|| match &recv {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match &**inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    })?;
+                self.method_decls
+                    .get(&(recv_base, head.to_string()))
+                    .map(|f| self.call_decl_result_tys(st, f, name, Some(base), args))
+            }
+            _ => None,
+        }
+    }
+
     fn unify_param_with_arg_shape(
         &self,
         param_ty: &TypeExpr,
@@ -1728,24 +2101,25 @@ impl<'a> Checker<'a> {
         if depth > Self::MAX_TYPE_RESOLUTION_DEPTH || matches!(arg_shape, TypeShape::Unknown) {
             return;
         }
+        if let TypeExpr::Named { name, .. } = param_ty {
+            if tparams.contains(name.as_str()) {
+                if matches!(out.get(name.as_str()), None | Some(TypeShape::Unknown)) {
+                    out.insert(name.clone(), arg_shape.clone());
+                }
+                return;
+            }
+        }
         let resolved = self.resolve_type_alias(param_ty);
         match (&resolved, arg_shape) {
-            (TypeExpr::Named { name, .. }, sh) if tparams.contains(name.as_str()) => {
-                out.entry(name.clone()).or_insert_with(|| sh.clone());
-            }
             (TypeExpr::Named { name, .. }, TypeShape::Struct(Some(arg_sname))) => {
                 if let (Some((pb, pargs)), Some((ab, aargs))) = (
-                    Self::split_generic_type_args(name),
+                    Self::parse_generic_type_args(name),
                     Self::split_generic_type_args(arg_sname),
                 ) {
                     if pb == ab {
-                        for (pa, aa) in pargs.iter().zip(aargs.iter()) {
-                            if tparams.contains(pa.as_str()) {
-                                let sh = self.shape_of_type_arg_str(aa, depth + 1);
-                                if !matches!(sh, TypeShape::Unknown) {
-                                    out.entry(pa.clone()).or_insert(sh);
-                                }
-                            }
+                        for (pa_ty, aa) in pargs.iter().zip(aargs.iter()) {
+                            let sh = self.shape_of_type_arg_str(aa, depth + 1);
+                            self.unify_param_with_arg_shape(pa_ty, &sh, tparams, out, depth + 1);
                         }
                     }
                 }
@@ -1787,6 +2161,9 @@ impl<'a> Checker<'a> {
         let mut tparam_set: std::collections::HashSet<String> =
             f.type_params.iter().map(|tp| tp.name.clone()).collect();
         tparam_set.extend(recv_tparams);
+        for tp in &tparam_set {
+            subst.insert(tp.clone(), TypeShape::Unknown);
+        }
 
         if let (Some(recv), Some(base_expr)) = (&f.receiver, recv_base) {
             if let TypeExpr::Named { name: rname, .. } = Self::unwrap_pointer_ty(&recv.ty) {
