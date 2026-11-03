@@ -9,3 +9,11 @@ fn constconv_folds_len_and_nested_calls_3084() {
     assert!(go.contains("uint8(249)"), "{go}");
     assert!(go.contains("uint8(44)"), "{go}");
 }
+
+#[test]
+fn constconv_min_max_preserve_wide_integer_precision_3477() {
+    let go = emit(
+        "fn main() {\n    a := u8(min(1 << 130, 300))\n    b := u8((max(1 << 130, 300) >> 122) + 44)\n    _ = a\n    _ = b\n}\n",
+    );
+    assert_eq!(go.matches("uint8(44)").count(), 2, "{go}");
+}
