@@ -2,7 +2,7 @@
 
 ## Contributor validation — histogram recording bit length (2026-11-03)
 
-- Replace the per-sample manual scan with standard-library bit length. Five existing histogram tests pass before/after; all 187 exponent-boundary comparisons agree. On one Apple M2/Go1.26.9 run series, median Record cost fell from19.760–26.140ns/op to2.852–2.899ns/op, zero allocations. No mean/quantile/compiler semantics change or end-to-end claim. Required workspace/corpus/differential/examples and hosted CI/review remain pending at this candidate checkpoint; [method/raw results](spikes/hybench-record-bitlen/RESULTS.md).
+- Replace the per-sample manual scan with standard-library bit length. Five existing histogram tests pass before/after; all 187 exponent-boundary comparisons agree. On one Apple M2/Go1.26.9 run series, median Record cost fell from19.760–26.140ns/op to2.852–2.899ns/op, zero allocations. No mean/quantile/compiler semantics change or end-to-end claim. Tested code0860ff59 passed workspace2584/2584, corpus130/130, differential42/42+88/88 and all ten examples. Hosted CI/review/award remain pending; [method/raw results](spikes/hybench-record-bitlen/RESULTS.md).
 
 ## Contributor validation — Go build constraints (2026-10-31)
 

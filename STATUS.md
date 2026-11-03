@@ -1,6 +1,6 @@
 # STATUS (for the human — 15 lines max)
 
-- Contributor candidate (2026-11-03): histogram Record uses math/bits bit length; existing five tests and187boundary comparisons agree. LocalM2/Go1.26.9 median19.76–26.14→2.85–2.90ns/op, no end-to-end/award claim. Required broad/hosted checks pending; see PLAN.md and spikes/hybench-record-bitlen.
+- Contributor candidate (2026-11-03): histogram Record uses math/bits bit length; existing five tests and187boundary comparisons agree. LocalM2/Go1.26.9 median19.76–26.14→2.85–2.90ns/op, no end-to-end/award claim. Workspace2584, corpus130, differential42+88 and all ten examples passed; hosted CI/review/award pending; see PLAN.md and spikes/hybench-record-bitlen.
 
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
 

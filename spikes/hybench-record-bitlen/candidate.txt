@@ -11,4 +11,4 @@ BenchmarkHistogramRecord/millisecond        	100000000	         2.866 ns/op	    
 BenchmarkHistogramRecord/millisecond        	100000000	         2.852 ns/op	       0 B/op	       0 allocs/op
 BenchmarkHistogramRecord/millisecond        	100000000	         2.784 ns/op	       0 B/op	       0 allocs/op
 PASS
-ok  	_/Volumes/GAME_SSD/Development/JOS/data-v2/scratch/provider/Temporary/task134-hybrid-histogram-source-20261103/runtime/go/hybench	2.819s
+ok  	hybench	2.819s

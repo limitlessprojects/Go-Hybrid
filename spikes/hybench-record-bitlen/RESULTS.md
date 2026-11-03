@@ -36,8 +36,9 @@ GO111MODULE=off go test -run '^$' -bench '^BenchmarkHistogramRecord$' -benchmem 
 
 The actual runs used an explicit task-owned GOCACHE/GOPATH/TMPDIR,
 `GOTOOLCHAIN=local`, `GOPROXY=off` and `GOMAXPROCS=2`; `-cpu=1` selects one
-benchmark processor. The full raw outputs are [baseline.txt](baseline.txt) and
-[candidate.txt](candidate.txt).
+benchmark processor. The measurement outputs are [baseline.txt](baseline.txt) and
+[candidate.txt](candidate.txt); only the local workspace path is redacted.
+Original unredacted command outputs are privately retained.
 
 | Sample group | Baseline median ns/op | Candidate median ns/op | Observed ratio |
 | --- | ---: | ---: | ---: |
@@ -62,8 +63,19 @@ covers bit-length boundaries; it is not an exhaustive enumeration of all inputs.
 The mathematical equivalence for positive values follows from the definitions
 of leading-zero count and bit length; the zero fast path is retained.
 
-Required compiler workspace, corpus, differential and example checks are
-pending at this initial candidate checkpoint. Hosted CI, maintainer review,
+On tested code commit `0860ff59b851c920fcc812317df5fec7b6f925f1`, the required
+local checks completed successfully with the pinned Rust 1.99.0 and Go 1.26.9:
+
+- `cargo test --workspace --offline --quiet`: 2,584 passed, zero failed/ignored.
+- `cargo build -p hyb --offline --quiet`: passed.
+- `tools/corpus_harness.py --bin <hyb>`: verdict agreement 130/130.
+- `tools/differential_loop.py --bin <hyb>`: 42/42 build-and-run and 88/88 rejections.
+- `bash tools/run_examples.sh`: all ten examples passed (including both cat paths).
+- `git diff --check`: passed; the changed Go files were formatted with gofmt.
+
+Commands were invoked directly with correctly quoted argv and task-owned paths,
+using the existing offline dependency caches. Subsequent documentation updates
+preserve the two tested Go files byte-for-byte. Hosted CI, maintainer review,
 merge and any discretionary bounty award remain unconfirmed.
 
 Provenance: AI-led source review, patch, benchmark and command execution. No
