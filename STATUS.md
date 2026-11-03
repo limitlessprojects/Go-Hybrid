@@ -2,6 +2,8 @@
 
 - Contributor (2026-11-05): default Actions watch selects the heavy workflow before pagination; three focused regressions pass (two failed before). The full Linux job suite passes 95/95 with no skips; earlier Windows environment limitations remain recorded in PLAN.md. Hosted CI/review pending.
 
+- Contributor documentation correction (2026-10-26, #1831): keep the Docker quickstart build/run chain inside the container shell. Shell-boundary checks pass; the published Docker image reproduces exit 127 before the change and builds/runs the hello example with exit 0 after it. Compiler/runtime code is unchanged. Pinned Rust 1.99.0 / Go 1.26.9 on macOS arm64: 1,800 Rust tests and corpus 127/127 pass. Differential first run: 40/41 accept, 86/86 reject (managed-map runtime failure); repeat: 41/41 and 86/86. Compiler/tools/tests match the parent; upstream CI is still pending.
+
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
 
 - Contributor #1165: range bounds spelled as different names of one Go integer type no longer raise a false HYB-E2009 (shared canonicaliser in `hy-check` + regression pin); workspace/corpus/differential/CI remain delivery gates.

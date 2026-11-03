@@ -1,9 +1,14 @@
 # Hybrid Language: Development Plan
 
+<<<<<<< HEAD
 ## Contributor validation — Actions watch workflow selection (2026-11-05)
 
 - `job.py actions watch` now queries the heavy workflow before pagination, so newer CI runs cannot hide dispatched heavy jobs. Explicit run IDs still inspect the requested workflow. No compiler or language behavior changes.
 - On base `c716aeb`, the three new offline regressions produce two failures and one passing explicit-ID control; after the fix all three pass. The Windows job suite has the same ten environment errors and seven skips before (92 tests) and after (95 tests): unavailable make/POSIX shell and fixture commit identities rejected by a host Git hook. Test registration, conflict-marker and whitespace guards pass. Linux follow-up (isolated WSL Alpine 3.24, Python 3.14.10, GNU make, Git 2.54): `python3 -B -m unittest discover -s tools -p "test_job*.py" -v` passes all 95 tests with no skips in 9.049s; no source or test changes were needed. Hosted CI and maintainer review remain pending.
+=======
+- Contributor documentation correction (2026-10-26, #1831): keep the Docker quickstart build/run chain inside the container shell. Shell-boundary checks pass; the published Docker image reproduces exit 127 before the change and builds/runs the hello example with exit 0 after it. Compiler/runtime code is unchanged. Pinned Rust 1.99.0 / Go 1.26.9 on macOS arm64: 1,800 Rust tests and corpus 127/127 pass. Differential first run: 40/41 accept, 86/86 reject (managed-map runtime failure); repeat: 41/41 and 86/86. Compiler/tools/tests match the parent; upstream CI is still pending.
+
+>>>>>>> ff7529ed (docs: keep Docker quickstart build and execution inside container)
 
 ## Contributor validation — Go build constraints (2026-10-31)
 
