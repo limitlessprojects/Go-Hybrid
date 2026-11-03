@@ -4127,7 +4127,9 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
-            if kinds_conflict(&want, &got)
+            let nil_to_non_nilable = Checker::is_nil_literal(&a.value) && is_non_nilable(&want);
+            if nil_to_non_nilable
+                || kinds_conflict(&want, &got)
                 || int_to_float_conflict
                 || scalar_mismatch
                 || self.sized_array_names_differ(
@@ -4182,7 +4184,9 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
-            if kinds_conflict(&want, &got)
+            let nil_to_non_nilable = Checker::is_nil_literal(&a.value) && is_non_nilable(&want);
+            if nil_to_non_nilable
+                || kinds_conflict(&want, &got)
                 || int_to_float_conflict
                 || scalar_mismatch
                 || self.sized_array_names_differ(
@@ -4224,7 +4228,8 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let nil_to_non_nilable = Checker::is_nil_literal(&a.value) && is_non_nilable(&want);
+            if nil_to_non_nilable || kinds_conflict(&want, &got) {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
