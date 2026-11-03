@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 130 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 88 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 130 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 88 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 134 programs — ACCEPT 42 · ACCEPT-MANAGED 2 · REJECT 90 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 134 programs — ACCEPT 42 · ACCEPT-MANAGED 2 · REJECT 90 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -301,3 +301,24 @@ in `hy-check/tests/type_name_in_value_position.rs` (13 tests).
 
 With this registration the corpus is **120 programs: ACCEPT 38 ·
 ACCEPT-MANAGED 2 · REJECT 80** — main's 118 plus these two.
+
+`a5-escape-interproc-write-reject.hy`, `a5-escape-interproc-controls-accept.hy` —
+the C9 (A5 / HYB-E3013) captured-write check now follows the write one call
+away: a closure handed to foreign Go that mutates a capture through a
+top-level fn, a pointer-receiver user method, another local closure, or an
+inline closure-factory call is rejected exactly like the inline store. The
+ACCEPT twin holds read-only, by-value and closure-local calls.
+
+With this registration the corpus is **132 programs: ACCEPT 41 ·
+ACCEPT-MANAGED 2 · REJECT 89**.
+
+`a5-escape-via-user-fn-param-reject.hy`, `a5-escape-via-user-fn-param-controls-accept.hy` —
+the C9 (A5 / HYB-E3013) check-site can no longer be laundered through a user
+wrapper: a captured-write closure passed to a Hybrid fn/method whose fn-typed
+parameter reaches a foreign Go call (directly, via a local alias, or via
+another such wrapper) is rejected at the wrapper's call site. The ACCEPT twin
+holds synchronous callers, an audited (`managed ... "interop"`) wrapper, and
+read-only closures.
+
+With this registration the corpus is **134 programs: ACCEPT 42 ·
+ACCEPT-MANAGED 2 · REJECT 90**.

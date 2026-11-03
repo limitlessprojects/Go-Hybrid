@@ -13,7 +13,7 @@ use crate::const_overflow::{const_int_fold_with, ConstFold};
 use crate::model::{unwrap_parens, Checker, FnState};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{ChanDir, Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 impl<'a> Checker<'a> {
     /// Pass-B entry: HYB-E2001 on `defer` + HYB-E2005 on builtin calls.
@@ -666,24 +666,42 @@ impl<'a> Checker<'a> {
         args: &[hy_syntax::CallArg],
         span: Span,
     ) {
-        if self.in_managed() || !self.is_foreign_escape_callee(st, callee) {
+        if self.in_managed() {
             return;
         }
-        let Some(name) = args
-            .iter()
-            .find_map(|a| self.arg_closure_captured_write(st, &a.value))
-        else {
-            return;
+        let message = if self.is_foreign_escape_callee(st, callee) {
+            let Some(name) = args
+                .iter()
+                .find_map(|a| self.arg_closure_captured_write(st, &a.value))
+            else {
+                return;
+            };
+            format!(
+                "closure writes the captured binding `{name}` and is passed to a foreign Go call — the escape must be explicit (HYB-E3013)"
+            )
+        } else {
+            // A closure handed to a USER fn/method whose parameter reaches a
+            // foreign Go call (`fn later(f fn()) { time.after_func(0, f) }`)
+            // escapes exactly as if it were passed to that call directly —
+            // the wrapper must not launder the C9 check-site away.
+            let Some((callee_name, decl)) = self.user_callee_decl(st, callee) else {
+                return;
+            };
+            let Some(name) = args.iter().enumerate().find_map(|(i, a)| {
+                let p = decl.params.get(i)?;
+                if !self.param_reaches_foreign_escape(decl, &p.name, 0) {
+                    return None;
+                }
+                self.arg_closure_captured_write(st, &a.value)
+            }) else {
+                return;
+            };
+            format!(
+                "closure writes the captured binding `{name}` and is passed to `{callee_name}`, which hands it to a foreign Go call — the escape must be explicit (HYB-E3013)"
+            )
         };
         self.diags.push(
-            Diagnostic::error(
-                "HYB-E3013",
-                self.path.clone(),
-                span,
-                format!(
-                    "closure writes the captured binding `{name}` and is passed to a foreign Go call — the escape must be explicit (HYB-E3013)"
-                ),
-            )
+            Diagnostic::error("HYB-E3013", self.path.clone(), span, message)
             .with_notes(vec![
                 "SPEC-LANGUAGE §8.5 C9: a closure that writes a captured mutable binding and \
                  escapes into foreign Go code must take `managed(\"...\", \"interop\")` at the call \
@@ -744,8 +762,63 @@ impl<'a> Checker<'a> {
                     .or_else(|| st.closure_mutates.get(&resolved))
                     .and_then(|roots| roots.iter().min().cloned())
             }
+            // A closure FACTORY call passed inline (`time.after_func(d,
+            // make_cb(m))`): the returned closure captures the factory's
+            // parameters, so a parameter the factory body mutates (inside the
+            // returned literal or otherwise) is a captured write of whatever
+            // shared storage the caller passed. The named form
+            // (`cb := make_cb(m); time.after_func(d, cb)`) is already caught
+            // through `closure_mutates`; the inline form must agree.
+            call @ Expr::Call { callee, args, .. }
+                if matches!(self.shape_of_expr(st, call), crate::model::TypeShape::Closure) =>
+            {
+                let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+                    return None;
+                };
+                if self.lookup_binding(st, name).is_some() {
+                    return None;
+                }
+                let decl = self.fns.get(name.as_str())?;
+                self.user_call_mutated_arg(st, decl, args, |e| {
+                    let r = unwrap_parens(e).root_ident()?;
+                    (r != "_").then(|| r.to_string())
+                })
+            }
             _ => None,
         }
+    }
+
+    /// The first argument root a call to the top-level/method `decl` may
+    /// mutate through shared storage: an argument whose parameter the callee
+    /// body stores through (`fn_mutates_param`, fail-closed past its depth
+    /// bound) and whose value may share storage with the caller (a by-value
+    /// primitive or all-primitive struct copy cannot). `root_of` maps an
+    /// argument expression to the captured binding it reaches (or `None`
+    /// for closure-local values).
+    fn user_call_mutated_arg(
+        &self,
+        st: &FnState,
+        decl: &hy_syntax::FnDecl,
+        args: &[hy_syntax::CallArg],
+        root_of: impl Fn(&Expr) -> Option<String>,
+    ) -> Option<String> {
+        for (i, a) in args.iter().enumerate() {
+            let mutates = match decl.params.get(i) {
+                Some(p) => self.fn_mutates_param(decl, &p.name, 0),
+                None => true, // variadic / arity mismatch: fail closed
+            };
+            if !mutates {
+                continue;
+            }
+            let shape = self.shape_of_expr(st, &a.value);
+            if !matches!(shape, crate::model::TypeShape::Unknown) && !self.shape_may_share(&shape) {
+                continue;
+            }
+            if let Some(r) = root_of(&a.value) {
+                return Some(r);
+            }
+        }
+        None
     }
 
     /// Is this call lexically inside a `managed(...)` block? `managed` is the
@@ -906,6 +979,34 @@ impl<'a> Checker<'a> {
             {
                 return args.first().and_then(|a| ref_of(&a.value));
             }
+            // A call to a top-level `fn` that stores through one of its
+            // parameters mutates whatever captured storage the closure passed
+            // (`bump(m, k)` writing `m[k]`) — the same write as an inline
+            // `m[k] = ...`, one call away.
+            Expr::Ident { name, .. }
+                if !sc.contains_key(name.as_str())
+                    && self.lookup_binding(st, name).is_none()
+                    && self.fns.contains_key(name.as_str()) =>
+            {
+                let decl = self.fns.get(name.as_str())?;
+                return self.user_call_mutated_arg(st, decl, args, &ref_of);
+            }
+            // Calling a closure of the enclosing function that itself writes
+            // captured bindings (`inner := fn() { m["k"] = 1 }` then
+            // `fn() { inner() }` escaping) — `closure_mutates` already holds
+            // its roots (the named-escape form uses the same table).
+            Expr::Ident { name, .. } if !sc.contains_key(name.as_str()) => {
+                let resolved = crate::freeze::resolve_alias(st, name);
+                if let Some(roots) = st
+                    .closure_mutates
+                    .get(name.as_str())
+                    .or_else(|| st.closure_mutates.get(&resolved))
+                {
+                    if let Some(r) = roots.iter().filter(|r| !sc.contains_key(r.as_str())).min() {
+                        return Some(r.clone());
+                    }
+                }
+            }
             Expr::Field { base, name, .. } => {
                 let base = unwrap_parens(base);
                 if let Expr::Ident { name: pkg, .. } = base {
@@ -925,6 +1026,23 @@ impl<'a> Checker<'a> {
                         return None;
                     }
                 }
+                // A user method on a captured receiver: a pointer receiver
+                // (`fn (c *counter) bump()`) writes the captured value itself
+                // — Go auto-addresses `c.bump()` — whenever its body stores
+                // through the receiver; any method may also mutate shared
+                // storage passed as an argument.
+                if let Some(decl) = self.user_method_decl(st, base, name) {
+                    if let Some(recv) = &decl.receiver {
+                        if recv.is_pointer && self.ptr_receiver_writes(st, decl, 0) {
+                            if let Some(r) = ref_of(base) {
+                                return Some(r);
+                            }
+                        }
+                    }
+                    if let Some(r) = self.user_call_mutated_arg(st, decl, args, &ref_of) {
+                        return Some(r);
+                    }
+                }
                 if matches!(
                     name.as_str(),
                     "insert"
@@ -942,6 +1060,205 @@ impl<'a> Checker<'a> {
             _ => {}
         }
         None
+    }
+}
+
+impl<'a> Checker<'a> {
+    /// The user-declared method `name` on the struct type of `base`
+    /// (value or pointer), if any.
+    fn user_method_decl(&self, st: &FnState, base: &Expr, name: &str) -> Option<&'a hy_syntax::FnDecl> {
+        let mut recv = self.shape_of_expr(st, base);
+        while let crate::model::TypeShape::Pointer(inner) = recv {
+            recv = *inner;
+        }
+        let crate::model::TypeShape::Struct(Some(s)) = recv else {
+            return None;
+        };
+        let base_ty = Self::base_named_type_str(&s).to_string();
+        self.method_decls.get(&(base_ty, name.to_string())).copied()
+    }
+
+    /// Does the pointer-receiver method `decl` store through its receiver?
+    /// A pointer receiver aliases the caller's value, so ANY field or index
+    /// store rooted at it (`s.n = s.n + 1`, not only reference-typed
+    /// contents) writes the caller's binding. Also: a mutation the
+    /// parameter walk sees (`fn_mutates_param`), or a call to another
+    /// pointer-receiver method on the receiver that writes (depth-bounded,
+    /// fail closed).
+    fn ptr_receiver_writes(&self, st: &FnState, decl: &hy_syntax::FnDecl, depth: usize) -> bool {
+        let Some(recv) = decl.receiver.as_ref().filter(|r| r.is_pointer) else {
+            return false;
+        };
+        if depth > 3 {
+            return true;
+        }
+        if self.fn_mutates_param(decl, &recv.name, 0) {
+            return true;
+        }
+        let Some(body) = &decl.body else {
+            return false;
+        };
+        let flat = crate::walk::flatten(body);
+        for (stmt, _) in &flat.stmts {
+            if let Stmt::Assign { targets, .. } = stmt {
+                if targets.iter().any(|t| {
+                    !matches!(t.kind, PlaceKind::Ident(_)) && t.root() == recv.name.as_str()
+                }) {
+                    return true;
+                }
+            }
+            let mut calls = Vec::new();
+            crate::walk::own_calls(stmt, &mut calls);
+            for cr in calls {
+                if let Expr::Field { base, name, .. } = unwrap_parens(cr.callee) {
+                    if unwrap_parens(base).root_ident() == Some(recv.name.as_str()) {
+                        if let Some(inner) = self.receiver_method_decl(&recv.ty, name) {
+                            if !std::ptr::eq(inner, decl) && self.ptr_receiver_writes(st, inner, depth + 1) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn receiver_method_decl(&self, ty: &hy_syntax::TypeExpr, name: &str) -> Option<&'a hy_syntax::FnDecl> {
+        let crate::model::TypeShape::Struct(Some(s)) = self.shape_of_type(ty) else {
+            return None;
+        };
+        let base_ty = Self::base_named_type_str(&s).to_string();
+        self.method_decls.get(&(base_ty, name.to_string())).copied()
+    }
+}
+
+impl<'a> Checker<'a> {
+    /// A call's callee resolved to a user-declared top-level fn (not
+    /// shadowed by a local) or a user method on a struct-typed receiver.
+    fn user_callee_decl(&self, st: &FnState, callee: &Expr) -> Option<(String, &'a hy_syntax::FnDecl)> {
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } if self.lookup_binding(st, name).is_none() => {
+                self.fns.get(name.as_str()).map(|d| (name.clone(), *d))
+            }
+            Expr::Field { base, name, .. } => {
+                let mut recv = self.shape_of_expr(st, base);
+                while let crate::model::TypeShape::Pointer(inner) = recv {
+                    recv = *inner;
+                }
+                let crate::model::TypeShape::Struct(Some(s)) = recv else {
+                    return None;
+                };
+                let base_ty = Self::base_named_type_str(&s).to_string();
+                self.method_decls
+                    .get(&(base_ty, name.clone()))
+                    .map(|d| (name.clone(), *d))
+            }
+            _ => None,
+        }
+    }
+
+    /// Does the fn-typed parameter `param` of `decl` reach a foreign Go
+    /// call as an argument (directly, through a local alias, or through
+    /// another user fn's parameter that does — depth-bounded, fail closed)
+    /// OUTSIDE a `managed` block? A foreign call is a call through a
+    /// package qualifier that no parameter/receiver/local of `decl` shadows,
+    /// or a method call on a parameter/receiver whose declared type is a
+    /// package-qualified (Go-side) type.
+    pub(crate) fn param_reaches_foreign_escape(
+        &self,
+        decl: &hy_syntax::FnDecl,
+        param: &str,
+        depth: usize,
+    ) -> bool {
+        if depth > 3 {
+            return true;
+        }
+        let Some(body) = &decl.body else {
+            return false;
+        };
+        let mut typed: HashMap<&str, &hy_syntax::TypeExpr> =
+            decl.params.iter().map(|p| (p.name.as_str(), &p.ty)).collect();
+        if let Some(r) = &decl.receiver {
+            typed.insert(r.name.as_str(), &r.ty);
+        }
+        let flat = crate::walk::flatten(body);
+        let mut locals: HashSet<String> = HashSet::new();
+        let mut aliases: HashSet<String> = [param.to_string()].into_iter().collect();
+        for (stmt, idx) in &flat.stmts {
+            let mut calls = Vec::new();
+            crate::walk::own_calls(stmt, &mut calls);
+            for cr in &calls {
+                let passes: Vec<usize> = cr
+                    .args
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| {
+                        matches!(unwrap_parens(&a.value), Expr::Ident { name, .. } if aliases.contains(name.as_str()))
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                if passes.is_empty() {
+                    continue;
+                }
+                match unwrap_parens(cr.callee) {
+                    Expr::Field { base, .. } => {
+                        let foreign = match unwrap_parens(base) {
+                            Expr::Ident { name, .. } => {
+                                if let Some(ty) = typed.get(name.as_str()) {
+                                    type_is_foreign(ty)
+                                } else {
+                                    !locals.contains(name.as_str())
+                                        && self.packages.contains(name.as_str())
+                                }
+                            }
+                            _ => false,
+                        };
+                        if foreign && !flat.in_managed(*idx) {
+                            return true;
+                        }
+                    }
+                    Expr::Ident { name, .. }
+                        if !typed.contains_key(name.as_str()) && !locals.contains(name.as_str()) =>
+                    {
+                        if let Some(inner) = self.fns.get(name.as_str()) {
+                            for i in &passes {
+                                let Some(p) = inner.params.get(*i) else {
+                                    return true; // variadic / arity mismatch: fail closed
+                                };
+                                if !std::ptr::eq(*inner, decl)
+                                    && self.param_reaches_foreign_escape(inner, &p.name, depth + 1)
+                                    && !flat.in_managed(*idx)
+                                {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Stmt::Local(l) = stmt {
+                for (i, n) in l.names.iter().enumerate() {
+                    locals.insert(n.clone());
+                    let v = l.values.get(i).or_else(|| l.values.first());
+                    if matches!(v.map(unwrap_parens), Some(Expr::Ident { name, .. }) if aliases.contains(name.as_str())) {
+                        aliases.insert(n.clone());
+                    } else {
+                        aliases.remove(n.as_str());
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
+fn type_is_foreign(ty: &hy_syntax::TypeExpr) -> bool {
+    match ty {
+        hy_syntax::TypeExpr::Named { name, .. } => name.contains('.'),
+        hy_syntax::TypeExpr::Pointer { to, .. } => type_is_foreign(to),
+        _ => false,
     }
 }
 

@@ -1332,6 +1332,17 @@ argument to a foreign (package-qualified) Go call must take
 Failure rejects with `HYB-Exxxx`. No curated Go API database is consulted;
 the check is decidable from Hybrid source alone: (1) closure body writes
 a captured binding, (2) closure is passed to a foreign call.
+"Writes" is not syntactic-only: a store reached ONE CALL AWAY counts —
+a top-level fn that stores through the parameter the capture is passed
+to, a pointer-receiver user method whose body stores through its
+receiver, a call to another local closure that writes a capture, and an
+inline closure-factory argument whose returned closure writes a factory
+parameter (corpus `a5-escape-interproc-write-reject.hy`).
+"Passed to a foreign call" includes passing it to a Hybrid fn or method
+whose fn-typed parameter itself reaches a foreign call outside `managed`
+(directly, through a local alias, or through another such wrapper —
+depth-bounded, fail closed); the diagnostic fires at the wrapper's call
+site (corpus `a5-escape-via-user-fn-param-reject.hy`).
 
 **Decision: fourth check-site class (D5 promoted, W-016 M2).**
 
