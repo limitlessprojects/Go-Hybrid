@@ -1,5 +1,10 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — routine Make paths and owned self-test scratch (2026-11-03)
+
+- Base `fe22a8e`: the runner self-test splits a checkout path containing spaces and removes a shared fixed scratch name. Routine Cargo/bin recipes also split path-valued variables. Use one `mktemp` directory per self-test with exit cleanup, and quote the checkout, Cargo target/executable and compiler paths.
+- Four offline Make regression methods pass with the fix. The baseline fails all four; a quote-only control separately reproduces scratch leakage, preexisting-data removal and a concurrent first runner losing its input (exit23). Legacy fixed scratch is relocated into owned fixtures; host scratch is untouched. A macOS launcher cache false positive was corrected by checking the observed per-run directory directly. Registration guard passes. Pinned real Make/workspace/corpus/differential validation and hosted CI/review are still pending; no award or payment is claimed.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.

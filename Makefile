@@ -46,6 +46,7 @@ check:
 	@$(PY) -m unittest discover -s tools -p test_check_guarantees.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_versions.py -v
 	@$(PY) -m unittest discover -s tools -p test_workload_run.py -v
+	@$(PY) -m unittest discover -s tools -p test_make_routine_paths.py -v
 	@$(PY) -m unittest discover -s tools -p test_runner_env_report.py -v
 	@$(PY) -m unittest discover -s tools -p test_corpus_harness.py -v
 	@$(PY) -m unittest discover -s tools -p test_package_version.py -v
@@ -59,32 +60,34 @@ check:
 	@$(PY) tools/check_test_registration.py && echo "test registration OK"
 	@bash tools/check-versions.sh --no-toolchain && echo "versions OK"
 	@$(PY) tools/check_conflict_markers.py && echo "conflict markers OK"
-	@cd /tmp && rm -rf gh-selftest && mkdir gh-selftest && cd gh-selftest && \
+	@selftest_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/gh-selftest.XXXXXX") || exit 1; \
+	trap 'rm -rf "$$selftest_dir"' EXIT; \
+	(cd "$$selftest_dir" && \
 	printf '%s\n' '{"job":"selftest","tier":"sandbox","sha":"HEAD","repo":"none","gpu":false,"setup":[],"commands":[{"name":"echo","run":"echo selftest-ok","timeout":30}],"expected_results":[]}' > job.json && \
-	$(PY) $(CURDIR)/tools/runner/runner.py job.json --results-dir results >/dev/null && \
-	test -f results/summary.json && grep -q '"ok": true' results/summary.json && echo "runner selftest OK"
+	$(PY) "$(CURDIR)/tools/runner/runner.py" job.json --results-dir results >/dev/null && \
+	test -f results/summary.json && grep -q '"ok": true' results/summary.json && echo "runner selftest OK")
 	@$(PY) -c "import glob,json;[json.load(open(p)) for p in glob.glob('jobs/*/job.json')];print('job specs OK')"
 	@! git grep -qE 'ghp_[A-Za-z0-9]{20,}|KGAT_[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}' HEAD 2>/dev/null || (echo "SECRET LEAK"; exit 1)
-	@cd compiler && CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) CARGO_BUILD_JOBS=2 $(CARGO) check --workspace --quiet && echo "cargo check OK"
+	@cd compiler && CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" CARGO_BUILD_JOBS=2 "$(CARGO)" check --workspace --quiet && echo "cargo check OK"
 	@echo "check OK"
 
 test-quick: check
-	@cd compiler && CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) CARGO_BUILD_JOBS=2 $(CARGO) test --workspace --quiet
-	@$(PY) tools/corpus_harness.py --bin $(HYB_BIN)
-	@$(PY) tools/differential_loop.py --bin $(HYB_BIN)
+	@cd compiler && CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" CARGO_BUILD_JOBS=2 "$(CARGO)" test --workspace --quiet
+	@$(PY) tools/corpus_harness.py --bin "$(HYB_BIN)"
+	@$(PY) tools/differential_loop.py --bin "$(HYB_BIN)"
 
 # MVP-0 walking-skeleton acceptance: parse → Tier-0 check → emit → go build
 # → run → diff against each example's expected.txt.
 examples:
-	@cd compiler && CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) CARGO_BUILD_JOBS=2 $(CARGO) build -p hyb --quiet
+	@cd compiler && CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" CARGO_BUILD_JOBS=2 "$(CARGO)" build -p hyb --quiet
 	@bash tools/run_examples.sh
 
 workspace:
-	@cd compiler && CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) CARGO_BUILD_JOBS=2 $(CARGO) check --workspace
+	@cd compiler && CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" CARGO_BUILD_JOBS=2 "$(CARGO)" check --workspace
 
 corpus:
-	@cd compiler && CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) CARGO_BUILD_JOBS=2 $(CARGO) build -p hyb --quiet
-	@$(PY) tools/corpus_harness.py --bin $(HYB_BIN)
+	@cd compiler && CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" CARGO_BUILD_JOBS=2 "$(CARGO)" build -p hyb --quiet
+	@$(PY) tools/corpus_harness.py --bin "$(HYB_BIN)"
 
 census:
 	@$(PY) tools/check_corpus_census.py
@@ -100,15 +103,15 @@ guarantees:
 # survive the full pipeline (hyb build + run, exit 0); rejected programs
 # must be rejected by the checker. SPEC §"Differential tests on the corpus".
 differential:
-	@cd compiler && CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) CARGO_BUILD_JOBS=2 $(CARGO) build -p hyb --quiet
-	@$(PY) tools/differential_loop.py --bin $(HYB_BIN)
+	@cd compiler && CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" CARGO_BUILD_JOBS=2 "$(CARGO)" build -p hyb --quiet
+	@$(PY) tools/differential_loop.py --bin "$(HYB_BIN)"
 
 # The G2 gate's call-overhead bench (Batch J): assembles the bench through
 # the exact hyb workspace recipe and measures the no-op crossing on the live
 # bridge. Two scenarios (shallow / grown stack); median of 3 process runs.
 bench:
-	@cd compiler && CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) CARGO_BUILD_JOBS=2 $(CARGO) build -p hyb --quiet
-	@$(HYB_BIN) bench-overhead
+	@cd compiler && CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" CARGO_BUILD_JOBS=2 "$(CARGO)" build -p hyb --quiet
+	@"$(HYB_BIN)" bench-overhead
 
 ci: check
 	@echo "CI parity with .github/workflows/ci.yml"
