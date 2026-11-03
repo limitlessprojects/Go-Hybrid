@@ -2,7 +2,7 @@
 
 ## Contributor validation — error-alias emission (#3323 follow-up, 2026-11-02)
 
-- Complete the emitter follow-up after #3325: use the existing cycle-safe T25 resolver for function/closure error-result shape and E4 propagation. On `a28ea1e`, the new regression file fails without the patch (1 pass/1 fail); patched parser/checker/emitter/Go build/runtime controls pass for five valid programs plus one invalid non-error alias. Pinned Rust 1.99.0/Go 1.26.9 on macOS arm64: workspace2509/2509, corpus130/130, differential42/42 build-and-run +88/88 reject. No checker/corpus verdict change. Hosted CI/review/award remain pending; [exact scope and local results](spikes/error-alias-emission-3323/RESULTS.md).
+- Complete the emitter follow-up after #3325: use the existing cycle-safe T25 resolver for function/closure error-result shape and E4 propagation. Original `a28ea1e` regression fails without the patch (1 pass/1 fail). Integrated upstream through `31e8806` on 2026-11-03, preserving both histories and the unchanged alias regressions. Pinned Rust 1.99.0/Go 1.26.9 macOS arm64: workspace2529/2529, corpus130/130, differential42/42 build/run +88/88 reject, all ten examples pass. Original head `7f7949f` hosted compiler/quick CI passed; refreshed-head CI/review/award pending. Whole-workspace formatting differences retained without rewrites. [Exact results and limits](spikes/error-alias-emission-3323/RESULTS.md).
 
 ## Contributor validation — Go build constraints (2026-10-31)
 

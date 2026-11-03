@@ -1440,3 +1440,16 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 324 -> 325 (#3169). Final main e8b717df, tree clean.
 - NEXT TICK QUEUE: #3299 (multi-value call arg widths) -> #3296 -> #3347 (dup-check vs #3346) -> #3308 -> #3229 (slot loan via call) -> #3298 (append dims) -> #3196 (fn lit scalar widths) -> tools flood (#3384/#3389/#3362/#3393) -> old tail. #3409 round-3 if author applies the one-line fix.
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
+
+## Session 68 — 2026-11-03 09:10 tick (1 landed: #3409 round-3; 1 conflict: #3308; 1 gate-fail: #3298 merged-state regression)
+
+- Recycle + restore (full evaporate; cold rebuild one call). scan OK (5th tick running); approve 17/17 (4955 remaining).
+- LANDED:
+  c6b6e31c Merge PR #3409 round-3 (alexrayyandev, fixes #3405) — container elem-type + sized-array dim mismatches reject E3012; round-3 dedup guard `already_diagnosed_e3012` (span match over ck.diags+diags) suppresses the secondary E1002 — the one-root-cause fix from round-1/2 evidence. ALL-GREEN vs 9aad9f84, 326 suites.
+- CONFLICT (rebase requested, reply posted):
+  #3308 (phatloi0010, fixes #3203) — buildable.rs changed both sides (PR branched before the #3165/#3069-era buildable work). Mechanical rebase expected; battery runs immediately on re-push. issuecomment-6592910254.
+- GATE FAIL (evidence posted, not landed):
+  #3298 (phatloi0010, fixes #3280) — MERGED-STATE-ONLY regression: pure PR head passes range_iter_target 14/14, pure main passes, merged tree emits spurious HYB-E1002 on user_method_call_iterable_stays_accepted (`for v in c.keys()`). Interaction between #3298's new append/slice-elem checks and landed #3409's container checks in buildable.rs. Fix offered: rebase + fail-open the elem check for unresolved/generic call results (method_decls convention). issuecomment-6592950416.
+- Suite trajectory: 325 -> 326 (#3409). Final main c6b6e31c, tree clean.
+- NEXT TICK QUEUE: #3299 -> #3296 -> #3347 (dup-check vs #3346) -> #3229 (slot loan via call) -> #3196 (fn lit widths) -> #2948 -> #2977 -> #2863 -> tools flood (#3384/#3389/#3362/#3393) -> old tail. #3308/#3298 round-2 on re-push.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
