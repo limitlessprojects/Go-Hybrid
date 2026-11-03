@@ -584,8 +584,10 @@ struct Collector<'a> {
     /// Lexical nesting depth within `select` statements.
     select_depth: usize,
     /// Lexical nesting depth within `managed` blocks (O6.1 hatch): while
-    /// inside one, the #1112 chan-send element check is suppressed — the
-    /// `managed` hatch deliberately relaxes sendability there.
+    /// inside one, the sendability checks (#1112 `check_send_elem` and the
+    /// #2817 `check_send_assignability`) are suppressed — the `managed` hatch
+    /// deliberately relaxes sendability there and leaves the HYB-E8001 audit
+    /// as the record (`fc_closure_boundary_send_inside_managed_escapes`).
     managed_depth: usize,
     defines: Vec<Define>,
     /// Every identifier mentioned in the file plus every dotted type root —
@@ -763,6 +765,26 @@ impl<'a> Collector<'a> {
             }
             _ => None,
         }
+    }
+
+    /// #2817 — the exact numeric element type of a channel expression, when
+    /// the channel is a plain identifier whose declared element type is a
+    /// predeclared numeric type. `var ch chan int64` renders its declared type
+    /// into `type_name_scopes` as `chan int64`; direction qualifiers
+    /// (`<-chan int`, `chan<- int`) normalize to the element. Named types,
+    /// non-numeric elements, and unresolved bindings return `None` so the
+    /// caller stays fail-open.
+    fn chan_element_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let Expr::Ident { name, .. } = unwrap_parens(e) else {
+            return None;
+        };
+        let tname = self.lookup_type_name(name)?;
+        let t = tname.trim();
+        let t = t.strip_prefix("<-").unwrap_or(t).trim();
+        let t = t.strip_prefix("chan")?;
+        let t = t.trim_start();
+        let t = t.strip_prefix("<-").unwrap_or(t).trim();
+        canonical_numeric_name(t)
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -1946,6 +1968,9 @@ impl<'a> Collector<'a> {
                 self.check_single_value_position(value, "a channel send", false);
                 self.expr(value);
                 self.check_send_elem(chan, value);
+                // #2817: the sent value must be assignable to the channel's
+                // element type; Go refuses `ch <- f` for mismatched widths.
+                self.check_send_assignability(chan, value);
             }
             Stmt::If {
                 init,
@@ -2203,6 +2228,8 @@ impl<'a> Collector<'a> {
                             self.expr(chan);
                             self.expr(value);
                             self.check_send_elem(chan, value);
+                            // #2817: same assignability rule inside `select`.
+                            self.check_send_assignability(chan, value);
                         }
                         SelectArmKind::Recv { names, chan } => {
                             self.check_repeated_bindings(names, chan.span());
@@ -4932,6 +4959,67 @@ impl<'a> Collector<'a> {
                 );
             }
         }
+    }
+
+    /// #2817 — Go §Send statements: "the type of the value to be sent must be
+    /// assignable to the channel's element type". `sendability.rs` treats every
+    /// numeric kind as one coarse `Primitive`, and `Stmt::Send` only ran the
+    /// #887 single-value check, so `ch <- f` with `f float64` on a `chan int`
+    /// (or `int32` → `chan int64`, `float64` → `chan float32`) passed
+    /// `hy-check` and failed `go build` with
+    /// `cannot use f (variable of type float64) as int value in send` —
+    /// a Row 13 BUILDABLE violation.
+    ///
+    /// Fail-open like the #682 U5 / #1031 precedents: only a PROVEN conflict is
+    /// reported. Untyped constants stay legal (`ch <- 1` into `chan float64`
+    /// builds), an unresolved channel element type or value type carries no
+    /// claim, and `OpKind` width collapse is compensated by comparing the
+    /// exact predeclared spellings whenever both sides are provably typed.
+    fn check_send_assignability(&mut self, chan: &Expr, value: &Expr) {
+        // O6.1: inside a `managed` block the hatch suppresses sendability
+        // checking by contract — E8001 is the auditable record instead. The
+        // #2817 rule must not reopen what the hatch closed (a top-level send
+        // of a mismatched type still fires; only the hatch is respected).
+        if self.managed_depth > 0 {
+            return;
+        }
+        let want = match self.kind_of_expr(chan) {
+            OpKind::Chan(e) => *e,
+            _ => return,
+        };
+        let got = self.kind_of_expr(value);
+        if want.is_numeric() && got.is_numeric() {
+            if let (Some(w), Some(g)) =
+                (self.chan_element_scalar(chan), self.typed_value_scalar(value))
+            {
+                if w != g {
+                    self.emit_send_mismatch(value, g, w);
+                }
+                return;
+            }
+        }
+        // A typed int value reaches a float channel through the (Float, Int)
+        // arm of `kinds_conflict`, which must stay open for untyped int
+        // constants; the same #682 U5 disambiguation applies here.
+        let typed_int_to_float = want == OpKind::Float
+            && got == OpKind::Int
+            && !self.is_untyped_int_const(value);
+        if kinds_conflict(&want, &got) || typed_int_to_float {
+            self.emit_send_mismatch(value, &got.label(), &want.label());
+        }
+    }
+
+    fn emit_send_mismatch(&mut self, value: &Expr, got: &str, want: &str) {
+        self.emit_e1002(
+            value.span(),
+            format!(
+                "cannot use `{}` (variable of type `{}`) as `{}` value in send (HYB-E1002)",
+                value.render(),
+                got,
+                want
+            ),
+            "the sent value's type must be assignable to the channel's element type (Go §Send statements)",
+        );
     }
 
     /// #682 U4 — `defer` requires a call, and that call's arguments must

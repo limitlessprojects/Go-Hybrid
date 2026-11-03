@@ -1639,3 +1639,23 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 370 -> 373 (+3 test files). Final main 1c0f56c0, tree clean, remote asserts green; replies posted per PR; no silent closes.
 - NEXT TICK QUEUE: #591 (score 9, constant-folding/type-alias/slice-index family) -> #2285 -> #2284 (fixes #1565) -> #937 (magomedta, 14.5d) -> #3499 (NO tests) -> #3503 -> DUP CHECKS: #2867 vs landed #1740; #2940 vs landed #3145. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
 - DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 84 — 2026-11-04 05:10 tick (2 landed: #591/#2285) — score-9 item cleared
+
+- Full recycle; env restored (rust 1.99.0 foreground, go1.26.9 re-downloaded, cache backfilled). scan timed out at 580/992 again (cap-or-skip; S83 queue). approve 15/15.
+- LANDED:
+  5dd1bd30 Merge PR #591 (Khanhtnq, fixes #586 + #576) — unified const_int_fold_at folder (depth-capped, self-ref-guarded, shadow-aware, checked_neg), ty_of_expr scalar propagation through unary/arith/conversions, type-alias resolution in assign targets + fn-typed callees, zd_defined seeded mutable-only. 374 suites. Scope note disclosed: body mentions model/closures/loans.rs but rebased diff rides on emit_guard BindingSight instead.
+  ef1f95c9 Merge PR #2285 (9xj89gzrtw-hue, fixes #1640) — redefining match-arm bodies wrapped in nested Go block so injected pattern binding stays legal; corpus 130->131 (ACCEPT 41). In-merge fixup: repaired README.md corpus-count lines the PR had glued/doubled (credited to author). 375 suites; differential accept now 43/43.
+- Suite trajectory: 373 -> 375 (+2 test files). Final main ef1f95c9, tree clean, remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #2284 (map key comparability, fixes #1565) -> #937 (magomedta, 14.5d, +449 — big; possibly split across ticks) -> #3499 (NO tests — scrutinize) -> #3503 -> DUP CHECKS: #2867 vs landed #1740; #2940 vs landed #3145. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 85 — 2026-11-04 06:10 tick (2 landed: #2284/#2867) + DUP CHECK #2867 cleared
+
+- Full recycle; env restored (rust 1.99.0, go1.26.9 from backfilled cache). scan timed out (cap-or-skip, S84 queue). approve 14/14.
+- LANDED:
+  52182214 Merge PR #2284 (9xj89gzrtw-hue, fixes #1565) — non-comparable map key types rejected (HYB-E1002 at TypeExpr::Map + MapLit sites, proven-incomparable only). PR was based on pre-#2285 main: 2 merge conflicts resolved in-merge + 5 census count surfaces reconciled 131->133 (ci.yml/Makefile/README/GUARANTEES/ast.rs, credited fixups); census 7/7 green. Corpus 133 (ACCEPT 42 · MANAGED 2 · REJECT 89); differential 44/44 + 89/89. 376 suites. Follow-up noted to author: VERDICTS.md rows missing (not census-enforced).
+  dd30466a Merge PR #2867 (Yumihariii, fixes #2817) — channel-send width-level assignability (int32->chan int64, float64->chan float32). DUP CHECK vs landed #1740 resolved NOT-A-DUP empirically (kind-level vs width-level gap confirmed on main pre-merge). 377 suites.
+- Suite trajectory: 375 -> 377 (+2 test files). Final main dd30466a, tree clean, remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #937 (magomedta, 14.5d, +449 — big; budget a full tick or split) -> #3499 (NO tests — scrutinize) -> #3503 -> DUP CHECK: #2940 vs landed #3145 (copy widths) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
