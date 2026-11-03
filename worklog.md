@@ -1380,3 +1380,7 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 319 -> 320 -> 321. Final main 77183364, tree clean.
 - DUP WATCH: #3303 (james-kkc) also fixes #3301 — now overlaps landed #3302; review residual next tick. #3145 vs #3153; #2982 vs #2976 vs #2978.
 - NEXT TICK QUEUE: #3190 (hy-diag severity coherence) -> #3300 (error OpKind) -> #3299 (multi-value call arg widths) -> #3296 (map key width) -> #3291 (E1002 width messages) -> #3169 (hy-emit closure error-tail, 7 files) -> #1818 (pointer/array conversions, 7.4d) -> #1663 (install symlinks, 8.3d) -> #3204 (recheck head) -> old tail (#2982/#3182/#3176/#3184/#2948/#2977/#1811/#2863/#3207/#2517).
+
+## #1825 (append spread validation) — escalated attempt
+
+- Already fixed on main by #2738 (a26dd9e7); probable duplicate, may not be payable. Added only regression test `issue_1825_append_spread_validation.rs` mirroring the issue repro (var locals, string literal, int spread) plus accept controls. No checker change.
