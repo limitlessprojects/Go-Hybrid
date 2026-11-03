@@ -65,5 +65,23 @@ Existing toolchain warning: rust-objcopy could not strip debug information
 because its bundled libLLVM.dylib was unavailable. Cargo exited 0; both sides used
 the same installed toolchain/profile, and original warnings/hashes are retained.
 
-Workspace, corpus, differential, examples and hosted CI: pending at this commit.
-No maintainer acceptance, independent human review, award or payment is claimed.
+## Complete local validation
+
+Tested code commit: `16353dbbd890614a3c50107f97aebb499b9766f1`, based on
+`b803f5556f4f75e8400bffe137f30717ae2e7831`.
+
+- Pinned offline `cargo test --workspace`: **2,631 passed**, zero failed/ignored.
+- Fresh `cargo build -p hyb` passed.
+- Checker corpus: **130/130** verdict agreement.
+- Differential: **42/42** accepted build-and-run plus **88/88** rejected.
+- All **ten examples** passed through the real compiler/Go pipeline.
+- New Rust example and test formatting checks passed; `git diff --check` passed.
+
+Verification uses the existing installed Rust 1.99.0 and Go 1.26.9 on macOS
+arm64, cached dependencies and local scratch. The unrelated fixed-scratch runner
+self-test was not run. No API/model, cloud job or package download was used.
+The final evidence update preserves all three tested Rust files byte-for-byte.
+
+Hosted CI, maintainer review, any award and payment remain unconfirmed.
+AI-assisted implementation, measurement and test execution; no independent
+human review is claimed.

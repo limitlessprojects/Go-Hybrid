@@ -4,7 +4,7 @@
 
 - The private cursor borrows UTF-8 instead of making a full `Vec<char>` copy. No grammar, API or diagnostic change is intended; token strings still allocate.
 - Base `b803f555`: full snapshots agree on 175 tracked `.hy` files plus three generated inputs, and two new Unicode/trivia/span tests pass. Three short macOS arm64 observations show comment-heavy ten-lex process peak RSS 45.08 → 2.64 MiB; the ordinary-source elapsed median is 4.9% slower. Raw results/limits: `spikes/lexer-borrowed-cursor/RESULTS.md`.
-- Workspace, corpus, differential, examples and hosted CI remain pending at this evidence commit; no acceptance, independent human review, award or payment is asserted.
+- Tested code `16353dbb`: pinned offline workspace 2,631 passed/zero failed or ignored; fresh compiler build, corpus 130/130, differential 42/42 build-and-run + 88/88 rejects and all ten examples pass. New Rust files format-check clean; final evidence updates keep tested Rust bytes. Hosted CI, review, award and payment remain unconfirmed; no independent human review claimed.
 
 ## Contributor validation — Go build constraints (2026-10-31)
 
