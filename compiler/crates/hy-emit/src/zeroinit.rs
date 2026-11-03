@@ -124,6 +124,7 @@ impl Emitter {
                 fields,
                 ..
             } if fields.is_empty() => t.clone(),
+            Expr::SliceLit { items, .. } if items.is_empty() => value.as_array_lit()?.2.clone(),
             Expr::MapLit {
                 key,
                 value,
@@ -142,7 +143,17 @@ impl Emitter {
                 return None;
             }
         }
-        self.n5_zero_init(&ty).map(|init| format!("&{}", init))
+        self.n5_zero_init(&ty).map(|init| {
+            if init.starts_with("func()") {
+                format!(
+                    "func() *{} {{ hyPtr := {}; return &hyPtr }}()",
+                    self.type_text(&ty),
+                    init
+                )
+            } else {
+                format!("&{}", init)
+            }
+        })
     }
 
     /// Follow user type aliases (`type counts = map[string]int`) to the

@@ -111,6 +111,38 @@ fn main() {
 }
 
 #[test]
+fn n5_new_allocates_map_fields_in_array_types() {
+    let go = emit_src(
+        "\
+struct bag {
+    counts map[string]int
+}
+
+type two_bags = [2]bag
+
+fn main() {
+    p := new(two_bags)
+    q := new([2]bag{})
+    r := new(([2]bag{}))
+    fmt.println(len(p[0].counts) + len(q[0].counts) + len(r[0].counts))
+}
+",
+    );
+    for want in [
+        "p := func() *two_bags { hyPtr := func() (hyArr two_bags) { for i := range hyArr { hyArr[i] = bag{counts: map[string]int{}} }; return hyArr }(); return &hyPtr }()",
+        "q := func() *[2]bag { hyPtr := func() (hyArr [2]bag) { for i := range hyArr { hyArr[i] = bag{counts: map[string]int{}} }; return hyArr }(); return &hyPtr }()",
+        "r := func() *[2]bag { hyPtr := func() (hyArr [2]bag) { for i := range hyArr { hyArr[i] = bag{counts: map[string]int{}} }; return hyArr }(); return &hyPtr }()",
+    ] {
+        assert!(go.contains(want), "missing {want:?} in:\n{go}");
+    }
+    assert!(!go.contains("&func()"), "invalid address-of IIFE:\n{go}");
+    assert!(
+        !go.contains("new([2]bag)"),
+        "raw new leaves map fields nil:\n{go}"
+    );
+}
+
+#[test]
 fn n5_leaves_generic_structs_alone() {
     // Generic struct fields need the literal's type arguments substituted;
     // they keep Go's zero value (a documented limit of this lowering).
