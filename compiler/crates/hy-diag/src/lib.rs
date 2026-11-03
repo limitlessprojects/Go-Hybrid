@@ -156,7 +156,7 @@ impl Diagnostic {
         Diagnostic {
             code: entry
                 .map(|e| e.code.clone())
-                .unwrap_or_else(|| code.trim().to_string()),
+                .unwrap_or_else(|| code.trim().to_ascii_uppercase()),
             name: entry.map(|e| e.name.clone()).unwrap_or_default(),
             severity,
             file,
@@ -194,7 +194,10 @@ impl Diagnostic {
     }
 
     pub fn with_rule(mut self, rule: &str) -> Self {
-        self.tier0_rule = Some(rule.to_string());
+        self.tier0_rule = match rule.trim() {
+            "" => None,
+            rule => Some(rule.to_string()),
+        };
         self
     }
 
@@ -404,8 +407,12 @@ impl Registry {
 /// an error, and a non-`E8nnn` code can never be constructed as a warning.
 /// Runs as a debug assert AND is unit-tested in release (`#[test]`).
 pub fn assert_severity_code_coherence(code: &str, severity: Severity) {
-    let canonical = Registry::global().lookup(code).map(|e| e.code.as_str()).unwrap_or_else(|| code.trim());
-    let is_lint = canonical.contains("-E8") || canonical.to_ascii_uppercase().starts_with("E8") || canonical.starts_with("8");
+    let canonical = Registry::global()
+        .lookup(code)
+        .map(|e| e.code.as_str())
+        .unwrap_or_else(|| code.trim())
+        .to_ascii_uppercase();
+    let is_lint = canonical.contains("-E8") || canonical.starts_with("E8") || canonical.starts_with('8');
     let is_err = severity == Severity::Error;
     debug_assert!(
         !(is_lint && is_err),
