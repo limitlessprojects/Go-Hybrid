@@ -48,10 +48,10 @@ pub fn width_of(spec_name: &str) -> Option<(u32, bool)> {
 /// decimal, `0x`/`0o`/`0b` prefixed, legacy leading-zero octal (`0755`), and
 /// `_` digit separators.
 pub fn parse_int(text: &str) -> Option<i128> {
-    let t = text.replace('_', "");
+    let t = text.trim().replace('_', "");
     let (neg, t) = match t.strip_prefix('-') {
         Some(rest) => (true, rest.to_string()),
-        None => (false, t),
+        None => (false, t.strip_prefix('+').unwrap_or(&t).to_string()),
     };
     let v = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         i128::from_str_radix(h, 16).ok()?
@@ -262,7 +262,11 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
             ..
         } => const_int_expr(operand)?.checked_neg(),
         Expr::Call { callee, args, .. } => {
-            let Expr::Ident { name, .. } = callee.as_ref() else { return None };
+            let mut c = callee.as_ref();
+            while let Expr::Paren { inner, .. } = c {
+                c = inner;
+            }
+            let Expr::Ident { name, .. } = c else { return None };
             if let Some((bits, signed)) = width_of(name) {
                 if args.len() == 1 && !args[0].spread {
                     let v = const_int_expr(&args[0].value)?;
