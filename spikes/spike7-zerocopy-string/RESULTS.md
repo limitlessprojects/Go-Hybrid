@@ -92,5 +92,51 @@ strings) as the spike's knowledge output.
 
 ## After results
 
-_(filled after the change is implemented and measured — nothing below
-this line was seen before registration)_
+Change: `pinCrossKey` / `pinString` replaced by `crossString`
+(`unsafe.StringData` + {ptr, len} + caller `runtime.KeepAlive(s)`; no
+copy, no pin for the string argument; out-parameters still pinned by
+callers per the pinned-borrow protocol). Same method, same machine,
+median of count=5:
+
+| benchmark | before ns/op | after ns/op | before B/op | after B/op | before allocs/op | after allocs/op |
+|-----------|-------------:|------------:|------------:|-----------:|-----------------:|----------------:|
+| BenchmarkGetIntByKey-4 | 383.0 | 158.3 | 24 | 8 | 3 | 1 |
+| BenchmarkGetIntByLongKey-4 | 318.6 | 160.2 | 80 | 8 | 3 | 1 |
+| BenchmarkIsMatch-4 | 47502 | 45414 | 96 | 0 | 5 | 0 |
+
+Threshold verdicts:
+
+- **T1 PASS.** GetIntByKey 3 → 1 allocs/op; post-change escape analysis
+  (`go build -gcflags=-m`) attributes the remainder solely to the
+  pinned out-parameter (`moved to heap: n`) — the string crossing
+  itself allocates nothing: no `[]byte(s)` escape, no Pinner escape.
+  IsMatch 5 → 0 allocs/op. B/op strictly lower on all three.
+- **T2 PASS, with margin.** No regression anywhere: −59% ns/op on the
+  short key, −50% on the 64-byte key, −4.4% on IsMatch (whose time is
+  dominated by Rust-side pattern compilation). The ns win on keyed
+  reads is larger than registered expectations — the copy plus Pinner
+  bookkeeping was over half the cost of a ~380 ns crossing.
+- **T3 PASS.** jsonbinding + regexbinding suites pass normally and
+  under `-race`; TestCrossStringUnderPressure (2,000 iterations of
+  result-checked keyed calls interleaved with `runtime.GC()` and
+  1,200-deep stack-growth recursion; 300 iterations for regex) passes
+  normally, under `-race`, and under `GODEBUG=gcstoptheworld=1`.
+- **T4 PASS.** TestEmptyKeyEdge and the full suites pass; the (0, 0)
+  empty-string crossing is unchanged.
+
+Honest limits:
+
+- The stack-backed-string risk could not be exercised directly:
+  deliberately stack-resident argument strings cannot be constructed
+  from Go source (string conversions escape to the heap), so the stress
+  test covers literal (rodata), heap, and substring backings under GC +
+  stack-copy pressure on the calling goroutine, not a proven
+  stack-resident backing. Note a crossing runs inside the NOSPLIT
+  trampoline, and a goroutine's stack is only copied while that
+  goroutine executes Go code — but that argument is analysis, not
+  measurement, and is recorded as such.
+- Absolute numbers are from a shared 4-vCPU sandbox, not the pinned
+  2-core box; the deltas, not the absolutes, are the claim.
+- Out-parameter pinning (the remaining 1 alloc/op on keyed reads) is
+  untouched — it is the results half of the pinned-borrow protocol,
+  not the string-argument copy this spike targeted.
