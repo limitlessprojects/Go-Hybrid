@@ -59,6 +59,19 @@ pub enum Decl {
     Fn(FnDecl),
 }
 
+impl Decl {
+    pub fn span(&self) -> Span {
+        match self {
+            Decl::Import { span, .. } => *span,
+            Decl::Const(decl) => decl.span,
+            Decl::Struct(decl) => decl.span,
+            Decl::Enum(decl) => decl.span,
+            Decl::TypeAlias(decl) => decl.span,
+            Decl::Fn(decl) => decl.span,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConstDecl {
     pub name: String,
@@ -786,8 +799,10 @@ impl Expr {
     /// Distinguished from a slice-of-arrays literal `[][N]T{…}` by the
     /// array `TypeExpr` sharing the literal's opening `[` source position.
     pub fn as_array_lit(&self) -> Option<(Option<&Expr>, &TypeExpr, &TypeExpr)> {
-        if let Expr::Paren { inner, .. } = self {
-            return inner.as_array_lit();
+        match self {
+            Expr::Paren { inner, .. } => return inner.as_array_lit(),
+            Expr::Move { operand, .. } => return operand.as_array_lit(),
+            _ => {}
         }
         if let Expr::SliceLit {
             elem: Some(t),

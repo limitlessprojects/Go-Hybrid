@@ -3235,6 +3235,17 @@ mod tests {
     }
 
     #[test]
+    fn declaration_span_covers_every_variant() {
+        let f = parse_src(
+            "import \"fmt\"\nconst n = 1\nstruct s {}\nenum e { a }\ntype t = int\nfn main() {}",
+        );
+        assert_eq!(f.decls.len(), 6);
+        for (decl, line) in f.decls.iter().zip(1..=6) {
+            assert_eq!(decl.span().start.line, line);
+        }
+    }
+
+    #[test]
     fn set_literal_approximation() {
         // spike-6 08: seen := set[node_id]{}
         let f = parse_src("fn main() { seen := set[node_id]{} }");
@@ -4289,6 +4300,7 @@ fn main() {
     g := [][2]int{{1, 2}}
     h := [1, 2, 3]
     i := []int{1, 2, 3}
+    j := move [3]int{1, 2, 3}
 }
 "#;
         let file = parse_src(src);
@@ -4338,6 +4350,9 @@ fn main() {
         // h := [1, 2, 3] and i := []int{1, 2, 3} — slice literals
         assert!(expr_at(7).as_array_lit().is_none());
         assert!(expr_at(8).as_array_lit().is_none());
+
+        // j := move [3]int{1, 2, 3}
+        assert!(expr_at(9).as_array_lit().is_some());
     }
 
     #[test]
@@ -4384,4 +4399,3 @@ fn main() {
     }
 
 }
-
