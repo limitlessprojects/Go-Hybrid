@@ -45,6 +45,45 @@ impl Emitter {
         self.n5_zero_init_at(ty, 0)
     }
 
+    /// Pointer to an N5-allocated zero value of `ty` (`*ty`), used by `new(T)`
+    /// and `&T{}` on array types whose value zero-init is an IIFE call (which
+    /// Go refuses as an operand of `&`).
+    pub(crate) fn n5_ptr_zero_init(&mut self, ty: &TypeExpr) -> Option<String> {
+        if let TypeExpr::Array {
+            len: Some(_), elem, ..
+        } = self.n5_resolve_alias(ty)
+        {
+            let (init, arr) = (self.n5_zero_init_at(&elem, 1)?, self.type_text(ty));
+            return Some(format!(
+                "func() *{arr} {{ var hyArr {arr}; for i := range hyArr {{ hyArr[i] = {init} }}; return &hyArr }}()"
+            ));
+        }
+        self.n5_zero_init(ty).map(|init| format!("&{}", init))
+    }
+
+    pub(crate) fn n5_addr_of_empty_array(&mut self, operand: &Expr) -> Option<String> {
+        let mut inner = operand;
+        while let Expr::Paren { inner: p, .. } | Expr::Move { operand: p, .. } = inner {
+            inner = p;
+        }
+        match inner {
+            Expr::SliceLit { items, .. } if items.is_empty() => {
+                let (_, _, arr_ty) = inner.as_array_lit()?;
+                self.n5_ptr_zero_init(arr_ty)
+            }
+            Expr::StructLit {
+                ty: Some(t),
+                fields,
+                ..
+            } if fields.is_empty()
+                && matches!(self.n5_resolve_alias(t), TypeExpr::Array { .. }) =>
+            {
+                self.n5_ptr_zero_init(t)
+            }
+            _ => None,
+        }
+    }
+
     fn n5_zero_init_at(&mut self, ty: &TypeExpr, depth: usize) -> Option<String> {
         if depth > MAX_DEPTH {
             return None;
@@ -124,6 +163,11 @@ impl Emitter {
                 fields,
                 ..
             } if fields.is_empty() => t.clone(),
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                ..
+            } if items.is_empty() && value.as_array_lit().is_some() => t.as_ref().clone(),
             Expr::MapLit {
                 key,
                 value,
@@ -142,7 +186,7 @@ impl Emitter {
                 return None;
             }
         }
-        self.n5_zero_init(&ty).map(|init| format!("&{}", init))
+        self.n5_ptr_zero_init(&ty)
     }
 
     /// Follow user type aliases (`type counts = map[string]int`) to the
