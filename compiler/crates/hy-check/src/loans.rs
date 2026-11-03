@@ -6341,6 +6341,12 @@ impl<'a> Checker<'a> {
             && (st.env.contains_key(name)
                 || st.scopes.iter().rev().skip(1).any(|s| s.contains_key(name))
                 || self.consts.contains_key(name));
+        if shadows_outer && st.borrow_bindings.contains(name) {
+            if let Some(outer_borrows) = st.borrow_binding_scopes.last_mut() {
+                outer_borrows.insert(name.to_string());
+            }
+        }
+        st.borrow_bindings.remove(name);
         self.preserve_peers_before_sever(st, name, shadows_outer);
         st.aliases.remove(name);
         st.share_clear(name);
@@ -9150,10 +9156,16 @@ impl<'a> Checker<'a> {
                     "make the mutation a method on the owner so the loan stays in one frame, return the index and let the caller do the access, or return a copy (Go-heap reads are copies, O9)".to_string(),
                     "a lifetime parameter is NOT offered on purpose: the language has none".to_string(),
                 ];
-                self.diags.push(
-                    Diagnostic::error("HYB-E3104", self.path.clone(), v.span(), msg)
-                        .with_notes(notes),
-                );
+                if !self
+                    .diags
+                    .iter()
+                    .any(|d| d.code == "HYB-E3104" && d.span == v.span())
+                {
+                    self.diags.push(
+                        Diagnostic::error("HYB-E3104", self.path.clone(), v.span(), msg)
+                            .with_notes(notes),
+                    );
+                }
             } else {
                 self.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
             }
