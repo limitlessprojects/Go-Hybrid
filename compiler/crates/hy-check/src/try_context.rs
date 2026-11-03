@@ -25,7 +25,8 @@ use hy_syntax::{
 const E11_PROPAGATING_TARGETS: &[&str] = &["http.handler"];
 
 fn is_builtin_error_type(ck: &Checker<'_>, ty: &TypeExpr) -> bool {
-    if !matches!(ty, TypeExpr::Named { name, .. } if name == "error")
+    let resolved = ck.resolve_type_alias(ty);
+    if !matches!(&resolved, TypeExpr::Named { name, .. } if name == "error")
         || ck.structs.contains_key("error")
         || ck.struct_type_params.contains_key("error")
         || ck.enums.contains_key("error")
@@ -172,7 +173,11 @@ fn walk_type(ck: &mut TryWalker<'_, '_>, ty: &TypeExpr, ctx: Ctx<'_>) {
         | TypeExpr::Option { elem: to, .. } => walk_type(ck, to, ctx),
         TypeExpr::Array { len, elem, .. } => {
             if let Some(l) = len {
-                walk_expr(ck, l, ctx);
+                let len_ctx = match ctx {
+                    Ctx::Ok => Ctx::NoErrorResult("array length"),
+                    no_err => no_err,
+                };
+                walk_expr(ck, l, len_ctx);
             }
             walk_type(ck, elem, ctx);
         }

@@ -413,6 +413,53 @@ impl Emitter {
     }
 
     fn emit_local_in_seq(&mut self, l: &LocalDecl, rest: &[Stmt]) -> Result<(), EmitError> {
+        // #3194: `f := fn() { p.n = 2 }` captures the live slot loan `p`. A
+        // later `f()` never names `p`, so without recording `f` as an alias
+        // of the loan the block-scoped flush stores `p` back right after the
+        // closure literal and the call writes a dead copy. Collect the
+        // captures before emitting (the decl may rebind a loan name).
+        let captured = self.closure_captured_loans(l);
+        self.emit_local_in_seq_inner(l, rest)?;
+        for (alias_name, loan_root) in captured {
+            self.loan_aliases
+                .entry(loan_root)
+                .or_default()
+                .insert(alias_name);
+        }
+        Ok(())
+    }
+
+    /// `(closure name, loan name)` for every name this declaration binds to
+    /// a function literal whose body mentions an active slot loan (or one of
+    /// its aliases) in the current loan frames.
+    fn closure_captured_loans(&self, l: &LocalDecl) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        if l.names.len() != l.values.len() {
+            return out;
+        }
+        for (name, v) in l.names.iter().zip(l.values.iter()) {
+            if name == "_" || !matches!(Self::peel_parens(v), Expr::FnLit { .. }) {
+                continue;
+            }
+            for frame in &self.loan_frames {
+                for (loan, _) in frame {
+                    if loan.is_empty() || loan == name {
+                        continue;
+                    }
+                    let mentions = Self::expr_mentions_ident(v, loan)
+                        || self.loan_aliases.get(loan).is_some_and(|aliases| {
+                            aliases.iter().any(|a| Self::expr_mentions_ident(v, a))
+                        });
+                    if mentions {
+                        out.push((name.clone(), loan.clone()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn emit_local_in_seq_inner(&mut self, l: &LocalDecl, rest: &[Stmt]) -> Result<(), EmitError> {
         self.note_closure_shapes(l);
         match l.kind {
             LocalKind::Var => {
@@ -2350,14 +2397,6 @@ impl Emitter {
             }
         }
         // Inside a function literal the closure owns the return — plain.
-        if self.fnlit_depth > 0 {
-            let vs = values
-                .iter()
-                .map(|v| self.emit_expr(v, 0))
-                .collect::<Result<Vec<_>, _>>()?;
-            self.push(&format!("return {}", vs.join(", ")));
-            return Ok(());
-        }
         // Inside the main wrapper closure: explicit returns carry `nil` for
         // the hidden error result; bare `return` is legal (named results)
         // and returns the current hyErr — exactly the E3 desugar's shape.

@@ -296,6 +296,7 @@ pub(crate) fn own_uses(stmt: &Stmt, out: &mut Vec<Use>) {
 pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: &mut Vec<Use>) {
     match stmt {
         Stmt::Local(l) => {
+            if let Some(ty) = &l.ty { walk_type_len_exprs(ty, &mut |e| expr_uses(e, out)); }
             for v in &l.values {
                 expr_uses(v, out);
             }
@@ -497,17 +498,21 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                 expr_uses(&a.value, out);
             }
         }
-        Expr::StructLit { fields, .. } => {
+        Expr::StructLit { ty, fields, .. } => {
+            if let Some(ty) = ty { walk_type_len_exprs(ty, &mut |e| expr_uses(e, out)); }
             for f in fields {
                 expr_uses(&f.value, out);
             }
         }
-        Expr::SliceLit { items, .. } => {
+        Expr::SliceLit { elem, items, .. } => {
+            if let Some(ty) = elem { walk_type_len_exprs(ty, &mut |e| expr_uses(e, out)); }
             for i in items {
                 expr_uses(i, out);
             }
         }
-        Expr::MapLit { entries, .. } => {
+        Expr::MapLit { key, value, entries, .. } => {
+            walk_type_len_exprs(key, &mut |e| expr_uses(e, out));
+            walk_type_len_exprs(value, &mut |e| expr_uses(e, out));
             for (k, v) in entries {
                 expr_uses(k, out);
                 expr_uses(v, out);
@@ -539,6 +544,7 @@ pub(crate) struct CallRef<'a> {
 pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
     match stmt {
         Stmt::Local(l) => {
+            if let Some(ty) = &l.ty { walk_type_len_exprs(ty, &mut |e| expr_calls(e, out)); }
             for v in &l.values {
                 expr_calls(v, out);
             }
@@ -624,6 +630,7 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
 pub(crate) fn own_fnlits<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Expr>) {
     match stmt {
         Stmt::Local(l) => {
+            if let Some(ty) = &l.ty { walk_type_len_exprs(ty, &mut |e| expr_fnlits(e, out)); }
             for v in &l.values {
                 expr_fnlits(v, out);
             }
@@ -729,17 +736,21 @@ pub(crate) fn expr_fnlits<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
                 expr_fnlits(&a.value, out);
             }
         }
-        Expr::StructLit { fields, .. } => {
+        Expr::StructLit { ty, fields, .. } => {
+            if let Some(ty) = ty { walk_type_len_exprs(ty, &mut |e| expr_fnlits(e, out)); }
             for f in fields {
                 expr_fnlits(&f.value, out);
             }
         }
-        Expr::SliceLit { items, .. } => {
+        Expr::SliceLit { elem, items, .. } => {
+            if let Some(ty) = elem { walk_type_len_exprs(ty, &mut |e| expr_fnlits(e, out)); }
             for i in items {
                 expr_fnlits(i, out);
             }
         }
-        Expr::MapLit { entries, .. } => {
+        Expr::MapLit { key, value, entries, .. } => {
+            walk_type_len_exprs(key, &mut |e| expr_fnlits(e, out));
+            walk_type_len_exprs(value, &mut |e| expr_fnlits(e, out));
             for (k, v) in entries {
                 expr_fnlits(k, out);
                 expr_fnlits(v, out);
@@ -793,17 +804,21 @@ pub(crate) fn expr_calls<'e>(expr: &'e Expr, out: &mut Vec<CallRef<'e>>) {
             }
         }
         Expr::Field { base, .. } => expr_calls(base, out),
-        Expr::StructLit { fields, .. } => {
+        Expr::StructLit { ty, fields, .. } => {
+            if let Some(ty) = ty { walk_type_len_exprs(ty, &mut |e| expr_calls(e, out)); }
             for f in fields {
                 expr_calls(&f.value, out);
             }
         }
-        Expr::SliceLit { items, .. } => {
+        Expr::SliceLit { elem, items, .. } => {
+            if let Some(ty) = elem { walk_type_len_exprs(ty, &mut |e| expr_calls(e, out)); }
             for i in items {
                 expr_calls(i, out);
             }
         }
-        Expr::MapLit { entries, .. } => {
+        Expr::MapLit { key, value, entries, .. } => {
+            walk_type_len_exprs(key, &mut |e| expr_calls(e, out));
+            walk_type_len_exprs(value, &mut |e| expr_calls(e, out));
             for (k, v) in entries {
                 expr_calls(k, out);
                 expr_calls(v, out);
@@ -811,6 +826,28 @@ pub(crate) fn expr_calls<'e>(expr: &'e Expr, out: &mut Vec<CallRef<'e>>) {
         }
         Expr::FnLit { .. } => {} // A5: see expr_uses / closures.rs
         Expr::Paren { inner, .. } => expr_calls(inner, out),
+    }
+}
+
+fn walk_type_len_exprs<'a>(ty: &'a hy_syntax::TypeExpr, f: &mut impl FnMut(&'a Expr)) {
+    match ty {
+        hy_syntax::TypeExpr::Array { len, elem, .. } => {
+            if let Some(len) = len { f(len); }
+            walk_type_len_exprs(elem, f);
+        }
+        hy_syntax::TypeExpr::Pointer { to, .. }
+        | hy_syntax::TypeExpr::Slice { elem: to, .. }
+        | hy_syntax::TypeExpr::Option { elem: to, .. }
+        | hy_syntax::TypeExpr::Chan { elem: to, .. } => walk_type_len_exprs(to, f),
+        hy_syntax::TypeExpr::Map { key, value, .. } => {
+            walk_type_len_exprs(key, f);
+            walk_type_len_exprs(value, f);
+        }
+        hy_syntax::TypeExpr::Fn { params, results, .. } => {
+            for p in params { walk_type_len_exprs(&p.ty, f); }
+            for r in results { walk_type_len_exprs(r, f); }
+        }
+        hy_syntax::TypeExpr::Named { .. } => {}
     }
 }
 

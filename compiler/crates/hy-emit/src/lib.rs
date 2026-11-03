@@ -548,7 +548,6 @@ pub struct Emitter {
     /// Inside a main-wrapper closure? (bare `return` legality, `?` shape)
     in_main_closure: bool,
     /// Inside a function literal (closure) — `?` binds to ITS results.
-    fnlit_depth: usize,
     /// Enclosing `for`/`loop` depth in the CURRENT function/closure frame.
     /// A labeled `break loop`/`continue loop` at depth 0 has no Go label
     /// target (labels do not cross func boundaries) — emit refuses instead
@@ -672,7 +671,6 @@ impl Emitter {
             bindings: BTreeMap::new(),
             temp_n: 0,
             in_main_closure: false,
-            fnlit_depth: 0,
             for_depth: 0,
             assoc_fns: BTreeSet::new(),
             cur_option_result: None,

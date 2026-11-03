@@ -19,9 +19,41 @@ impl<'a> Checker<'a> {
     /// Nested block bodies are NOT recursed here — `walk::flatten` already
     /// lists those statements, and a second walk would duplicate diagnostics.
     pub(crate) fn check_file_const_zero_divisors(&mut self) {
+        let empty = crate::model::FnState::default();
         for d in &self.file.decls {
-            if let hy_syntax::Decl::Const(c) = d {
-                self.check_expr_const_zero_divisor(&crate::model::FnState::default(), &c.value);
+            match d {
+                hy_syntax::Decl::Const(c) => {
+                    c.ty.as_ref().map(|t| self.check_type_const_zero_divisor(&empty, t));
+                    self.check_expr_const_zero_divisor(&empty, &c.value);
+                }
+                hy_syntax::Decl::Struct(s) => s.fields.iter().for_each(|f| self.check_type_const_zero_divisor(&empty, &f.ty)),
+                hy_syntax::Decl::Fn(f) => {
+                    f.receiver.as_ref().map(|r| self.check_type_const_zero_divisor(&empty, &r.ty));
+                    f.params.iter().for_each(|p| self.check_type_const_zero_divisor(&empty, &p.ty));
+                    f.results.iter().for_each(|r| self.check_type_const_zero_divisor(&empty, &r.ty));
+                }
+                hy_syntax::Decl::TypeAlias(a) => self.check_type_const_zero_divisor(&empty, &a.ty),
+                hy_syntax::Decl::Enum(e) => e.variants.iter().filter_map(|v| v.payload.as_ref()).for_each(|p| self.check_type_const_zero_divisor(&empty, p)),
+                _ => {}
+            }
+        }
+    }
+
+    fn check_type_const_zero_divisor(&mut self, st: &crate::model::FnState, ty: &hy_syntax::TypeExpr) {
+        match ty {
+            hy_syntax::TypeExpr::Named { .. } => {}
+            hy_syntax::TypeExpr::Pointer { to, .. } | hy_syntax::TypeExpr::Slice { elem: to, .. } | hy_syntax::TypeExpr::Chan { elem: to, .. } | hy_syntax::TypeExpr::Option { elem: to, .. } => self.check_type_const_zero_divisor(st, to),
+            hy_syntax::TypeExpr::Array { len, elem, .. } => {
+                len.as_ref().map(|l| self.check_expr_const_zero_divisor(st, l));
+                self.check_type_const_zero_divisor(st, elem);
+            }
+            hy_syntax::TypeExpr::Map { key, value, .. } => {
+                self.check_type_const_zero_divisor(st, key);
+                self.check_type_const_zero_divisor(st, value);
+            }
+            hy_syntax::TypeExpr::Fn { params, results, .. } => {
+                params.iter().for_each(|p| self.check_type_const_zero_divisor(st, &p.ty));
+                results.iter().for_each(|r| self.check_type_const_zero_divisor(st, r));
             }
         }
     }
@@ -40,6 +72,9 @@ impl<'a> Checker<'a> {
     ) {
         match stmt {
             Stmt::Local(l) => {
+                if let Some(ty) = &l.ty {
+                    self.check_type_const_zero_divisor(st, ty);
+                }
                 for v in &l.values {
                     self.check_expr_const_zero_divisor(st, v);
                 }
@@ -248,17 +283,25 @@ impl<'a> Checker<'a> {
                     self.check_expr_const_zero_divisor(st, &a.value);
                 }
             }
-            Expr::StructLit { fields, .. } => {
+            Expr::StructLit { ty, fields, .. } => {
+                if let Some(ty) = ty {
+                    self.check_type_const_zero_divisor(st, ty);
+                }
                 for f in fields {
                     self.check_expr_const_zero_divisor(st, &f.value);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some(elem) = elem {
+                    self.check_type_const_zero_divisor(st, elem);
+                }
                 for i in items {
                     self.check_expr_const_zero_divisor(st, i);
                 }
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit { key, value, entries, .. } => {
+                self.check_type_const_zero_divisor(st, key);
+                self.check_type_const_zero_divisor(st, value);
                 for (k, v) in entries {
                     self.check_expr_const_zero_divisor(st, k);
                     self.check_expr_const_zero_divisor(st, v);
@@ -271,7 +314,13 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::FnLit { params, body, .. } => {
+            Expr::FnLit { params, results, body, .. } => {
+                for p in params {
+                    self.check_type_const_zero_divisor(st, &p.ty);
+                }
+                for r in results {
+                    self.check_type_const_zero_divisor(st, &r.ty);
+                }
                 // Closure bodies are not flattened into Pass B — deep-walk.
                 // Their scopes differ from `st`: a closure-local shadow of a
                 // file const is invisible to env_lookup, so resolution fails

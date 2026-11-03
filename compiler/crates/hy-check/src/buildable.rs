@@ -1760,10 +1760,16 @@ impl<'a> Collector<'a> {
                         self.check_single_value_position(expr, "a for-range expression", false);
                         self.expr(expr);
                         let iter_kinds = self.iterate_var_kinds(expr, vars.len());
+                        // #3065 / SPEC LX13: a string ranges over runes, so
+                        // the element binding (the last var) is exactly
+                        // `rune` (= int32), not an untyped int; the width
+                        // checks then catch `var b byte = c` and `n + c`.
+                        let str_elem = matches!(self.kind_of_expr(expr), OpKind::Str)
+                            .then(|| vars.len().saturating_sub(1));
                         // Unread iterate bindings are lowered to `_` at
                         // emission (issue #139); write-only ones still
                         // reject as unused (PR #536).
-                        for (v, k) in vars.iter().zip(iter_kinds) {
+                        for (vi, (v, k)) in vars.iter().zip(iter_kinds).enumerate() {
                             self.define_elidable(v, *span);
                             // #1480: a struct/array element binding is a
                             // per-iteration copy at emission (`for _, x :=
@@ -1779,6 +1785,9 @@ impl<'a> Collector<'a> {
                                 }
                             }
                             self.bind_kind(v, k);
+                            if str_elem == Some(vi) {
+                                self.set_scalar(v, Some("int32"));
+                            }
                         }
                     }
                     ForKind::Infinite => {}
@@ -3374,10 +3383,28 @@ impl<'a> Collector<'a> {
                     // `float32`) — Go refuses that in a struct literal.
                     let scalar_mismatch =
                         self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
+                    let fty_name = fty.render();
+                    let got_type_name = self.typed_value_type_name(&f.value);
+                    let container_or_alias_mismatch = match (&got_type_name, &want, &got) {
+                        (Some(gname), OpKind::Chan(_), OpKind::Chan(_))
+                        | (Some(gname), OpKind::Map(_, _), OpKind::Map(_, _))
+                        | (Some(gname), OpKind::Slice(_), OpKind::Slice(_))
+                        | (Some(gname), OpKind::Pointer(_), OpKind::Pointer(_))
+                        | (Some(gname), OpKind::Array(_), OpKind::Array(_)) => fty_name != *gname,
+                        (Some(gname), _, _) => self.sized_array_names_differ(Some(fty_name.as_str()), Some(gname.as_str())),
+                        _ => false,
+                    };
                     let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
                         || kinds_conflict(&want, &got)
-                        || scalar_mismatch;
-                    if conflict {
+                        || scalar_mismatch
+                        || container_or_alias_mismatch;
+                    let already_diagnosed_e3012 = self
+                        .ck
+                        .diags
+                        .iter()
+                        .chain(self.diags.iter())
+                        .any(|d| d.code == "HYB-E3012" && d.span == f.value.span());
+                    if conflict && !already_diagnosed_e3012 {
                         self.emit_e1002(
                             f.value.span(),
                             format!(

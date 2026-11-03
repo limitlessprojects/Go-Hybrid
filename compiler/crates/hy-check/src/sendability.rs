@@ -2247,6 +2247,13 @@ impl<'a> Checker<'a> {
                             self.check_expr_against_ty(&args[1].value, &key, env);
                         }
                     }
+                } else if name == "copy" && args.len() == 2 {
+                    if let Some(dst_ty) = self.dir_ty_of_expr(&args[0].value, env) {
+                        let resolved_dst = self.resolve_type_alias(&dst_ty);
+                        if matches!(resolved_dst, hy_syntax::TypeExpr::Slice { .. }) {
+                            self.check_expr_against_ty(&args[1].value, &resolved_dst, env);
+                        }
+                    }
                 } else if args.len() == 1 {
                     if let Some(alias_ty) = self.type_aliases.get(name.as_str()).cloned() {
                         self.check_expr_against_ty(&args[0].value, &alias_ty, env);
@@ -2662,6 +2669,29 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            (
+                TypeExpr::Fn {
+                    params: pp,
+                    results: pr,
+                    ..
+                },
+                TypeExpr::Fn {
+                    params: ap,
+                    results: ar,
+                    ..
+                },
+            ) => {
+                if pp.len() == ap.len() {
+                    for (p, a) in pp.iter().zip(ap.iter()) {
+                        self.infer_type_param_bindings(&p.ty, &a.ty, tp_names, out);
+                    }
+                }
+                if pr.len() == ar.len() {
+                    for (p, a) in pr.iter().zip(ar.iter()) {
+                        self.infer_type_param_bindings(p, a, tp_names, out);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -2802,8 +2832,20 @@ impl<'a> Checker<'a> {
                 if n_vars >= 2 {
                     vec![Some(*key), Some(*value)]
                 } else {
-                    vec![Some(*value)]
+                    vec![Some(*key)]
                 }
+            }
+            TypeExpr::Named { name, .. } if !self.structs.contains_key("set") => {
+                if let Some(("set", mut targs)) = Self::parse_generic_type_args(&name) {
+                    if let Some(elem) = targs.pop() {
+                        return if n_vars >= 2 {
+                            vec![Some(elem), None]
+                        } else {
+                            vec![Some(elem)]
+                        };
+                    }
+                }
+                vec![None; n_vars.max(1)]
             }
             _ => vec![None; n_vars.max(1)],
         }
