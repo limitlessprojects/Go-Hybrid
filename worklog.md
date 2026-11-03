@@ -1469,3 +1469,18 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 326 -> 329 (#3299, #3296, #3347). Final main 2070f668, tree clean.
 - NEXT TICK QUEUE: #3229 (slot loan via call) -> #3196 (fn lit scalar widths) -> #2948 -> #2977 -> #2863 -> tools flood (#3384/#3389/#3362/#3393) -> old tail (#2982/#3182/#3176/#3184/#2977). #3346 round-2 on re-push. #3308/#3298 round-2 on re-push.
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978. (3346 vs 3347 RESOLVED.)
+
+## Session 70 — 2026-11-03 11:10 tick (4 landed: #3229/#2948/#2977/#3384; 1 conflict: #3196; 1 gate-fail: #2863)
+
+- Recycle + restore (cache hits both toolchains; disk lighter at 5.6G avail). scan RateGuard AGAIN at 12 remaining (quota consumed externally post-reset) — scan + approve skipped 2nd tick running; queue from S69 worklog.
+- In-repo trial-merge protocol (S69 fix) holding: cold build 70s, ~12 min/PR warm, zero disk drama.
+- LANDED:
+  7730659a Merge PR #3229 (coast9x72, fixes #3227) — slot loan for closure reached through a call; loan_aliases second-order propagation; 330 suites.
+  8d44f84d Merge PR #2948 (Alex, fixes #2700) — const-conversion overflow falls back to const_eval_int (constant EXPRESSIONS, not just literals); 331 suites.
+  9bf8d427 Merge PR #2977 (Alex, fixes #2698) — typed const in short define keeps its width (Go §Variable declarations); fixed_width_int_ty_of pub(crate); 332 suites.
+  edfcd28e Merge PR #3384 (Shokun123) — workload shape canonical LF + fail-closed drift checks; tool self-test OK; 332 suites.
+- CONFLICT (rebase requested, reply posted): #3196 (Alex, fixes #3180) — buildable.rs vs the width wave; return-side fn-lit lattice still needed, not duplicated by #3299.
+- GATE FAIL (evidence posted, not landed): #2863 (Alex, fixes #2858) — spurious E1002 on IDENTICAL `chan int` field/value (chan_direction_coercion, battery stopped 44/332); pre-container-wave branch; fix shape = canonical-equal fail-open / chan non-scalar skip. issuecomment-6594600961.
+- Suite trajectory: 329 -> 332 (#3229, #2948, #2977). Final main edfcd28e, tree clean.
+- NEXT TICK QUEUE: tools flood rest (#3389/#3362/#3393) -> #2982 (dup-watch vs #2976/#2978 FIRST) -> #3182 -> #3176 -> #3184 -> #1811/#3207/#2517. Round-2 watch: #3308/#3298/#3196/#2863/#3346/#3300/#3409-done on re-push.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978.
