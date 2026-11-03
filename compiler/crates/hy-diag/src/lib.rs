@@ -189,7 +189,7 @@ impl Diagnostic {
     }
 
     pub fn with_notes(mut self, notes: Vec<String>) -> Self {
-        self.notes = notes;
+        self.notes = notes.into_iter().filter(|n| !n.trim().is_empty()).collect();
         self
     }
 
@@ -359,7 +359,7 @@ impl Registry {
         self.data.codes.iter().find(|c| {
             let short = c.code.strip_prefix("HYB-").unwrap_or(&c.code);
             let digits = short.strip_prefix('E').unwrap_or(short);
-            c.code == q || short == q || digits == q || c.name.eq_ignore_ascii_case(raw)
+            c.code == q || short == q || digits == q || q.strip_prefix("HYB-") == Some(digits) || c.name.eq_ignore_ascii_case(raw)
         })
     }
 
