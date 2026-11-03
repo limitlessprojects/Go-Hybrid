@@ -233,6 +233,37 @@ fn is_sized_array_spelling(s: &str) -> bool {
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
+/// #3280 — parse a fixed-size array type into `(dimension, element_type)`.
+fn parse_sized_array(s: &str) -> Option<(&str, &str)> {
+    let t = s.trim();
+    if !t.starts_with('[') {
+        return None;
+    }
+    let close = t.find(']')?;
+    let head = &t[1..close];
+    if head.is_empty() || !head.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((head, t[close + 1..].trim()))
+}
+
+/// #3280 — check whether two element type strings conflict (numeric scalar width,
+/// nested slice elements, or fixed-size array dimensions and element types).
+fn elem_types_conflict(want: &str, got: &str) -> bool {
+    let w = want.trim();
+    let g = got.trim();
+    if let (Some(wn), Some(gn)) = (canonical_numeric_name(w), canonical_numeric_name(g)) {
+        return wn != gn;
+    }
+    if let (Some(w_inner), Some(g_inner)) = (w.strip_prefix("[]"), g.strip_prefix("[]")) {
+        return elem_types_conflict(w_inner, g_inner);
+    }
+    if let (Some((wl, we)), Some((gl, ge))) = (parse_sized_array(w), parse_sized_array(g)) {
+        return wl != gl || elem_types_conflict(we, ge);
+    }
+    false
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -879,6 +910,7 @@ impl<'a> Collector<'a> {
         }
         match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
             _ => None,
         }
     }
@@ -3418,14 +3450,29 @@ impl<'a> Collector<'a> {
                     let scalar_mismatch =
                         self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
                     let rendered_fty = fty.render();
-                    let field_type_name = subst.get(&rendered_fty).map(String::as_str).unwrap_or(&rendered_fty);
+                    let substituted_fty = if subst.is_empty() {
+                        rendered_fty
+                    } else {
+                        Self::substitute_type_str(&rendered_fty, &subst)
+                    };
+                    let field_type_name = substituted_fty.as_str();
                     let got_type_name = self.typed_value_type_name(&f.value);
+                    let is_generic_ty = |s: &str| {
+                        let inner = s.trim_start_matches("[]").trim_start_matches('*');
+                        inner.len() == 1 && inner.chars().all(|c| c.is_ascii_lowercase())
+                    };
                     let container_or_alias_mismatch = match (&got_type_name, &want, &got) {
                         (Some(gname), OpKind::Chan(_), OpKind::Chan(_))
                         | (Some(gname), OpKind::Map(_, _), OpKind::Map(_, _))
                         | (Some(gname), OpKind::Slice(_), OpKind::Slice(_))
                         | (Some(gname), OpKind::Pointer(_), OpKind::Pointer(_))
-                        | (Some(gname), OpKind::Array(_), OpKind::Array(_)) => field_type_name != gname.as_str(),
+                        | (Some(gname), OpKind::Array(_), OpKind::Array(_)) => {
+                            if field_type_name == gname.as_str() || is_generic_ty(field_type_name) || is_generic_ty(gname) {
+                                false
+                            } else {
+                                true
+                            }
+                        }
                         (Some(gname), _, _) => self.sized_array_names_differ(Some(field_type_name), Some(gname.as_str())),
                         _ => false,
                     };
@@ -4433,10 +4480,7 @@ impl<'a> Collector<'a> {
                         let dst_elem_ty = self.slice_element_type_name(&first.value);
                         let src_elem_ty = self.slice_element_type_name(&extra.value);
                         let ty_mismatch = match (&dst_elem_ty, &src_elem_ty) {
-                            (Some(d), Some(s)) => {
-                                crate::const_overflow::canonical_int_type_name(d)
-                                    != crate::const_overflow::canonical_int_type_name(s)
-                            }
+                            (Some(d), Some(s)) => elem_types_conflict(d, s),
                             _ => false,
                         };
                         let kind_mismatch = elem != *extra_elem
@@ -4519,18 +4563,33 @@ impl<'a> Collector<'a> {
             let dst_scalar = self.append_dest_scalar(&first.value);
             let got_scalar = self.typed_value_scalar(&extra.value);
             let scalar_mismatch = matches!((dst_scalar, got_scalar), (Some(d), Some(g)) if d != g);
-            if kinds_conflict(&elem, &got) || int_to_float_conflict || scalar_mismatch {
+            let got_ty = self.typed_value_type_name(&extra.value);
+            let elem_ty_mismatch = match (&dst_elem_ty, &got_ty) {
+                (Some(d), Some(g)) => elem_types_conflict(d, g),
+                _ => false,
+            };
+            if kinds_conflict(&elem, &got)
+                || int_to_float_conflict
+                || scalar_mismatch
+                || elem_ty_mismatch
+            {
                 let dst_label = match dst_elem_ty.as_deref() {
                     Some(d) => format!("[]{}", d),
                     None => self.kind_of_expr(&first.value).label().to_string(),
                 };
                 let got_label = match got_scalar {
                     Some(s) => s.to_string(),
-                    None => got.label().to_string(),
+                    None => match got_ty.as_deref() {
+                        Some(g) => g.to_string(),
+                        None => got.label().to_string(),
+                    },
                 };
                 let elem_label = match dst_scalar {
                     Some(d) => d.to_string(),
-                    None => elem.label().to_string(),
+                    None => match dst_elem_ty.as_deref() {
+                        Some(d) => d.to_string(),
+                        None => elem.label().to_string(),
+                    },
                 };
                 self.emit_e1002(
                     extra.value.span(),
