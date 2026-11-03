@@ -637,7 +637,18 @@ impl<'a> Lexer<'a> {
             }
             self.tok(start, Tok::Float(s))
         } else {
-            if s.starts_with('0') && s.len() > 1 {
+            if self.at(0).is_some_and(|c| c.is_ascii_alphabetic()) {
+                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                    s.push(self.bump().unwrap());
+                }
+                self.escape_diag(
+                    start,
+                    false,
+                    format!(
+                        "malformed integer literal `{s}`: trailing alphabetic characters (SPEC-LANGUAGE.md LX6)"
+                    ),
+                );
+            } else if s.starts_with('0') && s.len() > 1 {
                 if let Some(bad) = s.chars().find(|&c| !matches!(c, '0'..='7')) {
                     self.escape_diag(
                         start,
