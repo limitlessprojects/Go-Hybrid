@@ -4361,6 +4361,18 @@ impl<'a> Collector<'a> {
         }
         for (p, a) in f.params.iter().zip(args.iter()) {
             let want = self.kind_of_ty(&p.ty, 0);
+            if Checker::is_nil_literal(&a.value) && is_non_nilable(&want) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use nil as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        p.ty.render(),
+                        name
+                    ),
+                    "argument types must match declared parameter types",
+                );
+                continue;
+            }
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
                 if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
@@ -4417,6 +4429,19 @@ impl<'a> Collector<'a> {
         }
         for (p, a) in m.params.iter().zip(args.iter()) {
             let want = self.kind_of_ty(&p.ty, 0);
+            if Checker::is_nil_literal(&a.value) && is_non_nilable(&want) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use nil as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        p.ty.render(),
+                        sn,
+                        name
+                    ),
+                    "argument types must match declared parameter types",
+                );
+                continue;
+            }
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
                 if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
@@ -4467,6 +4492,17 @@ impl<'a> Collector<'a> {
         }
         for (p, a) in params.iter().zip(args.iter()) {
             let want = self.kind_of_ty(&p.ty, 0);
+            if Checker::is_nil_literal(&a.value) && is_non_nilable(&want) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use nil as `{}` value in argument to func literal (HYB-E1002)",
+                        p.ty.render()
+                    ),
+                    "argument types must match closure parameter types",
+                );
+                continue;
+            }
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
                 if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
