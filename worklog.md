@@ -1499,3 +1499,17 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 332 -> 337 (#3431 #3433 #3308 #3439 #3219). Final main 9cca4923, tree clean.
 - NEXT TICK QUEUE: #3013 (escapes) -> #3200 (range_iter, fixes #3199) -> #2996 (task spawns, +305) -> #3271 (slice elem width call args/returns, +373) -> #3441 (map key widths inferred bindings, +384) -> #3435 (coast9x72 container signatures, behind 5) -> #3160. Round-2 watch: #3298/#3346/#3438/#2863/#3300/#3196/#1833 (stale 746).
 - DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978. (3438 vs 3439 RESOLVED via 3439.)
+
+## Session 72 — 2026-11-03 13:10 tick (5 landed: #3452/#3445/#3446/#3298/#3200; 2-tick saga closed)
+
+- Recycle + restore (cache hits, 5.7G avail). scan + approve HEALTHY: approve 15/15, 4962 remaining.
+- LANDED (second record day in a row):
+  a4590081 Merge PR #3452 (aswadi, fixes #3451) — lexer rejects multi-dot float literals; 338 suites.
+  65163219 Merge PR #3445 (aswadi, fixes #3444) — E8nnn coherence case-insensitive + with_rule trim; 339 suites. (DUP #3449 "address #3444" unverified — next tick dup-check before any action.)
+  b3c043ba Merge PR #3446 (aswadi, fixes #3443) — zeroinit n5_new handles array types/aliases; 340 suites.
+  2b4d5fc2 Merge PR #3298 round-3 (phatloi0010, fixes #3280) — append elem type + nested dims, fail-open on unresolved/generic call results per round-1 evidence; author rebased twice, S68 gate-fail + S71 conflict both cleared; 341 suites.
+  a10b891b Merge PR #3200 (phatloi0010, fixes #3199) — range_iter strict iterable classification + per-form bound validation; 342 suites.
+- All remote asserts green; reply per PR; no silent closes.
+- Suite trajectory: 337 -> 342. Final main a10b891b, tree clean.
+- NEXT TICK QUEUE: #3441 (Shokun123 map key widths inferred bindings, +384) -> #1719 (ubelai A7/A2 use-after-consume, 8.7d, +344) -> #3013 (escapes, behind 11 -> check stale) -> #2996/#2867/#2940 (all behind 11) -> #3435 (behind 5) -> #3160. DUP CHECK FIRST: #3449 vs #3445(landed). Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3449 vs landed #3445.
