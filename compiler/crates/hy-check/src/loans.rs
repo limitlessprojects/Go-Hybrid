@@ -7526,60 +7526,15 @@ impl<'a> Checker<'a> {
     /// HYB-E6002 constant overflow checks on assignment targets).
     // ponytail: resolves direct ident, index, and struct field targets via package struct definitions.
     pub(crate) fn place_target_ty(&self, st: &FnState, p: &Place) -> Option<hy_syntax::TypeExpr> {
-        enum Step<'a> {
-            Index,
-            Field(&'a str),
-        }
-        let mut steps = Vec::new();
-        let mut walker = p;
-        loop {
-            match &walker.kind {
-                PlaceKind::Index { base, .. } => {
-                    steps.push(Step::Index);
-                    walker = base;
-                }
-                PlaceKind::Field { base, name } => {
-                    steps.push(Step::Field(name.as_str()));
-                    walker = base;
-                }
-                PlaceKind::AddrOf { base } => {
-                    walker = base;
-                }
-                PlaceKind::Ident(name) => {
-                    let b = self.lookup_binding(st, name)?;
-                    let mut cur = b.ty.as_ref()?;
-                    steps.reverse();
-                    for step in steps {
-                        while let hy_syntax::TypeExpr::Pointer { to, .. } = cur {
-                            cur = to.as_ref();
-                        }
-                        match step {
-                            Step::Index => match cur {
-                                hy_syntax::TypeExpr::Array { elem, .. }
-                                | hy_syntax::TypeExpr::Slice { elem, .. } => {
-                                    cur = elem.as_ref();
-                                }
-                                hy_syntax::TypeExpr::Map { value, .. } => {
-                                    cur = value.as_ref();
-                                }
-                                _ => return None,
-                            },
-                            Step::Field(field_name) => match cur {
-                                hy_syntax::TypeExpr::Named {
-                                    name: struct_name, ..
-                                } => {
-                                    let fields = self.structs.get(struct_name)?;
-                                    let (_, field_ty) =
-                                        fields.iter().find(|(f, _)| f == field_name)?;
-                                    cur = field_ty;
-                                }
-                                _ => return None,
-                            },
-                        }
-                    }
-                    return Some(cur.clone());
-                }
-            }
+        match &p.kind {
+            PlaceKind::Ident(name) => self.lookup_binding(st, name)?.ty.clone(),
+            PlaceKind::AddrOf { base } => self.place_target_ty(st, base),
+            PlaceKind::Index { base, .. } => match self.peel_pointer_and_alias(&self.place_target_ty(st, base)?) {
+                hy_syntax::TypeExpr::Array { elem, .. } | hy_syntax::TypeExpr::Slice { elem, .. } => Some(*elem),
+                hy_syntax::TypeExpr::Map { value, .. } => Some(*value),
+                _ => None,
+            },
+            PlaceKind::Field { base, name } => self.struct_fields_for_type(&self.place_target_ty(st, base)?)?.into_iter().find(|(f, _)| f == name).map(|(_, ty)| ty),
         }
     }
 
