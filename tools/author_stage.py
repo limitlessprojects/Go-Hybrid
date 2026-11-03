@@ -53,6 +53,7 @@ import argparse
 import json
 import os
 import pathlib
+import posixpath
 import re
 import subprocess
 import sys
@@ -64,6 +65,17 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 COMPILER = ROOT / "compiler"
 QUEUE = ROOT / "automation" / "land-queue"
 HYB = ROOT / "compiler" / "target" / "debug" / "hyb"
+
+
+def resolve_hyb_bin() -> pathlib.Path:
+    target_dir = os.environ.get("CARGO_TARGET_DIR")
+    base = pathlib.Path(target_dir) if target_dir else (COMPILER / "target")
+    cand = base / "debug" / "hyb"
+    if os.name == "nt" and not cand.is_file():
+        exe = base / "debug" / "hyb.exe"
+        if exe.is_file():
+            return exe
+    return cand
 BLOCKED_DIR = ROOT / "target" / "author-blocked"
 REPRO_DIR = ROOT / "compiler" / "target" / "author-stage"  # gitignored area
 REPO = "limitlessprojects/Go-Hybrid"
@@ -138,21 +150,58 @@ def chat(messages) -> str:
         return json.loads(r.read().decode())["choices"][0]["message"]["content"]
 
 
+def _clean_diff_path(raw: str, strip_ab: bool = False) -> str | None:
+    p = raw.split("\t", 1)[0].strip()
+    if len(p) >= 2 and p.startswith('"') and p.endswith('"'):
+        p = p[1:-1]
+    if p == "/dev/null":
+        return None
+    if strip_ab and (p.startswith("a/") or p.startswith("b/")):
+        p = p[2:]
+    return p
+
+
 def diff_paths(d: str) -> list[str]:
     paths = []
+    in_hunk = False
     for line in d.splitlines():
-        if line.startswith("+++ "):
-            p = line[4:].strip()
-            if p.startswith("b/"):
-                p = p[2:]
-            if p != "/dev/null":
-                paths.append(p)
+        if line.startswith("diff --git "):
+            in_hunk = False
+            continue
+        if line.startswith("@@ "):
+            in_hunk = True
+            continue
+        if in_hunk:
+            continue
+        p = None
+        if line.startswith("--- ") or line.startswith("+++ "):
+            p = _clean_diff_path(line[4:], strip_ab=True)
+        elif line.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
+            p = _clean_diff_path(line.split(" ", 2)[2], strip_ab=False)
+        if p is not None and p not in paths:
+            paths.append(p)
     return paths
+
+
+def _path_in_scope(p: str) -> bool:
+    if not p or p.startswith("/") or "\\" in p:
+        return False
+    parts = [seg for seg in p.split("/") if seg and seg != "."]
+    if not parts or ".." in parts:
+        return False
+    norm = posixpath.normpath("/".join(parts))
+    return norm.startswith(SCOPE_PREFIXES)
 
 
 def scope_ok(d: str) -> bool:
     ps = diff_paths(d)
-    return bool(ps) and all(p.startswith(SCOPE_PREFIXES) for p in ps)
+    return bool(ps) and all(_path_in_scope(p) for p in ps)
+
+
+def out_path_ok(out: pathlib.Path) -> bool:
+    resolved = out.resolve()
+    root_resolved = ROOT.resolve()
+    return resolved == root_resolved or root_resolved in resolved.parents
 
 
 def render_messages(issue: dict, feedback: str, files: list[str]) -> list[dict]:
@@ -189,7 +238,7 @@ def revert_tree() -> None:
 
 
 def hyb_check(path: pathlib.Path) -> tuple[int, str]:
-    r = sh([str(HYB), "check", str(path)], timeout=120)
+    r = sh([str(resolve_hyb_bin()), "check", str(path)], timeout=120)
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
@@ -209,10 +258,9 @@ def write_blocked(issue_no: int, trace: pathlib.Path, note: str) -> int:
 def run_author(issue_no: int, out: pathlib.Path, max_rounds: int,
                brain: str = "api") -> int:
     trace = pathlib.Path(tempfile.mkdtemp(prefix="author-stage-")) / "trace.log"
-    if not QUEUE.resolve() in out.resolve().parents and out.resolve() != QUEUE.resolve():
-        if not str(out).startswith(str(ROOT)):
-            print(f"AUTHOR-STAGE-ERROR: --out must live inside the repo ({ROOT})")
-            return 2
+    if not out_path_ok(out):
+        print(f"AUTHOR-STAGE-ERROR: --out must live inside the repo ({ROOT})")
+        return 2
     if dirty():
         print("AUTHOR-STAGE-ERROR: working tree dirty — refusing to run (clean it first)")
         return 2
