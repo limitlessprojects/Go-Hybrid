@@ -67,9 +67,17 @@ pub(crate) const SCALAR_ATOMICS: &[&str] = &[
     "atomic.uintptr",
 ];
 
+fn normalize_foreign_type_name(name: &str) -> String {
+    match name.split_once('.') {
+        Some((pkg, member)) => format!("{pkg}.{}", normalize_go_ident_to_snake(member)),
+        None => name.to_string(),
+    }
+}
+
 /// Is `name` a scalar atomic (class 2)?
 pub(crate) fn is_scalar_atomic(name: &str) -> bool {
-    SCALAR_ATOMICS.contains(&name)
+    let norm = normalize_foreign_type_name(name);
+    SCALAR_ATOMICS.contains(&norm.as_str())
 }
 
 /// Is `name` a `sync/atomic` type OUTSIDE the scalar set — `atomic.pointer[T]`,
@@ -93,7 +101,8 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
         // with the row-11 explanation (sendability.rs)
         return Some(TypeShape::Unknown);
     }
-    match name {
+    let norm = normalize_foreign_type_name(name);
+    match norm.as_str() {
         "serde_json.value" => Some(TypeShape::OwnHandle("serde_json.value".into())),
         "serde_json.view" => Some(TypeShape::BorrowHandle("serde_json.view".into())),
         "flate2.writer" => Some(TypeShape::OwnHandle("flate2.writer".into())),
@@ -120,7 +129,8 @@ pub(crate) fn is_iterable_handle(name: &str) -> bool {
 
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
-    match (pkg, method) {
+    let norm = normalize_go_ident_to_snake(method);
+    match (pkg, norm.as_str()) {
         ("serde_json", "parse" | "new_object" | "new_array") | ("flate2", "new_writer") => {
             CallMode::Produce
         }
@@ -140,24 +150,41 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
 /// `const` root there is a write, `HYB-E3006`). `None` = the descriptor stubs
 /// record no in-place write for this API.
 pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
-    match (pkg, method) {
-        (
-            "sort",
-            "ints" | "strings" | "float64s" | "slice" | "slice_stable" | "sort" | "stable"
-            | "Ints" | "Strings" | "Float64s" | "Slice" | "SliceStable" | "Sort" | "Stable",
-        ) => Some(0),
-        (
-            "io",
-            "read_full" | "read_at_least" | "ReadFull" | "ReadAtLeast",
-        ) => Some(1),
-        ("io", "copy_buffer" | "CopyBuffer") => Some(2),
+    let norm = normalize_go_ident_to_snake(method);
+    let m = norm.as_str();
+    match pkg {
+        "sort"
+            if matches!(
+                m,
+                "ints" | "strings" | "float64s" | "slice" | "slice_stable" | "sort" | "stable"
+            ) =>
+        {
+            Some(0)
+        }
+        "serde_json" if matches!(m, "set" | "remove" | "push_string" | "array_push_string") => {
+            Some(0)
+        }
+        "flate2" if matches!(m, "write" | "finish") => Some(0),
+        "atomic"
+            if m.starts_with("store_")
+                || m.starts_with("add_")
+                || m.starts_with("swap_")
+                || m.starts_with("compare_and_swap_") =>
+        {
+            Some(0)
+        }
+        "hex" if m == "decode" => Some(0),
+        "io" if matches!(m, "read_full" | "read_at_least") => Some(1),
+        "json" if m == "unmarshal" => Some(1),
+        "io" if m == "copy_buffer" => Some(2),
         _ => None,
     }
 }
 
 /// Result shape of a package-level call (for defines / loop variables).
 pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
-    match (pkg, method) {
+    let norm = normalize_go_ident_to_snake(method);
+    match (pkg, norm.as_str()) {
         ("serde_json", "parse" | "new_object" | "new_array") => {
             TypeShape::OwnHandle("serde_json.value".into())
         }
@@ -171,17 +198,24 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
             TypeShape::Str
         }
         ("strings", "split") | ("strings", "fields") => TypeShape::Slice(Box::new(TypeShape::Str)),
-        // `time.after(d)` returns a receive-only channel (the deadline
-        // pattern, example 04); the element shape is opaque here — the
+        // `time.after(d)` / `time.tick(d)` return a receive-only channel (the
+        // deadline pattern, example 04); the element shape is opaque here — the
         // binding still resolves as a channel so receives on it classify.
-        ("time", "after") => TypeShape::Chan(Box::new(TypeShape::Unknown)),
+        ("time", "after" | "tick") => TypeShape::Chan(Box::new(TypeShape::Unknown)),
+        ("time", "since" | "until") => TypeShape::ForeignOpaque("time.duration".into()),
+        ("time", "now") => TypeShape::ForeignOpaque("time.time".into()),
         ("http", "new_serve_mux") => TypeShape::ForeignOpaque("http.serve_mux".into()),
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
         // `atomic.load_pointer` / `atomic.swap_pointer` return an
-        // unsafe.Pointer to arbitrary state — not a primitive (row 11)
-        ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
-        ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
-        ("errors", "is" | "Is") => TypeShape::Primitive,
+        // unsafe.Pointer to arbitrary state — not a primitive (row 11);
+        // `atomic.store_*` are void in Go and produce no sendable scalar.
+        (
+            "atomic",
+            "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer",
+        ) => TypeShape::Unknown,
+        ("atomic", m) if m.starts_with("store_") => TypeShape::Unknown,
+        ("errors", "new" | "wrap") => TypeShape::ForeignOpaque("error".into()),
+        ("errors", "is") => TypeShape::Primitive,
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -191,7 +225,8 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
 /// values in Go (`(T, error)`, `(before, after, found)`, etc.) when not
 /// unwrapped with `?` (#380 / T23 `HYB-E2002`).
 pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
-    match (pkg, method) {
+    let norm = normalize_go_ident_to_snake(method);
+    match (pkg, norm.as_str()) {
         (
             "strconv",
             "parse_int"
@@ -201,17 +236,13 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
                 | "parse_complex"
                 | "atoi"
                 | "unquote"
-                | "ParseInt"
-                | "ParseUint"
-                | "ParseFloat"
-                | "ParseBool"
-                | "ParseComplex"
-                | "Atoi"
-                | "Unquote",
+                | "quoted_prefix",
         ) => Some(2),
+        ("strconv", "unquote_char") => Some(4),
         (
             "os",
             "open"
+                | "open_file"
                 | "create"
                 | "read_file"
                 | "read_dir"
@@ -220,26 +251,18 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
                 | "user_cache_dir"
                 | "user_config_dir"
                 | "executable"
+                | "hostname"
                 | "lookup_env"
                 | "stat"
                 | "lstat"
+                | "readlink"
+                | "getgroups"
+                | "find_process"
+                | "start_process"
                 | "create_temp"
-                | "mkdir_temp"
-                | "Open"
-                | "Create"
-                | "ReadFile"
-                | "ReadDir"
-                | "Getwd"
-                | "UserHomeDir"
-                | "UserCacheDir"
-                | "UserConfigDir"
-                | "Executable"
-                | "LookupEnv"
-                | "Stat"
-                | "Lstat"
-                | "CreateTemp"
-                | "MkdirTemp",
+                | "mkdir_temp",
         ) => Some(2),
+        ("os", "pipe") => Some(3),
         (
             "io",
             "read_all"
@@ -248,59 +271,67 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
                 | "copy"
                 | "copy_n"
                 | "copy_buffer"
-                | "write_string"
-                | "ReadAll"
-                | "ReadFull"
-                | "ReadAtLeast"
-                | "Copy"
-                | "CopyN"
-                | "CopyBuffer"
-                | "WriteString",
+                | "write_string",
         ) => Some(2),
-        (
-            "strings",
-            "cut_prefix" | "cut_suffix" | "CutPrefix" | "CutSuffix",
-        ) => Some(2),
-        ("strings", "cut" | "Cut") => Some(3),
+        ("strings", "cut_prefix" | "cut_suffix") => Some(2),
+        ("strings", "cut") => Some(3),
         (
             "filepath",
-            "abs"
-                | "rel"
-                | "eval_symlinks"
-                | "glob"
-                | "match"
-                | "split"
-                | "Abs"
-                | "Rel"
-                | "EvalSymlinks"
-                | "Glob"
-                | "Match"
-                | "Split",
+            "abs" | "rel" | "eval_symlinks" | "glob" | "match" | "split" | "localize",
         ) => Some(2),
-        ("path", "match" | "split" | "Match" | "Split") => Some(2),
+        ("path", "match" | "split") => Some(2),
         (
             "time",
             "parse"
+                | "parse_in_location"
                 | "parse_duration"
                 | "load_location"
-                | "Parse"
-                | "ParseDuration"
-                | "LoadLocation",
+                | "load_location_from_tz_data",
         ) => Some(2),
         (
             "net",
             "listen"
+                | "listen_packet"
+                | "listen_tcp"
+                | "listen_udp"
+                | "listen_ip"
+                | "listen_unix"
+                | "listen_unixgram"
                 | "dial"
+                | "dial_timeout"
+                | "dial_tcp"
+                | "dial_udp"
+                | "dial_ip"
+                | "dial_unix"
+                | "resolve_ip_addr"
                 | "resolve_tcp_addr"
+                | "resolve_udp_addr"
+                | "resolve_unix_addr"
                 | "lookup_host"
-                | "Listen"
-                | "Dial"
-                | "ResolveTCPAddr"
-                | "LookupHost",
+                | "lookup_addr"
+                | "lookup_cname"
+                | "lookup_ip"
+                | "lookup_mx"
+                | "lookup_ns"
+                | "lookup_port"
+                | "lookup_txt"
+                | "parse_mac"
+                | "interface_addrs"
+                | "interface_by_index"
+                | "interface_by_name"
+                | "interfaces"
+                | "file_conn"
+                | "file_listener"
+                | "file_packet_conn",
         ) => Some(2),
-        ("net", "split_host_port" | "SplitHostPort") => Some(3),
-        ("hex", "decode_string" | "DecodeString") => Some(2),
-        ("regex", "compile" | "match_string" | "Compile" | "MatchString") => Some(2),
+        ("net", "split_host_port" | "parse_cidr" | "lookup_srv") => Some(3),
+        (
+            "url",
+            "parse" | "parse_request_uri" | "parse_query" | "query_unescape" | "path_unescape" | "join_path",
+        ) => Some(2),
+        ("json", "marshal" | "marshal_indent") => Some(2),
+        ("hex", "decode" | "decode_string") => Some(2),
+        ("regex", "compile" | "match_string") => Some(2),
         _ => None,
     }
 }
@@ -312,7 +343,9 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
         // atomics are safe-by-type: no loan implications (class 2)
         return CallMode::Safe;
     }
-    match (recv_type, method) {
+    let norm_recv = normalize_foreign_type_name(recv_type);
+    let norm_method = normalize_go_ident_to_snake(method);
+    match (norm_recv.as_str(), norm_method.as_str()) {
         // #2200 / foreign-surface drift: this list must be a SUBSET of
         // hy-emit's SHAPES members for the same key (shapes.rs, "serde_json.value":
         // array, int, string, set, push_string) and of the Go methods the
@@ -370,9 +403,32 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const SYNC_MUTEX: &[&str] = &["lock", "unlock", "try_lock"];
     /// `sync.RWMutex`.
     const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
-    match recv_type {
-        "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
-        "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
+    /// `http.ServeMux` (`shapes.rs`).
+    const HTTP_SERVE_MUX: &[&str] = &["handle", "handle_func", "serve_http"];
+    /// `http.Handler` (`shapes.rs`).
+    const HTTP_HANDLER: &[&str] = &["serve_http"];
+    /// `http.ResponseWriter` (`shapes.rs`).
+    const HTTP_RESPONSE_WRITER: &[&str] = &["header", "write", "write_header"];
+    /// `http.Header` (`shapes.rs`).
+    const HTTP_HEADER: &[&str] = &["get", "set", "add"];
+    /// `time.Duration` (`shapes.rs`).
+    const TIME_DURATION: &[&str] = &[
+        "milliseconds",
+        "microseconds",
+        "nanoseconds",
+        "seconds",
+        "minutes",
+        "hours",
+    ];
+    let norm = normalize_foreign_type_name(recv_type);
+    match norm.as_str() {
+        "sync.mutex" => Some(SYNC_MUTEX),
+        "sync.rwmutex" | "sync.rw_mutex" => Some(SYNC_RWMUTEX),
+        "http.serve_mux" => Some(HTTP_SERVE_MUX),
+        "http.handler" => Some(HTTP_HANDLER),
+        "http.response_writer" => Some(HTTP_RESPONSE_WRITER),
+        "http.header" => Some(HTTP_HEADER),
+        "time.duration" => Some(TIME_DURATION),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -407,7 +463,9 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
 
 /// Result shape of a method call on a typed receiver.
 pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
-    match (recv_type, method) {
+    let norm_recv = normalize_foreign_type_name(recv_type);
+    let norm_method = normalize_go_ident_to_snake(method);
+    match (norm_recv.as_str(), norm_method.as_str()) {
         ("serde_json.value" | "serde_json.view", "array") => {
             // element views: iterating the result yields borrow handles
             TypeShape::BorrowHandle("serde_json.view".into())
@@ -416,10 +474,15 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
-        ("sync.mutex" | "sync.Mutex", "try_lock")
-        | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
+        ("sync.mutex", "try_lock") | ("sync.rwmutex" | "sync.rw_mutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
         }
+        ("http.response_writer", "header") => TypeShape::ForeignOpaque("http.header".into()),
+        ("http.header", "get") => TypeShape::Str,
+        (
+            "time.duration",
+            "milliseconds" | "microseconds" | "nanoseconds" | "seconds" | "minutes" | "hours",
+        ) => TypeShape::Primitive,
         // scalar atomics only ("atomic.int" is receiver_type_name's key for
         // TypeShape::Atomic): load/swap/add yield the scalar. A non-scalar
         // atomic's `load()` / `swap()` returns a pointer / `any` — Unknown,
@@ -1355,6 +1418,7 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "set"
                 | "remove"
                 | "push_string"
+                | "array_push_string"
                 | "value"
                 | "view"
         ),
@@ -1362,6 +1426,32 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
         "regex" => matches!(m, "is_match" | "is_valid" | "compile" | "match_string"),
         "flate2" => matches!(m, "new_writer" | "write" | "finish" | "writer"),
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn go_cased_atomics_and_mutated_args_and_surfaces_classify_consistently() {
+        assert!(is_scalar_atomic("atomic.Int64"));
+        assert!(is_scalar_atomic("atomic.Bool"));
+        assert!(!is_unproven_atomic("atomic.Int64"));
+        assert!(is_unproven_atomic("atomic.Pointer"));
+        assert!(is_unproven_atomic("atomic.Value"));
+        assert_eq!(package_result("atomic", "LoadPointer"), TypeShape::Unknown);
+        assert_eq!(package_result("atomic", "SwapPointer"), TypeShape::Unknown);
+        assert_eq!(package_result("atomic", "LoadInt64"), TypeShape::Primitive);
+        assert_eq!(package_mutated_arg("atomic", "StoreInt32"), Some(0));
+        assert_eq!(package_mutated_arg("serde_json", "Set"), Some(0));
+        assert_eq!(package_mutated_arg("json", "Unmarshal"), Some(1));
+        assert_eq!(package_mutated_arg("hex", "Decode"), Some(0));
+        assert_eq!(package_result_count("json", "marshal"), Some(2));
+        assert_eq!(package_result_count("url", "parse"), Some(2));
+        assert_eq!(package_result_count("os", "pipe"), Some(3));
+        assert!(foreign_method_surface("http.serve_mux").is_some());
+        assert!(foreign_method_surface("http.response_writer").is_some());
     }
 }
 
