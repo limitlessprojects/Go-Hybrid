@@ -412,6 +412,7 @@ fn is_sized_array_spelling(s: &str) -> bool {
 }
 
 /// #3280 — parse a fixed-size array type into `(dimension, element_type)`.
+
 fn parse_sized_array(s: &str) -> Option<(&str, &str)> {
     let t = s.trim();
     if !t.starts_with('[') {
@@ -907,6 +908,41 @@ impl<'a> Collector<'a> {
             }
         }
         None
+    }
+
+    fn map_type_name_of_expr(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::MapLit { key, value, .. } => {
+                Some(format!("map[{}]{}", key.render(), value.render()))
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            let fb = unwrap_parens(&first.value);
+                            if let Expr::MapLit { key, value, .. } = fb {
+                                return Some(format!("map[{}]{}", key.render(), value.render()));
+                            }
+                            let rendered = first.value.render();
+                            if rendered.starts_with("map[") {
+                                return Some(rendered);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if tname.starts_with("map[") {
+                        return Some(tname);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     fn slice_element_type_name(&self, e: &Expr) -> Option<String> {
@@ -2208,6 +2244,8 @@ impl<'a> Collector<'a> {
                     self.bind_type_name(name, format!("[]{}", elem));
                 } else if let Some(tp) = self.expr_type_param(val) {
                     self.bind_type_name(name, tp);
+                } else if let Some(mt) = self.map_type_name_of_expr(val) {
+                    self.bind_type_name(name, mt);
                 }
             }
         }
