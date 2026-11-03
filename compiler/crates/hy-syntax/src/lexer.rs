@@ -184,8 +184,7 @@ enum StrEscape {
 
 struct Lexer<'a> {
     path: String,
-    chars: Vec<char>,
-    i: usize,
+    chars: std::str::Chars<'a>,
     line: u32,
     col: u32,
     diags: Vec<Diagnostic>,
@@ -194,34 +193,30 @@ struct Lexer<'a> {
     /// InterpOpen in the same segment scan).
     pending: Option<Token>,
     eof_done: bool,
-    _src: &'a str,
 }
 
 impl<'a> Lexer<'a> {
     fn new(path: &str, src: &'a str) -> Self {
         Lexer {
             path: path.to_string(),
-            chars: src.chars().collect(),
-            i: 0,
+            chars: src.chars(),
             line: 1,
             col: 1,
             diags: Vec::new(),
             frames: Vec::new(),
             pending: None,
             eof_done: false,
-            _src: src,
         }
     }
 
     // -- low-level cursor ---------------------------------------------------
 
     fn at(&self, off: usize) -> Option<char> {
-        self.chars.get(self.i + off).copied()
+        self.chars.clone().nth(off)
     }
 
     fn bump(&mut self) -> Option<char> {
-        let c = self.chars.get(self.i).copied()?;
-        self.i += 1;
+        let c = self.chars.next()?;
         if c == '\n' {
             self.line += 1;
             self.col = 1;
@@ -256,33 +251,36 @@ impl<'a> Lexer<'a> {
     /// `skip_trivia` without consuming anything. Used by the contextual
     /// `map` + `[` rule.
     fn next_code_char_after_trivia(&self) -> Option<char> {
-        let mut i = self.i;
+        let mut chars = self.chars.clone();
         loop {
-            match self.chars.get(i).copied() {
-                Some(c) if c.is_whitespace() => i += 1,
-                Some('/') if self.chars.get(i + 1).copied() == Some('/') => {
-                    i += 2;
-                    while let Some(c) = self.chars.get(i).copied() {
+            let c = chars.next()?;
+            if c.is_whitespace() {
+                continue;
+            }
+            if c != '/' {
+                return Some(c);
+            }
+            match chars.clone().next() {
+                Some('/') => {
+                    chars.next();
+                    for c in chars.by_ref() {
                         if c == '\n' {
                             break;
                         }
-                        i += 1;
                     }
                 }
-                Some('/') if self.chars.get(i + 1).copied() == Some('*') => {
-                    i += 2;
+                Some('*') => {
+                    chars.next();
+                    let mut previous = None;
                     loop {
-                        if i + 1 >= self.chars.len() {
-                            return None;
-                        }
-                        if self.chars[i] == '*' && self.chars[i + 1] == '/' {
-                            i += 2;
+                        let c = chars.next()?;
+                        if previous == Some('*') && c == '/' {
                             break;
                         }
-                        i += 1;
+                        previous = Some(c);
                     }
                 }
-                other => return other,
+                _ => return Some('/'),
             }
         }
     }
