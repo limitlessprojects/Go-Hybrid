@@ -1635,7 +1635,7 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
   e8960367 Merge PR #2757 (ryder777777, fixes #582) — differential_loop fail-closed on OSError + corpus-dir validation; 2 inert scope notes disclosed in merge+reply (unreferenced {"issue":582} JSON markers; dead `if False` loop). 371 suites.
   8f822d05 Merge PR #2760 (ryder777777, fixes #1046) — projected map-element borrows (&m[k].f / &m[k][i]) rejected in arg/expr positions; slice/pointer hops stay legal. 372 suites.
   e0e479e6 Merge PR #2761 (ryder777777, fixes #1454) — select receive bindings carry channel elem TypeExpr + bool ok-binder (E6002 now fires). 373 suites.
-  1c0f56c0 Merge PR #2766 (ryder777777, fixes #1450) — bare return in named-result error fns stays naked (P0 silent wrong-code closed). 374 suites total file count reported by cargo = 373 ok + lib.
+  1c0f56c0 Merge PR #2766 (ryder777777, fixes #1450) — bare return in named-result error fns stays naked (P0 silent wrong-code closed). 373 suites.
 - Suite trajectory: 370 -> 373 (+3 test files). Final main 1c0f56c0, tree clean, remote asserts green; replies posted per PR; no silent closes.
 - NEXT TICK QUEUE: #591 (score 9, constant-folding/type-alias/slice-index family) -> #2285 -> #2284 (fixes #1565) -> #937 (magomedta, 14.5d) -> #3499 (NO tests) -> #3503 -> DUP CHECKS: #2867 vs landed #1740; #2940 vs landed #3145. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
 - DUP WATCH remaining: #2982 vs #2976 vs #2978.
