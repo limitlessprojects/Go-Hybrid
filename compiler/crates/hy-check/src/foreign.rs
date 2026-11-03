@@ -99,7 +99,7 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
         "flate2.writer" => Some(TypeShape::OwnHandle("flate2.writer".into())),
         _ => {
             let root = name.split('.').next().unwrap_or("");
-            if BUILTIN_PACKAGES.contains(&root) {
+            if is_curated_package_root(root) {
                 Some(TypeShape::ForeignOpaque(name.to_string()))
             } else {
                 None
