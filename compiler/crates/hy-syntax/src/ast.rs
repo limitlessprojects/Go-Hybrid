@@ -104,6 +104,9 @@ pub struct EnumVariant {
     pub name: String,
     /// `payload: Option<TypeExpr>` — `some(T)` etc.
     pub payload: Option<TypeExpr>,
+    /// `read = 0`: the variant carries an explicit integer constant
+    /// (SPEC T17). The value itself is not kept yet.
+    pub has_discriminant: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -1785,6 +1785,12 @@ impl<'a> Collector<'a> {
                 }
             }
         }
+        // #3137 rows 7-8: an enum value only fits its own enum type.
+        if l.values.len() == l.names.len() {
+            for (name, val) in l.names.iter().zip(&l.values) {
+                self.check_enum_value_target(name, l.ty.as_ref(), val);
+            }
+        }
         // Composed resolution (pr-430 x landed pr-475): #475's track_read
         // set (Define|Let|Var|Const) drives which locals get unused-read
         // tracking; #430's operand-kind inference runs for EVERY name so
@@ -1815,6 +1821,10 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                }
+                // #3137: `c := color.red` records `c` as a `color` value.
+                else if let Some(en) = self.enum_of_expr(val) {
+                    self.bind_type_name(name, en);
                 }
             }
         }
@@ -2158,6 +2168,12 @@ impl<'a> Collector<'a> {
                                     } else {
                                         OpKind::Unknown
                                     }
+                                } else if subject_kind == OpKind::Unknown {
+                                    // #3137: `circle(r)` / `shape.circle(r)` binds the
+                                    // variant's declared payload type.
+                                    self.enum_pattern_payload(segments)
+                                        .map(|t| self.kind_of_ty(&t, 0))
+                                        .unwrap_or(OpKind::Unknown)
                                 } else {
                                     OpKind::Unknown
                                 };
@@ -2526,6 +2542,7 @@ impl<'a> Collector<'a> {
             // interface is not a struct — so reject the base explicitly.
             Expr::Field { base, name, span } => {
                 self.check_pointer_method_receiver(base, name, *span);
+                self.check_enum_field(base, name, *span);
                 if matches!(self.kind_of_expr(base), OpKind::Interface) {
                     self.emit_e1002(
                         *span,
@@ -2567,6 +2584,7 @@ impl<'a> Collector<'a> {
                     Expr::Ident { name, .. } => self.read(name),
                     other => self.expr(other),
                 }
+                self.check_enum_int_conversion(callee, args, *span);
                 // `new(T)` and `make(T, len, cap)` take a TYPE as their FIRST
                 // argument, so that position is a type position and the
                 // #778 value-position check must not fire there — `new(bag)`
@@ -2605,6 +2623,7 @@ impl<'a> Collector<'a> {
                 self.check_call_operands(callee, args, *span);
                 self.check_set_method_arg(callee, args);
                 self.check_option_method_arg(callee, args);
+                self.check_enum_variant_ctor(callee, args, *span);
             }
             Expr::StructLit { ty, fields, span } => {
                 if let Some(t) = ty {
@@ -3627,6 +3646,225 @@ impl<'a> Collector<'a> {
             Expr::Ident { name, .. } => self.kind_of_named(name, 0),
             _ => OpKind::Unknown,
         }
+    }
+
+    /// #3137: the declared payload type of the variant a `match` pattern
+    /// names. `shape.circle` resolves through the named enum; a bare
+    /// `circle` resolves only when exactly one enum declares a variant with
+    /// that name, so an ambiguous pattern stays fail-open.
+    fn enum_pattern_payload(&self, segments: &[String]) -> Option<TypeExpr> {
+        let (enum_name, variant) = match segments {
+            [v] => (None, v.as_str()),
+            [e, v] => (Some(e.as_str()), v.as_str()),
+            _ => return None,
+        };
+        let mut found: Option<TypeExpr> = None;
+        let mut hits = 0usize;
+        for (name, variants) in &self.ck.enum_payloads {
+            if enum_name.is_some_and(|e| e != name) {
+                continue;
+            }
+            for (vn, payload) in variants {
+                if vn == variant {
+                    hits += 1;
+                    found = payload.clone();
+                }
+            }
+        }
+        if hits == 1 { found } else { None }
+    }
+
+    /// #3137: `shape.circle("x")` — a variant constructor takes exactly the
+    /// declared payload (one value of the payload type, or none at all).
+    /// Go has no enum constructors to catch this later: once enums emit
+    /// (SPEC T18), a wrong payload would be wrong Go, and today the checker
+    /// is the only line of defence.
+    fn check_enum_variant_ctor(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
+        let Expr::Field { base, name: variant, .. } = unwrap_parens(callee) else {
+            return;
+        };
+        let Expr::Ident { name: enum_name, .. } = unwrap_parens(base) else {
+            return;
+        };
+        if self.scopes.iter().any(|l| l.contains_key(enum_name.as_str())) {
+            return;
+        }
+        let Some(variants) = self.ck.enum_payloads.get(enum_name.as_str()) else {
+            return;
+        };
+        let Some((_, payload)) = variants.iter().find(|(vn, _)| vn == variant) else {
+            return;
+        };
+        let payload = payload.clone();
+        let want_n = usize::from(payload.is_some());
+        if args.len() != want_n {
+            let what = match &payload {
+                Some(t) => format!("one `{}` payload", t.render()),
+                None => "no payload".to_string(),
+            };
+            self.emit_e1002(
+                span,
+                format!(
+                    "variant `{}.{}` takes {}, but {} argument(s) were given (HYB-E1002)",
+                    enum_name,
+                    variant,
+                    what,
+                    args.len()
+                ),
+                "a variant constructor takes exactly the payload declared on the enum",
+            );
+            return;
+        }
+        let (Some(t), Some(a)) = (payload, args.first()) else {
+            return;
+        };
+        let want = self.kind_of_ty(&t, 0);
+        let got = self.kind_of_expr(&a.value);
+        let int_to_float_conflict =
+            want == OpKind::Float && got == OpKind::Int && !self.is_untyped_int_const(&a.value);
+        let scalar_mismatch = matches!(
+            (self.scalar_of_ty(&t), self.typed_value_scalar(&a.value)),
+            (Some(w), Some(g)) if w != g
+        );
+        if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
+            self.emit_e1002(
+                a.value.span(),
+                format!(
+                    "cannot use `{}` (type `{}`) as `{}` payload of variant `{}.{}` (HYB-E1002)",
+                    a.value.render(),
+                    got.label(),
+                    t.render(),
+                    enum_name,
+                    variant
+                ),
+                "the payload must have the type declared on the enum variant",
+            );
+        }
+    }
+
+    /// #3137: the user enum a value expression provably belongs to:
+    /// `color.red`, `shape.circle(2.0)`, or a local recorded as an enum
+    /// value. Anything else (including a shadowed enum name) is `None`.
+    fn enum_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Field { base, name, .. } => {
+                let Expr::Ident { name: en, .. } = unwrap_parens(base) else {
+                    return None;
+                };
+                if self.scopes.iter().any(|l| l.contains_key(en.as_str())) {
+                    return None;
+                }
+                let vs = self.ck.enums.get(en.as_str())?;
+                vs.iter().any(|v| v == name).then(|| en.clone())
+            }
+            Expr::Call { callee, .. } => {
+                let Expr::Field { .. } = unwrap_parens(callee) else {
+                    return None;
+                };
+                self.enum_of_expr(callee)
+            }
+            Expr::Ident { name, .. } => {
+                let t = self.lookup_type_name(name)?;
+                self.ck.enums.contains_key(t.as_str()).then_some(t)
+            }
+            _ => None,
+        }
+    }
+
+    /// #3137 rows 7-8: `var c color = shape.point` and `var n int = c`
+    /// (with `c` a `color`) build nothing Go would accept once enums emit:
+    /// an enum value is only assignable to its own enum type (or `any`).
+    fn check_enum_value_target(&mut self, name: &str, ty: Option<&TypeExpr>, val: &Expr) {
+        let (Some(TypeExpr::Named { name: tn, .. }), Some(en)) = (ty, self.enum_of_expr(val))
+        else {
+            return;
+        };
+        let tn = tn.trim();
+        let wrong = if self.ck.enums.contains_key(tn) {
+            tn != en
+        } else {
+            matches!(
+                self.kind_of_named(tn, 0),
+                OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str
+            ) || self.ck.structs.contains_key(tn)
+        };
+        if wrong {
+            self.emit_e1002(
+                val.span(),
+                format!(
+                    "cannot initialize `{}` (type `{}`) with `{}` (enum `{}`) (HYB-E1002)",
+                    name,
+                    tn,
+                    val.render(),
+                    en
+                ),
+                "an enum value is only assignable to its own enum type; SPEC T17 gives a numeric view only through `int(e)`",
+            );
+        }
+    }
+
+    /// #3137 row 9: SPEC T17 defines `int(e)` only when every variant of
+    /// the enum carries an explicit integer constant. On any other enum
+    /// there is no numeric view, so the conversion is refused.
+    fn check_enum_int_conversion(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
+        let Expr::Ident { name: conv, .. } = unwrap_parens(callee) else {
+            return;
+        };
+        if args.len() != 1
+            || !matches!(self.kind_of_named(conv, 0), OpKind::Int | OpKind::Float)
+            || self.scopes.iter().any(|l| l.contains_key(conv.as_str()))
+        {
+            return;
+        }
+        let Some(en) = self.enum_of_expr(&args[0].value) else {
+            return;
+        };
+        if self.ck.enum_constant.contains(en.as_str()) {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "cannot convert `{}` (enum `{}`) to `{}`: not every variant of `{}` has an explicit integer constant (HYB-E1002)",
+                args[0].value.render(),
+                en,
+                conv,
+                en
+            ),
+            "SPEC T17: `int(e)` is defined only when every variant carries a constant (`read = 0`); give each variant one, or `match` on the value",
+        );
+    }
+
+    /// #3137 row 10: enums have no fields. `s.radius` on an enum value is
+    /// refused unless the enum declares a method of that name.
+    fn check_enum_field(&mut self, base: &Expr, name: &str, span: Span) {
+        if matches!(unwrap_parens(base), Expr::Ident { name: n, .. }
+            if self.ck.enums.contains_key(n.as_str())
+                && !self.scopes.iter().any(|l| l.contains_key(n.as_str())))
+        {
+            return;
+        }
+        let Some(en) = self.enum_of_expr(base) else {
+            return;
+        };
+        if self
+            .ck
+            .method_decls
+            .contains_key(&(en.clone(), name.to_string()))
+        {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "`{}.{}`: enum `{}` has no field or method `{}` (HYB-E1002)",
+                base.render(),
+                name,
+                en,
+                name
+            ),
+            "enum values have no fields; bind the payload with `match` instead",
+        );
     }
 
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
