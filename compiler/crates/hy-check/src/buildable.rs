@@ -735,6 +735,8 @@ struct Collector<'a> {
     /// binding mutate the per-iteration copy and the collection never sees
     /// them — hy-check rejects those writes instead (#1480).
     copy_var_scopes: Vec<HashSet<String>>,
+    /// Parallel lexical scope stack tracking parameter kinds of function/closure bindings (#3467).
+    fn_param_scopes: Vec<HashMap<String, Vec<OpKind>>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     file_untyped_consts: HashSet<String>,
@@ -807,6 +809,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             type_name_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
+            fn_param_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
@@ -880,6 +883,7 @@ impl<'a> Collector<'a> {
         self.container_elem_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
+        self.fn_param_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -890,6 +894,82 @@ impl<'a> Collector<'a> {
         self.container_elem_scopes.pop();
         self.set_elem_scopes.pop();
         self.copy_var_scopes.pop();
+        self.fn_param_scopes.pop();
+    }
+
+    fn bind_fn_params(&mut self, name: &str, params: Vec<OpKind>) {
+        if name != "_" {
+            if let Some(top) = self.fn_param_scopes.last_mut() {
+                top.insert(name.to_string(), params);
+            }
+        }
+    }
+
+    fn lookup_fn_params(&self, name: &str) -> Option<&Vec<OpKind>> {
+        for layer in self.fn_param_scopes.iter().rev() {
+            if let Some(params) = layer.get(name) {
+                return Some(params);
+            }
+        }
+        None
+    }
+
+    fn struct_field_fn_params(&self, k: &OpKind, field: &str) -> Option<Vec<OpKind>> {
+        let full_name = self.struct_name(k)?;
+        let base_name = Checker::base_named_type_str(&full_name);
+        let fields = self.ck.structs.get(base_name)?;
+        let subst = self.struct_type_arg_map(&full_name);
+        let (_, ty) = fields.iter().find(|(n, _)| n == field)?;
+        if let TypeExpr::Fn { params, .. } = ty {
+            Some(
+                params
+                    .iter()
+                    .map(|p| self.kind_of_ty_with_subst(&p.ty, &subst, 0))
+                    .collect(),
+            )
+        } else {
+            None
+        }
+    }
+
+    fn check_fn_param_arg_types(&mut self, callee_name: &str, params: &[OpKind], args: &[CallArg]) {
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        if params.len() != args.len() {
+            return;
+        }
+        for (want, a) in params.iter().zip(args.iter()) {
+            let got = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = want {
+                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            let int_to_float_conflict = *want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            let is_nil = Checker::is_nil_literal(&a.value);
+            let nil_to_non_nilable = is_nil && is_non_nilable(want);
+            if kinds_conflict(want, &got) || nil_to_non_nilable || int_to_float_conflict {
+                let got_label = if is_nil {
+                    "untyped nil".to_string()
+                } else {
+                    got.label()
+                };
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        a.value.render(),
+                        got_label,
+                        want.label(),
+                        callee_name
+                    ),
+                    "argument types must match declared parameter types",
+                );
+            }
+        }
     }
 
     fn bind_type_name(&mut self, name: &str, type_name: String) {
@@ -1977,6 +2057,10 @@ impl<'a> Collector<'a> {
             self.set_container_elem_scalar(&p.name, ces);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
             self.bind_type_name(&p.name, p.ty.render());
+            if let TypeExpr::Fn { params, .. } = &p.ty {
+                let fpk: Vec<OpKind> = params.iter().map(|t| self.kind_of_ty(&t.ty, 0)).collect();
+                self.bind_fn_params(&p.name, fpk);
+            }
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -2198,6 +2282,12 @@ impl<'a> Collector<'a> {
             for name in &l.names {
                 self.bind_type_name(name, tname.clone());
             }
+            if let TypeExpr::Fn { params, .. } = t {
+                let pk: Vec<OpKind> = params.iter().map(|p| self.kind_of_ty(&p.ty, 0)).collect();
+                for name in &l.names {
+                    self.bind_fn_params(name, pk.clone());
+                }
+            }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
                 // `a := [2]int{..}` / `b := a`: an inferred sized array keeps
@@ -2208,6 +2298,15 @@ impl<'a> Collector<'a> {
                     self.bind_type_name(name, format!("[]{}", elem));
                 } else if let Some(tp) = self.expr_type_param(val) {
                     self.bind_type_name(name, tp);
+                }
+                let bare = unwrap_parens(val);
+                if let Expr::FnLit { params, .. } = bare {
+                    let pk: Vec<OpKind> = params.iter().map(|p| self.kind_of_ty(&p.ty, 0)).collect();
+                    self.bind_fn_params(name, pk);
+                } else if let Expr::Ident { name: orig, .. } = bare {
+                    if let Some(pk) = self.lookup_fn_params(orig).cloned() {
+                        self.bind_fn_params(name, pk);
+                    }
                 }
             }
         }
@@ -2351,6 +2450,21 @@ impl<'a> Collector<'a> {
                     }
                 }
                 self.check_assign_operands(targets, *op, values, *span);
+                if targets.len() == values.len() {
+                    for (t, v) in targets.iter().zip(values.iter()) {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            let bare = unwrap_parens(v);
+                            if let Expr::FnLit { params, .. } = bare {
+                                let pk: Vec<OpKind> = params.iter().map(|p| self.kind_of_ty(&p.ty, 0)).collect();
+                                self.bind_fn_params(name, pk);
+                            } else if let Expr::Ident { name: orig, .. } = bare {
+                                if let Some(pk) = self.lookup_fn_params(orig).cloned() {
+                                    self.bind_fn_params(name, pk);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Stmt::Expr { expr, .. } => self.expr(expr),
             Stmt::Send { chan, value, .. } => {
@@ -2504,6 +2618,9 @@ impl<'a> Collector<'a> {
                     Expr::Ident { name, .. } => {
                         self.check_user_fn_arity(name, args, *span);
                         self.check_user_fn_arg_types(name, args);
+                        if let Some(params) = self.lookup_fn_params(name).cloned() {
+                            self.check_fn_param_arg_types(name, &params, args);
+                        }
                     }
                     Expr::Field { base, name, .. } => {
                         let bk = self.kind_of_expr(base);
@@ -3092,6 +3209,10 @@ impl<'a> Collector<'a> {
                     self.set_container_elem_scalar(&p.name, ces);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
                     self.bind_type_name(&p.name, p.ty.render());
+                    if let TypeExpr::Fn { params, .. } = &p.ty {
+                        let fpk: Vec<OpKind> = params.iter().map(|t| self.kind_of_ty(&t.ty, 0)).collect();
+                        self.bind_fn_params(&p.name, fpk);
+                    }
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -4940,13 +5061,19 @@ impl<'a> Collector<'a> {
         let recv_kind = OpKind::Struct(Some(tn.clone()));
         let recv = &args[0].value;
         let got_kind = self.kind_of_expr(recv);
-        if kinds_conflict(&recv_kind, &got_kind) {
+        let recv_is_nil = Checker::is_nil_literal(recv);
+        if kinds_conflict(&recv_kind, &got_kind) || recv_is_nil {
+            let got_label = if recv_is_nil {
+                "untyped nil".to_string()
+            } else {
+                got_kind.label()
+            };
             self.emit_e1002(
                 recv.span(),
                 format!(
                     "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — the first argument of a method expression is the receiver (HYB-E1002)",
                     recv.render(),
-                    got_kind.label(),
+                    got_label,
                     tn,
                     tn,
                     name
@@ -5109,7 +5236,10 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
+            let is_nil = Checker::is_nil_literal(&a.value);
+            let nil_to_non_nilable = is_nil && is_non_nilable(&want);
             if kinds_conflict(&want, &got)
+                || nil_to_non_nilable
                 || int_to_float_conflict
                 || scalar_mismatch
                 || self.sized_array_names_differ(
@@ -5117,12 +5247,17 @@ impl<'a> Collector<'a> {
                     self.typed_value_type_name(&a.value).as_deref(),
                 )
             {
+                let got_label = if is_nil {
+                    "untyped nil".to_string()
+                } else {
+                    got.label()
+                };
                 self.emit_e1002(
                     a.value.span(),
                     format!(
                         "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
                         a.value.render(),
-                        got.label(),
+                        got_label,
                         want.label(),
                         name
                     ),
@@ -5177,7 +5312,10 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
+            let is_nil = Checker::is_nil_literal(&a.value);
+            let nil_to_non_nilable = is_nil && is_non_nilable(&want);
             if kinds_conflict(&want, &got)
+                || nil_to_non_nilable
                 || int_to_float_conflict
                 || scalar_mismatch
                 || self.sized_array_names_differ(
@@ -5185,12 +5323,17 @@ impl<'a> Collector<'a> {
                     self.typed_value_type_name(&a.value).as_deref(),
                 )
             {
+                let got_label = if is_nil {
+                    "untyped nil".to_string()
+                } else {
+                    got.label()
+                };
                 self.emit_e1002(
                     a.value.span(),
                     format!(
                         "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
                         a.value.render(),
-                        got.label(),
+                        got_label,
                         want.label(),
                         sn,
                         name
@@ -5230,13 +5373,20 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let is_nil = Checker::is_nil_literal(&a.value);
+            let nil_to_non_nilable = is_nil && is_non_nilable(&want);
+            if kinds_conflict(&want, &got) || nil_to_non_nilable {
+                let got_label = if is_nil {
+                    "untyped nil".to_string()
+                } else {
+                    got.label()
+                };
                 self.emit_e1002(
                     a.value.span(),
                     format!(
                         "cannot use `{}` (value of type `{}`) as `{}` value in argument to func literal (HYB-E1002)",
                         a.value.render(),
-                        got.label(),
+                        got_label,
                         want.label()
                     ),
                     "argument types must match closure parameter types",
@@ -7635,7 +7785,12 @@ impl<'a> Collector<'a> {
                         OpKind::Fn(_, Some(ref want)) if want.len() != args.len() => {
                             self.report_local_arity(name, want.len(), args.len(), span)
                         }
-                        OpKind::Fn(..) | OpKind::Unknown => {}
+                        OpKind::Fn(..) => {
+                            if let Some(params) = self.lookup_fn_params(name).cloned() {
+                                self.check_fn_param_arg_types(name, &params, args);
+                            }
+                        }
+                        OpKind::Unknown => {}
                         _ => self.emit_e1002(
                             span,
                             format!(
@@ -7792,6 +7947,8 @@ impl<'a> Collector<'a> {
                         if let OpKind::Fn(_, Some(ref want)) = fk {
                             if want.len() != args.len() {
                                 self.report_local_arity(&callee.render(), want.len(), args.len(), span);
+                            } else if let Some(params) = self.struct_field_fn_params(&bk, name) {
+                                self.check_fn_param_arg_types(&callee.render(), &params, args);
                             }
                         }
                     }
