@@ -813,6 +813,20 @@ impl<'a> Lexer<'a> {
                 return Some(self.tok(start, Tok::StrChunk(cooked)));
             };
             match c {
+                '\n' => {
+                    Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
+                    self.frames.pop();
+                    self.escape_diag(
+                        start,
+                        true,
+                        "newline in interpreted string literal (SPEC-LANGUAGE.md LX7) — use `\\n` or backtick raw string",
+                    );
+                    if cooked.is_empty() && emitted_any {
+                        return Some(self.tok(start, Tok::StrEnd));
+                    }
+                    self.pending = Some(self.tok(self.pos(), Tok::StrEnd));
+                    return Some(self.tok(start, Tok::StrChunk(cooked)));
+                }
                 '"' => {
                     Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
                     self.bump();
