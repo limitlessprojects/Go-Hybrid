@@ -402,6 +402,7 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "utf32" => "UTF32",
         "uuid" => "UUID",
         "vm" => "VM",
+        "waitgroup" => "WaitGroup",
         "xml" => "XML",
         "xmpp" => "XMPP",
         "xsrf" => "XSRF",
@@ -447,7 +448,13 @@ pub(crate) fn result_shape(results: &[FnResult]) -> (usize, bool) {
 
 pub(crate) fn base_ty_name(t: &TypeExpr) -> Option<String> {
     match t {
-        TypeExpr::Named { name, .. } => Some(name.clone()),
+        TypeExpr::Named { name, .. } => Some(match name.as_str() {
+            "sync.waitgroup" | "sync.WaitGroup" => "sync.wait_group".into(),
+            "sync.Mutex" => "sync.mutex".into(),
+            "sync.RWMutex" => "sync.rwmutex".into(),
+            "sync.Once" => "sync.once".into(),
+            _ => name.clone(),
+        }),
         TypeExpr::Pointer { to, .. } => base_ty_name(to),
         _ => None,
     }
@@ -1724,11 +1731,8 @@ impl Emitter {
         if matches!(t, TypeExpr::Map { .. }) {
             return Some(BindingKind::Map);
         }
-        let name = match t {
-            TypeExpr::Named { name, .. } => name.as_str(),
-            TypeExpr::Pointer { to, .. } => return self.binding_kind_of_ty(to),
-            _ => return None,
-        };
+        let Some(base) = base_ty_name(t) else { return None };
+        let name = base.as_str();
         if name.starts_with("set[") || name == "set" {
             return Some(BindingKind::Set);
         }
