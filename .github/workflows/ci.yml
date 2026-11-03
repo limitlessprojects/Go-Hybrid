@@ -36,6 +36,8 @@ jobs:
           python3 tools/check_guarantees.py
           python3 -m unittest discover -s tools -p test_check_guarantees.py -v
           python3 -m unittest discover -s tools -p test_author_repro_verdict.py -v
+          python3 -m unittest discover -s spikes/w002-author-model -p test_model.py -v
+          python3 spikes/w002-author-model/run_mutations.py
           python3 -m unittest discover -s tools -p test_shepherd_gate.py -v
           python3 -m unittest discover -s tools -p test_shepherd_verify_assert.py -v
           python3 -m unittest discover -s tools -p test_queue_sweeper.py -v

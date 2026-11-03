@@ -1,5 +1,17 @@
 # Hybrid Language: Development Plan
 
+## Contributor experiment — W-002 author clarification (2026-11-02)
+
+- `spikes/w002-author-model/` supplies a bounded executable capture/inference
+  model for #279. Preregistration committed before execution (`eb28990`).
+- Local Python 3.14.7: 20 semantic tests pass; both deliberately weakened
+  mutants are caught; test-registration guard passes. Quick CI runs the model
+  and mutation runner. No production compiler or corpus verdict is changed.
+- The author clarification retains resource identity and lexical loan state,
+  corrects the unqualified graph-deletion/diagnostic-compatibility claims, and
+  distinguishes proposal credit from #1078/#1893's independent implementations.
+  Rust/Go suites and hosted CI are not run here; review/award/payment pending.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.
