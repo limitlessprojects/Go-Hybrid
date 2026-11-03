@@ -2762,13 +2762,14 @@ impl<'a> Collector<'a> {
         let name = name.trim();
         if name.starts_with('*')
             || name.starts_with("[]")
+            || name.starts_with('[')
             || name.starts_with("chan ")
             || name.starts_with("<-chan ")
             || name.starts_with("chan<- ")
             || name.starts_with("map[")
             || (name.starts_with("option[") && name.ends_with(']'))
         {
-            return self.kind_of_type_str(name, depth);
+            return self.kind_of_type_str(name, depth + 1);
         }
         let base = Checker::base_named_type_str(name);
         if self.ck.structs.contains_key(base) || self.ck.struct_type_params.contains_key(base) {
@@ -2805,6 +2806,13 @@ impl<'a> Collector<'a> {
         if let Some(rest) = s.strip_prefix("[...]") {
             return OpKind::Array(Box::new(self.kind_of_type_str(rest, depth + 1)));
         }
+        if s.starts_with('[') {
+            if let Some((_inside, rest)) = Self::strip_leading_bracket_group(s) {
+                if !rest.trim().is_empty() {
+                    return OpKind::Array(Box::new(self.kind_of_type_str(rest.trim(), depth + 1)));
+                }
+            }
+        }
         if let Some(rest) = s
             .strip_prefix("<-chan ")
             .or_else(|| s.strip_prefix("chan<- "))
@@ -2812,7 +2820,19 @@ impl<'a> Collector<'a> {
         {
             return OpKind::Chan(Box::new(self.kind_of_type_str(rest, depth + 1)));
         }
-        self.kind_of_named(s, depth)
+        if let Some(after_map) = s.strip_prefix("map") {
+            if let Some((k, v)) = Self::strip_leading_bracket_group(after_map) {
+                let k_kind = self.kind_of_type_str(k.trim(), depth + 1);
+                let v_kind = self.kind_of_type_str(v.trim(), depth + 1);
+                return OpKind::Map(Box::new(k_kind), Box::new(v_kind));
+            }
+        }
+        if let Some(after_opt) = s.strip_prefix("option[") {
+            if let Some(inner) = after_opt.strip_suffix(']') {
+                return OpKind::Option(Box::new(self.kind_of_type_str(inner.trim(), depth + 1)));
+            }
+        }
+        self.kind_of_named(s, depth + 1)
     }
 
     fn kind_of_ty_with_subst(
