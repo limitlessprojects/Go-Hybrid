@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor current-main refresh
+
+- Contributor refresh (2026-11-03, PR #3528): integrated upstream `212af67e5df6452452c061e3dc3d3251faee790f` without conflicts. Python 3.12.14 top-level tooling: 503/503 passed; test-registration, conflict-marker and diff checks passed. Existing fix and regression tests preserved. Full Rust/Go verification on this refreshed head remains a hosted-CI/review gate; no award or payment claimed.
+
 ## Contributor candidate — bounded artifact downloads (2026-11-03)
 
 - `actions_fetch` streams archives to its existing sibling temporary file in 1 MiB reads, then atomically publishes after the response and output file close. A short Content-Length response remains an `IncompleteRead`; connection/write/publish failures retain the previous archive and remove partial files. Authentication and redirect handling are unchanged.
