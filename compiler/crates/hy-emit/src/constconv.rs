@@ -281,12 +281,15 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
                     return Some(WideInt::from_i128(st.len() as i128));
                 }
             } else if (name == "min" || name == "max") && !args.is_empty() && args.iter().all(|a| !a.spread) {
-                let mut acc = const_int_expr(&args[0].value)?.to_i128()?;
+                let mut acc = const_int_expr(&args[0].value)?;
                 for a in &args[1..] {
-                    let v = const_int_expr(&a.value)?.to_i128()?;
-                    acc = if name == "min" { acc.min(v) } else { acc.max(v) };
+                    let v = const_int_expr(&a.value)?;
+                    let v_is_less = v.checked_sub(acc)?.is_neg();
+                    if (name == "min" && v_is_less) || (name == "max" && !v_is_less) {
+                        acc = v;
+                    }
                 }
-                return Some(WideInt::from_i128(acc));
+                return Some(acc);
             }
             None
         }

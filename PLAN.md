@@ -2,6 +2,7 @@
 
 ## Contributor validation — Go build constraints (2026-10-31)
 
+- Contributor amendment (2026-11-03, #3477): `min`/`max` constant folding now compares 512-bit `WideInt` values instead of narrowing arguments to `i128`. Regression coverage exercises wide `min` and `max` inside `u8` conversions; it fails with the original implementation. `make corpus` 130/130 and `cargo test --workspace` pass.
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.
 - `hyb generate` excludes sibling filenames reported by `go list -e -find -json .` as `IgnoredGoFiles`, once per directory and invocation. Modern/legacy constraints, platform suffixes and `GOFLAGS` tags use Go's own selection; existing production-package conflict checks remain. This is CLI tooling correctness, not a language/checker soundness change; PR #1900's separate dot/underscore-prefix fix is untouched.
 - Reuse `hyb`'s existing `serde_json = "1"` test dependency in the production dependency section for Go's JSON response; no new package version or lockfile change. Selection does not resolve project imports, also supports module-free fixtures, and fails without touching output when the selection command fails.
