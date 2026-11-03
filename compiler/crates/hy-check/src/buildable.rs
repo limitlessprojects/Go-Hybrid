@@ -1125,6 +1125,10 @@ impl<'a> Collector<'a> {
         match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                self.struct_field_type_name(&bk, name)
+            }
             _ => None,
         }
     }
@@ -1841,10 +1845,30 @@ impl<'a> Collector<'a> {
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
-        let outer_tp = std::mem::replace(
-            &mut self.fn_type_params,
-            f.type_params.iter().map(|p| p.name.clone()).collect(),
-        );
+        let mut tparams: HashSet<String> = f.type_params.iter().map(|p| p.name.clone()).collect();
+        if let Some(r) = &f.receiver {
+            let r_name = match &r.ty {
+                TypeExpr::Named { name, .. } => Some(name.as_str()),
+                TypeExpr::Pointer { to, .. } => match &**to {
+                    TypeExpr::Named { name, .. } => Some(name.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(rn) = r_name {
+                if let Some(start) = rn.find('[') {
+                    if let Some(end) = rn.rfind(']') {
+                        for param in rn[start + 1..end].split(',') {
+                            let p = param.trim();
+                            if !p.is_empty() {
+                                tparams.insert(p.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let outer_tp = std::mem::replace(&mut self.fn_type_params, tparams);
         let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
         let outer_select = std::mem::replace(&mut self.select_depth, 0);
         self.block_stmts(body);
@@ -2037,8 +2061,12 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                if let Some((_, _, array_ty)) = unwrap_parens(val).as_array_lit() {
+                    self.bind_type_name(name, array_ty.render());
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Some(tname) = self.typed_value_type_name(val) {
+                    self.bind_type_name(name, tname);
                 }
             }
         }
@@ -8036,6 +8064,18 @@ impl<'a> Collector<'a> {
                 let mut first_arg: Option<(&Expr, OpKind)> = None;
                 let mut first_typed_scalar: Option<(&Expr, &'static str)> = None;
                 for arg in args {
+                    if let Some(tp) = self.generic_type_param_of_expr(&arg.value) {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "invalid argument `{}` (type parameter `{}`) for `{name}`: type parameter has no ordered constraint (HYB-E2005)",
+                                arg.value.render(),
+                                tp
+                            ),
+                            "the arguments to `min` and `max` must have ordered type (integers, floats, or strings)",
+                        );
+                        return;
+                    }
                     let k = self.kind_of_expr(&arg.value);
                     if matches!(k, OpKind::Unknown | OpKind::Void) {
                         continue;

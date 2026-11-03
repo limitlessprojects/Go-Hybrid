@@ -145,6 +145,46 @@ fn main() {}
 }
 
 #[test]
+fn rejects_generic_type_parameter_to_min_max() {
+    let src1 = r#"
+package main
+
+fn test_min[t any](a t, b t) {
+    _ = min(a, b)
+}
+
+fn main() {}
+"#;
+    assert_e2005(src1, "min on generic type parameter");
+
+    let src2 = r#"
+package main
+
+fn test_max[t any](a t, b t) {
+    _ = max(a, b)
+}
+
+fn main() {}
+"#;
+    assert_e2005(src2, "max on generic type parameter");
+}
+
+#[test]
+fn rejects_generic_type_parameter_via_local_and_field() {
+    let src = r#"
+package main
+
+fn test_local[t any](x t) {
+    y := x
+    clear(y)
+}
+
+fn main() {}
+"#;
+    assert_e2005(src, "clear on local inferred generic type parameter");
+}
+
+#[test]
 fn accepts_generic_slices_maps_channels() {
     let src = r#"
 package main
