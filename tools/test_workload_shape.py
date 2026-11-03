@@ -152,6 +152,28 @@ class WorkloadShapeTests(unittest.TestCase):
         for name in GENERATED:
             self.assertTrue((self.workloads / name).exists())
 
+    def test_check_rejects_crlf_and_invalid_utf8_without_traceback(self):
+        go_main = self.workloads / "go/main.go"
+        canonical = go_main.read_bytes()
+        go_main.write_bytes(canonical.replace(b"\n", b"\r\n"))
+        result = self.assert_check_preserves_tree(1)
+        self.assertIn("go/main.go", result.stdout)
+
+        go_main.write_bytes(b"\xff\xfe\x00invalid-utf8\n")
+        result = self.assert_check_preserves_tree(1)
+        self.assertIn("go/main.go", result.stdout)
+
+    def test_generation_recreates_missing_parent_directories_with_lf(self):
+        expected = {name: (self.workloads / name).read_bytes() for name in GENERATED}
+        for sub in ("go", "rust", "hy"):
+            shutil.rmtree(self.workloads / sub)
+        result = self.run_shape()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in GENERATED:
+            raw = (self.workloads / name).read_bytes()
+            self.assertNotIn(b"\r", raw)
+            self.assertEqual(raw, expected[name])
+
 
 if __name__ == "__main__":
     unittest.main()
