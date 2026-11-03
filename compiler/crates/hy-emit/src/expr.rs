@@ -72,14 +72,18 @@ impl Emitter {
             while let Expr::Paren { inner, .. } = lit {
                 lit = inner;
             }
+            let resolved = self.n5_resolve_alias(exp);
             match lit {
                 Expr::StructLit {
                     ty: None, fields, ..
                 } => {
-                    if let TypeExpr::Pointer { to, .. } = exp {
+                    if let TypeExpr::Pointer { to, .. } = &resolved {
                         let body = self.struct_lit_body(to, fields)?;
                         let s = format!("&{}{{{}}}", self.type_text(to), body);
                         return Ok(if min_prec > 50 { format!("({})", s) } else { s });
+                    }
+                    if let (true, Some(init)) = (fields.is_empty(), self.n5_zero_init(exp)) {
+                        return Ok(init);
                     }
                     let head = self.type_text(exp);
                     let body = self.struct_lit_body(exp, fields)?;
@@ -87,12 +91,34 @@ impl Emitter {
                 }
                 Expr::SliceLit {
                     elem: None, items, ..
-                } => match exp {
+                } => match &resolved {
                     TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
                         let head = self.type_text(exp);
                         let mut parts = Vec::new();
                         for i in items {
                             parts.push(self.emit_expr_exp(i, 0, Some(elem))?);
+                        }
+                        if let (
+                            TypeExpr::Array {
+                                len:
+                                    Some(
+                                        len_expr,
+                                    ),
+                                ..
+                            },
+                            Some(init),
+                        ) = (&resolved, self.n5_zero_init(elem))
+                        {
+                            if let Expr::Lit {
+                                kind: LitKind::Int(n),
+                                ..
+                            } = len_expr.as_ref()
+                            {
+                                parts.resize(
+                                    n.replace('_', "").parse().unwrap_or(0).max(parts.len()),
+                                    init,
+                                );
+                            }
                         }
                         return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                     }
@@ -225,10 +251,13 @@ impl Emitter {
 
             Expr::StructLit { ty, fields, .. } => {
                 if let Some(t) = ty {
-                    if matches!(t, TypeExpr::Chan { .. }) {
+                    if matches!(self.resolve_type_alias(t), TypeExpr::Chan { .. }) {
                         return Err(EmitError::unsupported(
                             "channel type is not a value expression — construct a channel with `make(chan T)`",
                         ));
+                    }
+                    if let (true, Some(init)) = (fields.is_empty(), self.n5_zero_init(t)) {
+                        return Ok(init);
                     }
                     let head = self.type_text(t);
                     let body = self.struct_lit_body(t, fields)?;
@@ -416,7 +445,17 @@ impl Emitter {
                 };
                 let saved_err_returns =
                     std::mem::replace(&mut self.cur_fn_error_returns, closure_err_returns);
-                self.fnlit_depth += 1;
+                let mut closure_opt = None;
+                let mut closure_conv = None;
+                if results.len() == 1 && results[0].name.is_none() {
+                    let rt = self.type_text(&results[0].ty);
+                    if rt.starts_with("option[") {
+                        closure_opt = Some(rt);
+                    }
+                    closure_conv = self.result_conv_key(&results[0].ty);
+                }
+                let saved_opt = std::mem::replace(&mut self.cur_option_result, closure_opt);
+                let saved_conv = std::mem::replace(&mut self.cur_fn_conv_result, closure_conv);
                 // Labels do not cross func boundaries: a labeled break/continue
                 // must find its loop INSIDE the literal — reset the depth so
                 // an outer loop's count cannot bless a closure-nested label.
@@ -445,9 +484,10 @@ impl Emitter {
                 self.loop_labels = saved_loop_labels;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
-                self.fnlit_depth -= 1;
                 self.in_main_closure = saved_main_closure;
                 self.cur_fn_error_returns = saved_err_returns;
+                self.cur_option_result = saved_opt;
+                self.cur_fn_conv_result = saved_conv;
                 self.for_depth = saved_for_depth;
                 self.handler_writer = saved_writer;
                 self.restore_scope(saved_scope);
@@ -804,6 +844,21 @@ impl Emitter {
         e
     }
 
+    fn assoc_index_type_arg(e: &Expr) -> Option<String> {
+        match Self::unwrap_parens(e) {
+            Expr::Ident { name, .. } => Some(name.clone()),
+            Expr::Field { base, name, .. } => {
+                Self::assoc_index_type_arg(base).map(|b| format!("{b}.{name}"))
+            }
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                ..
+            } if items.is_empty() => Some(format!("[]{}", t.render())),
+            _ => None,
+        }
+    }
+
     /// A selector's base never needs parentheses when its inner expression is
     /// itself a primary expression: `(hits).add(1)` and `(mux).handle(...)`
     /// are the same accesses as `hits.add(1)` / `mux.Handle(...)`. For
@@ -838,9 +893,10 @@ impl Emitter {
 
     pub(crate) fn emit_call(
         &mut self,
-        callee: &Expr,
+        raw_callee: &Expr,
         args: &[CallArg],
     ) -> Result<String, EmitError> {
+        let callee = Self::unwrap_parens(raw_callee);
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
         if matches!(callee, Expr::Ident { name, .. } if name == "make") {
             return self.emit_make(args);
@@ -923,13 +979,32 @@ impl Emitter {
 
         // --- associated-fn calls: `lru_cache.new[string, int](2)` →
         //     `lru_cache_new[string, int](2)` (Go has no dotted idents) ---
-        if let Expr::Field { base, name, .. } = callee {
-            if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base.as_ref()) {
+        let assoc_field_and_ta: Option<(&Expr, &str, Option<String>)> = match callee {
+            Expr::Field { base, name, .. } => {
+                let (head, ta) = split_type_args(name);
+                Some((base.as_ref(), head, ta.map(str::to_string)))
+            }
+            Expr::Index {
+                base: idx_base,
+                index,
+                ..
+            } => {
+                if let Expr::Field { base, name, .. } = Self::unwrap_parens(idx_base.as_ref()) {
+                    Self::assoc_index_type_arg(index)
+                        .map(|ta| (base.as_ref(), name.as_str(), Some(format!("[{ta}]"))))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((base, head, type_args)) = assoc_field_and_ta {
+            if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base) {
                 if !self.is_unshadowed_pkg_root(root) && !self.bindings.contains_key(root) {
-                    let (head, type_args) = split_type_args(name);
                     let full = format!("{}.{}", root, head);
                     if self.assoc_fns.contains(&full) {
                         let translated_ta = type_args
+                            .as_deref()
                             .map(|ta| self.translate_type_args_suffix(ta))
                             .unwrap_or_default();
                         let mut parts = Vec::new();
@@ -1033,7 +1108,7 @@ impl Emitter {
                 ptr_params = params.iter().map(|p| p.is_some()).collect();
             }
         }
-        let c = self.emit_expr(callee, ATOM)?;
+        let c = self.emit_expr(raw_callee, ATOM)?;
         let mut parts = Vec::new();
         for (i, a) in args.iter().enumerate() {
             let t = self.emit_call_arg(a)?;

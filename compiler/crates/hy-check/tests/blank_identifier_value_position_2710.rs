@@ -165,3 +165,40 @@ fn main() {
         r.diagnostics
     );
 }
+
+#[test]
+fn e3_error_return_blank_zero_value_placeholder_stays_accepted() {
+    let src = "\
+fn validate_email(ok bool, s string) (string, error) {
+    if !ok {
+        return _, errors.new(\"invalid email address\")
+    }
+    return s, nil
+}
+fn main() {}
+";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    assert!(
+        error_codes(&r).is_empty(),
+        "expected 0 errors for SPEC E3 `return _, err`, got {:?}",
+        r.diagnostics
+    );
+}
+
+#[test]
+fn blank_in_non_error_return_rejects_e1002() {
+    let src = "\
+fn foo() int {
+    return _
+}
+fn main() {}
+";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(
+        error_codes(&r).contains(&"HYB-E1002".to_string()),
+        "{:?}",
+        r.diagnostics
+    );
+}

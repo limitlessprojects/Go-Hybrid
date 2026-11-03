@@ -564,10 +564,8 @@ impl<'a> Lexer<'a> {
         //    UNLESS that starts an exponent (`2.e3`, `2.e+3`, `2.e-3`).
         if self.at(0) == Some('.') {
             let is_range = self.at(1) == Some('.');
-            let is_exp = matches!(self.at(1), Some('e') | Some('E')) && {
-                let k = if matches!(self.at(2), Some('+') | Some('-')) { 3 } else { 2 };
-                self.at(k).map(|d| d.is_ascii_digit()) == Some(true)
-            };
+            let is_exp = matches!(self.at(1), Some('e') | Some('E'))
+                && matches!(self.at(2), Some('+') | Some('-') | Some('0'..='9'));
             let is_ident_start = self.at(1).map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false);
 
             if !is_range && (!is_ident_start || is_exp) {
@@ -611,9 +609,32 @@ impl<'a> Lexer<'a> {
                         break;
                     }
                 }
+                if self.at(0).is_some_and(|c| c.is_ascii_alphabetic()) {
+                    while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                        s.push(self.bump().unwrap());
+                    }
+                    self.escape_diag(start, false, "malformed float literal: invalid character in exponent (SPEC-LANGUAGE.md LX6)");
+                }
+            } else {
+                is_float = true;
+                for _ in 0..k {
+                    s.push(self.bump().unwrap());
+                }
+                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                    s.push(self.bump().unwrap());
+                }
+                self.escape_diag(start, false, "malformed float literal: exponent has no digits (SPEC-LANGUAGE.md LX6)");
             }
         }
         if is_float {
+            if self.at(0) == Some('.') && self.at(1) != Some('.') {
+                s.push('.');
+                self.bump();
+                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                    s.push(self.bump().unwrap());
+                }
+                self.escape_diag(start, false, "malformed float literal: unexpected second . in float literal (SPEC-LANGUAGE.md LX6)");
+            }
             self.tok(start, Tok::Float(s))
         } else {
             if s.starts_with('0') && s.len() > 1 {

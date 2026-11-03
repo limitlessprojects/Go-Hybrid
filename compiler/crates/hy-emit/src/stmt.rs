@@ -116,6 +116,33 @@ impl Emitter {
                 if matches!(operand, Expr::Call { .. }) {
                     self.hoist_tries_expr(operand)?;
                 }
+
+                // #3209: If the deferred call captures an active slot loan (or one of its
+                // aliases), the deferred closure runs at function exit *after* any inline
+                // store-back has already written the old or pre-defer copy. To prevent the
+                // deferred write from being lost, emit a deferred store-back
+                // `defer func() { <store> }()` immediately before the user's deferred call.
+                // Go executes deferred functions in LIFO order, so the user's deferred closure
+                // executes first, followed immediately by this store-back defer.
+                let mut deferred_stores = Vec::new();
+                for frame in &self.loan_frames {
+                    for (loan_name, store) in frame {
+                        if !loan_name.is_empty() {
+                            let mentioned = Self::expr_mentions_ident(call, loan_name)
+                                || self.loan_aliases.get(loan_name).is_some_and(|aliases| {
+                                    aliases.iter().any(|a| Self::expr_mentions_ident(call, a))
+                                });
+                            if mentioned {
+                                deferred_stores.push(store.clone());
+                            }
+                        }
+                    }
+                }
+                deferred_stores.dedup();
+                for store in deferred_stores {
+                    self.push(&format!("defer func() {{ {} }}()", store));
+                }
+
                 let c = self.emit_expr(operand, 0)?;
                 self.push(&format!("defer {}", c));
                 Ok(())
@@ -343,6 +370,74 @@ impl Emitter {
     }
 
     fn emit_local_in_seq(&mut self, l: &LocalDecl, rest: &[Stmt]) -> Result<(), EmitError> {
+        // #3194: `f := fn() { p.n = 2 }` captures the live slot loan `p`. A
+        // later `f()` never names `p`, so without recording `f` as an alias
+        // of the loan the block-scoped flush stores `p` back right after the
+        // closure literal and the call writes a dead copy. Collect the
+        // captures before emitting (the decl may rebind a loan name).
+        let captured = self.closure_captured_loans(l);
+        self.emit_local_in_seq_inner(l, rest)?;
+        for (alias_name, loan_root) in captured {
+            self.loan_aliases
+                .entry(loan_root)
+                .or_default()
+                .insert(alias_name);
+        }
+        Ok(())
+    }
+
+    /// `(closure name, loan name)` for every name this declaration binds to
+    /// a function literal whose body mentions an active slot loan (or one of
+    /// its aliases) in the current loan frames.
+
+    /// Leading identifier of a call's callee (`mk()` -> `mk`,
+    /// `ns.mk()` -> None), used to recognise a second-order closure (#3227).
+    fn call_callee_ident(e: &Expr) -> Option<String> {
+        match Self::peel_parens(e) {
+            Expr::Call { callee, .. } => match Self::peel_parens(callee) {
+                Expr::Ident { name, .. } => Some(name.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn closure_captured_loans(&self, l: &LocalDecl) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        if l.names.len() != l.values.len() {
+            return out;
+        }
+        for (name, v) in l.names.iter().zip(l.values.iter()) {
+            if name == "_" {
+                continue;
+            }
+            for frame in &self.loan_frames {
+                for (loan, _) in frame {
+                    if loan.is_empty() || loan == name {
+                        continue;
+                    }
+                    // #3227: also treat the binding as an alias of the loan
+                    // when its value CALLS a binding already known to be an
+                    // alias of that loan (`h := mk()` where `mk` returns the
+                    // writer). A literal-only test misses that shape, and the
+                    // store-back would then flush before the writer runs.
+                    let aliases = self.loan_aliases.get(loan);
+                    let mentions = Self::expr_mentions_ident(v, loan)
+                        || aliases.is_some_and(|a| {
+                            a.iter().any(|x| Self::expr_mentions_ident(v, x))
+                        })
+                        || Self::call_callee_ident(v)
+                            .is_some_and(|c| aliases.is_some_and(|a| a.contains(&c)));
+                    if mentions {
+                        out.push((name.clone(), loan.clone()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn emit_local_in_seq_inner(&mut self, l: &LocalDecl, rest: &[Stmt]) -> Result<(), EmitError> {
         self.note_closure_shapes(l);
         match l.kind {
             LocalKind::Var => {
@@ -719,6 +814,7 @@ impl Emitter {
             let text = self.emit_expr(e, 0)?;
             let temp = self.next_temp("hyT");
             self.push(&format!("{} := {}", temp, text));
+            self.expr_temps.insert(Self::expr_key(inner), temp.clone());
             self.expr_temps.insert(Self::expr_key(e), temp);
         }
         Ok(())
@@ -727,9 +823,7 @@ impl Emitter {
     fn hoist_tries_call(&mut self, callee: &Expr, args: &[CallArg]) -> Result<(), EmitError> {
         let any_arg_has_try = args.iter().any(|a| Self::expr_has_hoistable_try(&a.value));
         if any_arg_has_try {
-            let mut inner = callee;
-            while let Expr::Paren { inner: p, .. } = inner { inner = p; }
-            match inner {
+            match Self::peel_parens(callee) {
                 Expr::Field { base, .. } => self.hoist_order_before_try(base)?,
                 Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => {
                     self.hoist_tries_expr(callee)?
@@ -1201,6 +1295,9 @@ impl Emitter {
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
         let e = Self::peel_parens(e);
+        if matches!(e, Expr::MapLit { .. }) {
+            return BindingKind::Map;
+        }
         if let Expr::StructLit { ty: Some(t), .. } = e {
             if let Some(kind) = self.binding_kind_of_ty(t) {
                 return kind;
@@ -1261,6 +1358,16 @@ impl Emitter {
                 {
                     return BindingKind::Chan;
                 }
+                if matches!(
+                    &first.value,
+                    Expr::MapLit { .. }
+                        | Expr::StructLit {
+                            ty: Some(TypeExpr::Map { .. }),
+                            ..
+                        }
+                ) {
+                    return BindingKind::Map;
+                }
             }
             return BindingKind::Plain;
         }
@@ -1278,6 +1385,21 @@ impl Emitter {
             Expr::Paren { inner, .. } => self.is_channel_expr(inner),
             Expr::Call { .. } | Expr::Try { .. } => {
                 self.binding_kind_of(e) == BindingKind::Chan
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether an expression evaluates to a map (`map[K]V` local/param,
+    /// map literal, `make(map…)` or a call whose result is a map). Single-var
+    /// `for k in m` binds the key (SPEC LX13, #2945).
+    fn is_map_expr(&self, e: &Expr) -> bool {
+        match Self::peel_parens(e) {
+            Expr::Ident { name, .. } => {
+                matches!(self.bindings.get(name), Some(BindingKind::Map))
+            }
+            e @ (Expr::Call { .. } | Expr::Try { .. } | Expr::StructLit { .. } | Expr::MapLit { .. }) => {
+                self.binding_kind_of(e) == BindingKind::Map
             }
             _ => false,
         }
@@ -1452,7 +1574,7 @@ impl Emitter {
                 .enumerate()
                 .map(|(i, v)| alias_assigns[i].is_some() || self.expr_is_pointer(v))
                 .collect();
-            for ((t, is_ptr), alias) in targets.iter().zip(ptr_flags).zip(alias_assigns.iter()) {
+            for (((t, is_ptr), alias), v) in targets.iter().zip(ptr_flags).zip(alias_assigns.iter()).zip(values.iter()) {
                 if let PlaceKind::Ident(name) = &t.kind {
                     if name != "_" {
                         for aliases in self.loan_aliases.values_mut() {
@@ -1463,6 +1585,24 @@ impl Emitter {
                                 .entry(loan_root.clone())
                                 .or_default()
                                 .insert(name.clone());
+                        } else if matches!(Self::peel_parens(v), Expr::FnLit { .. }) {
+                            for frame in &self.loan_frames {
+                                for (loan, _) in frame {
+                                    if loan.is_empty() || loan == name {
+                                        continue;
+                                    }
+                                    let mentions = Self::expr_mentions_ident(v, loan)
+                                        || self.loan_aliases.get(loan).is_some_and(|aliases| {
+                                            aliases.iter().any(|a| Self::expr_mentions_ident(v, a))
+                                        });
+                                    if mentions {
+                                        self.loan_aliases
+                                            .entry(loan.clone())
+                                            .or_default()
+                                            .insert(name.clone());
+                                    }
+                                }
+                            }
                         }
                         if is_ptr {
                             self.pointer_vars.insert(name.clone());
@@ -2090,7 +2230,9 @@ impl Emitter {
                             // maps) or the value (channels) — hence the Chan
                             // hint check.
                             let over_chan = self.is_channel_expr(expr);
-                            if over_chan {
+                            // SPEC LX13: single-var range over a map binds
+                            // the KEY (#2945) — Go's own single-var form.
+                            if over_chan || self.is_map_expr(expr) {
                                 self.shadow_local_names(vars);
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {
@@ -2251,14 +2393,6 @@ impl Emitter {
             }
         }
         // Inside a function literal the closure owns the return — plain.
-        if self.fnlit_depth > 0 {
-            let vs = values
-                .iter()
-                .map(|v| self.emit_expr(v, 0))
-                .collect::<Result<Vec<_>, _>>()?;
-            self.push(&format!("return {}", vs.join(", ")));
-            return Ok(());
-        }
         // Inside the main wrapper closure: explicit returns carry `nil` for
         // the hidden error result; bare `return` is legal (named results)
         // and returns the current hyErr — exactly the E3 desugar's shape.
