@@ -5751,9 +5751,6 @@ impl<'a> Collector<'a> {
         }
         let resolved_ty = self.ck.resolve_type_alias(elem_ty);
         let expected = self.kind_of_ty(&resolved_ty, 0);
-        if expected == OpKind::Unknown {
-            return;
-        }
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
@@ -5768,11 +5765,20 @@ impl<'a> Collector<'a> {
                 ..
             } = bare
             {
-                if let TypeExpr::Array { elem: sub_ty, .. }
-                | TypeExpr::Slice { elem: sub_ty, .. } = &resolved_ty
-                {
-                    self.check_array_lit_items(sub_ty, sub_items);
-                    continue;
+                match &resolved_ty {
+                    TypeExpr::Array { elem: sub_ty, .. } => {
+                        self.check_array_lit_items(sub_ty, sub_items);
+                        continue;
+                    }
+                    TypeExpr::Slice { elem: sub_ty, .. } => {
+                        self.check_slice_lit_items(sub_ty, sub_items);
+                        continue;
+                    }
+                    _ if matches!(expected, OpKind::Interface | OpKind::Unknown) => {
+                        self.check_untyped_slice_lit_items(sub_items);
+                        continue;
+                    }
+                    _ => {}
                 }
             }
             if let Expr::StructLit {
@@ -5788,6 +5794,9 @@ impl<'a> Collector<'a> {
                 {
                     continue;
                 }
+            }
+            if expected == OpKind::Unknown {
+                continue;
             }
             let ik = self.kind_of_expr(item);
             // #2788: `ik == expected` collapses every integer width into
@@ -5832,9 +5841,6 @@ impl<'a> Collector<'a> {
         }
         let resolved_ty = self.ck.resolve_type_alias(elem_ty);
         let expected = self.kind_of_ty(&resolved_ty, 0);
-        if expected == OpKind::Unknown {
-            return;
-        }
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
@@ -5849,11 +5855,20 @@ impl<'a> Collector<'a> {
                 ..
             } = bare
             {
-                if let TypeExpr::Array { elem: sub_ty, .. }
-                | TypeExpr::Slice { elem: sub_ty, .. } = &resolved_ty
-                {
-                    self.check_slice_lit_items(sub_ty, sub_items);
-                    continue;
+                match &resolved_ty {
+                    TypeExpr::Array { elem: sub_ty, .. } => {
+                        self.check_array_lit_items(sub_ty, sub_items);
+                        continue;
+                    }
+                    TypeExpr::Slice { elem: sub_ty, .. } => {
+                        self.check_slice_lit_items(sub_ty, sub_items);
+                        continue;
+                    }
+                    _ if matches!(expected, OpKind::Interface | OpKind::Unknown) => {
+                        self.check_untyped_slice_lit_items(sub_items);
+                        continue;
+                    }
+                    _ => {}
                 }
             }
             if let Expr::StructLit {
@@ -5869,6 +5884,9 @@ impl<'a> Collector<'a> {
                 {
                     continue;
                 }
+            }
+            if expected == OpKind::Unknown {
+                continue;
             }
             let ik = self.kind_of_expr(item);
             // #2788: same width-collapse escape as the array arm above.
@@ -6011,7 +6029,36 @@ impl<'a> Collector<'a> {
         let resolved_val = self.ck.resolve_type_alias(val_ty);
         let exp_val = self.kind_of_ty(&resolved_val, 0);
         for (k, v) in entries {
-            if exp_key != OpKind::Unknown && exp_key != OpKind::Interface && self.non_single_value_count(k).is_none() {
+            let mut key_delegated = false;
+            if self.non_single_value_count(k).is_none() {
+                if let Expr::SliceLit {
+                    elem: None,
+                    items: sub_items,
+                    ..
+                } = unwrap_parens(k)
+                {
+                    match &resolved_key {
+                        TypeExpr::Array { elem: sub_ty, .. } => {
+                            self.check_array_lit_items(sub_ty, sub_items);
+                            key_delegated = true;
+                        }
+                        TypeExpr::Slice { elem: sub_ty, .. } => {
+                            self.check_slice_lit_items(sub_ty, sub_items);
+                            key_delegated = true;
+                        }
+                        _ if matches!(exp_key, OpKind::Interface | OpKind::Unknown) => {
+                            self.check_untyped_slice_lit_items(sub_items);
+                            key_delegated = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !key_delegated
+                && exp_key != OpKind::Unknown
+                && exp_key != OpKind::Interface
+                && self.non_single_value_count(k).is_none()
+            {
                 let kk = self.kind_of_expr(k);
                 // #2788: a typed key of another concrete numeric width.
                 let scalar_mismatch = self
@@ -6035,7 +6082,36 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
-            if exp_val != OpKind::Unknown && exp_val != OpKind::Interface && self.non_single_value_count(v).is_none() {
+            let mut value_delegated = false;
+            if self.non_single_value_count(v).is_none() {
+                if let Expr::SliceLit {
+                    elem: None,
+                    items: sub_items,
+                    ..
+                } = unwrap_parens(v)
+                {
+                    match &resolved_val {
+                        TypeExpr::Array { elem: sub_ty, .. } => {
+                            self.check_array_lit_items(sub_ty, sub_items);
+                            value_delegated = true;
+                        }
+                        TypeExpr::Slice { elem: sub_ty, .. } => {
+                            self.check_slice_lit_items(sub_ty, sub_items);
+                            value_delegated = true;
+                        }
+                        _ if matches!(exp_val, OpKind::Interface | OpKind::Unknown) => {
+                            self.check_untyped_slice_lit_items(sub_items);
+                            value_delegated = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !value_delegated
+                && exp_val != OpKind::Unknown
+                && exp_val != OpKind::Interface
+                && self.non_single_value_count(v).is_none()
+            {
                 let bare_v = unwrap_parens(v);
                 if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
                     continue;
