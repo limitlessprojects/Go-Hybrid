@@ -605,7 +605,7 @@ impl<'a> Lexer<'a> {
             let is_range = self.at(1) == Some('.');
             let is_exp = matches!(self.at(1), Some('e') | Some('E'))
                 && matches!(self.at(2), Some('+') | Some('-') | Some('0'..='9'));
-            let is_ident_start = self.at(1).map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false);
+            let is_ident_start = self.at(1).map(|c| c.is_ascii_alphabetic()).unwrap_or(false);
 
             if !is_range && (!is_ident_start || is_exp) {
                 if trailing_underscore {
