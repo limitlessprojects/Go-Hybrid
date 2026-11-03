@@ -2327,14 +2327,6 @@ impl Emitter {
             }
         }
         // Inside a function literal the closure owns the return — plain.
-        if self.fnlit_depth > 0 {
-            let vs = values
-                .iter()
-                .map(|v| self.emit_expr(v, 0))
-                .collect::<Result<Vec<_>, _>>()?;
-            self.push(&format!("return {}", vs.join(", ")));
-            return Ok(());
-        }
         // Inside the main wrapper closure: explicit returns carry `nil` for
         // the hidden error result; bare `return` is legal (named results)
         // and returns the current hyErr — exactly the E3 desugar's shape.
