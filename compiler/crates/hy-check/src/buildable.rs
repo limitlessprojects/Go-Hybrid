@@ -1129,6 +1129,20 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #3516: returns the type parameter name if the expression resolves to
+    /// a bare unconstrained generic type parameter (`T any`).
+    fn generic_type_param_of_expr(&self, e: &Expr) -> Option<String> {
+        if self.fn_type_params.is_empty() {
+            return None;
+        }
+        let tn = self.typed_value_type_name(e)?;
+        if self.fn_type_params.contains(&tn) {
+            Some(tn)
+        } else {
+            None
+        }
+    }
+
     /// #2771 — the declared Go spelling of a simple local assignment target.
     fn place_type_name(&self, p: &Place) -> Option<String> {
         match &p.kind {
@@ -7643,6 +7657,17 @@ impl<'a> Collector<'a> {
                 if builtins_already_flags_len_cap(op, false) {
                     return;
                 }
+                if let Some(tp) = self.generic_type_param_of_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type `{tp}`) for built-in `len` (HYB-E2005)",
+                            op.render()
+                        ),
+                        "`len` accepts a string, slice, array, map, or channel",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 let ok = matches!(
                     ak,
@@ -7676,6 +7701,17 @@ impl<'a> Collector<'a> {
                 if builtins_already_flags_len_cap(op, true) {
                     return;
                 }
+                if let Some(tp) = self.generic_type_param_of_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type `{tp}`) for built-in `cap` (HYB-E2005)",
+                            op.render()
+                        ),
+                        "`cap` accepts a slice, array, or channel — maps and strings have no capacity",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 let ok = matches!(
                     ak,
@@ -7704,6 +7740,17 @@ impl<'a> Collector<'a> {
                 if builtins_already_flags_close(op) {
                     return;
                 }
+                if let Some(tp) = self.generic_type_param_of_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot close non-channel `{}` (type `{tp}`) (HYB-E2005)",
+                            op.render()
+                        ),
+                        "`close` requires a bidirectional or send-only channel (`chan T` or `chan<- T`)",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 if !matches!(ak, OpKind::Unknown | OpKind::Chan(_)) {
                     self.emit_e2005(
@@ -7723,6 +7770,17 @@ impl<'a> Collector<'a> {
                 }
                 let map_arg = &args[0].value;
                 let key_arg = &args[1].value;
+                if let Some(tp) = self.generic_type_param_of_expr(map_arg) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type `{tp}`) is not a map in `delete` (HYB-E2005)",
+                            map_arg.render()
+                        ),
+                        "`delete(m, k)` requires a map as its first argument",
+                    );
+                    return;
+                }
                 let mk = self.kind_of_expr(map_arg);
                 match &mk {
                     // #2474: `delete(s, v)` on a `set[T]` (lowered to
@@ -7809,6 +7867,17 @@ impl<'a> Collector<'a> {
                     return;
                 }
                 let slice_arg = &args[0].value;
+                if let Some(tp) = self.generic_type_param_of_expr(slice_arg) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid `append`: first argument `{}` (type `{tp}`) must be a slice (HYB-E2005)",
+                            slice_arg.render()
+                        ),
+                        "the first argument to `append(xs, ...)` must be a slice (`[]T`)",
+                    );
+                    return;
+                }
                 let sk = self.kind_of_expr(slice_arg);
                 if !matches!(sk, OpKind::Unknown | OpKind::Slice(_)) {
                     self.emit_e2005(
@@ -7828,6 +7897,28 @@ impl<'a> Collector<'a> {
                 }
                 let dst_arg = &args[0].value;
                 let src_arg = &args[1].value;
+                if let Some(tp) = self.generic_type_param_of_expr(dst_arg) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "first argument to `copy` must be a slice, found `{}` (type `{tp}`) (HYB-E2005)",
+                            dst_arg.render()
+                        ),
+                        "the first argument to `copy(dst, src)` must be a slice (`[]T`)",
+                    );
+                    return;
+                }
+                if let Some(tp) = self.generic_type_param_of_expr(src_arg) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "second argument to `copy` must be a slice or string, found `{}` (type `{tp}`) (HYB-E2005)",
+                            src_arg.render()
+                        ),
+                        "the second argument to `copy(dst, src)` must be a slice (`[]T`) or string",
+                    );
+                    return;
+                }
                 let dk = self.kind_of_expr(dst_arg);
                 let sk = self.kind_of_expr(src_arg);
 
@@ -7909,6 +8000,17 @@ impl<'a> Collector<'a> {
                     return; // arity handled by builtins.rs
                 }
                 let op = &args[0].value;
+                if let Some(tp) = self.generic_type_param_of_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot clear non-slice/map `{}` (type `{tp}`) (HYB-E2005)",
+                            op.render()
+                        ),
+                        "`clear` requires a slice or map operand",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Map(_, _)) {
                     self.emit_e2005(
