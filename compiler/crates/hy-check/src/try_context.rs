@@ -25,7 +25,8 @@ use hy_syntax::{
 const E11_PROPAGATING_TARGETS: &[&str] = &["http.handler"];
 
 fn is_builtin_error_type(ck: &Checker<'_>, ty: &TypeExpr) -> bool {
-    if !matches!(ty, TypeExpr::Named { name, .. } if name == "error")
+    let resolved = ck.resolve_type_alias(ty);
+    if !matches!(&resolved, TypeExpr::Named { name, .. } if name == "error")
         || ck.structs.contains_key("error")
         || ck.struct_type_params.contains_key("error")
         || ck.enums.contains_key("error")
@@ -153,7 +154,7 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
                     Ctx::NoErrorResult(f.name.as_str())
                 };
                 let http_ok = w.is_unshadowed_pkg_root("http");
-                w.return_e11 = is_e11_result_type(w.ck, &f.results, http_ok);
+                w.return_e11 = !is_main && is_e11_result_type(w.ck, &f.results, http_ok);
                 walk_block(&mut w, body, ctx);
                 w.return_e11 = false;
                 w.pop_scope();
@@ -352,6 +353,8 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
         ck.push_scope();
         params.iter().for_each(|p| ck.bind_name(&p.name));
         results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| ck.bind_name(n));
+        let http_ok = ck.is_unshadowed_pkg_root("http");
+        ck.return_e11 = is_e11_result_type(ck.ck, results, http_ok);
         walk_block(ck, body, ctx);
         ck.pop_scope();
         ck.return_e11 = saved_return_e11;

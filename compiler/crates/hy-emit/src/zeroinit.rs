@@ -134,6 +134,7 @@ impl Emitter {
                 value: value.clone(),
                 span: *span,
             },
+            Expr::SliceLit { items, .. } if items.is_empty() => value.as_array_lit()?.2.clone(),
             _ => return None,
         };
         if let TypeExpr::Named { name, .. } = &ty {
@@ -142,7 +143,14 @@ impl Emitter {
                 return None;
             }
         }
-        self.n5_zero_init(&ty).map(|init| format!("&{}", init))
+        let ty_text = self.type_text(&ty);
+        self.n5_zero_init(&ty).map(|init| {
+            if init.starts_with("func()") {
+                format!("func() *{ty_text} {{ hyPtr := {init}; return &hyPtr }}()")
+            } else {
+                format!("&{init}")
+            }
+        })
     }
 
     /// Follow user type aliases (`type counts = map[string]int`) to the
