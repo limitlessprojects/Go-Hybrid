@@ -230,6 +230,14 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
         },
     ),
     (
+        "sync.wait_group",
+        TypeShape { members: &[("add", method("Add", None)), ("done", method("Done", None)), ("wait", method("Wait", None))] },
+    ),
+    (
+        "sync.once",
+        TypeShape { members: &[("do", method("Do", None))] },
+    ),
+    (
         // Scalar sync/atomic struct types recognized as class-2 sendable by
         // hy-check/src/foreign.rs (SCALAR_ATOMICS).
         "atomic.bool",
@@ -575,9 +583,7 @@ pub fn import_path_of(root: &str) -> String {
         // path is `atomic`, but the PATH is sync/atomic (the naive last-
         // segment import `"atomic"` is not in std).
         "atomic" => "sync/atomic".to_string(),
-        "filepath" => "path/filepath".to_string(),
         "json" => "encoding/json".to_string(),
-        "url" => "net/url".to_string(),
         "sha3binding" => "hybrid.program/sha3binding".to_string(),
         "jsonbinding" => "hybrid.program/jsonbinding".to_string(),
         "regexbinding" => "hybrid.program/regexbinding".to_string(),
