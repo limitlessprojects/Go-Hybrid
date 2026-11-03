@@ -870,10 +870,14 @@ impl<'a> Collector<'a> {
 
     /// #2771 — the declared Go spelling of a value whose type carries detail
     /// that `OpKind` drops, notably an array's length (`[3]int` vs `[4]int`).
-    /// Only identifiers bound with an explicit type name are known; everything
-    /// else (literals, conversions, calls) fails open.
+    /// Identifiers bound with an explicit type name or explicit array literals
+    /// are known; everything else (conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
-        match unwrap_parens(e) {
+        let bare = unwrap_parens(e);
+        if let Some((_, _, array_ty)) = bare.as_array_lit() {
+            return Some(array_ty.render());
+        }
+        match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             _ => None,
         }
@@ -883,6 +887,27 @@ impl<'a> Collector<'a> {
     fn place_type_name(&self, p: &Place) -> Option<String> {
         match &p.kind {
             PlaceKind::Ident(n) => self.lookup_type_name(n),
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                self.struct_field_type_name(&bk, name)
+            }
+            PlaceKind::Index { base, .. } => {
+                if let Some(base_tname) = self.place_type_name(base) {
+                    let s = base_tname.trim();
+                    if let Some(elem) = s.strip_prefix("[]") {
+                        return Some(elem.trim().to_string());
+                    }
+                    if s.starts_with('[') {
+                        if let Some(close) = s.find(']') {
+                            let elem = s[close + 1..].trim();
+                            if !elem.is_empty() {
+                                return Some(elem.to_string());
+                            }
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -1760,10 +1785,16 @@ impl<'a> Collector<'a> {
                         self.check_single_value_position(expr, "a for-range expression", false);
                         self.expr(expr);
                         let iter_kinds = self.iterate_var_kinds(expr, vars.len());
+                        // #3065 / SPEC LX13: a string ranges over runes, so
+                        // the element binding (the last var) is exactly
+                        // `rune` (= int32), not an untyped int; the width
+                        // checks then catch `var b byte = c` and `n + c`.
+                        let str_elem = matches!(self.kind_of_expr(expr), OpKind::Str)
+                            .then(|| vars.len().saturating_sub(1));
                         // Unread iterate bindings are lowered to `_` at
                         // emission (issue #139); write-only ones still
                         // reject as unused (PR #536).
-                        for (v, k) in vars.iter().zip(iter_kinds) {
+                        for (vi, (v, k)) in vars.iter().zip(iter_kinds).enumerate() {
                             self.define_elidable(v, *span);
                             // #1480: a struct/array element binding is a
                             // per-iteration copy at emission (`for _, x :=
@@ -1779,6 +1810,9 @@ impl<'a> Collector<'a> {
                                 }
                             }
                             self.bind_kind(v, k);
+                            if str_elem == Some(vi) {
+                                self.set_scalar(v, Some("int32"));
+                            }
                         }
                     }
                     ForKind::Infinite => {}
@@ -2914,6 +2948,16 @@ impl<'a> Collector<'a> {
             .map(|(_, ty)| self.kind_of_ty_with_subst(ty, &subst, 0))
     }
 
+    fn struct_field_type_name(&self, k: &OpKind, field: &str) -> Option<String> {
+        let full_name = self.struct_name(k)?;
+        let base_name = Checker::base_named_type_str(&full_name);
+        let fields = self.ck.structs.get(base_name)?;
+        let subst = self.struct_type_arg_map(&full_name);
+        let (_, ty) = fields.iter().find(|(n, _)| n == field)?;
+        let rendered = ty.render();
+        Some(subst.get(&rendered).cloned().unwrap_or(rendered))
+    }
+
     pub(crate) fn kind_of_expr(&self, e: &Expr) -> OpKind {
         match e {
             Expr::Ident { name, .. } => {
@@ -3373,10 +3417,34 @@ impl<'a> Collector<'a> {
                     // `float32`) — Go refuses that in a struct literal.
                     let scalar_mismatch =
                         self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
+                    let rendered_fty = fty.render();
+                    let field_type_name = subst.get(&rendered_fty).map(String::as_str).unwrap_or(&rendered_fty);
+                    let got_type_name = self.typed_value_type_name(&f.value);
+                    let container_or_alias_mismatch = match (&got_type_name, &want, &got) {
+                        (Some(gname), OpKind::Chan(_), OpKind::Chan(_))
+                        | (Some(gname), OpKind::Map(_, _), OpKind::Map(_, _))
+                        | (Some(gname), OpKind::Slice(_), OpKind::Slice(_))
+                        | (Some(gname), OpKind::Pointer(_), OpKind::Pointer(_))
+                        | (Some(gname), OpKind::Array(_), OpKind::Array(_)) => field_type_name != gname.as_str(),
+                        (Some(gname), _, _) => self.sized_array_names_differ(Some(field_type_name), Some(gname.as_str())),
+                        _ => false,
+                    };
+                    let array_mismatch = self.sized_array_names_differ(
+                        Some(field_type_name),
+                        got_type_name.as_deref(),
+                    );
                     let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
                         || kinds_conflict(&want, &got)
-                        || scalar_mismatch;
-                    if conflict {
+                        || scalar_mismatch
+                        || container_or_alias_mismatch
+                        || array_mismatch;
+                    let already_diagnosed_e3012 = self
+                        .ck
+                        .diags
+                        .iter()
+                        .chain(self.diags.iter())
+                        .any(|d| d.code == "HYB-E3012" && d.span == f.value.span());
+                    if conflict && !already_diagnosed_e3012 {
                         self.emit_e1002(
                             f.value.span(),
                             format!(
@@ -3950,16 +4018,39 @@ impl<'a> Collector<'a> {
         if let Some(n) = self.multi_value_arg_count(args) {
             if f.params.len() == n {
                 let got_kinds = self.multi_value_kinds(&args[0].value);
-                for (p, got) in f.params.iter().zip(got_kinds.iter()) {
+                // #3293: `kinds_conflict` alone cannot see int32 vs int64 or
+                // float32 vs float64 -- `OpKind` collapses both. Ask the
+                // callee's own result scalars for the exact widths; a
+                // non-named callee or an untyped result gives None and the
+                // check fails open.
+                let got_scalars = match unwrap_parens(&args[0].value) {
+                    Expr::Call { callee, args, .. } => self.call_result_scalars(callee, args),
+                    _ => None,
+                };
+                for (i, (p, got)) in f.params.iter().zip(got_kinds.iter()).enumerate() {
                     let want = self.kind_of_ty(&p.ty, 0);
-                    if kinds_conflict(&want, got) {
+                    let want_scalar = self.scalar_of_ty(&p.ty);
+                    let got_scalar = got_scalars
+                        .as_ref()
+                        .and_then(|v| v.get(i).copied().flatten());
+                    let width_conflict = matches!(
+                        (want_scalar, got_scalar),
+                        (Some(w), Some(g)) if w != g
+                    );
+                    if kinds_conflict(&want, got) || width_conflict {
+                        let got_label = got_scalar
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| got.label());
+                        let want_label = want_scalar
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| want.label());
                         self.emit_e1002(
                             args[0].value.span(),
                             format!(
                                 "cannot use `{}` result of type `{}` as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
                                 args[0].value.render(),
-                                got.label(),
-                                want.label(),
+                                got_label,
+                                want_label,
                                 name
                             ),
                             "argument types must match declared parameter types",
@@ -5282,6 +5373,20 @@ impl<'a> Collector<'a> {
 
     /// Family C1 (#425, #708): `base[index]` requires a slice, array, map, or string,
     /// and constant indices on constant strings must satisfy `0 <= index < len(base)`.
+
+    /// #3292: the declared key scalar of a map-typed base, when it is a
+    /// predeclared numeric spelling. Anything else (named type, unresolved)
+    /// gives None and the caller fails open.
+    fn map_key_scalar_name(&self, base: Option<&Expr>) -> Option<&'static str> {
+        let base = base?;
+        let Expr::Ident { name, .. } = unwrap_parens(base) else {
+            return None;
+        };
+        let ty = self.type_name_scopes.iter().rev().find_map(|l| l.get(name))?;
+        let key = ty.strip_prefix("map[")?.split(']').next()?;
+        canonical_numeric_name(key)
+    }
+
     fn check_index_kind(
         &mut self,
         base_str: &str,
@@ -5323,17 +5428,35 @@ impl<'a> Collector<'a> {
                 let is_untyped_int_to_float = **key_kind == OpKind::Float
                     && *ik == OpKind::Int
                     && self.is_untyped_int_const(index);
+                // #3292: `OpKind` collapses every integer width, so a
+                // `map[int32]V` indexed by an `int64` compared equal. Compare
+                // the declared key spelling against the index value's spelling;
+                // either side unresolved fails open so an untyped constant or
+                // a named alias still passes.
+                let key_scalar = self.map_key_scalar_name(base_expr);
+                let idx_scalar = self.typed_value_scalar(index);
+                let width_conflict = matches!((key_scalar, idx_scalar),
+                    (Some(a), Some(b)) if a != b);
                 let conflict = (**key_kind == OpKind::Float && *ik == OpKind::Int && !is_untyped_int_to_float)
-                    || kinds_conflict(key_kind, ik);
+                    || kinds_conflict(key_kind, ik)
+                    || width_conflict;
                 if conflict {
+                    // #3292: prefer the declared spellings over the kind
+                    // labels, which collapse int32/int64 to `int` and make
+                    // the message read as a mismatch between identical types.
+                    let key_label = key_scalar
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| key_kind.label());
+                    let idx_label = idx_scalar
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| ik.label());
                     self.emit_e1002(
                         index.span(),
                         format!(
-                            "cannot use `{}` (type `{}`) as `{}` value in map index on `{}` (HYB-E1002)",
+                            "cannot use `{}` (type `{}`) as `{}` value in map index (HYB-E1002)",
                             index.render(),
-                            ik.label(),
-                            key_kind.label(),
-                            bk.label()
+                            idx_label,
+                            key_label
                         ),
                         "map index expression must match the map's key type",
                     );
@@ -5669,9 +5792,6 @@ impl<'a> Collector<'a> {
         }
         let resolved_ty = self.ck.resolve_type_alias(elem_ty);
         let expected = self.kind_of_ty(&resolved_ty, 0);
-        if expected == OpKind::Unknown {
-            return;
-        }
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
@@ -5686,11 +5806,20 @@ impl<'a> Collector<'a> {
                 ..
             } = bare
             {
-                if let TypeExpr::Array { elem: sub_ty, .. }
-                | TypeExpr::Slice { elem: sub_ty, .. } = &resolved_ty
-                {
-                    self.check_array_lit_items(sub_ty, sub_items);
-                    continue;
+                match &resolved_ty {
+                    TypeExpr::Array { elem: sub_ty, .. } => {
+                        self.check_array_lit_items(sub_ty, sub_items);
+                        continue;
+                    }
+                    TypeExpr::Slice { elem: sub_ty, .. } => {
+                        self.check_slice_lit_items(sub_ty, sub_items);
+                        continue;
+                    }
+                    _ if matches!(expected, OpKind::Interface | OpKind::Unknown) => {
+                        self.check_untyped_slice_lit_items(sub_items);
+                        continue;
+                    }
+                    _ => {}
                 }
             }
             if let Expr::StructLit {
@@ -5706,6 +5835,9 @@ impl<'a> Collector<'a> {
                 {
                     continue;
                 }
+            }
+            if expected == OpKind::Unknown {
+                continue;
             }
             let ik = self.kind_of_expr(item);
             // #2788: `ik == expected` collapses every integer width into
@@ -5750,9 +5882,6 @@ impl<'a> Collector<'a> {
         }
         let resolved_ty = self.ck.resolve_type_alias(elem_ty);
         let expected = self.kind_of_ty(&resolved_ty, 0);
-        if expected == OpKind::Unknown {
-            return;
-        }
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
@@ -5767,11 +5896,20 @@ impl<'a> Collector<'a> {
                 ..
             } = bare
             {
-                if let TypeExpr::Array { elem: sub_ty, .. }
-                | TypeExpr::Slice { elem: sub_ty, .. } = &resolved_ty
-                {
-                    self.check_slice_lit_items(sub_ty, sub_items);
-                    continue;
+                match &resolved_ty {
+                    TypeExpr::Array { elem: sub_ty, .. } => {
+                        self.check_array_lit_items(sub_ty, sub_items);
+                        continue;
+                    }
+                    TypeExpr::Slice { elem: sub_ty, .. } => {
+                        self.check_slice_lit_items(sub_ty, sub_items);
+                        continue;
+                    }
+                    _ if matches!(expected, OpKind::Interface | OpKind::Unknown) => {
+                        self.check_untyped_slice_lit_items(sub_items);
+                        continue;
+                    }
+                    _ => {}
                 }
             }
             if let Expr::StructLit {
@@ -5787,6 +5925,9 @@ impl<'a> Collector<'a> {
                 {
                     continue;
                 }
+            }
+            if expected == OpKind::Unknown {
+                continue;
             }
             let ik = self.kind_of_expr(item);
             // #2788: same width-collapse escape as the array arm above.
@@ -5858,6 +5999,21 @@ impl<'a> Collector<'a> {
             return;
         }
         let Some(head) = untyped_slice_head_ty(first) else {
+            // `[x]`, `[f()]`, `[a + b]`, `[s.f]`, `[arr[i]]`: hy-emit's
+            // `infer_slice_head` reads the element type from a basic literal,
+            // a sign, parentheses, or a typed struct literal — nothing else.
+            // A non-literal head used to be skipped here and then refused at
+            // `hyb build` ("untyped slice literal of `x` — spell the element
+            // type"), so `hyb check` accepted a program that could not be
+            // emitted (GUARANTEES Row 13, BUILDABLE).
+            self.emit_e1002(
+                first.span(),
+                format!(
+                    "an untyped slice literal cannot infer its element type from `{}` — the emitter reads it only from a literal or a typed struct literal (HYB-E1002)",
+                    first.render()
+                ),
+                "spell the element type: `[]int{x}`, `[]T{f()}`, `[]T{s.f}`, …",
+            );
             return;
         };
         let head_text = head.render();
@@ -5914,7 +6070,36 @@ impl<'a> Collector<'a> {
         let resolved_val = self.ck.resolve_type_alias(val_ty);
         let exp_val = self.kind_of_ty(&resolved_val, 0);
         for (k, v) in entries {
-            if exp_key != OpKind::Unknown && exp_key != OpKind::Interface && self.non_single_value_count(k).is_none() {
+            let mut key_delegated = false;
+            if self.non_single_value_count(k).is_none() {
+                if let Expr::SliceLit {
+                    elem: None,
+                    items: sub_items,
+                    ..
+                } = unwrap_parens(k)
+                {
+                    match &resolved_key {
+                        TypeExpr::Array { elem: sub_ty, .. } => {
+                            self.check_array_lit_items(sub_ty, sub_items);
+                            key_delegated = true;
+                        }
+                        TypeExpr::Slice { elem: sub_ty, .. } => {
+                            self.check_slice_lit_items(sub_ty, sub_items);
+                            key_delegated = true;
+                        }
+                        _ if matches!(exp_key, OpKind::Interface | OpKind::Unknown) => {
+                            self.check_untyped_slice_lit_items(sub_items);
+                            key_delegated = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !key_delegated
+                && exp_key != OpKind::Unknown
+                && exp_key != OpKind::Interface
+                && self.non_single_value_count(k).is_none()
+            {
                 let kk = self.kind_of_expr(k);
                 // #2788: a typed key of another concrete numeric width.
                 let scalar_mismatch = self
@@ -5938,7 +6123,36 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
-            if exp_val != OpKind::Unknown && exp_val != OpKind::Interface && self.non_single_value_count(v).is_none() {
+            let mut value_delegated = false;
+            if self.non_single_value_count(v).is_none() {
+                if let Expr::SliceLit {
+                    elem: None,
+                    items: sub_items,
+                    ..
+                } = unwrap_parens(v)
+                {
+                    match &resolved_val {
+                        TypeExpr::Array { elem: sub_ty, .. } => {
+                            self.check_array_lit_items(sub_ty, sub_items);
+                            value_delegated = true;
+                        }
+                        TypeExpr::Slice { elem: sub_ty, .. } => {
+                            self.check_slice_lit_items(sub_ty, sub_items);
+                            value_delegated = true;
+                        }
+                        _ if matches!(exp_val, OpKind::Interface | OpKind::Unknown) => {
+                            self.check_untyped_slice_lit_items(sub_items);
+                            value_delegated = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !value_delegated
+                && exp_val != OpKind::Unknown
+                && exp_val != OpKind::Interface
+                && self.non_single_value_count(v).is_none()
+            {
                 let bare_v = unwrap_parens(v);
                 if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
                     continue;
@@ -6619,18 +6833,32 @@ impl<'a> Collector<'a> {
                         let is_untyped_int_to_float = **k_expected == OpKind::Float
                             && kk == OpKind::Int
                             && self.is_untyped_int_const(key_arg);
-                        if **k_expected != OpKind::Unknown
+                        // #3292: same width blindness as the index arm --
+                        // `map[int32]V` with an `int64` key both look like
+                        // `OpKind::Int`. Compare the declared spellings too.
+                        let del_key_scalar = self.map_key_scalar_name(Some(map_arg));
+                        let del_arg_scalar = self.typed_value_scalar(key_arg);
+                        let del_width_conflict = matches!(
+                            (del_key_scalar, del_arg_scalar),
+                            (Some(a), Some(b)) if a != b
+                        );
+                        if (**k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
                             && kk != **k_expected
-                            && !is_untyped_int_to_float
+                            && !is_untyped_int_to_float)
+                            || del_width_conflict
                         {
                             self.emit_e2005(
                                 span,
                                 format!(
                                     "cannot use `{}` (type `{}`) as key type `{}` in `delete` (HYB-E2005)",
                                     key_arg.render(),
-                                    kk.label(),
-                                    k_expected.label()
+                                    del_arg_scalar
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_else(|| kk.label()),
+                                    del_key_scalar
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_else(|| k_expected.label())
                                 ),
                                 "the second argument to `delete(m, k)` must match the map's key type",
                             );

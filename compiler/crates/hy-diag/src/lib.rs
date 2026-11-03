@@ -24,7 +24,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// A source position (1-based line/column).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Pos {
     pub line: u32,
     pub col: u32,
@@ -52,7 +52,10 @@ pub struct Span {
 
 impl Span {
     pub fn new(start: Pos, end: Pos) -> Self {
-        Span { start, end }
+        Span {
+            start: start.min(end),
+            end: start.max(end),
+        }
     }
 
     pub fn point(pos: Pos) -> Self {
@@ -65,8 +68,8 @@ impl Span {
     /// Merge two spans into one covering both.
     pub fn to(self, other: Span) -> Span {
         Span {
-            start: self.start,
-            end: other.end,
+            start: self.start.min(other.start),
+            end: self.end.max(other.end),
         }
     }
 }
@@ -144,17 +147,21 @@ impl Diagnostic {
         span: Span,
         message: impl Into<String>,
     ) -> Self {
-        let reg = Registry::global();
-        let entry = reg.lookup(code);
+        Self::build(code, Severity::Error, file.into(), span, message.into())
+    }
+
+    fn build(code: &str, severity: Severity, file: String, span: Span, message: String) -> Self {
+        assert_severity_code_coherence(code, severity);
+        let entry = Registry::global().lookup(code);
         Diagnostic {
             code: entry
                 .map(|e| e.code.clone())
-                .unwrap_or_else(|| code.to_string()),
+                .unwrap_or_else(|| code.trim().to_string()),
             name: entry.map(|e| e.name.clone()).unwrap_or_default(),
-            severity: Severity::Error,
-            file: file.into(),
+            severity,
+            file,
             span,
-            message: message.into(),
+            message,
             notes: Vec::new(),
             fixits: entry
                 .map(|e| {
@@ -178,9 +185,7 @@ impl Diagnostic {
         span: Span,
         message: impl Into<String>,
     ) -> Self {
-        let mut d = Diagnostic::error(code, file, span, message);
-        d.severity = Severity::Warning;
-        d
+        Self::build(code, Severity::Warning, file.into(), span, message.into())
     }
 
     pub fn with_notes(mut self, notes: Vec<String>) -> Self {
@@ -275,7 +280,7 @@ impl ManagedReport {
         if self.total_sites == 0 {
             0.0
         } else {
-            100.0 * self.sites_via_managed as f64 / self.total_sites as f64
+            (100.0 * self.sites_via_managed as f64 / self.total_sites as f64).min(100.0)
         }
     }
 }
@@ -350,11 +355,10 @@ impl Registry {
     pub fn lookup(&self, query: &str) -> Option<&RegistryEntry> {
         let raw = query.trim();
         let q = raw.to_ascii_uppercase();
-        let q_short = q.trim_start_matches("HYB-");
         self.data.codes.iter().find(|c| {
-            let short = c.code.trim_start_matches("HYB-"); // "E3003"
-            let digits = short.trim_start_matches('E'); // "3003"
-            c.code == q || short == q_short || digits == q_short || c.name == raw
+            let short = c.code.strip_prefix("HYB-").unwrap_or(&c.code);
+            let digits = short.strip_prefix('E').unwrap_or(short);
+            c.code == q || short == q || digits == q || c.name.eq_ignore_ascii_case(raw)
         })
     }
 
@@ -400,7 +404,8 @@ impl Registry {
 /// an error, and a non-`E8nnn` code can never be constructed as a warning.
 /// Runs as a debug assert AND is unit-tested in release (`#[test]`).
 pub fn assert_severity_code_coherence(code: &str, severity: Severity) {
-    let is_lint = code.contains("-E8");
+    let canonical = Registry::global().lookup(code).map(|e| e.code.as_str()).unwrap_or_else(|| code.trim());
+    let is_lint = canonical.contains("-E8") || canonical.to_ascii_uppercase().starts_with("E8") || canonical.starts_with("8");
     let is_err = severity == Severity::Error;
     debug_assert!(
         !(is_lint && is_err),
@@ -520,6 +525,11 @@ mod tests {
     #[test]
     fn severity_coherence_never_panics_for_valid_pairs() {
         assert_severity_code_coherence("HYB-E8001", Severity::Warning);
+        assert_severity_code_coherence("E8001", Severity::Warning);
         assert_severity_code_coherence("HYB-E3001", Severity::Error);
+        assert!(Registry::global().lookup("HYB-HYB-E3003").is_none());
+        assert!(Registry::global().lookup("USE-AFTER-MOVE").is_some());
+        let s = Span::new(Pos::new(5, 1), Pos::new(5, 8)).to(Span::new(Pos::new(2, 4), Pos::new(2, 10)));
+        assert_eq!((s.start, s.end), (Pos::new(2, 4), Pos::new(5, 8)));
     }
 }
