@@ -611,6 +611,24 @@ impl<'a> Lexer<'a> {
                         break;
                     }
                 }
+            } else {
+                is_float = true;
+                for _ in 0..k {
+                    if let Some(c) = self.bump() {
+                        s.push(c);
+                    }
+                }
+                while self
+                    .at(0)
+                    .is_some_and(|c| c == '_' || c.is_ascii_alphanumeric())
+                {
+                    s.push(self.bump().unwrap());
+                }
+                self.escape_diag(
+                    start,
+                    false,
+                    "malformed float literal: exponent has no digits (SPEC-LANGUAGE.md LX6)",
+                );
             }
         }
         if is_float {
