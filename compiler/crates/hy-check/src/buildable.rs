@@ -1930,18 +1930,21 @@ impl<'a> Collector<'a> {
                             }
                         }
                         // #2858: record element scalar for iterate variables
-                        let iter_elem_scalar = self.container_elem_scalar_of_expr(expr);
-                        if vars.len() == 1 {
-                            if vars[0] != "_" {
-                                self.set_scalar(&vars[0], iter_elem_scalar);
+                        if let Some(iter_elem_scalar) = self.container_elem_scalar_of_expr(expr) {
+                            if vars.len() == 1 {
+                                if vars[0] != "_" {
+                                    self.set_scalar(&vars[0], Some(iter_elem_scalar));
+                                }
+                            } else if vars.len() >= 2 {
+                                if vars[0] != "_" && matches!(self.kind_of_expr(expr), OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str) {
+                                    self.set_scalar(&vars[0], Some("int"));
+                                }
+                                if vars[1] != "_" {
+                                    self.set_scalar(&vars[1], Some(iter_elem_scalar));
+                                }
                             }
-                        } else if vars.len() >= 2 {
-                            if vars[0] != "_" && matches!(self.kind_of_expr(expr), OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str) {
-                                self.set_scalar(&vars[0], Some("int"));
-                            }
-                            if vars[1] != "_" {
-                                self.set_scalar(&vars[1], iter_elem_scalar);
-                            }
+                        } else if vars.len() >= 2 && vars[0] != "_" && matches!(self.kind_of_expr(expr), OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str) {
+                            self.set_scalar(&vars[0], Some("int"));
                         }
                     }
                     ForKind::Infinite => {}
