@@ -260,12 +260,16 @@ impl<'a> Checker<'a> {
     ) {
         match stmt {
             Stmt::Local(l) => {
+                if let Some(ty) = &l.ty {
+                    self.check_type_addr_of_loan_projections(st, ty, include_direct_ident);
+                }
                 let allow_slot_loan = matches!(l.kind, LocalKind::Define | LocalKind::Let)
                     && l.ty.is_none()
                     && l.names.len() == l.values.len();
                 for v in &l.values {
-                    // `x := &m[k]` is the O8 slot-loan initializer: legal.
-                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, allow_slot_loan);
+                    // `x := &m[k]` is the O8 slot-loan initializer: legal when rooted at a place path.
+                    let allow_root = allow_slot_loan && walk::addr_of_index_base_path(v).is_some();
+                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, allow_root);
                 }
             }
             Stmt::Assign {
@@ -281,8 +285,9 @@ impl<'a> Checker<'a> {
                     && targets.len() == values.len()
                     && targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)));
                 for v in values {
-                    // `x = &m[k]` is the slot-loan re-binding: legal.
-                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, allow_slot_loan);
+                    // `x = &m[k]` is the slot-loan re-binding: legal when rooted at a place path.
+                    let allow_root = allow_slot_loan && walk::addr_of_index_base_path(v).is_some();
+                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, allow_root);
                 }
             }
             Stmt::Expr { expr, .. } => {
@@ -326,10 +331,10 @@ impl<'a> Checker<'a> {
                 for v in values {
                     // LOAN-ESCAPE (O2, also HYB-E3104) already owns a
                     // returned `&m[k]`; recurse for nested borrows only.
-                    if self.map_slot_borrow_span(st, v).is_some() {
-                        continue;
-                    }
-                    self.check_expr_addr_of_loan_projections(st, v, include_direct_ident);
+                    let e = as_addr_of(unwrap_parens(v))
+                        .filter(|_| self.map_slot_borrow_span(st, v).is_some())
+                        .unwrap_or(v);
+                    self.check_expr_addr_of_loan_projections(st, e, include_direct_ident);
                 }
             }
             Stmt::Task { callee, args, .. } => {
@@ -539,17 +544,25 @@ impl<'a> Checker<'a> {
                     self.check_expr_addr_of_loan_projections(st, &a.value, include_direct_ident);
                 }
             }
-            Expr::StructLit { fields, .. } => {
+            Expr::StructLit { ty, fields, .. } => {
+                if let Some(t) = ty {
+                    self.check_type_addr_of_loan_projections(st, t, include_direct_ident);
+                }
                 for f in fields {
                     self.check_expr_addr_of_loan_projections(st, &f.value, include_direct_ident);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some(t) = elem {
+                    self.check_type_addr_of_loan_projections(st, t, include_direct_ident);
+                }
                 for i in items {
                     self.check_expr_addr_of_loan_projections(st, i, include_direct_ident);
                 }
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit { key, value, entries, .. } => {
+                self.check_type_addr_of_loan_projections(st, key, include_direct_ident);
+                self.check_type_addr_of_loan_projections(st, value, include_direct_ident);
                 for (k, v) in entries {
                     self.check_expr_addr_of_loan_projections(st, k, include_direct_ident);
                     self.check_expr_addr_of_loan_projections(st, v, include_direct_ident);
@@ -564,7 +577,39 @@ impl<'a> Checker<'a> {
             }
             // Closure bodies are entered by emit_guard.rs with their own
             // scoped FnState and `include_direct_ident = true`.
-            Expr::FnLit { .. } | Expr::Ident { .. } | Expr::Lit { .. } => {}
+            Expr::FnLit { params, results, .. } => {
+                for t in params.iter().map(|p| &p.ty).chain(results.iter().map(|r| &r.ty)) {
+                    self.check_type_addr_of_loan_projections(st, t, include_direct_ident);
+                }
+            }
+            Expr::Ident { .. } | Expr::Lit { .. } => {}
+        }
+    }
+
+    fn check_type_addr_of_loan_projections(&mut self, st: &FnState, ty: &hy_syntax::TypeExpr, include_direct_ident: bool) {
+        match ty {
+            hy_syntax::TypeExpr::Array { len, elem, .. } => {
+                if let Some(len_expr) = len {
+                    self.check_expr_addr_of_loan_projections(st, len_expr, include_direct_ident);
+                }
+                self.check_type_addr_of_loan_projections(st, elem, include_direct_ident);
+            }
+            hy_syntax::TypeExpr::Pointer { to: inner, .. }
+            | hy_syntax::TypeExpr::Slice { elem: inner, .. }
+            | hy_syntax::TypeExpr::Chan { elem: inner, .. }
+            | hy_syntax::TypeExpr::Option { elem: inner, .. } => {
+                self.check_type_addr_of_loan_projections(st, inner, include_direct_ident);
+            }
+            hy_syntax::TypeExpr::Map { key, value, .. } => {
+                self.check_type_addr_of_loan_projections(st, key, include_direct_ident);
+                self.check_type_addr_of_loan_projections(st, value, include_direct_ident);
+            }
+            hy_syntax::TypeExpr::Fn { params, results, .. } => {
+                for t in params.iter().map(|p| &p.ty).chain(results.iter()) {
+                    self.check_type_addr_of_loan_projections(st, t, include_direct_ident);
+                }
+            }
+            hy_syntax::TypeExpr::Named { .. } => {}
         }
     }
 
