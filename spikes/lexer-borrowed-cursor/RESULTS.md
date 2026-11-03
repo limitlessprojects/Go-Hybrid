@@ -26,4 +26,44 @@ version comparison, not a public serialization format. No library dependencies
 are added. Report any mismatches or material time regression; no speedup is
 assumed in advance and a resource-only improvement must state its tradeoff.
 
-Results: not run at this commit. Existing PRs and their source remain unchanged.
+## Observed results — 3 November 2026
+
+Host: Apple M2 / macOS-26.5.2-arm64-arm-64bit-Mach-O, arm64,
+Rust 1.99.0, release profile. Baseline `df0cae63` retains the original lexer;
+candidate `eb432aa4` borrows `Chars`. Both measurement executables used the same
+driver SHA256 `e7522be724ff6ef260946a10d269adcf5b53e33e740af7d200ff7516e1c3e264`.
+The driver was subsequently rustfmt-formatted without a logic change.
+
+Medians of three fresh-process observations; each process performs ten lexes:
+
+| Input | Bytes | Baseline ms/lex | Candidate ms/lex | Baseline max RSS MiB | Candidate max RSS MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ordinary | 27,808 | 0.353 | 0.370 | 2.23 | 2.14 |
+| comments | 1,080,014 | 1.316 | 0.671 | 45.08 | 2.64 |
+| unicode | 54,808 | 0.341 | 0.329 | 2.23 | 2.08 |
+
+The comment-heavy repeated-lex case has lower observed process peak RSS and
+time. The ordinary-source elapsed median is about 4.9% slower; Unicode-source
+time is slightly lower. These short, single-machine observations do not
+establish statistical significance or a universal speedup. Returned tokens and
+strings still allocate: this removes the separate source-wide character vector.
+
+Complete token/diagnostic Debug snapshots match byte-for-byte on all 175 tracked
+`.hy` files plus three generated inputs. Two new public API tests pass for
+Unicode block/line-comment lookahead, tab/character columns, a multiline raw
+string and one EOF. No grammar, API or diagnostic change is intended.
+
+[measurements.json](measurements.json) retains every timing/RSS observation and
+input hash; [inputs.py](inputs.py) regenerates the bounded inputs. Build and keep
+the example at both revisions; compare its `snapshot FILE` bytes for
+`git ls-files '*.hy'` and the generated inputs. The fixed `input.hy` diagnostic
+label avoids private path differences. Original full outputs are retained by
+the contributor. Debug is compared on the same Rust version, not proposed as a
+new stable serialization format.
+
+Existing toolchain warning: rust-objcopy could not strip debug information
+because its bundled libLLVM.dylib was unavailable. Cargo exited 0; both sides used
+the same installed toolchain/profile, and original warnings/hashes are retained.
+
+Workspace, corpus, differential, examples and hosted CI: pending at this commit.
+No maintainer acceptance, independent human review, award or payment is claimed.

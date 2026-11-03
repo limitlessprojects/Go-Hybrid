@@ -1,5 +1,11 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — borrowed lexer cursor (2026-11-03)
+
+- The private cursor borrows UTF-8 instead of making a full `Vec<char>` copy. No grammar, API or diagnostic change is intended; token strings still allocate.
+- Base `b803f555`: full snapshots agree on 175 tracked `.hy` files plus three generated inputs, and two new Unicode/trivia/span tests pass. Three short macOS arm64 observations show comment-heavy ten-lex process peak RSS 45.08 → 2.64 MiB; the ordinary-source elapsed median is 4.9% slower. Raw results/limits: `spikes/lexer-borrowed-cursor/RESULTS.md`.
+- Workspace, corpus, differential, examples and hosted CI remain pending at this evidence commit; no acceptance, independent human review, award or payment is asserted.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.

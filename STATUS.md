@@ -1,5 +1,7 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor lexer cursor (2026-11-03): borrowed UTF-8 avoids the full character-vector copy. All 175 tracked + three generated snapshots agree; two position tests pass. Comment-heavy ten-lex process peak RSS 45.08 → 2.64 MiB; ordinary median 4.9% slower. Workspace/corpus/differential/examples and hosted CI pending. See `spikes/lexer-borrowed-cursor/RESULTS.md`; no award/payment.
+
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
 
 - Contributor #1165: range bounds spelled as different names of one Go integer type no longer raise a false HYB-E2009 (shared canonicaliser in `hy-check` + regression pin); workspace/corpus/differential/CI remain delivery gates.
