@@ -721,8 +721,8 @@ impl<'a> Collector<'a> {
         match bare {
             Expr::Ident { name, .. } => {
                 if let Some(tname) = self.lookup_type_name(name) {
-                    if let Some(elem) = tname.strip_prefix("[]") {
-                        return Some(elem.to_string());
+                    if let Some(elem) = self.named_slice_element_name(&tname) {
+                        return Some(elem);
                     }
                     if let Some(elem) = tname.strip_prefix("[") {
                         if let Some(close) = elem.find(']') {
@@ -730,7 +730,7 @@ impl<'a> Collector<'a> {
                         }
                     }
                 }
-                None
+                self.named_slice_element_name(name)
             }
             Expr::SliceLit { elem: Some(t), .. } => {
                 match t.as_ref() {
@@ -3624,7 +3624,7 @@ impl<'a> Collector<'a> {
                 Box::new(self.kind_of_ty(key, 0)),
                 Box::new(self.kind_of_ty(value, 0)),
             ),
-            Expr::Ident { name, .. } => self.kind_of_named(name, 0),
+            Expr::Ident { name, .. } => self.kind_of_type_str(name, 0),
             _ => OpKind::Unknown,
         }
     }
@@ -3840,8 +3840,366 @@ impl<'a> Collector<'a> {
     /// #2811 — the element spelling of a slice TYPE NAME (alias resolution
     /// included), e.g. `my_int64_slice` → `int64`. `None` when the name does
     /// not resolve to a slice type, which fails open.
+    /// #3412 — compares two type string representations for container element or base incompatibility.
+    fn map_or_chan_type_str_conflict(&self, target_t: &str, arg_t: &str) -> bool {
+        let t_trim = target_t.trim();
+        let a_trim = arg_t.trim();
+        if t_trim == a_trim {
+            return false;
+        }
+        if let (Some(t_num), Some(a_num)) = (
+            canonical_numeric_name(t_trim),
+            canonical_numeric_name(a_trim),
+        ) {
+            return t_num != a_num;
+        }
+        if t_trim.starts_with('[') && a_trim.starts_with('[') {
+            let t_end = t_trim.find(']');
+            let a_end = a_trim.find(']');
+            if let (Some(te), Some(ae)) = (t_end, a_end) {
+                let t_len = &t_trim[1..te];
+                let a_len = &a_trim[1..ae];
+                if t_len != a_len {
+                    return true;
+                }
+                let t_el = &t_trim[te + 1..];
+                let a_el = &a_trim[ae + 1..];
+                return self.map_or_chan_type_str_conflict(t_el, a_el);
+            }
+            return true;
+        }
+        if t_trim != a_trim {
+            return true;
+        }
+        false
+    }
+
+    /// #3412 — base type name of a pointer type alias or direct `*T` spelling.
+    fn named_pointer_base_name(&self, name: &str) -> Option<String> {
+        let trimmed = name.trim();
+        if let Some(rest) = trimmed.strip_prefix('*') {
+            return Some(rest.trim().to_string());
+        }
+        let base = Checker::base_named_type_str(trimmed);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            match self.ck.resolve_type_alias(ty) {
+                hy_syntax::TypeExpr::Pointer { to, .. } => Some(to.render()),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// #3412 — base type of a pointer-typed expression.
+    fn pointer_base_type_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                self.named_pointer_base_name(&tn)
+            }
+            Expr::AddrOf { operand, .. } => {
+                let bare = unwrap_parens(operand);
+                if let Some(scalar) = self.typed_value_scalar(bare) {
+                    return Some(scalar.to_string());
+                }
+                if let Expr::Ident { name, .. } = bare {
+                    if let Some(tn) = self.lookup_type_name(name) {
+                        return Some(tn);
+                    }
+                }
+                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                    return Some(self.ck.resolve_type_alias(arr_ty).render());
+                }
+                None
+            }
+            Expr::Unary { op: hy_syntax::UnOp::Addr, operand, .. } => {
+                let bare = unwrap_parens(operand);
+                if let Some(scalar) = self.typed_value_scalar(bare) {
+                    return Some(scalar.to_string());
+                }
+                if let Expr::Ident { name, .. } = bare {
+                    if let Some(tn) = self.lookup_type_name(name) {
+                        return Some(tn);
+                    }
+                }
+                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                    return Some(self.ck.resolve_type_alias(arr_ty).render());
+                }
+                None
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "new" {
+                        if let Some(first) = args.first() {
+                            return Some(first.value.render());
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// #3412 — element type name of a channel type alias or direct channel spelling.
+    fn named_channel_elem_name(&self, name: &str) -> Option<String> {
+        let trimmed = name.trim();
+        if let Some(rest) = trimmed
+            .strip_prefix("<-chan ")
+            .or_else(|| trimmed.strip_prefix("chan<- "))
+            .or_else(|| trimmed.strip_prefix("chan "))
+        {
+            return Some(rest.trim().to_string());
+        }
+        let base = Checker::base_named_type_str(trimmed);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            match self.ck.resolve_type_alias(ty) {
+                hy_syntax::TypeExpr::Chan { elem, .. } => Some(elem.render()),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// #3412 — element type of a channel-typed expression.
+    fn channel_elem_type_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                if let Some(tn) = self.lookup_type_name(name) {
+                    if let Some(elem) = self.named_channel_elem_name(&tn) {
+                        return Some(elem);
+                    }
+                }
+                self.named_channel_elem_name(name)
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.channel_elem_type_of_expr(&first.value);
+                        }
+                    } else if let Some(elem) = self.named_channel_elem_name(name) {
+                        return Some(elem);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// #3412 — key and value type names of a map type alias or direct `map[K]V` spelling.
+    fn named_map_types(&self, name: &str) -> Option<(String, String)> {
+        let trimmed = name.trim();
+        if let Some(rest) = trimmed.strip_prefix("map[") {
+            let mut depth = 0;
+            let mut split_idx = None;
+            for (idx, ch) in rest.char_indices() {
+                if ch == '[' {
+                    depth += 1;
+                } else if ch == ']' {
+                    if depth == 0 {
+                        split_idx = Some(idx);
+                        break;
+                    }
+                    depth -= 1;
+                }
+            }
+            if let Some(idx) = split_idx {
+                let k_str = rest[..idx].trim().to_string();
+                let v_str = rest[idx + 1..].trim().to_string();
+                if !k_str.is_empty() && !v_str.is_empty() {
+                    return Some((k_str, v_str));
+                }
+            }
+            return None;
+        }
+        let base = Checker::base_named_type_str(trimmed);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            match self.ck.resolve_type_alias(ty) {
+                hy_syntax::TypeExpr::Map { key, value, .. } => {
+                    Some((key.render(), value.render()))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// #3412 — key and value types of a map-typed expression.
+    fn map_types_of_expr(&self, e: &Expr) -> Option<(String, String)> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                if let Some(tn) = self.lookup_type_name(name) {
+                    if let Some(types) = self.named_map_types(&tn) {
+                        return Some(types);
+                    }
+                }
+                self.named_map_types(name)
+            }
+            Expr::MapLit { key, value, .. } => {
+                Some((key.render(), value.render()))
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.map_types_of_expr(&first.value);
+                        }
+                    } else if let Some(types) = self.named_map_types(name) {
+                        return Some(types);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// #3412 — resolved array type of an array-typed expression.
+    fn resolved_array_type_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                let base = Checker::base_named_type_str(&tn);
+                if let Some(ty) = self.ck.type_aliases.get(base) {
+                    let res = self.ck.resolve_type_alias(ty);
+                    if matches!(res, hy_syntax::TypeExpr::Array { .. }) {
+                        return Some(res.render());
+                    }
+                }
+                if is_sized_array_spelling(&tn) {
+                    return Some(tn);
+                }
+                None
+            }
+            _ => {
+                if let Some((_, _, arr_ty)) = unwrap_parens(e).as_array_lit() {
+                    return Some(self.ck.resolve_type_alias(arr_ty).render());
+                }
+                None
+            }
+        }
+    }
+
+    /// #3412 — checks whether a composite literal item/key/value contradicts
+    /// the expected container type (channel element, map key/value, slice element,
+    /// array length/element, or pointer base).
+    fn container_item_conflict(&self, target_ty: &TypeExpr, value: &Expr) -> bool {
+        let resolved_target = self.ck.resolve_type_alias(target_ty);
+        let want = self.kind_of_ty(&resolved_target, 0);
+        let got = self.kind_of_expr(value);
+
+        if self.sized_array_names_differ(
+            Some(target_ty.render().as_str()),
+            self.typed_value_type_name(value).as_deref(),
+        ) {
+            return true;
+        }
+
+        // Channel element conflict
+        if matches!(want, OpKind::Chan(_)) && matches!(got, OpKind::Chan(_)) {
+            let target_chan_elem = match &resolved_target {
+                TypeExpr::Chan { elem, .. } => Some(elem.render()),
+                TypeExpr::Named { name, .. } => self.named_channel_elem_name(name),
+                _ => self.named_channel_elem_name(&target_ty.render()),
+            };
+            if let Some(fe) = target_chan_elem {
+                if let Some(ve) = self.channel_elem_type_of_expr(value) {
+                    if self.map_or_chan_type_str_conflict(&fe, &ve) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Map key/value conflict
+        if matches!(want, OpKind::Map(_, _)) && matches!(got, OpKind::Map(_, _)) {
+            let target_map = match &resolved_target {
+                TypeExpr::Map { key, value, .. } => Some((key.render(), value.render())),
+                TypeExpr::Named { name, .. } => self.named_map_types(name),
+                _ => self.named_map_types(&target_ty.render()),
+            };
+            if let Some((fk, fv)) = target_map {
+                if let Some((vk, vv)) = self.map_types_of_expr(value) {
+                    if self.map_or_chan_type_str_conflict(&fk, &vk)
+                        || self.map_or_chan_type_str_conflict(&fv, &vv)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Slice element conflict
+        if matches!(want, OpKind::Slice(_)) && matches!(got, OpKind::Slice(_)) {
+            let target_slice_elem = match &resolved_target {
+                TypeExpr::Slice { elem, .. } => Some(elem.render()),
+                TypeExpr::Named { name, .. } => self.named_slice_element_name(name),
+                _ => self.named_slice_element_name(&target_ty.render()),
+            };
+            if let Some(fe) = target_slice_elem {
+                if let Some(ve) = self.slice_element_type_name(value) {
+                    if self.map_or_chan_type_str_conflict(&fe, &ve) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Array alias or element conflict
+        if matches!(want, OpKind::Array(_)) && matches!(got, OpKind::Array(_)) {
+            let target_arr = match &resolved_target {
+                TypeExpr::Array { .. } => Some(resolved_target.render()),
+                _ => {
+                    let r = target_ty.render();
+                    if is_sized_array_spelling(&r) {
+                        Some(r)
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some(fa) = target_arr {
+                if let Some(va) = self.resolved_array_type_of_expr(value) {
+                    if self.map_or_chan_type_str_conflict(&fa, &va) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Pointer base conflict
+        if matches!(want, OpKind::Pointer(_)) && matches!(got, OpKind::Pointer(_)) {
+            let target_ptr_base = match &resolved_target {
+                TypeExpr::Pointer { to, .. } => Some(to.render()),
+                TypeExpr::Named { name, .. } => self.named_pointer_base_name(name),
+                _ => self.named_pointer_base_name(&target_ty.render()),
+            };
+            if let Some(fb) = target_ptr_base {
+                if let Some(vb) = self.pointer_base_type_of_expr(value) {
+                    if self.map_or_chan_type_str_conflict(&fb, &vb) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    /// #2811 — the element spelling of a slice TYPE NAME (alias resolution
+    /// included), e.g. `my_int64_slice` → `int64`. `None` when the name does
+    /// not resolve to a slice type, which fails open.
     fn named_slice_element_name(&self, name: &str) -> Option<String> {
-        let base = Checker::base_named_type_str(name);
+        let trimmed = name.trim();
+        if let Some(stripped) = trimmed.strip_prefix("[]") {
+            return Some(stripped.trim().to_string());
+        }
+        let base = Checker::base_named_type_str(trimmed);
         let ty = self.ck.type_aliases.get(base)?;
         match self.ck.resolve_type_alias(ty) {
             hy_syntax::TypeExpr::Slice { elem, .. } => Some(elem.render()),
@@ -6365,12 +6723,14 @@ impl<'a> Collector<'a> {
             // into `float32`) slipped through and failed `go build`
             // (`cannot use i (variable of type int) as int64 value in array
             // or slice literal`).
+            // #3412: container element and length soundness.
             let scalar_mismatch = self
                 .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            let container_mismatch = self.container_item_conflict(&resolved_ty, item);
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch {
+            if ik == expected && !scalar_mismatch && !container_mismatch {
                 continue;
             }
             let is_untyped_int_to_float = expected == OpKind::Float
@@ -6378,16 +6738,18 @@ impl<'a> Collector<'a> {
                 && self.is_untyped_int_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
-                || scalar_mismatch;
+                || scalar_mismatch
+                || container_mismatch;
             if !conflict {
                 continue;
             }
+            let item_type = self.typed_value_type_name(item).unwrap_or_else(|| ik.label());
             self.emit_e1002(
                 item.span(),
                 format!(
                     "cannot use `{}` (type `{}`) as `{}` value in array literal (HYB-E1002)",
                     item.render(),
-                    ik.label(),
+                    item_type,
                     elem_ty.render()
                 ),
                 "every element of an array composite literal `[N]T{...}` / `[...]T{...}` must be assignable to the element type `T`",
@@ -6450,12 +6812,14 @@ impl<'a> Collector<'a> {
             }
             let ik = self.kind_of_expr(item);
             // #2788: same width-collapse escape as the array arm above.
+            // #3412: container element and length soundness.
             let scalar_mismatch = self
                 .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            let container_mismatch = self.container_item_conflict(&resolved_ty, item);
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch {
+            if ik == expected && !scalar_mismatch && !container_mismatch {
                 continue;
             }
             if expected == OpKind::Float
@@ -6469,16 +6833,18 @@ impl<'a> Collector<'a> {
                 && self.is_untyped_int_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
-                || scalar_mismatch;
+                || scalar_mismatch
+                || container_mismatch;
             if !conflict {
                 continue;
             }
+            let item_type = self.typed_value_type_name(item).unwrap_or_else(|| ik.label());
             self.emit_e1002(
                 item.span(),
                 format!(
                     "cannot use `{}` (type `{}`) as `{}` value in slice literal (HYB-E1002)",
                     item.render(),
-                    ik.label(),
+                    item_type,
                     elem_ty.render()
                 ),
                 "every element of a slice composite literal `[]T{...}` must be assignable to the element type `T`",
@@ -6621,21 +6987,25 @@ impl<'a> Collector<'a> {
             {
                 let kk = self.kind_of_expr(k);
                 // #2788: a typed key of another concrete numeric width.
+                // #3412: container element and length soundness.
                 let scalar_mismatch = self
                     .scalar_names_conflict(self.scalar_of_ty(&resolved_key), self.typed_value_scalar(k));
+                let container_mismatch = self.container_item_conflict(&resolved_key, k);
                 let is_untyped_int_to_float = exp_key == OpKind::Float
                     && kk == OpKind::Int
                     && self.is_untyped_int_const(k);
                 let conflict = (exp_key == OpKind::Float && kk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_key, &kk)
-                    || scalar_mismatch;
+                    || scalar_mismatch
+                    || container_mismatch;
                 if kk != OpKind::Unknown && conflict {
+                    let k_type = self.typed_value_type_name(k).unwrap_or_else(|| kk.label());
                     self.emit_e1002(
                         k.span(),
                         format!(
                             "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
                             k.render(),
-                            kk.label(),
+                            k_type,
                             key_ty.render()
                         ),
                         "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
@@ -6678,21 +7048,25 @@ impl<'a> Collector<'a> {
                 }
                 let vk = self.kind_of_expr(v);
                 // #2788: a typed value of another concrete numeric width.
+                // #3412: container element and length soundness.
                 let scalar_mismatch = self
                     .scalar_names_conflict(self.scalar_of_ty(&resolved_val), self.typed_value_scalar(v));
+                let container_mismatch = self.container_item_conflict(&resolved_val, v);
                 let is_untyped_int_to_float = exp_val == OpKind::Float
                     && vk == OpKind::Int
                     && self.is_untyped_int_const(v);
                 let conflict = (exp_val == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_val, &vk)
-                    || scalar_mismatch;
+                    || scalar_mismatch
+                    || container_mismatch;
                 if vk != OpKind::Unknown && conflict {
+                    let v_type = self.typed_value_type_name(v).unwrap_or_else(|| vk.label());
                     self.emit_e1002(
                         v.span(),
                         format!(
                             "cannot use `{}` (type `{}`) as `{}` value in map value (HYB-E1002)",
                             v.render(),
-                            vk.label(),
+                            v_type,
                             val_ty.render()
                         ),
                         "every value of a map composite literal `map[K]V{...}` must be assignable to the value type `V`",
