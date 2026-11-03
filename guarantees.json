@@ -118,12 +118,13 @@
       "id": 5,
       "surface": "Closure bodies",
       "does": "`task`/send statements inside a closure are real boundaries (goroutines in the emitted Go) and are checked fail-closed, `managed`-escapable",
-      "claim": "**Guaranteed** for boundary statements; a closure that writes a captured mutable binding and is passed to a foreign Go call is checked too (HYB-E3013, the [A5](SPEC-LANGUAGE.md) fourth check-site); captures without a boundary statement or an escape write remain **outside**",
+      "claim": "**Guaranteed** for boundary statements; foreign callback writes reject with HYB-E3013, and read-only captures freeze later caller mutations with HYB-E3014; unrelated closure captures remain **outside**",
       "strength": "guaranteed",
       "rules": [
         "HYB-E3001",
         "HYB-E3002",
-        "HYB-E3013"
+        "HYB-E3013",
+        "HYB-E3014"
       ],
       "fixtures": [
         {
@@ -139,7 +140,7 @@
           "expect": "reject"
         }
       ],
-      "evidence_md": "§9.3 O4.10; corpus [10](tests/checker-corpus/10-a5-http-handler-capture.hy) flipped ACCEPT→REJECT by the A5 fourth check-site (W-016 M2/M3) per its own pre-registered OQ1 condition"
+      "evidence_md": "§9.3 O4.10 and O5.3; corpus [10](tests/checker-corpus/10-a5-http-handler-capture.hy) pins the A5 write rejection; [go_escape_captured_write_3013.rs](compiler/crates/hy-check/tests/go_escape_captured_write_3013.rs) pins read-capture freeze behavior"
     },
     {
       "id": 6,
@@ -232,11 +233,12 @@
     {
       "id": 9,
       "surface": "Values escaping into Go APIs (net/http handlers, callbacks)",
-      "does": "A closure that writes a captured mutable binding and is passed to a foreign (package-qualified) Go call is a fourth check-site: rejects with HYB-E3013 unless the call site takes `managed(\"...\", \"interop\")` or the capture is const/non-`may_share`; read-only captures stay outside the checker",
-      "claim": "**Guaranteed** (HYB-E3013) for captured-write escapes; read-only captures are **outside** — Go's DRF-SC with `-race` as the backstop",
+      "does": "A closure writing a captured mutable binding passed to any foreign (package-qualified) Go call rejects with HYB-E3013 unless managed; a read-only capture of mutable may-share storage is EscapeFrozen, so later caller mutations reject with HYB-E3014",
+      "claim": "**Guaranteed** for captured-write escapes and for rejecting caller mutations after read-only callback captures; foreign Go behavior beyond the checked source remains under Go's DRF-SC / `-race` backstop",
       "strength": "guaranteed",
       "rules": [
-        "HYB-E3013"
+        "HYB-E3013",
+        "HYB-E3014"
       ],
       "fixtures": [
         {
@@ -244,7 +246,7 @@
           "expect": "reject"
         }
       ],
-      "evidence_md": "§8.5 (A5 promoted to a fourth check-site, W-016 M2/M3); §9.2; corpus [10](tests/checker-corpus/10-a5-http-handler-capture.hy) pins the reject"
+      "evidence_md": "§8.5 C9 and §9.3 O5.3; corpus [10](tests/checker-corpus/10-a5-http-handler-capture.hy) pins HYB-E3013; [go_escape_captured_write_3013.rs](compiler/crates/hy-check/tests/go_escape_captured_write_3013.rs) pins HYB-E3014"
     },
     {
       "id": 10,
@@ -305,12 +307,20 @@
     {
       "id": 13,
       "surface": "Finalizers (`runtime.SetFinalizer`)",
-      "does": "Not in the surface; not modeled",
-      "claim": "**No claim**",
-      "strength": "no-claim",
-      "rules": [],
-      "fixtures": [],
-      "evidence_md": "§9.2 \"foreign code the checker cannot see\""
+      "does": "Finalizer callbacks passed to `runtime.SetFinalizer` use the same source-based foreign-callback checks as other package-qualified Go calls: captured writes reject and read-only captures freeze later caller mutations",
+      "claim": "**Guaranteed** for captured callback writes (HYB-E3013) and later caller mutations after read-only captures (HYB-E3014); no finalizer lifecycle or termination claim",
+      "strength": "guaranteed",
+      "rules": [
+        "HYB-E3013",
+        "HYB-E3014"
+      ],
+      "fixtures": [
+        {
+          "path": "tests/checker-corpus/10-a5-http-handler-capture.hy",
+          "expect": "reject"
+        }
+      ],
+      "evidence_md": "§8.5 C9 and §9.3 O5.3; generic call-site analysis requires no Go API database; [go_escape_captured_write_3013.rs](compiler/crates/hy-check/tests/go_escape_captured_write_3013.rs) pins `runtime.SetFinalizer`"
     },
     {
       "id": 14,

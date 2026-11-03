@@ -164,6 +164,8 @@ impl<'a> Checker<'a> {
         loop_end: Option<usize>,
         stmt_consumes: &mut Vec<(Span, Span)>,
     ) {
+        self.check_escape_site(st, cr.callee, cr.args, cr.span);
+        self.check_escape_frozen_call(st, cr);
         match self.resolve_call(st, cr) {
             Resolved::Package { pkg, method } => {
                 // T22: a package call that mutates an argument in place
@@ -416,6 +418,56 @@ impl<'a> Checker<'a> {
                 self.record_callee_param_stores(st, cr);
                 self.check_a3_inline_or_unknown_call(st, cr, idx);
             }
+        }
+    }
+
+    fn check_escape_frozen_call(&mut self, st: &FnState, cr: &CallRef<'_>) {
+        let roots = match self.resolve_call(st, cr) {
+            Resolved::Package { pkg, method }
+                if matches!(
+                    foreign::package_mode(&pkg, &method),
+                    CallMode::Mutate | CallMode::Consume
+                ) =>
+            {
+                if let Some(index) = foreign::package_mutated_arg(&pkg, &method) {
+                    cr.args
+                        .get(index)
+                        .and_then(|arg| arg.value.root_ident())
+                        .map(str::to_string)
+                        .into_iter()
+                        .collect()
+                } else {
+                    cr.args
+                        .iter()
+                        .filter_map(|arg| arg.value.root_ident().map(str::to_string))
+                        .collect()
+                }
+            }
+            Resolved::Method {
+                root,
+                method,
+                recv,
+                ..
+            } if receiver_type_name(&recv).is_some_and(|ty| {
+                matches!(
+                    foreign::method_mode(&ty, &method),
+                    CallMode::Mutate | CallMode::Consume
+                )
+            }) =>
+            {
+                vec![root]
+            }
+            Resolved::Fn { name } if matches!(name.as_str(), "delete" | "clear" | "copy") => cr
+                .args
+                .first()
+                .and_then(|arg| arg.value.root_ident())
+                .map(str::to_string)
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        };
+        for root in roots {
+            self.check_escape_frozen_mutation(st, &root, cr.span);
         }
     }
 
@@ -10229,4 +10281,3 @@ fn main() {
         );
     }
 }
-

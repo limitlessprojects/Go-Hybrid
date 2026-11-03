@@ -40,7 +40,7 @@ pub(crate) fn resolve_alias(st: &FnState, name: &str) -> String {
 
 /// Transitive connected component of `seed` across both `aliases` (parent and
 /// child directions) and `may_share`, including `seed` itself.
-fn storage_component(st: &FnState, seed: &str) -> HashSet<String> {
+pub(crate) fn storage_component(st: &FnState, seed: &str) -> HashSet<String> {
     if !st.aliases.contains_key(seed)
         && st.may_share.get(seed).is_none_or(|peers| peers.is_empty())
         && !st.aliases.values().any(|parent| parent == seed)
@@ -1858,5 +1858,4 @@ mod tests {
         assert!(r_iter.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
     }
 }
-
 

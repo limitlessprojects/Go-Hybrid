@@ -1328,10 +1328,13 @@ surface post-MVP; when it lands, atomic-typed values become O4 class 2
 A closure that writes to a captured mutable binding and is passed as an
 argument to a foreign (package-qualified) Go call must take
 `managed("...", "interop")` at the call site, or the capture must be
-`const` (immutable-by-type), or the capture must be non-`may_share`.
-Failure rejects with `HYB-Exxxx`. No curated Go API database is consulted;
-the check is decidable from Hybrid source alone: (1) closure body writes
-a captured binding, (2) closure is passed to a foreign call.
+`const` (immutable-by-type), or the capture must be non-`may_share`
+(`HYB-E3013`). A closure that only reads captured `may_share` storage may
+escape, but the caller may not mutate that binding or any live may-share
+alias afterwards (`HYB-E3014`, O5.3). This applies to every foreign callback
+site, including finalizer registration; it does not depend on knowing which
+APIs invoke callbacks asynchronously. No curated Go API database is
+consulted: the closure and call syntax identify both checks.
 
 **Decision: fourth check-site class (D5 promoted, W-016 M2).**
 
@@ -1629,9 +1632,15 @@ mux.handle("/x", http.handler(fn(w http.response_writer) {
   idiomatic AND receivers can be proven read-only, the rule may relax to
   writes-only as a logged decision — and the §9.2 claims paragraph narrows
   in the same edit.*
-- **O5.3 — Fresh literals and immutable values are not frozen** (nothing
-  aliased exists to freeze); channels are never frozen (class 2 — sharing
-  them is their purpose).
+- **O5.3 — Escape-freeze on read-only foreign captures.** When a callback
+  passed to a foreign Go call reads a captured mutable `may_share` binding,
+  that binding and its live may-share aliases enter `EscapeFrozen` at the
+  call site. Reads remain legal, but later caller mutations reject with
+  `HYB-E3014`; writes inside the callback remain subject to C9 /
+  `HYB-E3013`. `managed("...", "interop")` is the explicit escape hatch.
+  Fresh literals and immutable values are not frozen (nothing aliased exists
+  to freeze); channels are never frozen (class 2 — sharing them is their
+  purpose).
 - **O5.4 — `move` applies to whole bindings** (`move counter`), and to
   **own-handle fields** (`move s.conn` — linear values support partial
   moves; the struct field becomes moved-from). `move` on a GC composite's
@@ -2279,7 +2288,6 @@ cannot drift silently.
 *End of first draft. The next revision is triggered by: the adversarial
 checker corpus landing, MVP-0's walking skeleton, or a tripwire (§9.7) —
 whichever comes first.*
-
 
 
 

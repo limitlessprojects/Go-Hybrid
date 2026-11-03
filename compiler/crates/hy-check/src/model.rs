@@ -248,6 +248,8 @@ pub(crate) struct FnState {
     /// storage with `a` too. The freeze rule (O5.2) must cover the whole
     /// connected component, not just the single-parent `aliases` chain.
     pub may_share: HashMap<String, HashSet<String>>,
+    /// Binding and scope depth frozen by a read-only foreign callback capture.
+    pub escape_frozen: HashMap<(String, usize), Span>,
     pub loans: Vec<Loan>,
     /// name -> last statement index that references it (Pass A result).
     pub last_use: HashMap<String, usize>,
@@ -321,6 +323,9 @@ impl FnState {
 
     /// Exit the innermost block scope (walk.rs's Pop events).
     pub(crate) fn scope_pop(&mut self) {
+        let depth = self.scopes.len();
+        self.escape_frozen
+            .retain(|(_, frozen_depth), _| *frozen_depth < depth);
         if let Some(fnlits) = self.fnlit_scopes.pop() {
             if !fnlits.is_empty() {
                 let mut snap_env = self.env.clone();
@@ -1026,4 +1031,3 @@ pub(crate) fn collect_move_operands<'e>(e: &'e Expr, out: &mut Vec<(&'e Expr, Sp
         _ => {}
     }
 }
-

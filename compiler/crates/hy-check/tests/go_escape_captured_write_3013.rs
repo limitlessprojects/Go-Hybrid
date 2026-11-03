@@ -56,6 +56,30 @@ fn read_only_capture_into_foreign_call_is_accepted() {
 }
 
 #[test]
+fn read_only_capture_freezes_later_mutations_of_binding_and_aliases() {
+    for mutation in ["hits[\"x\"] = 1", "peer[\"x\"] = 1", "clear(hits)"] {
+        let src = format!(
+            "{IMPORT}\nfn main() {{\n    hits := map[string]int{{\"x\": 0}}\n    peer := hits\n    mux := http.new_serve_mux()\n    mux.handle_func(\"/x\", fn() {{ _ = hits[\"x\"] }})\n    {mutation}\n}}\n"
+        );
+        assert_rejected(&src, "HYB-E3014");
+    }
+
+    let before_escape = format!(
+        "{IMPORT}\nfn main() {{\n    hits := map[string]int{{\"x\": 0}}\n    hits[\"x\"] = 1\n    mux := http.new_serve_mux()\n    mux.handle_func(\"/x\", fn() {{ _ = hits[\"x\"] }})\n}}\n"
+    );
+    assert_ok(&before_escape);
+
+    let finalizer = "import \"runtime\"\n\
+        fn main() {\n\
+            state := map[string]int{\"x\": 0}\n\
+            object := &state\n\
+            runtime.set_finalizer(object, fn() { _ = state[\"x\"] })\n\
+            state[\"x\"] = 1\n\
+        }\n";
+    assert_rejected(finalizer, "HYB-E3014");
+}
+
+#[test]
 fn write_to_a_closure_local_is_accepted() {
     let src = format!(
         "{IMPORT}\nfn main() {{\n    mux := http.new_serve_mux()\n    mux.handle(\"/x\", http.handler(fn() {{\n        local := 0\n        local++\n        fmt.println(local)\n    }}))\n}}\n"

@@ -547,6 +547,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         let mut uses = Vec::new();
         walk::own_uses_with_results(stmt, &st.named_results, &mut uses);
         ck.check_uses(&st, &uses);
+        ck.check_escape_frozen_writes(&st, &uses);
         // T24: no address-of on a map-slot loan (HYB-E3104).
         ck.check_addr_of_loan(&st, &uses);
         // T24 + O8: a live slot loan cannot be re-bound to a general
@@ -5251,4 +5252,3 @@ mod tests {
         assert_eq!(e3006_count, 2, "{:?}", r.diagnostics);
     }
 }
-
