@@ -5614,7 +5614,9 @@ impl<'a> Collector<'a> {
                         if got_kinds.len() == targets.len() {
                             for (t, vk) in targets.iter().zip(got_kinds.iter()) {
                                 let tpk = self.kind_of_place(t);
-                                if kinds_conflict(&tpk, vk) {
+                                let int_float_conflict = (tpk == OpKind::Float && *vk == OpKind::Int)
+                                    || (tpk == OpKind::Int && *vk == OpKind::Float);
+                                if kinds_conflict(&tpk, vk) || int_float_conflict {
                                     self.emit_e1002(
                                         span,
                                         format!(
