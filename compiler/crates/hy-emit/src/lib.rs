@@ -1913,9 +1913,36 @@ impl Emitter {
             TypeExpr::Fn {
                 params, results, ..
             } => {
+                // #3545: in unnamed fn-type parameters (`fn(i64) i64`), the parser
+                // stores the parameter type in `p.name` and leaves `p.ty` as `Named("")`.
+                // Run `p.name` through `go_type_name` so Hybrid width spellings (`i64`,
+                // `u8`, `i32`, `f64`) lower to standard Go types (`int64`, `uint8`, etc.).
+                let any_named = params.iter().any(|p| {
+                    !p.name.is_empty()
+                        && !matches!(&p.ty, TypeExpr::Named { name, .. } if name.is_empty())
+                });
                 let ps = params
                     .iter()
-                    .map(|p| format!("{} {}", p.name, self.type_text(&p.ty)))
+                    .map(|p| {
+                        let is_unnamed = match &p.ty {
+                            TypeExpr::Named { name, .. } => name.is_empty(),
+                            _ => p.name.is_empty(),
+                        };
+                        if is_unnamed {
+                            let ty_str = if p.name.is_empty() {
+                                self.type_text(&p.ty)
+                            } else {
+                                self.go_type_name(&p.name)
+                            };
+                            if any_named {
+                                format!("_ {}", ty_str)
+                            } else {
+                                ty_str
+                            }
+                        } else {
+                            format!("{} {}", p.name, self.type_text(&p.ty))
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 let rs = results
@@ -2244,7 +2271,8 @@ impl Emitter {
             TypeExpr::Slice { .. }
             | TypeExpr::Map { .. }
             | TypeExpr::Chan { .. }
-            | TypeExpr::Pointer { .. } => "nil".into(),
+            | TypeExpr::Pointer { .. }
+            | TypeExpr::Fn { .. } => "nil".into(),
             TypeExpr::Option { .. } => format!("{}{{}}", self.type_text(t)),
             _ => format!("*new({})", self.type_text(t)),
         }
