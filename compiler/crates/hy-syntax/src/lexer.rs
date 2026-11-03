@@ -614,6 +614,14 @@ impl<'a> Lexer<'a> {
             }
         }
         if is_float {
+            if self.at(0) == Some('.') && self.at(1) != Some('.') {
+                s.push('.');
+                self.bump();
+                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                    s.push(self.bump().unwrap());
+                }
+                self.escape_diag(start, false, "malformed float literal: unexpected second . in float literal (SPEC-LANGUAGE.md LX6)");
+            }
             self.tok(start, Tok::Float(s))
         } else {
             if s.starts_with('0') && s.len() > 1 {
