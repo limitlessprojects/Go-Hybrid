@@ -144,7 +144,7 @@ fn handle_unpack(h: u64) -> Option<(usize, u32)> {
     }
     let raw_idx = (h & 0xFFFF_FFFF) as usize;
     let gen = (h >> 32) as u32;
-    if raw_idx == 0 || gen == 0 {
+    if raw_idx == 0 || raw_idx == u32::MAX as usize || gen == 0 || gen == u32::MAX {
         return None;
     }
     Some((raw_idx - 1, gen))
@@ -367,13 +367,9 @@ pub extern "C" fn hy_json_array_get(arr: u64, i: u64, out_handle: *mut u64) -> i
         return ERR_TABLE;
     }
     with_table(|t| {
+        let array = table_get(t, arr)?.as_array().ok_or(ERR_JSON)?;
         let idx = usize::try_from(i).map_err(|_| ERR_JSON)?;
-        let elem = table_get(t, arr)?
-            .as_array()
-            .ok_or(ERR_JSON)?
-            .get(idx)
-            .ok_or(ERR_JSON)?
-            .clone();
+        let elem = array.get(idx).ok_or(ERR_JSON)?.clone();
         let h = table_insert(t, elem);
         unsafe {
             *out_handle = h;
@@ -386,8 +382,8 @@ pub extern "C" fn hy_json_array_get(arr: u64, i: u64, out_handle: *mut u64) -> i
 #[no_mangle]
 pub extern "C" fn hy_json_array_push_string(arr: u64, sptr: u64, slen: u64) -> i32 {
     with_table(|t| {
-        let a = table_get_mut(t, arr)?.as_array_mut().ok_or(ERR_JSON)?;
         let sv = unsafe { HyStr::from_raw(sptr, slen) }.as_str()?.to_string();
+        let a = table_get_mut(t, arr)?.as_array_mut().ok_or(ERR_JSON)?;
         a.push(Json::String(sv));
         Ok(())
     })
@@ -678,6 +674,31 @@ mod json_text_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handle_unpack_rejects_reserved_index_and_generation() {
+        let max_index = (1u64 << 32) | u32::MAX as u64;
+        let max_generation = ((u32::MAX as u64) << 32) | 1;
+
+        assert_eq!(handle_unpack(max_index), None);
+        assert_eq!(handle_unpack(max_generation), None);
+    }
+
+    #[test]
+    fn array_helpers_validate_table_before_other_inputs() {
+        let mut object = 0u64;
+        assert_eq!(hy_json_new_object(&mut object), 0);
+
+        assert_eq!(hy_json_array_push_string(object, 0, 1), ERR_TABLE);
+
+        #[cfg(target_pointer_width = "32")]
+        {
+            let mut element = 0u64;
+            assert_eq!(hy_json_array_get(0, u64::MAX, &mut element), ERR_TABLE);
+        }
+
+        assert_eq!(hy_json_release(object), 0);
+    }
 
     #[test]
     fn slot_reuse_increments_generation_and_ignores_stale_cleanup_release() {
