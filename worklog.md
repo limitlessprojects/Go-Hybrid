@@ -1555,3 +1555,15 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - NEXT TICK QUEUE: scan FIRST (fresh queue missing this tick) -> #1740 (wminno int->float64 provenance, 8.5d, +294) -> #1718 (ubelai O8/A3, behind 3) -> #1719 (behind 11) -> #3441 (behind 11) -> #3428 (+682) -> #3435 -> #3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
 - DUP WATCH remaining: #2982 vs #2976 vs #2978. (3145/3153 resolved.)
 - OPS NOTE: verify_pr.sh still carries the deprecated worktree protocol + --no-keep-memory RUSTFLAGS; kept using in-repo trial merge per S69 binding protocol. Consider updating the script or the cron text next tick.
+
+## Session 76 — 2026-11-03 17:10 tick (3 landed: #3491/#3490/#3501)
+
+- Recycle + restore (go from cache; rustup bg install hung on installer download again — foreground sync install is the reliable path, 2nd confirmation). scan healthy (REAL_EXIT=0), approve 21/21 (4974 remaining).
+- LANDED:
+  b3158063 Merge PR #3491 (aswadi, fixes #3488) — lexer float suffix check out of exponent branch + 3+ dot consumption; float hardening arc complete. 354 suites.
+  d6469bcd Merge PR #3490 (aswadi, fixes #3487) — diag lookup `_`->`-` normalization + HYB-8nnn coherence (`-8` arm); diag arc complete. 355 suites.
+  3d6aa6fd Merge PR #3501 (chusmias258-dev, fixes #3500) — is_unshadowed_builtin gates make/new/primitive-conversion fast paths. 356 suites.
+- Suite trajectory: 353 -> 356. Final main 3d6aa6fd, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #1740 (wminno int->float64 provenance, 8.5d, +294, approve shepherded) -> #937 (magomedta make/new/void validation, 14.5d, +449) -> #3499 (pedromino wildcard loan slices, +52, no tests — scrutinize) -> #1718 (behind 3) -> #1719 -> #3441 -> #3428 -> #3435 -> #3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
+- OPS NOTE (repeat): verify_pr.sh worktree protocol + --no-keep-memory deprecated since S69; cron text should point at in-repo trial merge. rustup-init.sh in nohup hangs ~50% of runs — run it foreground.
