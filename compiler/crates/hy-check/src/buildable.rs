@@ -3231,9 +3231,15 @@ impl<'a> Collector<'a> {
     }
 
     fn struct_name(&self, k: &OpKind) -> Option<String> {
+        // Issue #3112: Go selectors auto-dereference at most ONE pointer level.
+        // Previous recursion unwrapped Pointer(Pointer(...)) without bound,
+        // so **T resolved as T and passed hy-check but failed go build.
         match k {
             OpKind::Struct(Some(s)) => Some(s.clone()),
-            OpKind::Pointer(inner) => self.struct_name(inner),
+            OpKind::Pointer(inner) => match &**inner {
+                OpKind::Struct(Some(s)) => Some(s.clone()),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -7164,6 +7170,29 @@ impl<'a> Collector<'a> {
         } else {
             false
         };
+
+        // Issue #3112: reject selectors on fully-resolved multi-level pointer
+        // indirection (**T, ***T, ...) — Go refuses "x.f" on **T.
+        let is_multi_indirection_pointer = matches!(
+            bk,
+            OpKind::Pointer(inner) if matches!(&**inner, OpKind::Pointer(_))
+        );
+        if is_multi_indirection_pointer && !has_field && !has_method {
+            let needle = format!("{}.{} undefined", base_render, name);
+            if self.diags.iter().any(|d| (d.span == span && d.code == "HYB-E1002") || (d.code == "HYB-E1002" && d.message.contains(&needle))) {
+                return;
+            }
+            self.emit_e1002(
+                span,
+                format!(
+                    "`{}` has no field or method `{}` — Go refuses selectors on multiple pointer indirection (`**T` dereferences at most one level) (HYB-E1002)",
+                    base_render,
+                    name
+                ),
+                "dereference the outer pointer first (`(*pp).f`), or use a single-level pointer",
+            );
+            return;
+        }
 
         if (!is_struct_like || struct_known) && !has_field && !has_method {
             let needle = format!("{}.{} undefined", base_render, name);
