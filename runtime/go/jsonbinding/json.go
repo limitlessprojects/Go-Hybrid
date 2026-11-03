@@ -57,17 +57,24 @@ func wrap(id uint64) Value {
 	return Value{h: h}
 }
 
-// pinCrossKey: the copy-small pinned borrow for a key/string argument.
-// Returns the byte copy's pointer + len and a release func.
-func pinCrossKey(s string) (uintptr, uintptr, *runtime.Pinner, []byte) {
-	b := []byte(s)
-	var p runtime.Pinner
-	if len(b) > 0 {
-		p.Pin(&b[0])
-		return uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), &p, b
+// crossString: the zero-copy view of a string argument for one crossing.
+// Returns the string's own backing pointer + len — no []byte copy, no
+// runtime.Pinner (spike7-zerocopy-string).
+//
+// Why this is sound here: a Go string's bytes are immutable, and the
+// callee contract is the SPEC §9 O3 view loan — read-only, never
+// retained past the call. The caller keeps the string alive with
+// runtime.KeepAlive(s) until the crossing returns, and Go's heap is
+// non-moving, so a heap-backed string's pointer is stable for the call.
+// The residual risk is a stack-backed string whose frame is copied by
+// stack growth mid-crossing; TestCrossStringUnderPressure hammers keyed
+// calls with GC + forced stack growth and result-checks every call.
+// Empty string: pass (0, 0) — hyrt's HyStr::as_str maps len==0 to "".
+func crossString(s string) (uintptr, uintptr) {
+	if len(s) == 0 {
+		return 0, 0
 	}
-	// Empty key: pass (0, 0) — hyrt's HyStr::as_str maps len==0 to "".
-	return 0, 0, &p, b
+	return uintptr(unsafe.Pointer(unsafe.StringData(s))), uintptr(len(s))
 }
 
 // Parse parses JSON text into a fresh value handle.
@@ -112,13 +119,14 @@ func (v Value) Array(key string) ([]Value, error) {
 		return nil, ErrJSON
 	}
 	var arrID uint64
-	kptr, klen, pin, kb := pinCrossKey(key)
+	kptr, klen := crossString(key)
+	var pin runtime.Pinner
 	pin.Pin(&arrID)
 	// DEEP class: as_array().clone() recurses on the array's contents.
 	st := hybridge.CrossDeep4(FnGetArray, uintptr(v.h.id), kptr, klen, uintptr(unsafe.Pointer(&arrID)))
 	pin.Unpin()
-	runtime.KeepAlive(pin)
-	runtime.KeepAlive(kb)
+	runtime.KeepAlive(&pin)
+	runtime.KeepAlive(key)
 	if st != statusOK {
 		return nil, ErrJSON
 	}
@@ -143,12 +151,13 @@ func (v Value) Int(key string) (int64, error) {
 		return 0, ErrJSON
 	}
 	var n int64
-	kptr, klen, pin, kb := pinCrossKey(key)
+	kptr, klen := crossString(key)
+	var pin runtime.Pinner
 	pin.Pin(&n)
 	st := hybridge.Cross4S(FnGetInt, uintptr(v.h.id), kptr, klen, uintptr(unsafe.Pointer(&n))) // SMALL: scalar read
 	pin.Unpin()
-	runtime.KeepAlive(pin)
-	runtime.KeepAlive(kb)
+	runtime.KeepAlive(&pin)
+	runtime.KeepAlive(key)
 	if st != statusOK {
 		return 0, ErrJSON
 	}
@@ -162,13 +171,14 @@ func (v Value) String(key string) (string, error) {
 		return "", ErrJSON
 	}
 	var sid uint64
-	kptr, klen, pin, kb := pinCrossKey(key)
+	kptr, klen := crossString(key)
+	var pin runtime.Pinner
 	pin.Pin(&sid)
 	// SMALL: string clone is a heap copy, not a tree walk.
 	st := hybridge.Cross4S(FnGetString, uintptr(v.h.id), kptr, klen, uintptr(unsafe.Pointer(&sid)))
 	pin.Unpin()
-	runtime.KeepAlive(pin)
-	runtime.KeepAlive(kb)
+	runtime.KeepAlive(&pin)
+	runtime.KeepAlive(key)
 	if st != statusOK {
 		return "", ErrJSON
 	}
@@ -182,11 +192,9 @@ func (v Value) PushString(s string) error {
 	if v.h == nil || v.h.id == 0 {
 		return ErrJSON
 	}
-	sptr, slen, pin, sb := pinCrossKey(s)
+	sptr, slen := crossString(s)
 	st := hybridge.Cross3S(FnPushString, uintptr(v.h.id), sptr, slen) // SMALL: Vec push + heap copy
-	pin.Unpin()
-	runtime.KeepAlive(pin)
-	runtime.KeepAlive(sb)
+	runtime.KeepAlive(s)
 	if st != statusOK {
 		return ErrJSON
 	}
@@ -218,13 +226,11 @@ func (v Value) setHandle(key string, val Value) error {
 	if v.h == nil || v.h.id == 0 || val.h == nil || val.h.id == 0 {
 		return ErrJSON
 	}
-	kptr, klen, pin, kb := pinCrossKey(key)
+	kptr, klen := crossString(key)
 	// DEEP class: insert DROPS the replaced value (if the key existed) and
 	// drop recurses on the value tree.
 	st := hybridge.CrossDeep4(FnSet, uintptr(v.h.id), kptr, klen, uintptr(val.h.id))
-	pin.Unpin()
-	runtime.KeepAlive(pin)
-	runtime.KeepAlive(kb)
+	runtime.KeepAlive(key)
 	if st != statusOK {
 		return ErrJSON
 	}
