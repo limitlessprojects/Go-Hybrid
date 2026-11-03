@@ -116,6 +116,33 @@ impl Emitter {
                 if matches!(operand, Expr::Call { .. }) {
                     self.hoist_tries_expr(operand)?;
                 }
+
+                // #3209: If the deferred call captures an active slot loan (or one of its
+                // aliases), the deferred closure runs at function exit *after* any inline
+                // store-back has already written the old or pre-defer copy. To prevent the
+                // deferred write from being lost, emit a deferred store-back
+                // `defer func() { <store> }()` immediately before the user's deferred call.
+                // Go executes deferred functions in LIFO order, so the user's deferred closure
+                // executes first, followed immediately by this store-back defer.
+                let mut deferred_stores = Vec::new();
+                for frame in &self.loan_frames {
+                    for (loan_name, store) in frame {
+                        if !loan_name.is_empty() {
+                            let mentioned = Self::expr_mentions_ident(call, loan_name)
+                                || self.loan_aliases.get(loan_name).is_some_and(|aliases| {
+                                    aliases.iter().any(|a| Self::expr_mentions_ident(call, a))
+                                });
+                            if mentioned {
+                                deferred_stores.push(store.clone());
+                            }
+                        }
+                    }
+                }
+                deferred_stores.dedup();
+                for store in deferred_stores {
+                    self.push(&format!("defer func() {{ {} }}()", store));
+                }
+
                 let c = self.emit_expr(operand, 0)?;
                 self.push(&format!("defer {}", c));
                 Ok(())
@@ -1547,7 +1574,7 @@ impl Emitter {
                 .enumerate()
                 .map(|(i, v)| alias_assigns[i].is_some() || self.expr_is_pointer(v))
                 .collect();
-            for ((t, is_ptr), alias) in targets.iter().zip(ptr_flags).zip(alias_assigns.iter()) {
+            for (((t, is_ptr), alias), v) in targets.iter().zip(ptr_flags).zip(alias_assigns.iter()).zip(values.iter()) {
                 if let PlaceKind::Ident(name) = &t.kind {
                     if name != "_" {
                         for aliases in self.loan_aliases.values_mut() {
@@ -1558,6 +1585,24 @@ impl Emitter {
                                 .entry(loan_root.clone())
                                 .or_default()
                                 .insert(name.clone());
+                        } else if matches!(Self::peel_parens(v), Expr::FnLit { .. }) {
+                            for frame in &self.loan_frames {
+                                for (loan, _) in frame {
+                                    if loan.is_empty() || loan == name {
+                                        continue;
+                                    }
+                                    let mentions = Self::expr_mentions_ident(v, loan)
+                                        || self.loan_aliases.get(loan).is_some_and(|aliases| {
+                                            aliases.iter().any(|a| Self::expr_mentions_ident(v, a))
+                                        });
+                                    if mentions {
+                                        self.loan_aliases
+                                            .entry(loan.clone())
+                                            .or_default()
+                                            .insert(name.clone());
+                                    }
+                                }
+                            }
                         }
                         if is_ptr {
                             self.pointer_vars.insert(name.clone());
