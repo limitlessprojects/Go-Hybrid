@@ -402,6 +402,7 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "utf32" => "UTF32",
         "uuid" => "UUID",
         "vm" => "VM",
+        "waitgroup" => "WaitGroup",
         "xml" => "XML",
         "xmpp" => "XMPP",
         "xsrf" => "XSRF",
@@ -447,7 +448,13 @@ pub(crate) fn result_shape(results: &[FnResult]) -> (usize, bool) {
 
 pub(crate) fn base_ty_name(t: &TypeExpr) -> Option<String> {
     match t {
-        TypeExpr::Named { name, .. } => Some(name.clone()),
+        TypeExpr::Named { name, .. } => Some(match name.as_str() {
+            "sync.waitgroup" | "sync.WaitGroup" => "sync.wait_group".into(),
+            "sync.Mutex" => "sync.mutex".into(),
+            "sync.RWMutex" => "sync.rwmutex".into(),
+            "sync.Once" => "sync.once".into(),
+            _ => name.clone(),
+        }),
         TypeExpr::Pointer { to, .. } => base_ty_name(to),
         _ => None,
     }
@@ -617,6 +624,9 @@ pub struct Emitter {
     /// a call can run such a closure inside an O8 slot-loan window, so any
     /// slot loan keyed by one of these names snapshots its key into `hyKeyN`.
     closure_written: BTreeSet<String>,
+    /// True when the current fn declares any named result item (so Go's
+    /// result signature is fully named and bare `return` returns live slots).
+    cur_fn_has_named_results: bool,
     /// Per-fn result shapes, collected eagerly (Batch I): name →
     /// (n_results, ends_in_error, first_result's binding kind, per-param
     /// pointer-base types). Drives the `?` hoist arity (13:
@@ -687,6 +697,7 @@ impl Emitter {
             export_pub: false,
             cur_fn_error_returns: None,
             closure_written: BTreeSet::new(),
+            cur_fn_has_named_results: false,
             fn_shapes: BTreeMap::new(),
             closure_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
@@ -1102,21 +1113,12 @@ impl Emitter {
     ) {
         match ty {
             TypeExpr::Map { key, value, .. } => {
-                if let TypeExpr::Named { name, .. } = key.as_ref() {
-                    if param_names.contains(name) {
-                        out.insert(name.clone());
-                    }
-                }
+                Self::collect_key_params_in_ty(key, param_names, out);
                 Self::collect_comparable_in_ty(key, param_names, out);
                 Self::collect_comparable_in_ty(value, param_names, out);
             }
             TypeExpr::Named { name, .. } => {
-                if let Some(inner) = name.strip_prefix("set[").and_then(|s| s.strip_suffix(']')) {
-                    let elem = inner.trim();
-                    if param_names.contains(elem) {
-                        out.insert(elem.to_string());
-                    }
-                }
+                Self::collect_comparable_in_folded_name(name, param_names, out);
             }
             TypeExpr::Pointer { to, .. } => Self::collect_comparable_in_ty(to, param_names, out),
             TypeExpr::Array { len, elem, .. } => {
@@ -1282,11 +1284,7 @@ impl Emitter {
     ) {
         match e {
             Expr::MapLit { key, value, entries, .. } => {
-                if let TypeExpr::Named { name, .. } = key.as_ref() {
-                    if param_names.contains(name) {
-                        out.insert(name.clone());
-                    }
-                }
+                Self::collect_key_params_in_ty(key, param_names, out);
                 Self::collect_comparable_in_ty(key, param_names, out);
                 Self::collect_comparable_in_ty(value, param_names, out);
                 for (k, v) in entries {
@@ -1432,6 +1430,7 @@ impl Emitter {
         if let Some(body) = &f.body {
             Self::collect_closure_writes_block(body, false, &mut self.closure_written);
         }
+        self.cur_fn_has_named_results = f.results.iter().any(|r| r.name.is_some());
         if !is_main && !f.results.is_empty() && !main_needs_wrapper {
             let last_is_err = matches!(
                 &f.results.last().unwrap().ty,
@@ -1737,11 +1736,8 @@ impl Emitter {
         if matches!(t, TypeExpr::Map { .. }) {
             return Some(BindingKind::Map);
         }
-        let name = match t {
-            TypeExpr::Named { name, .. } => name.as_str(),
-            TypeExpr::Pointer { to, .. } => return self.binding_kind_of_ty(to),
-            _ => return None,
-        };
+        let Some(base) = base_ty_name(t) else { return None };
+        let name = base.as_str();
         if name.starts_with("set[") || name == "set" {
             return Some(BindingKind::Set);
         }
@@ -1934,8 +1930,10 @@ impl Emitter {
                     .join(", ");
                 if rs.is_empty() {
                     format!("func({})", ps)
-                } else {
+                } else if results.len() == 1 {
                     format!("func({}) {}", ps, rs)
+                } else {
+                    format!("func({}) ({})", ps, rs)
                 }
             }
         }
@@ -1956,6 +1954,33 @@ impl Emitter {
         }
         if let Some(rest) = name.strip_prefix("[...]") {
             return format!("[...]{}", self.go_type_name(rest));
+        }
+        if let Some(rest) = name.strip_prefix('[') {
+            if let Some((len_s, elem_s)) = Self::split_bracket_prefix(rest) {
+                return format!("[{}]{}", len_s.trim(), self.go_type_name(elem_s));
+            }
+        }
+        if let Some(rest) = name.strip_prefix("fn(") {
+            if let Some((params_s, tail_s)) = Self::split_paren_prefix(rest) {
+                let go_params = Self::split_top_level_type_args(params_s)
+                    .into_iter()
+                    .map(|p| self.go_type_name(p))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let tail = tail_s.trim();
+                if tail.is_empty() {
+                    return format!("func({})", go_params);
+                }
+                if let Some(inner) = tail.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+                    let go_res = Self::split_top_level_type_args(inner)
+                        .into_iter()
+                        .map(|r| self.go_type_name(r))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return format!("func({}) ({})", go_params, go_res);
+                }
+                return format!("func({}) {}", go_params, self.go_type_name(tail));
+            }
         }
         if let Some(rest) = name.strip_prefix("<-chan ") {
             return format!("<-chan {}", self.go_type_name(rest));
@@ -2024,6 +2049,135 @@ impl Emitter {
         } else {
             suffix.to_string()
         }
+    }
+
+    fn collect_key_params_in_ty(
+        ty: &TypeExpr,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                Self::collect_key_params_in_name(name, param_names, out);
+            }
+            TypeExpr::Array { elem, .. } | TypeExpr::Option { elem, .. } => {
+                Self::collect_key_params_in_ty(elem, param_names, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_key_params_in_name(
+        name: &str,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        let name = name.trim();
+        if name.starts_with('*')
+            || name.starts_with("[]")
+            || name.starts_with("map[")
+            || name.starts_with("fn(")
+            || name.starts_with("chan ")
+            || name.starts_with("<-chan ")
+            || name.starts_with("chan<- ")
+        {
+            return;
+        }
+        if let Some(rest) = name.strip_prefix("[...]") {
+            Self::collect_key_params_in_name(rest, param_names, out);
+            return;
+        }
+        if let Some(rest) = name.strip_prefix('[') {
+            if let Some((_, elem_s)) = Self::split_bracket_prefix(rest) {
+                Self::collect_key_params_in_name(elem_s, param_names, out);
+            }
+            return;
+        }
+        if let Some(open) = name.find('[') {
+            if open > 0 && name.ends_with(']') {
+                let inner = &name[open + 1..name.len() - 1];
+                for arg in Self::split_top_level_type_args(inner) {
+                    Self::collect_key_params_in_name(arg, param_names, out);
+                }
+                return;
+            }
+        }
+        if param_names.contains(name) {
+            out.insert(name.to_string());
+        }
+    }
+
+    fn collect_comparable_in_folded_name(
+        name: &str,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        let name = name.trim();
+        for prefix in ["*", "[]", "[...]", "<-chan ", "chan<- ", "chan "] {
+            if let Some(rest) = name.strip_prefix(prefix) {
+                Self::collect_comparable_in_folded_name(rest, param_names, out);
+                return;
+            }
+        }
+        if let Some(rest) = name.strip_prefix("map[") {
+            if let Some((k_s, v_s)) = Self::split_bracket_prefix(rest) {
+                Self::collect_key_params_in_name(k_s, param_names, out);
+                Self::collect_comparable_in_folded_name(k_s, param_names, out);
+                Self::collect_comparable_in_folded_name(v_s, param_names, out);
+            }
+            return;
+        }
+        if let Some(rest) = name.strip_prefix('[') {
+            if let Some((_, elem_s)) = Self::split_bracket_prefix(rest) {
+                Self::collect_comparable_in_folded_name(elem_s, param_names, out);
+            }
+            return;
+        }
+        if let Some(rest) = name.strip_prefix("fn(") {
+            if let Some((params_s, tail_s)) = Self::split_paren_prefix(rest) {
+                for p in Self::split_top_level_type_args(params_s) {
+                    Self::collect_comparable_in_folded_name(p, param_names, out);
+                }
+                let tail = tail_s.trim();
+                if let Some(inner) = tail.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+                    for r in Self::split_top_level_type_args(inner) {
+                        Self::collect_comparable_in_folded_name(r, param_names, out);
+                    }
+                } else if !tail.is_empty() {
+                    Self::collect_comparable_in_folded_name(tail, param_names, out);
+                }
+            }
+            return;
+        }
+        if let Some(open) = name.find('[') {
+            if open > 0 && name.ends_with(']') {
+                let head = name[..open].trim();
+                let inner = &name[open + 1..name.len() - 1];
+                if head == "set" {
+                    Self::collect_key_params_in_name(inner, param_names, out);
+                }
+                for arg in Self::split_top_level_type_args(inner) {
+                    Self::collect_comparable_in_folded_name(arg, param_names, out);
+                }
+            }
+        }
+    }
+
+    fn split_paren_prefix(s: &str) -> Option<(&str, &str)> {
+        let mut depth = 1usize;
+        for (i, ch) in s.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((&s[..i], &s[i + 1..]));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     fn split_bracket_prefix(s: &str) -> Option<(&str, &str)> {

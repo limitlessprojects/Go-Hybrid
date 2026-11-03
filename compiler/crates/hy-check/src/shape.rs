@@ -832,7 +832,12 @@ impl<'a> Checker<'a> {
                 results: results.iter().map(|r| r.ty.clone()).collect(),
                 span: *span,
             }),
-            Expr::Move { operand, .. }
+            Expr::Unary {
+                op: hy_syntax::UnOp::Neg,
+                operand,
+                ..
+            }
+            | Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
             | Expr::Paren { inner: operand, .. } => self.ty_of_expr(st, operand),
             Expr::Call { callee, args, span } => match crate::model::unwrap_parens(callee) {
@@ -1017,9 +1022,9 @@ impl<'a> Checker<'a> {
                         base
                     ));
                 }
-                if let Some(fields) = self.structs.get(base) {
+                if let Some(fields) = self.struct_fields_for_sname(name) {
                     for (fname, fty) in fields {
-                        if let Some(inner) = self.no_zero_value_reason(fty, depth + 1) {
+                        if let Some(inner) = self.no_zero_value_reason(&fty, depth + 1) {
                             return Some(format!(
                                 "struct `{}` has no zero value because field `{}` ({})",
                                 base, fname, inner

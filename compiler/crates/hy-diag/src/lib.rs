@@ -52,7 +52,10 @@ pub struct Span {
 
 impl Span {
     pub fn new(start: Pos, end: Pos) -> Self {
-        Span { start, end }
+        Span {
+            start: start.min(end),
+            end: start.max(end),
+        }
     }
 
     pub fn point(pos: Pos) -> Self {
@@ -153,7 +156,7 @@ impl Diagnostic {
         Diagnostic {
             code: entry
                 .map(|e| e.code.clone())
-                .unwrap_or_else(|| code.to_string()),
+                .unwrap_or_else(|| code.trim_matches(|c: char| c.is_whitespace() || matches!(c, '[' | ']' | ':' | '\'' | '"' | '`')).replace('_', "-").to_ascii_uppercase()),
             name: entry.map(|e| e.name.clone()).unwrap_or_default(),
             severity,
             file,
@@ -186,12 +189,13 @@ impl Diagnostic {
     }
 
     pub fn with_notes(mut self, notes: Vec<String>) -> Self {
-        self.notes = notes;
+        self.notes = notes.into_iter().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect();
         self
     }
 
     pub fn with_rule(mut self, rule: &str) -> Self {
-        self.tier0_rule = Some(rule.to_string());
+        let rule = rule.trim();
+        self.tier0_rule = (!rule.is_empty()).then(|| rule.to_string());
         self
     }
 
@@ -277,7 +281,7 @@ impl ManagedReport {
         if self.total_sites == 0 {
             0.0
         } else {
-            100.0 * self.sites_via_managed as f64 / self.total_sites as f64
+            (100.0 * self.sites_via_managed as f64 / self.total_sites as f64).min(100.0)
         }
     }
 }
@@ -350,12 +354,12 @@ impl Registry {
     /// Resolve a code by any of its accepted spellings:
     /// `HYB-E3001`, `E3001`, `3001` (case-insensitive), or machine name.
     pub fn lookup(&self, query: &str) -> Option<&RegistryEntry> {
-        let raw = query.trim();
+        let raw = query.trim_matches(|c: char| c.is_whitespace() || matches!(c, '[' | ']' | ':' | '\'' | '"' | '`')).replace('_', "-");
         let q = raw.to_ascii_uppercase();
         self.data.codes.iter().find(|c| {
             let short = c.code.strip_prefix("HYB-").unwrap_or(&c.code);
             let digits = short.strip_prefix('E').unwrap_or(short);
-            c.code == q || short == q || digits == q || c.name.eq_ignore_ascii_case(raw)
+            c.code == q || short == q || digits == q || q.strip_prefix("HYB-") == Some(digits) || c.name.eq_ignore_ascii_case(&raw)
         })
     }
 
@@ -401,8 +405,8 @@ impl Registry {
 /// an error, and a non-`E8nnn` code can never be constructed as a warning.
 /// Runs as a debug assert AND is unit-tested in release (`#[test]`).
 pub fn assert_severity_code_coherence(code: &str, severity: Severity) {
-    let canonical = Registry::global().lookup(code).map(|e| e.code.as_str()).unwrap_or(code);
-    let is_lint = canonical.contains("-E8") || canonical.to_ascii_uppercase().starts_with("E8") || canonical.starts_with("8");
+    let canonical = Registry::global().lookup(code).map(|e| e.code.clone()).unwrap_or_else(|| code.trim_matches(|c: char| c.is_whitespace() || matches!(c, '[' | ']' | ':' | '\'' | '"' | '`')).replace('_', "-").to_ascii_uppercase());
+    let is_lint = canonical.contains("-E8") || canonical.contains("-8") || canonical.starts_with("E8") || canonical.starts_with("8");
     let is_err = severity == Severity::Error;
     debug_assert!(
         !(is_lint && is_err),

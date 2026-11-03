@@ -141,9 +141,9 @@ def chat(messages) -> str:
 def diff_paths(d: str) -> list[str]:
     paths = []
     for line in d.splitlines():
-        if line.startswith("+++ "):
+        if line.startswith(("+++ ", "--- ")):
             p = line[4:].strip()
-            if p.startswith("b/"):
+            if p.startswith(("a/", "b/")):
                 p = p[2:]
             if p != "/dev/null":
                 paths.append(p)
@@ -152,7 +152,9 @@ def diff_paths(d: str) -> list[str]:
 
 def scope_ok(d: str) -> bool:
     ps = diff_paths(d)
-    return bool(ps) and all(p.startswith(SCOPE_PREFIXES) for p in ps)
+    return bool(ps) and all(
+        p.startswith(SCOPE_PREFIXES) and ".." not in p.split("/") and not p.startswith("/") for p in ps
+    )
 
 
 def render_messages(issue: dict, feedback: str, files: list[str]) -> list[dict]:
