@@ -42,6 +42,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # as execution.
 PYTHON_RE = re.compile(r"(?:.*/)?python(?:3(?:\.\d+)?)?\Z")
 PYTHON_FLAGS_RE = re.compile(r"-[bBdEIOPqRsSuvx]+\Z")
+ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*\Z", re.DOTALL)
 
 
 def shell_words(line):
@@ -64,7 +65,14 @@ def python_commands(workflow_text):
                 tokens = shell_words(tokens[0])
         except ValueError:
             continue
-        if tokens and PYTHON_RE.fullmatch(tokens[0]):
+        # POSIX permits temporary environment assignments before a command,
+        # for example `PYTHONHASHSEED=0 python3 ...`. They do not change which
+        # program is executed, so look past them when identifying Python.
+        command_index = 0
+        while (command_index < len(tokens)
+               and ENV_ASSIGNMENT_RE.fullmatch(tokens[command_index])):
+            command_index += 1
+        if command_index < len(tokens) and PYTHON_RE.fullmatch(tokens[command_index]):
             # Only the first simple command is covered. A following echo's
             # -p flag must never become another unittest discovery pattern.
             end = next((i for i, token in enumerate(tokens)
@@ -78,7 +86,7 @@ def python_commands(workflow_text):
                 for token in tokens[end:]
             ):
                 continue
-            arguments = tokens[1:end]
+            arguments = tokens[command_index + 1:end]
             while arguments:
                 option = arguments[0]
                 if PYTHON_FLAGS_RE.fullmatch(option):
