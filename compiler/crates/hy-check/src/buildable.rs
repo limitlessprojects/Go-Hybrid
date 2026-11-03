@@ -7064,7 +7064,12 @@ impl<'a> Collector<'a> {
                         }
                     }
                     (OpKind::Slice(dst_elem), OpKind::Str) => {
-                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                        // `OpKind::Int` merges every integer width, so the declared
+                        // element type name is what tells `[]byte` from `[]int`.
+                        let wide = self
+                            .slice_element_type_name(dst_arg)
+                            .is_some_and(|t| is_wide_int_type_name(&t));
+                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) || wide {
                             self.emit_e1002(
                                 span,
                                 format!(
@@ -7700,4 +7705,13 @@ fn untyped_slice_head_ty(first: &Expr) -> Option<TypeExpr> {
         Expr::StructLit { ty: Some(t), .. } => Some(t.clone()),
         _ => None,
     }
+}
+
+/// Integer element types other than `byte`/`uint8`, by their Go or Hybrid names.
+fn is_wide_int_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "int" | "int8" | "int16" | "int32" | "int64" | "uint" | "uint16" | "uint32" | "uint64"
+            | "uintptr" | "rune" | "i8" | "i16" | "i32" | "i64" | "u16" | "u32" | "u64"
+    )
 }
