@@ -2,7 +2,7 @@
 
 use hy_syntax::*;
 
-use super::{to_go_name, BindingKind, EmitError, Emitter};
+use super::{special_member, to_go_name, BindingKind, EmitError, Emitter, MemberSpecial};
 
 use super::expr::ATOM;
 use super::shapes::lookup_conversion;
@@ -1758,6 +1758,13 @@ impl Emitter {
             return super::to_go_name(name);
         }
         let root = base.root();
+        if let Some(special) = special_member(root, name) {
+            match special {
+                MemberSpecial::Var(text) => return text.strip_prefix(&format!("{root}.")).unwrap_or(text).to_string(),
+                MemberSpecial::Renamed(go_name) => return go_name.to_string(),
+                _ => {}
+            }
+        }
         if self.is_unshadowed_pkg_root(root)
             || matches!(
                 self.bindings.get(root),
@@ -1775,6 +1782,13 @@ impl Emitter {
         // `(x).f` resolves as `x.f`: a redundant receiver paren must not hide
         // a package root or a foreign binding from the spelling decision.
         if let Expr::Ident { name: root, .. } = Self::peel_parens(base) {
+            if let Some(special) = special_member(root, name) {
+                match special {
+                    MemberSpecial::Var(text) => return text.strip_prefix(&format!("{root}.")).unwrap_or(text).to_string(),
+                    MemberSpecial::Renamed(go_name) => return go_name.to_string(),
+                    _ => {}
+                }
+            }
             if self.is_unshadowed_pkg_root(root) {
                 return to_go_name(name);
             }

@@ -349,8 +349,11 @@ const GO_BUILTIN_TYPES: &[&str] = &[
 fn go_initialism(seg: &str) -> Option<&'static str> {
     Some(match seg {
         "acl" => "ACL",
+        "ansic" => "ANSIC",
         "api" => "API",
         "ascii" => "ASCII",
+        "cidr" => "CIDR",
+        "cname" => "CNAME",
         "cpu" => "CPU",
         "crlf" => "CRLF",
         "css" => "CSS",
@@ -359,9 +362,13 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "guid" => "GUID",
         "html" => "HTML",
         "http" => "HTTP",
+        "http2" => "HTTP2",
         "https" => "HTTPS",
         "id" => "ID",
         "ip" => "IP",
+        "mac" => "MAC",
+        "mx" => "MX",
+        "ns" => "NS",
         "ipv4" => "IPv4",
         "ipv6" => "IPv6",
         "json" => "JSON",
@@ -388,15 +395,18 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "sla" => "SLA",
         "smtp" => "SMTP",
         "sql" => "SQL",
+        "srv" => "SRV",
         "ssh" => "SSH",
         "tcp" => "TCP",
         "tls" => "TLS",
+        "txt" => "TXT",
         "ttl" => "TTL",
         "udp" => "UDP",
         "ui" => "UI",
         "uid" => "UID",
         "uri" => "URI",
         "url" => "URL",
+        "utc" => "UTC",
         "utf8" => "UTF8",
         "utf16" => "UTF16",
         "utf32" => "UTF32",
@@ -488,6 +498,8 @@ pub(crate) fn is_package_root(name: &str) -> bool {
             | "sha3"
             | "serde_json"
             | "regex"
+            | "net"
+            | "url"
     )
 }
 
@@ -513,6 +525,21 @@ pub(crate) fn special_member(pkg: &str, name: &str) -> Option<MemberSpecial> {
         ("hex", "encode") => Some(MemberSpecial::Renamed("EncodeToString")),
         // errors.wrap(err, "ctx") → fmt.Errorf("%s: %w", "ctx", err) (E2 wrap-on-demand)
         ("errors", "wrap") => Some(MemberSpecial::ErrorsWrap),
+        // #3538: net/url package roots, curated stdlib initialisms and os.O_* flags
+        ("os", "o_rdonly") => Some(MemberSpecial::Var("os.O_RDONLY")),
+        ("os", "o_wronly") => Some(MemberSpecial::Var("os.O_WRONLY")),
+        ("os", "o_rdwr") => Some(MemberSpecial::Var("os.O_RDWR")),
+        ("os", "o_append") => Some(MemberSpecial::Var("os.O_APPEND")),
+        ("os", "o_create") => Some(MemberSpecial::Var("os.O_CREATE")),
+        ("os", "o_excl") => Some(MemberSpecial::Var("os.O_EXCL")),
+        ("os", "o_sync") => Some(MemberSpecial::Var("os.O_SYNC")),
+        ("os", "o_trunc") => Some(MemberSpecial::Var("os.O_TRUNC")),
+        ("os", "dir_fs") => Some(MemberSpecial::Renamed("DirFS")),
+        ("os", "copy_fs") => Some(MemberSpecial::Renamed("CopyFS")),
+        ("http", "file_server_fs") => Some(MemberSpecial::Renamed("FileServerFS")),
+        ("http", "serve_file_fs") => Some(MemberSpecial::Renamed("ServeFileFS")),
+        ("net", "ipv4len") => Some(MemberSpecial::Var("net.IPv4len")),
+        ("net", "ipv6len") => Some(MemberSpecial::Var("net.IPv6len")),
         _ => None,
     }
 }
