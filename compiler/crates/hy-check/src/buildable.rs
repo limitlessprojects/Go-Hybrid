@@ -694,6 +694,7 @@ struct Collector<'a> {
     /// binding mutate the per-iteration copy and the collection never sees
     /// them — hy-check rejects those writes instead (#1480).
     copy_var_scopes: Vec<HashSet<String>>,
+    fn_var_scalars: Vec<HashMap<String, Option<&'static str>>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     file_untyped_consts: HashSet<String>,
@@ -765,6 +766,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             type_name_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
+            fn_var_scalars: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
@@ -837,6 +839,7 @@ impl<'a> Collector<'a> {
         self.container_elem_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
+        self.fn_var_scalars.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -847,6 +850,7 @@ impl<'a> Collector<'a> {
         self.container_elem_scopes.pop();
         self.set_elem_scopes.pop();
         self.copy_var_scopes.pop();
+        self.fn_var_scalars.pop();
     }
 
     fn bind_type_name(&mut self, name: &str, type_name: String) {
@@ -1123,6 +1127,164 @@ impl<'a> Collector<'a> {
         None
     }
 
+    fn bind_fn_scalar(&mut self, name: &str, s: Option<&'static str>) {
+        if let Some(top) = self.fn_var_scalars.last_mut() {
+            top.insert(name.to_string(), s);
+        }
+    }
+
+    fn lookup_fn_scalar(&self, name: &str) -> Option<&'static str> {
+        for layer in self.fn_var_scalars.iter().rev() {
+            if let Some(res) = layer.get(name) {
+                return *res;
+            }
+        }
+        None
+    }
+
+    fn resolve_type_spelling(&self, spelling: &str) -> String {
+        let mut curr = spelling.trim().to_string();
+        for _ in 0..16 {
+            let base = Checker::base_named_type_str(&curr);
+            if let Some(target) = self.ck.type_aliases.get(base) {
+                curr = target.render();
+            } else {
+                break;
+            }
+        }
+        curr
+    }
+
+    fn resolve_deep_type_spelling(&self, s: &str) -> String {
+        let s = s.trim();
+        let resolved = self.resolve_type_spelling(s);
+        if let Some(rest) = resolved.strip_prefix("[]") {
+            let inner = self.resolve_deep_type_spelling(rest);
+            return format!("[]{}", inner);
+        }
+        if resolved.starts_with('[') {
+            if let Some(close) = resolved.find(']') {
+                let head = &resolved[1..close];
+                if !head.is_empty() && head.chars().all(|c| c.is_ascii_digit()) {
+                    let rest = resolved[close + 1..].trim();
+                    let inner = self.resolve_deep_type_spelling(rest);
+                    return format!("[{}]{}", head, inner);
+                }
+            }
+        }
+        if resolved.starts_with("map[") {
+            if let Some(close) = resolved.find(']') {
+                let key = &resolved[4..close];
+                let val = resolved[close + 1..].trim();
+                let key_res = self.resolve_deep_type_spelling(key);
+                let val_res = self.resolve_deep_type_spelling(val);
+                return format!("map[{}]{}", key_res, val_res);
+            }
+        }
+        if let Some(rest) = resolved.strip_prefix('*') {
+            let inner = self.resolve_deep_type_spelling(rest);
+            return format!("*{}", inner);
+        }
+        resolved
+    }
+
+    fn type_names_conflict(&self, want_raw: &str, got_raw: &str) -> bool {
+        let w = self.resolve_deep_type_spelling(want_raw);
+        let g = self.resolve_deep_type_spelling(got_raw);
+        if w == g {
+            return false;
+        }
+        if w.starts_with("[]") || g.starts_with("[]") {
+            if let (Some(w_inner), Some(g_inner)) = (w.strip_prefix("[]"), g.strip_prefix("[]")) {
+                return self.type_names_conflict(w_inner, g_inner);
+            }
+            return true;
+        }
+        if is_sized_array_spelling(&w) || is_sized_array_spelling(&g) {
+            if is_sized_array_spelling(&w) && is_sized_array_spelling(&g) {
+                let close_w = w.find(']').unwrap();
+                let close_g = g.find(']').unwrap();
+                let dim_w = &w[1..close_w];
+                let dim_g = &g[1..close_g];
+                if dim_w != dim_g {
+                    return true;
+                }
+                let elem_w = w[close_w + 1..].trim();
+                let elem_g = g[close_g + 1..].trim();
+                return self.type_names_conflict(elem_w, elem_g);
+            }
+            return true;
+        }
+        if w.starts_with("map[") || g.starts_with("map[") {
+            if w.starts_with("map[") && g.starts_with("map[") {
+                if let (Some(close_w), Some(close_g)) = (w.find(']'), g.find(']')) {
+                    let key_w = &w[4..close_w];
+                    let key_g = &g[4..close_g];
+                    let val_w = w[close_w + 1..].trim();
+                    let val_g = g[close_g + 1..].trim();
+                    return self.type_names_conflict(key_w, key_g) || self.type_names_conflict(val_w, val_g);
+                }
+            }
+            return true;
+        }
+        if w.starts_with('*') || g.starts_with('*') {
+            if let (Some(w_inner), Some(g_inner)) = (w.strip_prefix('*'), g.strip_prefix('*')) {
+                return self.type_names_conflict(w_inner, g_inner);
+            }
+            return true;
+        }
+        match (canonical_numeric_name(&w), canonical_numeric_name(&g)) {
+            (Some(w_num), Some(g_num)) => w_num != g_num,
+            (Some(_), None) | (None, Some(_)) => true,
+            _ => w != g,
+        }
+    }
+
+    fn iterate_var_type_names(&self, expr: &Expr, n_vars: usize) -> Vec<Option<String>> {
+        let Some(raw_ty) = self.typed_value_type_name(expr) else {
+            return vec![None; n_vars];
+        };
+        let resolved = self.resolve_deep_type_spelling(&raw_ty);
+        if let Some(elem) = resolved.strip_prefix("[]") {
+            if n_vars >= 2 {
+                vec![Some("int".to_string()), Some(elem.to_string())]
+            } else {
+                vec![Some(elem.to_string())]
+            }
+        } else if resolved.starts_with('[') {
+            if let Some(close) = resolved.find(']') {
+                let elem = resolved[close + 1..].trim();
+                if n_vars >= 2 {
+                    vec![Some("int".to_string()), Some(elem.to_string())]
+                } else {
+                    vec![Some(elem.to_string())]
+                }
+            } else {
+                vec![None; n_vars]
+            }
+        } else if resolved.starts_with("map[") {
+            if let Some(close) = resolved.find(']') {
+                let key = resolved[4..close].trim();
+                let val = resolved[close + 1..].trim();
+                if n_vars >= 2 {
+                    vec![Some(key.to_string()), Some(val.to_string())]
+                } else {
+                    vec![Some(key.to_string())]
+                }
+            } else {
+                vec![None; n_vars]
+            }
+        } else if let Some(elem) = resolved
+            .strip_prefix("chan ")
+            .or_else(|| resolved.strip_prefix("<-chan "))
+            .or_else(|| resolved.strip_prefix("chan<- "))
+        {
+            vec![Some(elem.trim().to_string()); n_vars.max(1)]
+        } else {
+            vec![None; n_vars]
+        }
+    }
+
     /// #2770 — the canonical numeric spelling of a simple local target, for the
     /// assignment/argument scalar comparison. Non-ident places fail open.
     fn place_scalar(&self, p: &Place) -> Option<&'static str> {
@@ -1158,6 +1320,26 @@ impl<'a> Collector<'a> {
         match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
+            Expr::MapLit { key, value, .. } => {
+                Some(format!("map[{}]{}", key.render(), value.render()))
+            }
+            Expr::Receive { chan, .. } => {
+                let tn = self.typed_value_type_name(chan)?;
+                let resolved = self.resolve_deep_type_spelling(&tn);
+                let elem = resolved
+                    .strip_prefix("chan ")
+                    .or_else(|| resolved.strip_prefix("<-chan "))
+                    .or_else(|| resolved.strip_prefix("chan<- "))?;
+                Some(elem.trim().to_string())
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        return self.make_type_name(args);
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -1373,38 +1555,63 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-            return None;
-        };
-        if self
-            .scopes
-            .iter()
-            .any(|layer| layer.contains_key(name.as_str()))
-        {
-            return None;
-        }
-        if let Some(fd) = self.ck.fns.get(name.as_str()) {
-            if fd.receiver.is_some() || !fd.type_params.is_empty() {
-                return None;
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                if let Some(s) = self.lookup_fn_scalar(name) {
+                    return Some(vec![Some(s)]);
+                }
+                if self
+                    .scopes
+                    .iter()
+                    .any(|layer| layer.contains_key(name.as_str()))
+                {
+                    return None;
+                }
+                if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                    if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                        return None;
+                    }
+                    return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                }
+                if name == "min" || name == "max" {
+                    let res_scalar = args
+                        .iter()
+                        .find_map(|a| self.typed_value_scalar(&a.value));
+                    return Some(vec![res_scalar]);
+                }
+                if args.len() == 1
+                    && !self.ck.structs.contains_key(name.as_str())
+                    && !self.ck.enums.contains_key(name.as_str())
+                    && !self.ck.type_aliases.contains_key(name.as_str())
+                {
+                    if let Some(s) = canonical_numeric_name(name) {
+                        return Some(vec![Some(s)]);
+                    }
+                }
+                None
             }
-            return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
-        }
-        if name == "min" || name == "max" {
-            let res_scalar = args
-                .iter()
-                .find_map(|a| self.typed_value_scalar(&a.value));
-            return Some(vec![res_scalar]);
-        }
-        if args.len() == 1
-            && !self.ck.structs.contains_key(name.as_str())
-            && !self.ck.enums.contains_key(name.as_str())
-            && !self.ck.type_aliases.contains_key(name.as_str())
-        {
-            if let Some(s) = canonical_numeric_name(name) {
-                return Some(vec![Some(s)]);
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let head = Checker::base_named_type_str(name);
+                let struct_name = match &bk {
+                    OpKind::Struct(Some(sn)) => Some(sn.as_str()),
+                    OpKind::Pointer(inner) => match &**inner {
+                        OpKind::Struct(Some(sn)) => Some(sn.as_str()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(sn) = struct_name {
+                    let base_sn = Checker::base_named_type_str(sn);
+                    if let Some(m) = self.ck.method_decls.get(&(base_sn.to_string(), head.to_string())) {
+                        let rs: Vec<Option<&'static str>> = m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+                        return Some(rs);
+                    }
+                }
+                None
             }
+            _ => None,
         }
-        None
     }
 
     /// #1031 — the exact numeric type of a value that is provably TYPED.
@@ -1436,6 +1643,13 @@ impl<'a> Collector<'a> {
                 operand,
                 ..
             } => self.typed_value_scalar(operand),
+            Expr::Receive { .. } => {
+                if let Some(tn) = self.typed_value_type_name(e) {
+                    canonical_numeric_name(&tn)
+                } else {
+                    None
+                }
+            }
             Expr::Call { callee, args, .. } => match self.call_result_scalars(callee, args) {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
@@ -1973,9 +2187,13 @@ impl<'a> Collector<'a> {
                     (Some(w), Some(v)) if w != v
                 );
                 // #2771: `var c [4]int = a` where `a` is a `[3]int`.
+                let type_conflict = self.typed_value_type_name(&l.values[0])
+                    .is_some_and(|vtn| self.type_names_conflict(&t.render(), &vtn));
+
                 if kinds_conflict(&want, &vk)
                     || int_float_conflict
                     || scalar_mismatch
+                    || type_conflict
                     || self.sized_array_names_differ(
                         Some(t.render().as_str()),
                         self.typed_value_type_name(&l.values[0]).as_deref(),
@@ -2005,9 +2223,12 @@ impl<'a> Collector<'a> {
                         (Some(w), Some(g)) if w != g
                     );
                     // #2771: sized-array length must match the declared type.
+                    let type_conflict = self.typed_value_type_name(v)
+                        .is_some_and(|vtn| self.type_names_conflict(&t.render(), &vtn));
                     if kinds_conflict(&want, &vk)
                         || int_float_conflict
                         || scalar_mismatch
+                        || type_conflict
                         || self.sized_array_names_differ(
                             Some(t.render().as_str()),
                             self.typed_value_type_name(v).as_deref(),
@@ -2049,6 +2270,16 @@ impl<'a> Collector<'a> {
                 _ => None,
             })
             .collect();
+        if l.values.len() == l.names.len() {
+            for (name, val) in l.names.iter().zip(&l.values) {
+                if let Expr::FnLit { results, .. } = unwrap_parens(val) {
+                    if results.len() == 1 {
+                        let s = self.scalar_of_ty(&results[0].ty);
+                        self.bind_fn_scalar(name, s);
+                    }
+                }
+            }
+        }
         if let Some(t) = &l.ty {
             let tname = t.render();
             for name in &l.names {
@@ -2056,7 +2287,9 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                if let Some(tn) = self.typed_value_type_name(val) {
+                    self.bind_type_name(name, tn);
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
                 }
             }
@@ -2257,6 +2490,7 @@ impl<'a> Collector<'a> {
                         self.check_single_value_position(expr, "a for-range expression", false);
                         self.expr(expr);
                         let iter_kinds = self.iterate_var_kinds(expr, vars.len());
+                        let iter_type_names = self.iterate_var_type_names(expr, vars.len());
                         // #3065 / SPEC LX13: a string ranges over runes, so
                         // the element binding (the last var) is exactly
                         // `rune` (= int32), not an untyped int; the width
@@ -2282,7 +2516,12 @@ impl<'a> Collector<'a> {
                                 }
                             }
                             self.bind_kind(v, k);
-                            if str_elem == Some(vi) {
+                            if let Some(Some(tname)) = iter_type_names.get(vi) {
+                                self.bind_type_name(v, tname.clone());
+                                if let Some(s) = canonical_numeric_name(tname) {
+                                    self.set_scalar(v, Some(s));
+                                }
+                            } else if str_elem == Some(vi) {
                                 self.set_scalar(v, Some("int32"));
                             }
                         }
@@ -3866,6 +4105,22 @@ impl<'a> Collector<'a> {
                 }
                 None
             }
+            _ => None,
+        }
+    }
+
+    fn make_type_name(&self, args: &[CallArg]) -> Option<String> {
+        let first = args.first()?;
+        let bare = unwrap_parens(&first.value);
+        match bare {
+            Expr::StructLit { ty: Some(t), .. } => Some(t.render()),
+            Expr::SliceLit { elem: Some(t), .. } if bare.as_array_lit().is_none() => {
+                Some(format!("[]{}", t.render()))
+            }
+            Expr::MapLit { key, value, .. } => {
+                Some(format!("map[{}]{}", key.render(), value.render()))
+            }
+            Expr::Ident { name, .. } => Some(name.clone()),
             _ => None,
         }
     }
