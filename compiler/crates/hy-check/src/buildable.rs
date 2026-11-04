@@ -184,6 +184,114 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     }
 }
 
+/// The composite container family of a rendered `TypeExpr` spelling, with the
+/// parts split out (#3412). `None` = not a composite container (a bare name —
+/// alias/type-parameter/named type — a `fn(...)`, an `option[...]`, …), where
+/// the string model has no assignability claim and must fail open.
+enum CompFamily<'a> {
+    Chan {
+        /// Direction is not compared here: direction mismatches are the
+        /// E3012 coercion layer's single-diagnostic territory (#3412).
+        _dir: &'a str,
+        elem: &'a str,
+    },
+    Slice {
+        elem: &'a str,
+    },
+    Array {
+        len: Option<&'a str>,
+        elem: &'a str,
+    },
+    Map {
+        key: &'a str,
+        value: &'a str,
+    },
+    Pointer {
+        base: &'a str,
+    },
+}
+
+/// Split a rendered composite spelling at its first balanced `]` from `from`.
+fn split_balanced_bracket(s: &str, from: usize) -> Option<(usize, usize)> {
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut start = None;
+    for (i, b) in bytes[from..].iter().enumerate() {
+        let i = from + i;
+        match b {
+            b'[' => {
+                if start.is_none() {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((start?, i));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+impl<'a> CompFamily<'a> {
+    /// Classify a rendered type spelling. Spellings come from
+    /// `TypeExpr::render` (both sides of every comparison), so the forms
+    /// below are exhaustive for composite containers.
+    fn split(s: &'a str) -> Option<CompFamily<'a>> {
+        if let Some(rest) = s.strip_prefix("<-chan ") {
+            return Some(CompFamily::Chan {
+                _dir: "recv",
+                elem: rest,
+            });
+        }
+        if let Some(rest) = s.strip_prefix("chan<- ") {
+            return Some(CompFamily::Chan {
+                _dir: "send",
+                elem: rest,
+            });
+        }
+        if let Some(rest) = s.strip_prefix("chan ") {
+            return Some(CompFamily::Chan {
+                _dir: "both",
+                elem: rest,
+            });
+        }
+        if let Some(rest) = s.strip_prefix("[]") {
+            return Some(CompFamily::Slice { elem: rest });
+        }
+        if s.starts_with('[') {
+            let (open, close) = split_balanced_bracket(s, 0)?;
+            let len_txt = &s[open + 1..close];
+            let len = if !len_txt.is_empty() && len_txt.bytes().all(|b| b.is_ascii_digit()) {
+                Some(len_txt)
+            } else {
+                // An expression length (`[N]T`) has no textual truth here —
+                // fail open on the length, the element still compares.
+                None
+            };
+            return Some(CompFamily::Array {
+                len,
+                elem: &s[close + 1..],
+            });
+        }
+        if let Some(_rest) = s.strip_prefix("map[") {
+            let (open, close) = split_balanced_bracket(s, 3)?;
+            return Some(CompFamily::Map {
+                key: &s[open + 1..close],
+                value: &s[close + 1..],
+            });
+        }
+        if let Some(base) = s.strip_prefix('*') {
+            return Some(CompFamily::Pointer { base });
+        }
+        None
+    }
+}
+
 /// #1031 — the exact Go spelling of a predeclared numeric type, after the
 /// emitter's SPEC→Go primitive mapping (`shapes::go_primitive_name`) and Go's
 /// own identities (`byte` = `uint8`, `rune` = `int32`).
@@ -1046,6 +1154,99 @@ impl<'a> Collector<'a> {
     fn sized_array_names_differ(&self, a: Option<&str>, b: Option<&str>) -> bool {
         matches!((a, b), (Some(x), Some(y))
             if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
+    }
+
+    /// #3412 — deep composite-element conflict: the kind model collapses
+    /// container inners (`OpKind::Chan(OpKind::Int)` fits `chan int64` as
+    /// well as `chan int32`), so a typed composite element whose INNER type
+    /// differs passed the `ik == expected` arm and failed `go build`
+    /// (`cannot use bad (variable of type chan int64) as chan int32 value in
+    /// slice literal`). Compare the resolved spellings part by part.
+    ///
+    /// Fail-open everywhere the string model cannot see Go assignability: a
+    /// bare-word (alias / named / type-parameter) spelling on either side, a
+    /// family mismatch (the kind layer already owns those), any type
+    /// parameter appearing in either spelling, and non-numeric array
+    /// lengths. Only a provable textual part mismatch conflicts.
+    fn deep_composite_conflict(&self, want: &TypeExpr, got: Option<&str>) -> Option<&'static str> {
+        let got = got?;
+        if got.is_empty() {
+            return None;
+        }
+        let want_resolved = self.ck.resolve_type_alias(want);
+        let want_s = want_resolved.render();
+        if want_s == got {
+            return None;
+        }
+        if self
+            .fn_type_params
+            .iter()
+            .any(|p| want_s.contains(p.as_str()) || got.contains(p.as_str()))
+        {
+            return None;
+        }
+        match (CompFamily::split(&want_s), CompFamily::split(got)) {
+            (
+                Some(CompFamily::Chan {
+                    elem: we,
+                    ..
+                }),
+                Some(CompFamily::Chan {
+                    elem: ge,
+                    ..
+                }),
+            ) => {
+                // Direction mismatches here are the E3012 coercion layer's
+                // territory (its slice/map-literal arms already reject
+                // them); a second E1002 on the same span is a double
+                // report. Only an ELEMENT type difference is ours.
+                (we != ge).then_some("channel element types differ")
+            }
+            (Some(CompFamily::Slice { elem: we }), Some(CompFamily::Slice { elem: ge })) => {
+                (we != ge).then_some("slice element types differ")
+            }
+            (
+                Some(CompFamily::Array {
+                    len: wl,
+                    elem: we,
+                }),
+                Some(CompFamily::Array {
+                    len: gl,
+                    elem: ge,
+                }),
+            ) => {
+                if let (Some(a), Some(b)) = (wl, gl) {
+                    if a != b {
+                        return Some("array lengths differ");
+                    }
+                }
+                (we != ge).then_some("array element types differ")
+            }
+            (
+                Some(CompFamily::Map {
+                    key: wk,
+                    value: wv,
+                }),
+                Some(CompFamily::Map {
+                    key: gk,
+                    value: gv,
+                }),
+            ) => {
+                if wk != gk {
+                    Some("map key types differ")
+                } else if wv != gv {
+                    Some("map value types differ")
+                } else {
+                    None
+                }
+            }
+            (Some(CompFamily::Pointer { base: wb }), Some(CompFamily::Pointer { base: gb })) => {
+                (wb != gb).then_some("pointer base types differ")
+            }
+            // Family mismatch or a non-composite side: the kind layer owns
+            // the former and the latter has no string-level claim.
+            _ => None,
+        }
     }
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
@@ -3533,8 +3734,10 @@ impl<'a> Collector<'a> {
                         return Some(vec![first]);
                     }
                     "make" => return Some(vec![self.make_kind(args)]),
-                    "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
-                    "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
+                    "new" => return Some(vec![self.new_kind(args)]),
+                    "delete" | "close" | "print" | "println" | "panic" | "clear" => {
+                        return Some(Vec::new());
+                    }
                     "recover" => return Some(vec![OpKind::Interface]),
                     "min" | "max" => {
                         let res_kind = args
@@ -3627,6 +3830,55 @@ impl<'a> Collector<'a> {
             Expr::Ident { name, .. } => self.kind_of_named(name, 0),
             _ => OpKind::Unknown,
         }
+    }
+
+    fn new_kind(&self, args: &[CallArg]) -> OpKind {
+        let Some(first) = args.first() else {
+            return OpKind::Pointer(Box::new(OpKind::Unknown));
+        };
+        let bare = unwrap_parens(&first.value);
+        let inner = match bare {
+            Expr::Ident { name, .. } => {
+                if self.lookup_kind(name).is_some() || self.file_consts.contains_key(name) {
+                    OpKind::Unknown
+                } else {
+                    let k = self.kind_of_named(name, 0);
+                    if k != OpKind::Unknown {
+                        k
+                    } else {
+                        let head = Checker::base_named_type_str(name);
+                        if self.ck.structs.contains_key(name.as_str())
+                            || self.ck.structs.contains_key(head)
+                        {
+                            OpKind::Struct(Some(head.to_string()))
+                        } else {
+                            OpKind::Unknown
+                        }
+                    }
+                }
+            }
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                ..
+            } if items.is_empty() => OpKind::Slice(Box::new(self.kind_of_ty(t, 0))),
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } if entries.is_empty() => OpKind::Map(
+                Box::new(self.kind_of_ty(key, 0)),
+                Box::new(self.kind_of_ty(value, 0)),
+            ),
+            Expr::StructLit {
+                ty: Some(t),
+                fields,
+                ..
+            } if fields.is_empty() => self.kind_of_ty(t, 0),
+            _ => OpKind::Unknown,
+        };
+        OpKind::Pointer(Box::new(inner))
     }
 
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
@@ -6367,10 +6619,20 @@ impl<'a> Collector<'a> {
             // or slice literal`).
             let scalar_mismatch = self
                 .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            // #3412: the kind model also collapses container inners
+            // (`chan int64` and `chan int32` are both `Chan(Int)`), so a
+            // typed element whose composite inner differs passed the equal
+            // kind arm and failed `go build`. Deep-compare the spellings;
+            // aliases and type parameters fail open.
+            let deep_conflict = if ik == expected && expected != OpKind::Interface {
+                self.deep_composite_conflict(&resolved_ty, self.typed_value_type_name(item).as_deref())
+            } else {
+                None
+            };
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch {
+            if ik == expected && !scalar_mismatch && deep_conflict.is_none() {
                 continue;
             }
             let is_untyped_int_to_float = expected == OpKind::Float
@@ -6378,17 +6640,27 @@ impl<'a> Collector<'a> {
                 && self.is_untyped_int_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
-                || scalar_mismatch;
+                || scalar_mismatch
+                || deep_conflict.is_some();
             if !conflict {
                 continue;
             }
+            let got_ty = if deep_conflict.is_some() {
+                self.typed_value_type_name(item).unwrap_or_else(|| ik.label().to_string())
+            } else {
+                ik.label().to_string()
+            };
+            let detail = deep_conflict
+                .map(|r| format!(" — {}", r))
+                .unwrap_or_default();
             self.emit_e1002(
                 item.span(),
                 format!(
-                    "cannot use `{}` (type `{}`) as `{}` value in array literal (HYB-E1002)",
+                    "cannot use `{}` (type `{}`) as `{}` value in array literal{} (HYB-E1002)",
                     item.render(),
-                    ik.label(),
-                    elem_ty.render()
+                    got_ty,
+                    elem_ty.render(),
+                    detail
                 ),
                 "every element of an array composite literal `[N]T{...}` / `[...]T{...}` must be assignable to the element type `T`",
             );
@@ -6449,13 +6721,22 @@ impl<'a> Collector<'a> {
                 continue;
             }
             let ik = self.kind_of_expr(item);
-            // #2788: same width-collapse escape as the array arm above.
+            // #2788: a typed element of another concrete numeric width.
             let scalar_mismatch = self
                 .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            // #3412: the kind model collapses container inners, so a typed
+            // element whose composite inner differs passed the equal kind
+            // arm. Deep-compare the spellings; aliases and type parameters
+            // fail open.
+            let deep_conflict = if ik == expected && expected != OpKind::Interface {
+                self.deep_composite_conflict(&resolved_ty, self.typed_value_type_name(item).as_deref())
+            } else {
+                None
+            };
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch {
+            if ik == expected && !scalar_mismatch && deep_conflict.is_none() {
                 continue;
             }
             if expected == OpKind::Float
@@ -6469,17 +6750,27 @@ impl<'a> Collector<'a> {
                 && self.is_untyped_int_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
-                || scalar_mismatch;
+                || scalar_mismatch
+                || deep_conflict.is_some();
             if !conflict {
                 continue;
             }
+            let got_ty = if deep_conflict.is_some() {
+                self.typed_value_type_name(item).unwrap_or_else(|| ik.label().to_string())
+            } else {
+                ik.label().to_string()
+            };
+            let detail = deep_conflict
+                .map(|r| format!(" — {}", r))
+                .unwrap_or_default();
             self.emit_e1002(
                 item.span(),
                 format!(
-                    "cannot use `{}` (type `{}`) as `{}` value in slice literal (HYB-E1002)",
+                    "cannot use `{}` (type `{}`) as `{}` value in slice literal{} (HYB-E1002)",
                     item.render(),
-                    ik.label(),
-                    elem_ty.render()
+                    got_ty,
+                    elem_ty.render(),
+                    detail
                 ),
                 "every element of a slice composite literal `[]T{...}` must be assignable to the element type `T`",
             );
@@ -6623,20 +6914,38 @@ impl<'a> Collector<'a> {
                 // #2788: a typed key of another concrete numeric width.
                 let scalar_mismatch = self
                     .scalar_names_conflict(self.scalar_of_ty(&resolved_key), self.typed_value_scalar(k));
+                // #3412: the kind model collapses container inners, so a
+                // typed key whose composite inner differs passed the equal
+                // kind arm (`map[chan int64]string{...}` into `map[chan int32]string`).
+                let deep_conflict = if kk == exp_key && exp_key != OpKind::Interface {
+                self.deep_composite_conflict(&resolved_key, self.typed_value_type_name(k).as_deref())
+            } else {
+                None
+            };
                 let is_untyped_int_to_float = exp_key == OpKind::Float
                     && kk == OpKind::Int
                     && self.is_untyped_int_const(k);
                 let conflict = (exp_key == OpKind::Float && kk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_key, &kk)
-                    || scalar_mismatch;
+                    || scalar_mismatch
+                    || deep_conflict.is_some();
                 if kk != OpKind::Unknown && conflict {
+                    let got_ty = if deep_conflict.is_some() {
+                        self.typed_value_type_name(k).unwrap_or_else(|| kk.label().to_string())
+                    } else {
+                        kk.label().to_string()
+                    };
+                    let detail = deep_conflict
+                        .map(|r| format!(" — {}", r))
+                        .unwrap_or_default();
                     self.emit_e1002(
                         k.span(),
                         format!(
-                            "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
+                            "cannot use `{}` (type `{}`) as `{}` value in map key{} (HYB-E1002)",
                             k.render(),
-                            kk.label(),
-                            key_ty.render()
+                            got_ty,
+                            key_ty.render(),
+                            detail
                         ),
                         "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
                     );
@@ -6680,20 +6989,38 @@ impl<'a> Collector<'a> {
                 // #2788: a typed value of another concrete numeric width.
                 let scalar_mismatch = self
                     .scalar_names_conflict(self.scalar_of_ty(&resolved_val), self.typed_value_scalar(v));
+                // #3412: the kind model collapses container inners, so a
+                // typed value whose composite inner differs passed the equal
+                // kind arm (`map[string]chan int64` into `map[string]chan int32`).
+                let deep_conflict = if vk == exp_val && exp_val != OpKind::Interface {
+                self.deep_composite_conflict(&resolved_val, self.typed_value_type_name(v).as_deref())
+            } else {
+                None
+            };
                 let is_untyped_int_to_float = exp_val == OpKind::Float
                     && vk == OpKind::Int
                     && self.is_untyped_int_const(v);
                 let conflict = (exp_val == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_val, &vk)
-                    || scalar_mismatch;
+                    || scalar_mismatch
+                    || deep_conflict.is_some();
                 if vk != OpKind::Unknown && conflict {
+                    let got_ty = if deep_conflict.is_some() {
+                        self.typed_value_type_name(v).unwrap_or_else(|| vk.label().to_string())
+                    } else {
+                        vk.label().to_string()
+                    };
+                    let detail = deep_conflict
+                        .map(|r| format!(" — {}", r))
+                        .unwrap_or_default();
                     self.emit_e1002(
                         v.span(),
                         format!(
-                            "cannot use `{}` (type `{}`) as `{}` value in map value (HYB-E1002)",
+                            "cannot use `{}` (type `{}`) as `{}` value in map value{} (HYB-E1002)",
                             v.render(),
-                            vk.label(),
-                            val_ty.render()
+                            got_ty,
+                            val_ty.render(),
+                            detail
                         ),
                         "every value of a map composite literal `map[K]V{...}` must be assignable to the value type `V`",
                     );
@@ -7586,6 +7913,14 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
+
+            "new" => {
+                if args.len() != 1 {
+                    return; // arity handled by builtins.rs
+                }
+                let op = &args[0].value;
+                self.check_new_type_operand(op, span);
+            }
             "min" | "max" => {
                 let mut first_arg: Option<(&Expr, OpKind)> = None;
                 let mut first_typed_scalar: Option<(&Expr, &'static str)> = None;
@@ -7653,7 +7988,91 @@ impl<'a> Collector<'a> {
                     }
                 }
             }
+
             _ => {}
+        }
+    }
+
+    fn check_new_type_operand(&mut self, op: &Expr, span: Span) {
+        let bare = unwrap_parens(op);
+        if matches!(bare, Expr::Lit { .. })
+            || matches!(
+                bare,
+                Expr::Unary {
+                    op: UnOp::Neg,
+                    operand,
+                    ..
+                } if matches!(unwrap_parens(operand), Expr::Lit { .. })
+            )
+        {
+            return; // already handled by builtins.rs
+        }
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(k) = self.lookup_kind(name) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot use `{name}` (variable of type `{}`) as type in argument to `new` (HYB-E2005)",
+                            k.label()
+                        ),
+                        "`new` takes a type name — not a variable",
+                    );
+                } else if self.file_consts.contains_key(name) {
+                    self.emit_e2005(
+                        span,
+                        format!("cannot use `{name}` (constant) as type in argument to `new` (HYB-E2005)"),
+                        "`new` takes a type name — not a constant",
+                    );
+                } else if self.ck.fns.contains_key(name) {
+                    self.emit_e2005(
+                        span,
+                        format!("cannot use `{name}` (function) as type in argument to `new` (HYB-E2005)"),
+                        "`new` takes a type name — not a function",
+                    );
+                } else if name == "true" || name == "false" || name == "nil" {
+                    self.emit_e2005(
+                        span,
+                        format!("cannot use `{name}` as type in argument to `new` (HYB-E2005)"),
+                        "`new` takes a type name — not a literal",
+                    );
+                }
+            }
+            Expr::SliceLit {
+                elem: Some(_),
+                items,
+                ..
+            } if items.is_empty() => {}
+            Expr::MapLit { entries, .. } if entries.is_empty() => {}
+            Expr::StructLit {
+                ty: Some(TypeExpr::Chan { .. }),
+                fields,
+                ..
+            } if fields.is_empty() => {}
+            Expr::Field { base, .. } => {
+                if let Expr::Ident { name: bname, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(bname).is_some() {
+                        self.emit_e2005(
+                            span,
+                            format!("cannot use `{}` as type in argument to `new` (HYB-E2005)", op.render()),
+                            "`new` takes a type — not a field access on a variable",
+                        );
+                    }
+                } else {
+                    self.emit_e2005(
+                        span,
+                        format!("cannot use `{}` as type in argument to `new` (HYB-E2005)", op.render()),
+                        "`new` takes a type name — not an expression",
+                    );
+                }
+            }
+            _ => {
+                self.emit_e2005(
+                    span,
+                    format!("argument to `new` must be a type, found expression `{}` (HYB-E2005)", op.render()),
+                    "`new` takes a type name — not a value or expression",
+                );
+            }
         }
     }
 
