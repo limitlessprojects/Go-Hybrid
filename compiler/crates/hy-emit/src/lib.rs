@@ -1920,7 +1920,13 @@ impl Emitter {
             } => {
                 let ps = params
                     .iter()
-                    .map(|p| format!("{} {}", p.name, self.type_text(&p.ty)))
+                    .map(|p| {
+                        if matches!(&p.ty, TypeExpr::Named { name, .. } if name.is_empty()) {
+                            self.go_type_name(&p.name)
+                        } else {
+                            format!("{} {}", p.name, self.type_text(&p.ty))
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 let rs = results
