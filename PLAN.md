@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor amendment — runtime histogram (#3388)
+
+- `hybench.Histogram` now initializes its minimum sentinel to `math.MaxInt64`, returns zero for NaN fractions, and clamps unsigned bucket reconstructions to the recorded range. Regression coverage passes; corpus is 130/130 and `cargo test --workspace` passes.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.
