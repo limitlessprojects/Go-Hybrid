@@ -1038,6 +1038,8 @@ impl Emitter {
             }
             if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first() {
                 self.register_var_ty(&names[0], t);
+            } else if let Some(sn) = values.first().and_then(|v| self.user_struct_name_of(v)) {
+                self.var_struct.insert(names[0].clone(), sn.to_string());
             }
         }
         for (name, is_ptr) in names.iter().zip(ptr_flags) {
@@ -1362,7 +1364,73 @@ impl Emitter {
         {
             return super::to_go_name(name);
         }
-        name.to_string()
+        self.aliased_place_member_name(base, name).unwrap_or_else(|| name.to_string())
+    }
+
+    pub(crate) fn aliased_place_member_name(&self, base: &Place, name: &str) -> Option<String> {
+        let t = self.aliased_type_of_place(base)?;
+        if let Some(m) = super::shapes::lookup_member(t, name) {
+            return Some(match m.kind {
+                super::shapes::MemberKind::Field | super::shapes::MemberKind::Method => {
+                    m.go.to_string()
+                }
+                super::shapes::MemberKind::MethodZero => format!("{}" + "()", m.go),
+            });
+        }
+        Some(super::to_go_name(name))
+    }
+
+    pub(crate) fn aliased_type_of_place(&self, p: &Place) -> Option<&'static str> {
+        match &p.kind {
+            PlaceKind::Ident(vn) => {
+                if let Some(BindingKind::ForeignTy(t)) = self.bindings.get(vn) {
+                    return Some(t);
+                }
+                if let Some((ty, _)) = self.var_ty.get(vn) {
+                    if let Some((k, _)) = super::shapes::SHAPES.iter().find(|(k, _)| *k == ty) {
+                        return Some(k);
+                    }
+                }
+                None
+            }
+            PlaceKind::AddrOf { base } => self.aliased_type_of_place(base),
+            PlaceKind::Field { base, name } => {
+                if let Some(bt) = self.aliased_type_of_place(base) {
+                    if let Some(m) = super::shapes::lookup_member(bt, name) {
+                        return m.result;
+                    }
+                }
+                let sn = self.aliased_user_struct_name_of_place(base)?;
+                if let Some(fields) = self.n5_structs.get(sn) {
+                    if let Some(f) = fields.iter().find(|f| &f.name == name) {
+                        if let Some(BindingKind::ForeignTy(k)) = self.binding_kind_of_ty(&f.ty) {
+                            return Some(k);
+                        }
+                    }
+                }
+                let (_, fty) = self.struct_fields.get(sn)?.iter().find(|(f, _)| f == name)?;
+                super::shapes::SHAPES.iter().find(|(k, _)| *k == fty).map(|(k, _)| *k)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn aliased_user_struct_name_of_place(&self, p: &Place) -> Option<&str> {
+        match &p.kind {
+            PlaceKind::Ident(vn) => self.var_struct.get(vn).map(String::as_str),
+            PlaceKind::AddrOf { base } => self.aliased_user_struct_name_of_place(base),
+            PlaceKind::Field { base, name } => {
+                let sn = self.aliased_user_struct_name_of_place(base)?;
+                let fty = self
+                    .struct_fields
+                    .get(sn)?
+                    .iter()
+                    .find(|(f, _)| f == name)
+                    .map(|(_, t)| t.as_str())?;
+                self.resolve_to_struct_name(fty)
+            }
+            _ => None,
+        }
     }
 
     /// Member-name normalization decision for a field/method access whose
