@@ -1,5 +1,7 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor allocation follow-up (2026-11-04, PR #3527): punctuation uses borrowed lookahead; ordinary successful allocation calls 5,006→3,004, requested bytes about 2% lower. New timing result remains inconclusive. Code `7f1116d8`: 2,635 workspace tests, 178 snapshots, corpus 130/130, differential 42+88 and ten examples pass; hosted review/award pending.
+
 - Contributor lexer cursor/identifier follow-up (2026-11-04): source-wide copy stays removed; ASCII identifiers borrow keyword text. Against submitted2deb0be, paired Mac medians ordinary−8.4%, Unicode−12.8%; comments/one real file nearly unchanged, no new RSS/universal claim.178snapshots equal; local2633workspace/corpus130/differential42+88/ten examples pass. Current-head hosted CI, review, merge/award/payment pending; see `spikes/lexer-borrowed-cursor/RESULTS.md`.
 
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.

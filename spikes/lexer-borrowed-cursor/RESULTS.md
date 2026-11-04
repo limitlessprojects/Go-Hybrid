@@ -116,14 +116,33 @@ Whole-file `rustfmt --check` finds pre-existing differences elsewhere in the unc
 
 ## Punctuation allocation follow-up — 4 November 2026
 
-Native CPU sampling of the submitted `e50bddcc` lexer found ordinary-input time in punctuation prefix matching. `lex_punct` built a four-character `String` for every punctuation token. Current main still has that exact method; the selected external issues already have claimants and were left alone.
+Native CPU sampling of submitted head `e50bddcc` found ordinary-input time in punctuation prefix matching. `lex_punct` built a four-character `String` for every punctuation token. Current main still has that exact method. The two selected issue candidates already have claimants and were left alone.
 
-Borrow `Chars::as_str()` and filter multi-operator candidates by their first ASCII byte before the existing longest-first prefix check. The table, fallback and scalar-position updates remain unchanged. Two guards pin overlapping operators at EOF and punctuation positions around multibyte whitespace. Full178token/diagnostic snapshots and the two guards pass. Full required validation is pending in this preparation commit.
+Borrow `Chars::as_str()` and filter multi-operator candidates by their first ASCII byte before the existing longest-first prefix check. The operator table, fallback and scalar-position updates remain unchanged. Two guards pin overlapping operators at EOF and punctuation positions around multibyte whitespace.
 
-The separate allocation experiment compares this patch against `e50bddcc`, with the same new `lexer_allocations` example in both trees. Observed allocation calls per lex: ordinary5006→3004(-40.0%), comments3→3, Unicode3006→2004(-33.3%), selected real source84→46(-45.2%). Reallocation counts did not increase. These are allocation-request counts, not a40%reduction in resident memory. Requested-byte totals and all raw results are in [punctuation-allocations-2026-11-04.json](punctuation-allocations-2026-11-04.json).
+The allocation experiment compares this patch against `e50bddcc`, with the same new `lexer_allocations` example in both trees. Observed successful `alloc`/`alloc_zeroed` calls per lex:
 
-The initial wall-time experiment failed its saved gate: ordinary median improved28.0%, comments slowed5.3%, Unicode improved13.5%and the fixed real case improved35.8%. An identical-binary A/A control differed4.75%, failing the separately saved2%resolution check for a5%regression gate. Keep that failed/inconclusive timing result; do not turn it into a speed pass or multiply it by earlier ratios. A new allocation-specific protocol was recorded before the counting experiment: at least10%fewer ordinary allocation calls, no increases on the other retained cases, and exact/full correctness checks. Passing the allocation criterion does not validate the speed claim.
+| Input | Before | After |
+|---|---:|---:|
+| Ordinary | 5,006 | 3,004 |
+| Comments | 3 | 3 |
+| Unicode | 3,006 | 2,004 |
+| Fixed real source | 84 | 46 |
 
-Reproduce the observed request counts with Rust1.99.0: build/run `cargo run -p hy-syntax --example lexer_allocations --release --locked --offline -- FILE 10` from `compiler/`. For the baseline, create a separate checkout at `e50bddcc` and copy the same example into it before building with the same toolchain/flags. Inputs are the existing generated ordinary/comments/Unicode files plus the previously selected real corpus source; generation and hashes are retained with the earlier spike. Input loading and output happen outside the counters; token construction and drops are included. The [Rust GlobalAlloc reference](https://doc.rust-lang.org/std/alloc/trait.GlobalAlloc.html) warns that optimisers may elide/combine requests and allocator code must avoid recursive allocation. This example forwards to System and only updates atomic counters inside allocation methods; counters do not decide production correctness. Reference docs1.99.1 are not the actual1.99.0compiler.
+Reallocation counts did not increase. The ordinary call count fell about 40%; requested bytes fell from 826,163 to 810,147 per lex, about 2%. These are observed requests, not resident or peak-live memory. [Raw counts, timing runs and controls](punctuation-allocations-2026-11-04.json) retain the complete comparison.
 
-No reliable additional runtime-speed, RSS, universal allocation or other-platform claim. HostedCI, maintainer review and any discretionary award/payment remain unconfirmed.
+The initial wall-time experiment did not pass its saved gate: ordinary median improved 28.0%, comments slowed 5.3%, Unicode improved 13.5% and the fixed real case improved 35.8%. An identical-binary A/A control differed 4.75%, failing the separately saved 2% resolution check for a 5% regression gate. Keep that failed/inconclusive timing result; it establishes neither a reliable new speedup nor a confirmed comment regression. Do not multiply these ratios by earlier measurements. A separate allocation-specific protocol was recorded before counting: at least 10% fewer ordinary allocation calls, no increases on the other cases, and exact/full correctness checks. Passing it does not validate the speed claim. Protocols were saved privately before their respective measurements and published afterward.
+
+At tested code `7f1116d853ba4dbbcc9764219723bcf255fdd092`, all 178 complete token/diagnostic snapshots match. The 2,635 workspace tests include the two new punctuation guards; 130/130 corpus verdicts, 42/42 differential build-and-run cases, 88/88 rejects and all ten examples pass. New example and existing position-test files pass the pinned formatter; the two new test snippets pass. Both baseline and candidate punctuation methods retain the same pre-existing MULTI-table wrapping differences; no whole-lexer formatting pass is claimed. The final evidence update changes docs/status only and preserves the tested code bytes.
+
+Reproduce observed request counts with Rust 1.99.0, from `compiler/`:
+
+```sh
+cargo run -p hy-syntax --example lexer_allocations --release --locked --offline -- FILE 10
+```
+
+For the baseline, create a separate checkout at `e50bddcc` and copy the same example into it before building with the same toolchain and flags. Inputs are the existing generated ordinary/comments/Unicode files plus the previously fixed real corpus source; generation and hashes are in the earlier spike. Input loading and output happen outside the counters; token construction and drops are included.
+
+The [Rust GlobalAlloc reference](https://doc.rust-lang.org/std/alloc/trait.GlobalAlloc.html) warns that optimisers may elide/combine requests and allocator methods must avoid recursive allocation. This example forwards to System and updates only atomic counters inside allocator methods. Counters do not decide production correctness. Reference docs 1.99.1 are distinct from the actual 1.99.0 compiler.
+
+One Mac and four fixtures: no reliable additional runtime-speed, RSS, universal allocation or other-platform claim. Hosted CI, maintainer review and any discretionary award/payment remain unconfirmed.
