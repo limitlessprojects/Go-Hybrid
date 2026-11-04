@@ -124,3 +124,17 @@ fn main() {
 "#;
     accepts(src);
 }
+
+#[test]
+fn test_import_os_used_with_eprint_accepted() {
+    let src = r#"
+import "fmt"
+import "os"
+
+fn main() {
+    _ = os.Args
+    fmt.eprintln("standard error output")
+}
+"#;
+    accepts(src);
+}

@@ -7226,6 +7226,8 @@ impl<'a> Collector<'a> {
                                 ),
                                 "`fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to `os.Stderr`; rename the shadowing `os` binding so `os.Stderr` is accessible",
                             );
+                        } else {
+                            self.roots.insert("os".to_string());
                         }
                     }
                     if self.lookup_kind(pkg).is_none() {
