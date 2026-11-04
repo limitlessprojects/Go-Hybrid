@@ -73,3 +73,11 @@
 - Suites 404 -> 406. Differential 45/45 + 90/90 both landings. Disk: watch /home/z (82% used after cleanup); incremental cache deletion cost is acceptable — prefer freeing /tmp scratch first next time.
 - Worklog: this commit.
 - Next queue: #3362 -> #3558 -> #3366 -> #3611 -> #3355 -> #3554 -> #3566 -> #3438 -> #3056 -> #2456.
+
+## Session 102 — 2026-11-05 05:10 UTC+8 tick
+- approve 8/8 ok; scan ok.
+- Landed PR #3701 -> fd3cec4e (hy-check: := inferred sized arrays keep [N]T, #2771 differ logic now applies; fixes #3700, nyxlabs29-cyber). ALL-GREEN 407 suites.
+- Landed PR #3703 -> 9dd49697 (hy-check: range_iter move-unwrapping at 6 sites + len(set[T]) int bound vs user-set shadow guard; fixes #3699, aswadi). ALL-GREEN 408 suites. First cargo run hit transient ENOSPC again (infra); freed incremental cache + scratch, rerun clean; noted in reply.
+- Disk: recurring ENOSPC pattern when target rebuilds cold — standard mitigation now: rm -rf target/debug/incremental /tmp/verify-wt /tmp/hydiff-* then rerun (incremental loss costs ~2-4 min on warm deps).
+- Suites 406 -> 408. Worklog: this commit.
+- Next queue: #3702 -> #3612 -> #3614 -> #3616 -> #2934 -> #3362 -> #2937 -> #3558 -> #2661.
