@@ -56,3 +56,12 @@
 - Landed PR #3156 -> f91390bd (hy-check: untyped nil condition in if/for/match guard rejects HYB-E1002 fail-closed; fixes #3155, Dimank92). ALL-GREEN 401 suites.
 - Suites 398 -> 401. Differential 45/45 + 90/90 all three landings. Worklog: this commit.
 - Next queue: #3153 -> #3076 -> #2592 -> #3168 -> #3238 -> #3676 -> #3233 -> #3070 -> #3438 -> #3570 -> #3441.
+
+## Session 100 — 2026-11-05 02:10 UTC+8 tick
+- approve 7/7 ok; scan ok.
+- Landed PR #3687 -> 24abd25a (hy-emit: binding kind across try-parens, generic/assoc calls, new Index operands; fixes #3685, aswadi). ALL-GREEN 402 suites.
+- Landed PR #3686 -> 2f0a2288 (hy-check: new(G[T]) Index type operands + new([N]T{}) pointer-to-array via as_array_lit; fixes #3684, aswadi). ALL-GREEN 403 suites.
+- Landed PR #3519 -> 982b1d64 (hy-check: untyped nil on delete set-elem/map-key + append non-nilable elem, HYB-E1002/E2005; fixes #3518, seenorht). ALL-GREEN 404 suites.
+- Dup protocol: #3689 (marhabynova, same issue #3684, 17 min later) superseded — honest independent-diagnosis credit posted, invited to re-target residuals.
+- Suites 401 -> 404. Differential 45/45 + 90/90 all three landings. Worklog: this commit.
+- Next queue: #3586 -> #3414 -> #3423 -> #3351 -> #3472 -> #3362(behind 14) -> #2586(behind 7) -> #3366(behind 14) -> #3168/#3238/#3676/#3233/#3070/#3438.
