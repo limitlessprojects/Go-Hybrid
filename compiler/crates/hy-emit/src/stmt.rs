@@ -8,6 +8,20 @@ use super::expr::ATOM;
 use super::shapes::lookup_conversion;
 use std::collections::BTreeSet;
 
+/// True when the arm body's TOP-LEVEL statements contain a local define that
+/// redeclares the arm's pattern binding. hy-check treats a match arm body as a
+/// nested scope, so `some(v): { v := v + 1 ... }` is a legal arm-local shadow
+/// there; but the emitter injects `v := temp.val` into the same Go block as
+/// the (inlined) arm body, and Go rejects `v := v + 1` after it with
+/// "no new variables on left side of :=". Only top-level statements count:
+/// nested `Stmt::Block`/`if` bodies already emit their own braces and shadow
+/// legally without any wrapping.
+fn arm_body_redefines_binding(body: &Block, binding: &str) -> bool {
+    body.stmts.iter().any(|s| {
+        matches!(s, Stmt::Local(l) if l.names.iter().any(|n| n == binding))
+    })
+}
+
 impl Emitter {
     pub fn emit_stmt(&mut self, s: &Stmt) -> Result<(), EmitError> {
         match s {
@@ -186,6 +200,33 @@ impl Emitter {
                 if matches!(operand, Expr::Call { .. }) {
                     self.hoist_tries_expr(operand)?;
                 }
+
+                // #3209: If the deferred call captures an active slot loan (or one of its
+                // aliases), the deferred closure runs at function exit *after* any inline
+                // store-back has already written the old or pre-defer copy. To prevent the
+                // deferred write from being lost, emit a deferred store-back
+                // `defer func() { <store> }()` immediately before the user's deferred call.
+                // Go executes deferred functions in LIFO order, so the user's deferred closure
+                // executes first, followed immediately by this store-back defer.
+                let mut deferred_stores = Vec::new();
+                for frame in &self.loan_frames {
+                    for (loan_name, store) in frame {
+                        if !loan_name.is_empty() {
+                            let mentioned = Self::expr_mentions_ident(call, loan_name)
+                                || self.loan_aliases.get(loan_name).is_some_and(|aliases| {
+                                    aliases.iter().any(|a| Self::expr_mentions_ident(call, a))
+                                });
+                            if mentioned {
+                                deferred_stores.push(store.clone());
+                            }
+                        }
+                    }
+                }
+                deferred_stores.dedup();
+                for store in deferred_stores {
+                    self.push(&format!("defer func() {{ {} }}()", store));
+                }
+
                 let c = self.emit_expr(operand, 0)?;
                 self.push(&format!("defer {}", c));
                 Ok(())
@@ -432,13 +473,26 @@ impl Emitter {
     /// `(closure name, loan name)` for every name this declaration binds to
     /// a function literal whose body mentions an active slot loan (or one of
     /// its aliases) in the current loan frames.
+
+    /// Leading identifier of a call's callee (`mk()` -> `mk`,
+    /// `ns.mk()` -> None), used to recognise a second-order closure (#3227).
+    fn call_callee_ident(e: &Expr) -> Option<String> {
+        match Self::peel_parens(e) {
+            Expr::Call { callee, .. } => match Self::peel_parens(callee) {
+                Expr::Ident { name, .. } => Some(name.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn closure_captured_loans(&self, l: &LocalDecl) -> Vec<(String, String)> {
         let mut out = Vec::new();
         if l.names.len() != l.values.len() {
             return out;
         }
         for (name, v) in l.names.iter().zip(l.values.iter()) {
-            if name == "_" || !matches!(Self::peel_parens(v), Expr::FnLit { .. }) {
+            if name == "_" {
                 continue;
             }
             for frame in &self.loan_frames {
@@ -446,10 +500,18 @@ impl Emitter {
                     if loan.is_empty() || loan == name {
                         continue;
                     }
+                    // #3227: also treat the binding as an alias of the loan
+                    // when its value CALLS a binding already known to be an
+                    // alias of that loan (`h := mk()` where `mk` returns the
+                    // writer). A literal-only test misses that shape, and the
+                    // store-back would then flush before the writer runs.
+                    let aliases = self.loan_aliases.get(loan);
                     let mentions = Self::expr_mentions_ident(v, loan)
-                        || self.loan_aliases.get(loan).is_some_and(|aliases| {
-                            aliases.iter().any(|a| Self::expr_mentions_ident(v, a))
-                        });
+                        || aliases.is_some_and(|a| {
+                            a.iter().any(|x| Self::expr_mentions_ident(v, x))
+                        })
+                        || Self::call_callee_ident(v)
+                            .is_some_and(|c| aliases.is_some_and(|a| a.contains(&c)));
                     if mentions {
                         out.push((name.clone(), loan.clone()));
                     }
@@ -1596,7 +1658,7 @@ impl Emitter {
                 .enumerate()
                 .map(|(i, v)| alias_assigns[i].is_some() || self.expr_is_pointer(v))
                 .collect();
-            for ((t, is_ptr), alias) in targets.iter().zip(ptr_flags).zip(alias_assigns.iter()) {
+            for (((t, is_ptr), alias), v) in targets.iter().zip(ptr_flags).zip(alias_assigns.iter()).zip(values.iter()) {
                 if let PlaceKind::Ident(name) = &t.kind {
                     if name != "_" {
                         for aliases in self.loan_aliases.values_mut() {
@@ -1607,6 +1669,24 @@ impl Emitter {
                                 .entry(loan_root.clone())
                                 .or_default()
                                 .insert(name.clone());
+                        } else if matches!(Self::peel_parens(v), Expr::FnLit { .. }) {
+                            for frame in &self.loan_frames {
+                                for (loan, _) in frame {
+                                    if loan.is_empty() || loan == name {
+                                        continue;
+                                    }
+                                    let mentions = Self::expr_mentions_ident(v, loan)
+                                        || self.loan_aliases.get(loan).is_some_and(|aliases| {
+                                            aliases.iter().any(|a| Self::expr_mentions_ident(v, a))
+                                        });
+                                    if mentions {
+                                        self.loan_aliases
+                                            .entry(loan.clone())
+                                            .or_default()
+                                            .insert(name.clone());
+                                    }
+                                }
+                            }
                         }
                         if is_ptr {
                             self.pointer_vars.insert(name.clone());
@@ -1712,23 +1792,20 @@ impl Emitter {
                         return m.result;
                     }
                 }
-                if let PlaceKind::Ident(vn) = &base.kind {
-                    if let Some(sn) = self.var_struct.get(vn) {
-                        if let Some(fields) = self.struct_fields.get(sn) {
-                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                                if let Some((k, _)) =
-                                    super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
-                                {
-                                    return Some(k);
-                                }
-                            }
-                        }
-                    }
-                }
-                None
+                let (_, fty) = self.struct_fields.get(self.user_struct_name_of_place(base)?)?.iter().find(|(f, _)| f == name)?;
+                super::shapes::SHAPES.iter().find(|(k, _)| *k == fty).map(|(k, _)| *k)
             }
             PlaceKind::AddrOf { base } => self.type_of_place(base),
             PlaceKind::Index { .. } => None,
+        }
+    }
+
+    fn user_struct_name_of_place(&self, p: &Place) -> Option<&str> {
+        match &p.kind {
+            PlaceKind::Ident(vn) => self.var_struct.get(vn).map(String::as_str),
+            PlaceKind::AddrOf { base } => self.user_struct_name_of_place(base),
+            PlaceKind::Field { base, name } => self.struct_fields.get(self.user_struct_name_of_place(base)?)?.iter().find(|(f, _)| f == name).and_then(|(_, fty)| self.struct_fields.contains_key(fty).then_some(fty.as_str())),
+            _ => None,
         }
     }
 
@@ -2466,16 +2543,20 @@ impl Emitter {
         // with their zero texts (13: `return v` in a (value, error) fn →
         // `return v, nil`) — Go demands the full arity. An EMPTY slot is
         // the error result (propagate_error fills it at propagation time);
-        // a short explicit return means nil.
-        if let Some(zeros) = &self.cur_fn_error_returns {
-            while vs.len() < zeros.len() {
-                let i = vs.len();
-                let z = &zeros[i];
-                vs.push(if z.is_empty() {
-                    "nil".to_string()
-                } else {
-                    z.clone()
-                });
+        // a short explicit return means nil. When the fn has named results,
+        // bare `return` (`values.is_empty()`) must stay naked so Go returns
+        // the live named result variables instead of clobbering them to zero.
+        if !(values.is_empty() && self.cur_fn_has_named_results) {
+            if let Some(zeros) = &self.cur_fn_error_returns {
+                while vs.len() < zeros.len() {
+                    let i = vs.len();
+                    let z = &zeros[i];
+                    vs.push(if z.is_empty() {
+                        "nil".to_string()
+                    } else {
+                        z.clone()
+                    });
+                }
             }
         }
         if vs.is_empty() {
@@ -2732,12 +2813,36 @@ impl Emitter {
                                 self.indent += 1;
                             }
                             let prebound = prebound_guard_var.as_deref() == Some(binding.as_str());
-                            if *binding != "_" && !prebound && crate::rangebind::body_reads(&arm.body, binding) {
+                            // When the arm body's top level redefines the
+                            // pattern binding (`some(v): { v := v + 1 ... }` is
+                            // a legal nested shadow in hy-check), an inlined
+                            // body would collide with the injected
+                            // `binding := temp.val` in the same Go block ("no
+                            // new variables on left side of :="). Keep the
+                            // injection in the arm's Go scope and wrap ONLY the
+                            // body in a nested block; `crate::rangebind::
+                            // body_reads` is shadow-aware, so the injection
+                            // happens only when the body genuinely reads the
+                            // pre-shadow binding. Arms that do not redefine the
+                            // binding keep byte-identical output.
+                            let injects = *binding != "_" && !prebound
+                                && crate::rangebind::body_reads(&arm.body, binding);
+                            let wraps_body =
+                                injects && arm_body_redefines_binding(&arm.body, binding);
+                            if injects {
                                 self.push(&format!("{} := {}.val", binding, temp));
                             } else if !prebound {
                                 self.local_vars.remove(*binding);
                             }
+                            if wraps_body {
+                                self.push("{");
+                                self.indent += 1;
+                            }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                            if wraps_body {
+                                self.indent -= 1;
+                                self.push("}");
+                            }
                             if chain_opened {
                                 self.indent -= 1;
                                 self.push("}");
@@ -2811,12 +2916,31 @@ impl Emitter {
                             self.push("}");
                         }
                         None => {
-                            if *binding != "_" && crate::rangebind::body_reads(&arm.body, binding) {
+                            let injects =
+                                *binding != "_" && crate::rangebind::body_reads(&arm.body, binding);
+                            // Same treatment as the simple chain: keep the
+                            // injected binding in the per-arm Go scope and wrap
+                            // ONLY a redefining arm body in a nested block.
+                            // `body_reads` is shadow-aware (reads after a
+                            // top-level redeclare of the binding do not count),
+                            // so the injection survives only when genuinely
+                            // used.
+                            let wraps_body =
+                                injects && arm_body_redefines_binding(&arm.body, binding);
+                            if injects {
                                 self.push(&format!("{} := {}.val", binding, temp));
                             } else {
                                 self.local_vars.remove(*binding);
                             }
+                            if wraps_body {
+                                self.push("{");
+                                self.indent += 1;
+                            }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                            if wraps_body {
+                                self.indent -= 1;
+                                self.push("}");
+                            }
                         }
                     }
                     Ok(())
