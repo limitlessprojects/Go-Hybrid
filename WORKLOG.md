@@ -65,3 +65,11 @@
 - Dup protocol: #3689 (marhabynova, same issue #3684, 17 min later) superseded — honest independent-diagnosis credit posted, invited to re-target residuals.
 - Suites 401 -> 404. Differential 45/45 + 90/90 all three landings. Worklog: this commit.
 - Next queue: #3586 -> #3414 -> #3423 -> #3351 -> #3472 -> #3362(behind 14) -> #2586(behind 7) -> #3366(behind 14) -> #3168/#3238/#3676/#3233/#3070/#3438.
+
+## Session 101 — 2026-11-05 04:10 UTC+8 tick
+- approve 9/9 ok; scan ok. (03:10 tick had no external merges; main unchanged at start.)
+- Landed PR #3692 -> 466799a9 (hy-check: run_type_arg_expr skips predeclared set/option + type params in new/make operands, keeps E1001/E1002 on real errors; fixes #3691, aswadi). ALL-GREEN 405 suites.
+- Landed PR #3693 -> 9bfd7f63 (hy-emit: struct/foreign shapes across Try/Move/AddrOf, generic + assoc callees via fn_shapes, StructLit in assoc_index_type_arg; fixes #3690, aswadi). ALL-GREEN 406 suites. First battery run hit transient ENOSPC in differential sandbox (infra, not code); freed target/debug/incremental (1G) + /tmp scratch, rerun clean end-to-end; noted in landing reply.
+- Suites 404 -> 406. Differential 45/45 + 90/90 both landings. Disk: watch /home/z (82% used after cleanup); incremental cache deletion cost is acceptable — prefer freeing /tmp scratch first next time.
+- Worklog: this commit.
+- Next queue: #3362 -> #3558 -> #3366 -> #3611 -> #3355 -> #3554 -> #3566 -> #3438 -> #3056 -> #2456.

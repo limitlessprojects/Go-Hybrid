@@ -675,12 +675,10 @@ impl Emitter {
     pub(crate) fn user_struct_name_of(&self, e: &Expr) -> Option<&str> {
         match Self::unwrap_parens(e) {
             Expr::Ident { name, .. } => self.var_struct.get(name).map(String::as_str),
-            Expr::AddrOf { operand, .. }
-            | Expr::Unary {
-                op: UnOp::Addr,
-                operand,
-                ..
-            } => self.user_struct_name_of(operand),
+            Expr::Try { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Unary { op: UnOp::Addr, operand, .. } => self.user_struct_name_of(operand),
             Expr::Field { base, name, .. } => {
                 let sn = self.user_struct_name_of(base)?;
                 let fty = self
@@ -786,7 +784,11 @@ impl Emitter {
                 if let Some(t) = self.type_of_expr(callee) {
                     return Some(t);
                 }
-                match Self::unwrap_parens(callee) {
+                let callee_head = match Self::unwrap_parens(callee) {
+                    Expr::Index { base, .. } => Self::unwrap_parens(base),
+                    other => other,
+                };
+                match callee_head {
                     Expr::Ident { name, span } => {
                         if name == "new" && self.is_unshadowed_builtin("new") {
                             if let Some(BindingKind::ForeignTy(t)) = args.first().and_then(|a| Self::assoc_index_type_arg(&a.value)).and_then(|n| self.binding_kind_of_ty(&TypeExpr::Named { name: n, span: *span })) { return Some(t); }
@@ -823,6 +825,9 @@ impl Emitter {
                                     ("url", "parse") => Some("url.url"),
                                     _ => None,
                                 };
+                            } else if !self.local_vars.contains(pkg) && !self.bindings.contains_key(pkg) {
+                                let (head, _) = split_type_args(name);
+                                if let Some((_, _, Some(BindingKind::ForeignTy(t)), _)) = self.fn_shapes.get(&format!("{pkg}.{head}")) { return Some(t); }
                             }
                         }
                         None
@@ -895,6 +900,7 @@ impl Emitter {
                 items,
                 ..
             } if items.is_empty() => Some(format!("[]{}", t.render())),
+            Expr::StructLit { ty: Some(t), fields, .. } if fields.is_empty() => super::base_ty_name(t),
             _ => None,
         }
     }
@@ -920,12 +926,10 @@ impl Emitter {
         match Self::unwrap_parens(e) {
             Expr::Ident { name, .. } => self.var_struct.contains_key(name),
             Expr::StructLit { .. } => true,
-            Expr::AddrOf { operand, .. }
-            | Expr::Unary {
-                op: UnOp::Addr,
-                operand,
-                ..
-            } => self.is_user_struct_expr(operand),
+            Expr::Try { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Unary { op: UnOp::Addr, operand, .. } => self.is_user_struct_expr(operand),
             // Recursive since #1553: `o.sub` AND `o.sub.deep` are user
             // structs, not just `o.f`. The old single-hop read made a
             // three-level `o.sub.thing.pop()` look like a builtin pop and
