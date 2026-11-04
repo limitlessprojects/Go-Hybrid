@@ -426,22 +426,52 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             match d {
                 Decl::Import { .. } => {}
                 Decl::Const(cd) => {
+                    if cd.name == "init" {
+                        c.emit_e1002(
+                            cd.span,
+                            format!("cannot declare init as a const — init at file level is reserved for n init() (HYB-E1002)"),
+                            "file-level init must be a function: n init()",
+                        );
+                    }
                     c.ty_opt(&cd.ty);
                     c.expr(&cd.value);
                 }
                 Decl::Struct(s) => {
+                    if s.name == "init" {
+                        c.emit_e1002(
+                            s.span,
+                            format!("cannot declare init as a struct — init at file level is reserved for n init() (HYB-E1002)"),
+                            "file-level init must be a function: n init()",
+                        );
+                    }
                     for f in &s.fields {
                         c.ty(&f.ty);
                     }
                 }
                 Decl::Enum(e) => {
+                    if e.name == "init" {
+                        c.emit_e1002(
+                            e.span,
+                            format!("cannot declare init as an enum — init at file level is reserved for n init() (HYB-E1002)"),
+                            "file-level init must be a function: n init()",
+                        );
+                    }
                     for v in &e.variants {
                         if let Some(t) = &v.payload {
                             c.ty(t);
                         }
                     }
                 }
-                Decl::TypeAlias(t) => c.ty(&t.ty),
+                Decl::TypeAlias(t) => {
+                    if t.name == "init" {
+                        c.emit_e1002(
+                            t.span,
+                            format!("cannot declare init as a type alias — init at file level is reserved for n init() (HYB-E1002)"),
+                            "file-level init must be a function: n init()",
+                        );
+                    }
+                    c.ty(&t.ty);
+                }
                 Decl::Fn(f) => c.fn_decl(f),
             }
         }
