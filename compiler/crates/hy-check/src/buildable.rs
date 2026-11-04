@@ -379,6 +379,42 @@ fn is_sized_array_spelling(s: &str) -> bool {
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
+/// #3260 — extract the value type name from a map type string `map[K]V`.
+fn map_value_type_name(s: &str) -> Option<&str> {
+    let t = s.trim();
+    if !t.starts_with("map[") {
+        return None;
+    }
+    let rest = &t[4..];
+    let mut depth = 1;
+    for (i, c) in rest.char_indices() {
+        if c == '[' {
+            depth += 1;
+        } else if c == ']' {
+            depth -= 1;
+            if depth == 0 {
+                let val = rest[i + 1..].trim();
+                return if val.is_empty() { None } else { Some(val) };
+            }
+        }
+    }
+    None
+}
+
+/// #3260 — extract the element type name from a channel type string.
+fn chan_elem_type_name(s: &str) -> Option<&str> {
+    let t = s.trim();
+    if let Some(rest) = t.strip_prefix("chan ") {
+        Some(rest.trim())
+    } else if let Some(rest) = t.strip_prefix("<-chan ") {
+        Some(rest.trim())
+    } else if let Some(rest) = t.strip_prefix("chan<- ") {
+        Some(rest.trim())
+    } else {
+        None
+    }
+}
+
 /// #3280 — parse a fixed-size array type into `(dimension, element_type)`.
 fn parse_sized_array(s: &str) -> Option<(&str, &str)> {
     let t = s.trim();
@@ -391,6 +427,11 @@ fn parse_sized_array(s: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((head, t[close + 1..].trim()))
+}
+
+/// #3260 — extract the element type name from a sized array type string `[N]T`.
+fn array_elem_type_name(s: &str) -> Option<&str> {
+    parse_sized_array(s).map(|(_, elem)| elem)
 }
 
 /// #3280 — check whether two element type strings conflict (numeric scalar width,
@@ -1157,7 +1198,22 @@ impl<'a> Collector<'a> {
         }
         match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::Move { operand, .. } => self.typed_value_type_name(operand),
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
+            Expr::Index { base, .. } => {
+                let base_ty = self.typed_value_type_name(base)?;
+                if let Some(val) = map_value_type_name(&base_ty) {
+                    return Some(val.to_string());
+                }
+                if let Some(elem) = array_elem_type_name(&base_ty) {
+                    return Some(elem.to_string());
+                }
+                None
+            }
+            Expr::Receive { chan, .. } => {
+                let chan_ty = self.typed_value_type_name(chan)?;
+                chan_elem_type_name(&chan_ty).map(|s| s.to_string())
+            }
             _ => None,
         }
     }
@@ -1431,6 +1487,29 @@ impl<'a> Collector<'a> {
                 BinOp::Shl | BinOp::Shr => self.typed_value_scalar(lhs),
                 _ => None,
             },
+            Expr::Move { operand, .. } => self.typed_value_scalar(operand),
+            Expr::Index { base, .. } => {
+                if let Some(elem) = self.slice_element_type_name(base) {
+                    if let Some(s) = canonical_numeric_name(&elem) {
+                        return Some(s);
+                    }
+                }
+                if let Some(base_ty) = self.typed_value_type_name(base) {
+                    if let Some(elem_ty) = map_value_type_name(&base_ty).or_else(|| array_elem_type_name(&base_ty)) {
+                        return canonical_numeric_name(elem_ty);
+                    }
+                }
+                if self.kind_of_expr(base) == OpKind::Str {
+                    Some("uint8")
+                } else {
+                    self.container_elem_scalar_of_expr(base)
+                }
+            }
+            Expr::Receive { chan, .. } => {
+                let chan_ty = self.typed_value_type_name(chan)?;
+                let elem_ty = chan_elem_type_name(&chan_ty)?;
+                canonical_numeric_name(elem_ty)
+            }
             Expr::Unary {
                 op: UnOp::Neg,
                 operand,
@@ -1444,14 +1523,6 @@ impl<'a> Collector<'a> {
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
                 self.struct_field_scalar(&bk, name)
-            }
-            // #2858: index into slice/array/map/string
-            Expr::Index { base, .. } => {
-                if self.kind_of_expr(base) == OpKind::Str {
-                    Some("uint8")
-                } else {
-                    self.container_elem_scalar_of_expr(base)
-                }
             }
             _ => None,
         }
@@ -1544,12 +1615,9 @@ impl<'a> Collector<'a> {
             return l.values.iter().map(|v| self.initializer_scalar(v)).collect();
         }
         if n >= 2 && l.values.len() == 1 {
-            if let Expr::Call { callee, args, .. } = unwrap_parens(&l.values[0]) {
-                if let Some(rs) = self.call_result_scalars(callee, args) {
-                    if rs.len() == n {
-                        return rs;
-                    }
-                }
+            let mvs = self.multi_value_scalars(&l.values[0]);
+            if mvs.len() == n {
+                return mvs;
             }
             // #2858: comma-ok map index (val, ok := m["k"])
             if n == 2 {
@@ -2058,6 +2126,15 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Some(tname) = self.typed_value_type_name(val) {
+                    self.bind_type_name(name, tname);
+                }
+            }
+        } else if l.names.len() >= 2 && l.values.len() == 1 {
+            let mv_types = self.multi_value_type_names(&l.values[0]);
+            for (name, maybe_tname) in l.names.iter().zip(mv_types) {
+                if let Some(tname) = maybe_tname {
+                    self.bind_type_name(name, tname);
                 }
             }
         }
@@ -2151,6 +2228,83 @@ impl<'a> Collector<'a> {
                 vec![OpKind::Unknown, OpKind::Unknown]
             }
             _ => vec![OpKind::Unknown, OpKind::Unknown],
+        }
+    }
+
+    /// #3260 — numeric scalar types for multi-value unpacking (e.g. comma-ok).
+    fn multi_value_scalars(&self, e: &Expr) -> Vec<Option<&'static str>> {
+        match unwrap_parens(e) {
+            Expr::Move { operand, .. } => self.multi_value_scalars(operand),
+            Expr::Index { base, .. } => {
+                let elem_scalar = if let Some(base_ty) = self.typed_value_type_name(base) {
+                    map_value_type_name(&base_ty).and_then(canonical_numeric_name)
+                } else {
+                    None
+                }
+                .or_else(|| self.container_elem_scalar_of_expr(base));
+                vec![elem_scalar, None]
+            }
+            Expr::Receive { chan, .. } => {
+                let elem_scalar = if let Some(chan_ty) = self.typed_value_type_name(chan) {
+                    chan_elem_type_name(&chan_ty).and_then(canonical_numeric_name)
+                } else {
+                    None
+                }
+                .or_else(|| self.chan_element_scalar(chan));
+                vec![elem_scalar, None]
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Some(res) = self.call_result_scalars(callee, args) {
+                    if res.len() >= 2 {
+                        return res;
+                    }
+                }
+                vec![None, None]
+            }
+            _ => vec![None, None],
+        }
+    }
+
+    /// #3260 — type names for multi-value unpacking (e.g. comma-ok).
+    fn multi_value_type_names(&self, e: &Expr) -> Vec<Option<String>> {
+        match unwrap_parens(e) {
+            Expr::Move { operand, .. } => self.multi_value_type_names(operand),
+            Expr::Index { base, .. } => {
+                let elem_ty = self
+                    .typed_value_type_name(base)
+                    .as_deref()
+                    .and_then(map_value_type_name)
+                    .map(|s| s.to_string());
+                vec![elem_ty, Some("bool".to_string())]
+            }
+            Expr::Receive { chan, .. } => {
+                let elem_ty = self
+                    .typed_value_type_name(chan)
+                    .as_deref()
+                    .and_then(chan_elem_type_name)
+                    .map(|s| s.to_string());
+                vec![elem_ty, Some("bool".to_string())]
+            }
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if !self
+                        .scopes
+                        .iter()
+                        .any(|layer| layer.contains_key(name.as_str()))
+                    {
+                        if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                            if fd.receiver.is_none()
+                                && fd.type_params.is_empty()
+                                && fd.results.len() >= 2
+                            {
+                                return fd.results.iter().map(|r| Some(r.ty.render())).collect();
+                            }
+                        }
+                    }
+                }
+                vec![None, None]
+            }
+            _ => vec![None, None],
         }
     }
 
@@ -6009,17 +6163,35 @@ impl<'a> Collector<'a> {
                     } else {
                         let got_kinds = self.multi_value_kinds(&values[0]);
                         if got_kinds.len() == targets.len() {
-                            for (t, vk) in targets.iter().zip(got_kinds.iter()) {
+                            let got_scalars = self.multi_value_scalars(&values[0]);
+                            let got_type_names = self.multi_value_type_names(&values[0]);
+                            for (i, (t, vk)) in targets.iter().zip(got_kinds.iter()).enumerate() {
                                 let tpk = self.kind_of_place(t);
-                                if kinds_conflict(&tpk, vk) {
+                                let scalar_mismatch = matches!(
+                                    (self.place_scalar(t), got_scalars.get(i).copied().flatten()),
+                                    (Some(tp), Some(vp)) if tp != vp
+                                );
+                                let array_mismatch = self.sized_array_names_differ(
+                                    self.place_type_name(t).as_deref(),
+                                    got_type_names.get(i).and_then(|x| x.as_deref()),
+                                );
+                                if kinds_conflict(&tpk, vk) || scalar_mismatch || array_mismatch {
+                                    let got_lbl = got_type_names
+                                        .get(i)
+                                        .and_then(|x| x.as_deref())
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_else(|| vk.label());
+                                    let target_lbl = self
+                                        .place_type_name(t)
+                                        .unwrap_or_else(|| tpk.label());
                                     self.emit_e1002(
                                         span,
                                         format!(
                                             "cannot assign a value of type `{}` to `{}` (type `{}`) in multi-value assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
-                                            vk.label(),
+                                            got_lbl,
                                             t.render(),
-                                            tpk.label(),
-                                            tpk.label()
+                                            target_lbl,
+                                            target_lbl
                                         ),
                                         "each target's declared type is fixed; write an explicit conversion when a conversion is intended",
                                     );
