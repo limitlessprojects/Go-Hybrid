@@ -1659,3 +1659,31 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 375 -> 377 (+2 test files). Final main dd30466a, tree clean, remote asserts green; replies posted per PR; no silent closes.
 - NEXT TICK QUEUE: #937 (magomedta, 14.5d, +449 — big; budget a full tick or split) -> #3499 (NO tests — scrutinize) -> #3503 -> DUP CHECK: #2940 vs landed #3145 (copy widths) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
 - DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 86 — 2026-11-04 10:10 tick (1 landed: #937 salvaged) — 14.5d saga item resolved
+
+- Full recycle; env restored. scan capped (cap-or-skip, S85 queue). approve 10/10.
+- LANDED:
+  99dd2ffa Merge PR #937 (magomedta, fixes #936) — new(T) type-operand validation (HYB-E2005) + new_kind named-type resolution + print/println void-value rejection (HYB-E1002) + legal acceptance pins. GATE FAIL on first battery (8 tests: expected E2005, got E1002): the PR's make-size arm was superseded while queued — 641a5514 (fixes #2693, Dimank92) landed non-integer make sizes under E1002 + classify_make_size E2005 covers negative-const/len>cap; all three verified empirically on pre-merge main; PR's second "make" arm was an unreachable duplicate. SALVAGE FIXUP (credited): dropped unreachable arm + 7 duplicate make tests, kept fresh new/print/println coverage. 378 suites.
+- Suite trajectory: 377 -> 378. Final main 99dd2ffa, tree clean, remote asserts green; reply posted with full supersession evidence; no silent closes.
+- NEXT TICK QUEUE: #3499 (NO tests — scrutinize hard, manual repro mandatory) -> #3503 -> DUP CHECK: #2940 vs landed #3145 (copy widths) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 87 — 2026-11-04 11:10 tick (0 landed; 1 GATE FAIL evidence, 1 DUP closed-out)
+
+- Full recycle; env restored. scan capped (cap-or-skip, S86 queue). approve 10/10.
+- GATE FAIL: #3499 (pedromineo, "fixes" #3429) — zero-copy Digest256Borrowed drops runtime.Pinner on the FALSE premise that Cross3S is NOSPLIT/safepoint-free. Evidence: Cross3S (bridge.go:216) has a deep path (needsDeep -> acquireDeep -> runtime.Gosched() at stack_linux.go:59 -> callDeep3 reusing the raw uintptr); stack growth in that window stales a stack-resident &data[0]. De-facto safe TODAY only because FnDigest256 is SMALL-class (fast-only) — a table fact the PR neither cites nor guards, and it would be the repo's first unpin crossing. Two acceptance paths offered (hybridge-side borrowed crossing w/ deep-leg fallback, or documented+asserted SMALL-class license + benchmarks). Triage "NO tests" flag was wrong: PR has a Go test; review-level failure, not test-level.
+- DUP CHECK: #2940 (fixes #2825) vs landed #3145 (fixes #3085) — CONFIRMED DUPLICATE. All repros empirically closed on main (int64/int32, float64/float32 width E1002; string-into-non-byte E1002; legal []byte<-string accepted). Evidence reply posted; author may close or open fresh issue for residual shapes; sweeper will handle.
+- #3503 DEFERRED (deliberate, budget): stale-base PR (counts 130->132 vs main's 133) — needs same treatment as #2284: 2 merge conflicts + 5 census fixups + 319-line deep_composite_conflict review. Pre-computed post-merge truth: corpus 135 (ACCEPT 43 · MANAGED 2 · REJECT 90). ALSO: PLAN.md +1 / STATUS.md +1 in diff need scope check.
+- No main movement this tick; main stays aa22a692 (worklog below moves it), suites 378.
+- NEXT TICK QUEUE: #3503 (top priority, pre-computed above) -> DUP CHECK: #2982 vs #2976 vs #2978 -> #1718/#1719/#3441/#3428/#3435/#3160 -> re-scan for fresh PRs (996 open). Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+
+## Session 88 — 2026-11-04 12:10 tick (1 landed: stale-base #3503 with in-merge reconciliation)
+
+- Full recycle; env restored from scratch (rustup foreground + go tarball re-cached to my-project/go-1.26.9.tar.gz). scan fresh, approve 13/13 (35 calls used).
+- LANDED: #3503 (lilyliiphone2026-collab, fixes #3412) -> merge 457e7f22. Stale-base reconciliation: 7 count-surface conflicts (2 content + 5 census faces) resolved to the S87-pre-computed post-merge truth — corpus 135 = ACCEPT 43 / ACCEPT-MANAGED 2 / REJECT 90, census 7/7 green. Four deep_composite_conflict call sites auto-merged; context hand-verified against main's newer literal arms (scalar_mismatch / untyped int->float preserved).
+- In-merge fixups (all credited in the merge message): VERDICTS.md section + 2 rows added (PR missed the README's own contract) + glued-row blemish from a prior in-merge repaired; dead chan_dir_assignable + never-read Chan::dir removed (0 new warnings; _dir rename with E3012-territory note); PLAN/STATUS '(138)' corrected to 135.
+- Battery: build 0 warnings; workspace 379 suites / 2705 passed / 0 failed (composite_lit_inner_types 5/5); corpus 135/135 verdict agreement, tripwire 1.5% not fired; differential FULL 45/45 + 90/90 (44/89 + 1 new fixture each side, as pre-computed).
+- Suite trajectory: 378 -> 379. Main d6507a52 -> 457e7f22 (+ worklog commit), tree clean.
+- DUP CHECK (executed post-merge, in budget): #2982 vs #3058 — CONFIRMED DUPLICATE (same kinds_conflict arm-split, same fixes #2962). Empirical on main 457e7f22: all three #2962 repros still pass 0 diagnostics -> family FRESH, exactly one claimant carries it. Canonical = #2982 (first claimant, 9-test pin); written dup-evidence reply posted on #3058 with revisit-on-differentiation clause. #2976/#2978 dup pair untouched this tick.
+- NEXT TICK QUEUE: #2982 (canonical #2962 fix, verify + land) -> #2976 vs #2978 dup check -> #1718/#1719/#3441/#3428/#3435/#3160 -> re-scan Pareto top (fresh #3551/#3550/#3547/#3581 score-9 batch). Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
