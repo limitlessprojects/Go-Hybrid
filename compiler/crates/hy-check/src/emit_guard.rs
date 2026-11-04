@@ -469,6 +469,16 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if (name == "new" || name == "make") && st.env_lookup(name).is_none()) {
+                    if let Some(a0) = args.first() {
+                        let tname = match unwrap_parens(&a0.value) {
+                            Expr::Ident { name, .. } => Some(name.clone()),
+                            Expr::Index { base, index, .. } => Some(format!("{}[{}]", base.render(), index.render())),
+                            _ => None,
+                        };
+                        if let Some(name) = tname { self.check_type_expr_with_state(Some(st), &TypeExpr::Named { name, span: a0.value.span() }); }
+                    }
+                }
                 self.check_call_const_overflow(st, callee, args);
                 self.check_expr_emit_guard(st, callee);
                 for a in args {
@@ -1020,8 +1030,25 @@ impl<'a> Checker<'a> {
             }
             TypeExpr::Pointer { to, .. }
             | TypeExpr::Slice { elem: to, .. }
-            | TypeExpr::Option { elem: to, .. }
             | TypeExpr::Chan { elem: to, .. } => self.check_type_expr_with_state(st, to),
+            TypeExpr::Option { elem: to, span } => {
+                // Issue #3620: `option[T]` lowers to Go prelude generic `option[T]`.
+                // A local or parameter named `option` shadows the type in Go, causing
+                // `option (variable) is not a type` (Row 13 BUILDABLE).
+                if let Some(st) = st {
+                    if st.env_lookup("option").is_some() {
+                        let msg = "type `option` is shadowed by local value `option` in this scope — Go rejects `option (variable) is not a type` (HYB-E1002)".to_string();
+                        self.diags.push(
+                            Diagnostic::error("HYB-E1002", self.path.clone(), *span, msg)
+                                .with_notes(vec![
+                                    "why: Go resolves `option` to the in-scope local or parameter rather than the type, so the emitted program fails `go build` (GUARANTEES Row 13)".to_string(),
+                                    "fix: rename the local binding `option` so it does not shadow the type name".to_string(),
+                                ]),
+                        );
+                    }
+                }
+                self.check_type_expr_with_state(st, to);
+            }
             TypeExpr::Map { key, value, span } => {
                 // Issue #1565: `map[K]V` is a compile error in Go when `K` has
                 // no `==` (`invalid map key type []int`). Map LITERALS pass
@@ -1035,7 +1062,8 @@ impl<'a> Checker<'a> {
                 params, results, ..
             } => {
                 for p in params {
-                    self.check_type_expr_with_state(st, &p.ty);
+                    let pty = if matches!(&p.ty, TypeExpr::Named { name, .. } if name.is_empty()) { TypeExpr::Named { name: p.name.clone(), span: p.span } } else { p.ty.clone() };
+                    self.check_type_expr_with_state(st, &pty);
                 }
                 for r in results {
                     self.check_type_expr_with_state(st, r);

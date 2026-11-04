@@ -370,7 +370,7 @@ impl<'a> Checker<'a> {
                     // classified as shared mutable state and rejected at every
                     // check-site. The pointee is inferred when the type argument
                     // resolves; otherwise Unknown — still a non-sendable pointer.
-                    "new" => {
+                    "new" if !self.fns.contains_key("new") => {
                         let pointee = match args
                             .first()
                             .map(|a| crate::model::unwrap_parens(&a.value))
@@ -388,10 +388,10 @@ impl<'a> Checker<'a> {
                                     TypeShape::Unknown
                                 }
                             }
-                            Some(Expr::Index { base, .. }) => {
+                            Some(Expr::Index { base, index, .. }) => {
                                 if let Expr::Ident { name, .. } = crate::model::unwrap_parens(base)
                                 {
-                                    self.named_shape(name)
+                                    self.type_arg_ty(st, index).map(|t| self.named_shape(&format!("{name}[{}]", t.render()))).unwrap_or_else(|| self.named_shape(name))
                                 } else {
                                     TypeShape::Unknown
                                 }
@@ -863,6 +863,7 @@ impl<'a> Checker<'a> {
                             other => self.ty_of_expr(st, other),
                         });
                     }
+                    if name == "new" && args.len() == 1 && !self.fns.contains_key("new") { return Some(TypeExpr::Pointer { to: Box::new(self.type_arg_ty(st, &args[0].value)?), span: *span }); }
                     if args.len() == 1 {
                         let is_type_name = crate::const_overflow::fixed_width_int_range(name).is_some()
                             || crate::const_init::is_conversion_type_name(name)
@@ -1004,6 +1005,14 @@ impl<'a> Checker<'a> {
     /// N3 (`HYB-E4002`): returns `Some(reason)` when `ty` has no zero value
     /// (an `enum` whose first variant carries a payload, or a `struct`/`[N]T`
     /// containing such a field/element transitively).
+    fn type_arg_ty(&self, st: &FnState, expr: &Expr) -> Option<TypeExpr> {
+        match crate::model::unwrap_parens(expr) {
+            Expr::Ident { name, span } => Some(TypeExpr::Named { name: name.clone(), span: *span }),
+            Expr::Field { base, name, span } => if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) { Some(TypeExpr::Named { name: format!("{pkg}.{name}"), span: *span }) } else { None },
+            Expr::Index { base, index, span } => if let Expr::Ident { name, .. } = crate::model::unwrap_parens(base) { Some(TypeExpr::Named { name: format!("{name}[{}]", self.type_arg_ty(st, index)?.render()), span: *span }) } else { None },
+            other => self.ty_of_expr(st, other),
+        }
+    }
     pub(crate) fn no_zero_value_reason(&self, ty: &TypeExpr, depth: usize) -> Option<String> {
         if depth > 16 {
             return None;
