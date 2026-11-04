@@ -2821,8 +2821,10 @@ impl<'a> Collector<'a> {
                 );
                 if type_first_arg {
                     if let Some(first_arg) = args.first() {
-                        if let Expr::Ident { name, span } = unwrap_parens(&first_arg.value) {
-                            self.check_named_type_instantiation(name, *span);
+                        match unwrap_parens(&first_arg.value) {
+                            Expr::Ident { name, span } => self.check_named_type_instantiation(name, *span),
+                            Expr::Index { base, index, span } if matches!(unwrap_parens(base), Expr::Ident { name, .. } if self.lookup_kind(name).is_none() && !self.file_consts.contains_key(name) && !self.ck.fns.contains_key(name)) => self.check_named_type_instantiation(&format!("{}[{}]", base.render(), index.render()), *span),
+                            _ => {}
                         }
                     }
                 }
@@ -3914,11 +3916,17 @@ impl<'a> Collector<'a> {
                     }
                 }
             }
+            Expr::Index { base, index, .. } => {
+                self.kind_of_named(&format!("{}[{}]", base.render(), index.render()), 0)
+            }
             Expr::SliceLit {
                 elem: Some(t),
                 items,
                 ..
-            } if items.is_empty() => OpKind::Slice(Box::new(self.kind_of_ty(t, 0))),
+            } if items.is_empty() => match bare.as_array_lit() {
+                Some((_, ie, _)) => OpKind::Array(Box::new(self.kind_of_ty(ie, 0))),
+                None => OpKind::Slice(Box::new(self.kind_of_ty(t, 0))),
+            },
             Expr::MapLit {
                 key,
                 value,
@@ -8112,6 +8120,8 @@ impl<'a> Collector<'a> {
                 ..
             } if items.is_empty() => {}
             Expr::MapLit { entries, .. } if entries.is_empty() => {}
+            Expr::Index { base, .. }
+                if matches!(unwrap_parens(base), Expr::Ident { name, .. } if self.lookup_kind(name).is_none() && !self.file_consts.contains_key(name) && !self.ck.fns.contains_key(name)) => {}
             Expr::StructLit {
                 ty: Some(TypeExpr::Chan { .. }),
                 fields,
