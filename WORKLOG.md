@@ -40,3 +40,11 @@
 - Landing replies for #2944 and #3666 posted successfully (comment endpoints unaffected).
 - Suites 394 -> 396. Differential 45/45 + 90/90 both landings. Worklog: this commit.
 - Next queue: #3535 -> #3519 -> #3586 -> #3423 -> #2934/#2942/#2937 (behind 5, gttps trio) -> #2923/#3611/#1811.
+
+## Session 98 — 2026-11-05 00:10 UTC+8 tick
+- approve --max 40 succeeded (8/8 approved; secondary 403 from S97 cleared). Full scan succeeded.
+- Landed PR #3670 -> d1fa520f (hy-emit: assoc_index_type_arg Index arm + emit_new via go_type_name; new(T) in user_struct_name_of/type_of_expr guarded by is_unshadowed_builtin; fixes #3669, aswadi). ALL-GREEN 397 suites.
+- Landed PR #3668 -> 29f4e8cd (hy-check: unnamed fn param promotion in check_type_expr_with_state + new/make type operands walk shadow guard; fixes #3667, aswadi). ALL-GREEN 398 suites.
+- Landed PR #3389 -> 59bba45d (runtime/go/hybench: minVal=MaxInt64 sentinel, NaN fail-closed, uint64 bucket hi clamp; fixes #3388, Shokun123). ALL-GREEN 398 suites.
+- Suites 396 -> 398. Differential 45/45 + 90/90 all three landings. Worklog: this commit.
+- Next queue: #3362 -> #3366 -> #3611 -> #1811 -> #3438 -> #3570 -> #3441 -> #3586(behind 12) -> #3414 -> #3351 -> #3423(behind 12) -> #3472.
