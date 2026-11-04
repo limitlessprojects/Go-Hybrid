@@ -3533,8 +3533,10 @@ impl<'a> Collector<'a> {
                         return Some(vec![first]);
                     }
                     "make" => return Some(vec![self.make_kind(args)]),
-                    "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
-                    "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
+                    "new" => return Some(vec![self.new_kind(args)]),
+                    "delete" | "close" | "print" | "println" | "panic" | "clear" => {
+                        return Some(Vec::new());
+                    }
                     "recover" => return Some(vec![OpKind::Interface]),
                     "min" | "max" => {
                         let res_kind = args
@@ -3627,6 +3629,55 @@ impl<'a> Collector<'a> {
             Expr::Ident { name, .. } => self.kind_of_named(name, 0),
             _ => OpKind::Unknown,
         }
+    }
+
+    fn new_kind(&self, args: &[CallArg]) -> OpKind {
+        let Some(first) = args.first() else {
+            return OpKind::Pointer(Box::new(OpKind::Unknown));
+        };
+        let bare = unwrap_parens(&first.value);
+        let inner = match bare {
+            Expr::Ident { name, .. } => {
+                if self.lookup_kind(name).is_some() || self.file_consts.contains_key(name) {
+                    OpKind::Unknown
+                } else {
+                    let k = self.kind_of_named(name, 0);
+                    if k != OpKind::Unknown {
+                        k
+                    } else {
+                        let head = Checker::base_named_type_str(name);
+                        if self.ck.structs.contains_key(name.as_str())
+                            || self.ck.structs.contains_key(head)
+                        {
+                            OpKind::Struct(Some(head.to_string()))
+                        } else {
+                            OpKind::Unknown
+                        }
+                    }
+                }
+            }
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                ..
+            } if items.is_empty() => OpKind::Slice(Box::new(self.kind_of_ty(t, 0))),
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } if entries.is_empty() => OpKind::Map(
+                Box::new(self.kind_of_ty(key, 0)),
+                Box::new(self.kind_of_ty(value, 0)),
+            ),
+            Expr::StructLit {
+                ty: Some(t),
+                fields,
+                ..
+            } if fields.is_empty() => self.kind_of_ty(t, 0),
+            _ => OpKind::Unknown,
+        };
+        OpKind::Pointer(Box::new(inner))
     }
 
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
@@ -7586,6 +7637,14 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
+
+            "new" => {
+                if args.len() != 1 {
+                    return; // arity handled by builtins.rs
+                }
+                let op = &args[0].value;
+                self.check_new_type_operand(op, span);
+            }
             "min" | "max" => {
                 let mut first_arg: Option<(&Expr, OpKind)> = None;
                 let mut first_typed_scalar: Option<(&Expr, &'static str)> = None;
@@ -7653,7 +7712,91 @@ impl<'a> Collector<'a> {
                     }
                 }
             }
+
             _ => {}
+        }
+    }
+
+    fn check_new_type_operand(&mut self, op: &Expr, span: Span) {
+        let bare = unwrap_parens(op);
+        if matches!(bare, Expr::Lit { .. })
+            || matches!(
+                bare,
+                Expr::Unary {
+                    op: UnOp::Neg,
+                    operand,
+                    ..
+                } if matches!(unwrap_parens(operand), Expr::Lit { .. })
+            )
+        {
+            return; // already handled by builtins.rs
+        }
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(k) = self.lookup_kind(name) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot use `{name}` (variable of type `{}`) as type in argument to `new` (HYB-E2005)",
+                            k.label()
+                        ),
+                        "`new` takes a type name — not a variable",
+                    );
+                } else if self.file_consts.contains_key(name) {
+                    self.emit_e2005(
+                        span,
+                        format!("cannot use `{name}` (constant) as type in argument to `new` (HYB-E2005)"),
+                        "`new` takes a type name — not a constant",
+                    );
+                } else if self.ck.fns.contains_key(name) {
+                    self.emit_e2005(
+                        span,
+                        format!("cannot use `{name}` (function) as type in argument to `new` (HYB-E2005)"),
+                        "`new` takes a type name — not a function",
+                    );
+                } else if name == "true" || name == "false" || name == "nil" {
+                    self.emit_e2005(
+                        span,
+                        format!("cannot use `{name}` as type in argument to `new` (HYB-E2005)"),
+                        "`new` takes a type name — not a literal",
+                    );
+                }
+            }
+            Expr::SliceLit {
+                elem: Some(_),
+                items,
+                ..
+            } if items.is_empty() => {}
+            Expr::MapLit { entries, .. } if entries.is_empty() => {}
+            Expr::StructLit {
+                ty: Some(TypeExpr::Chan { .. }),
+                fields,
+                ..
+            } if fields.is_empty() => {}
+            Expr::Field { base, .. } => {
+                if let Expr::Ident { name: bname, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(bname).is_some() {
+                        self.emit_e2005(
+                            span,
+                            format!("cannot use `{}` as type in argument to `new` (HYB-E2005)", op.render()),
+                            "`new` takes a type — not a field access on a variable",
+                        );
+                    }
+                } else {
+                    self.emit_e2005(
+                        span,
+                        format!("cannot use `{}` as type in argument to `new` (HYB-E2005)", op.render()),
+                        "`new` takes a type name — not an expression",
+                    );
+                }
+            }
+            _ => {
+                self.emit_e2005(
+                    span,
+                    format!("argument to `new` must be a type, found expression `{}` (HYB-E2005)", op.render()),
+                    "`new` takes a type name — not a value or expression",
+                );
+            }
         }
     }
 
