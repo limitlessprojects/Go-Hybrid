@@ -43,3 +43,33 @@ fn multiline_raw_string_counts_characters_and_has_one_eof() {
         1
     );
 }
+
+#[test]
+fn long_ascii_identifier_stops_before_unicode_whitespace() {
+    let name = format!("id{}", "_a0".repeat(1024));
+    let source = format!("// λ🙂\nlet {name}\u{2003}:= `λ`");
+    let tokens = lex("unicode.hy", &source).expect("ASCII identifier after Unicode comment");
+    let identifier = tokens
+        .iter()
+        .find(|t| matches!(&t.tok, Tok::Ident(value) if value == &name))
+        .expect("complete identifier");
+    let end = 5 + name.len() as u32;
+    assert_eq!(coordinates(identifier), (2, 5, 2, end));
+    let assignment = tokens
+        .iter()
+        .find(|t| matches!(&t.tok, Tok::Punct(":=")))
+        .expect("operator following one Unicode whitespace character");
+    assert_eq!(coordinates(assignment), (2, end + 1, 2, end + 3));
+}
+
+#[test]
+fn long_ascii_identifier_at_eof_keeps_complete_text_and_span() {
+    let name = "_a0".repeat(2048);
+    let tokens = lex("identifier.hy", &name).expect("identifier ending at EOF");
+    let end = 1 + name.len() as u32;
+    assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens[0].tok, Tok::Ident(name));
+    assert_eq!(coordinates(&tokens[0]), (1, 1, 1, end));
+    assert!(matches!(&tokens[1].tok, Tok::Eof));
+    assert_eq!(coordinates(&tokens[1]), (1, end, 1, end));
+}

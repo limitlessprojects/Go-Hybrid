@@ -425,15 +425,17 @@ impl<'a> Lexer<'a> {
 
     fn lex_ident_or_kw(&mut self) -> Token {
         let start = self.pos();
-        let mut s = String::new();
-        while let Some(c) = self.at(0) {
-            if c == '_' || c.is_ascii_alphanumeric() {
-                s.push(c);
-                self.bump();
-            } else {
-                break;
-            }
-        }
+        let remaining = self.chars.as_str();
+        let length = remaining
+            .as_bytes()
+            .iter()
+            .position(|&c| c != b'_' && !c.is_ascii_alphanumeric())
+            .unwrap_or(remaining.len());
+        // Identifiers are ASCII, so every consumed byte is one column and
+        // the first non-identifier byte remains at a UTF-8 boundary.
+        let s = &remaining[..length];
+        self.chars = remaining[length..].chars();
+        self.col += length as u32;
         if s.chars().any(|c| c.is_ascii_uppercase()) {
             // LX2: Hybrid identifiers are snake_case; foreign names are
             // normalized at binding time, so uppercase never appears here.
@@ -463,7 +465,7 @@ impl<'a> Lexer<'a> {
         if let Some(kw) = KEYWORDS.iter().find(|k| **k == s) {
             self.tok(start, Tok::Kw(kw))
         } else {
-            self.tok(start, Tok::Ident(s))
+            self.tok(start, Tok::Ident(s.to_owned()))
         }
     }
 
