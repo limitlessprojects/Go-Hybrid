@@ -1152,7 +1152,20 @@ impl<'a> Collector<'a> {
     /// are known; everything else (conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
-        if let Some((_, _, array_ty)) = bare.as_array_lit() {
+        if let Some((len_opt, inner_elem, array_ty)) = bare.as_array_lit() {
+            // #3599: For `[...]int{1, 2, 3}`, len_opt is None; compute length from items.len().
+            // For `[N]int{1, 2, 3}` where N is a constant, fold N to its integer length.
+            if let Some(l) = len_opt {
+                if let Some(v) = crate::const_overflow::const_int_value(l)
+                    .or_else(|| self.ck.const_int_value_at(l, l.span().start, 0))
+                {
+                    if v >= 0 {
+                        return Some(format!("[{}]{}", v, inner_elem.render()));
+                    }
+                }
+            } else if let Expr::SliceLit { items, .. } = bare {
+                return Some(format!("[{}]{}", items.len(), inner_elem.render()));
+            }
             return Some(array_ty.render());
         }
         match bare {
@@ -7292,6 +7305,25 @@ impl<'a> Collector<'a> {
                             "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
                         );
                     }
+                    // #3598: `fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to
+                    // `fmt.Fprint*(os.Stderr, ...)` in `hy-emit`. When `os` is shadowed by
+                    // an in-scope parameter, local binding, loop variable, closure argument,
+                    // type parameter, or package-level declaration, emitted Go fails
+                    // downstream compilation (Row 13 BUILDABLE).
+                    if pkg == "fmt"
+                        && matches!(name.as_str(), "eprint" | "eprintln" | "eprintf")
+                        && self.lookup_kind(pkg).is_none()
+                        && self.is_os_shadowed()
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot call `fmt.{}` because `os` is shadowed by an in-scope declaration (HYB-E1002)",
+                                name
+                            ),
+                            "`fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to `os.Stderr`; rename the shadowing `os` binding so `os.Stderr` is accessible",
+                        );
+                    }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -7413,6 +7445,20 @@ impl<'a> Collector<'a> {
                 }
             }
         }
+    }
+
+    /// #3598: `fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to
+    /// `fmt.Fprint*(os.Stderr, ...)` in `hy-emit`. When `os` is shadowed by
+    /// an in-scope parameter, local binding, loop variable, closure argument,
+    /// type parameter, or package-level declaration, emitted Go resolves `os.Stderr`
+    /// to the shadowing entity, causing downstream compilation to fail (Row 13 BUILDABLE).
+    fn is_os_shadowed(&self) -> bool {
+        self.scopes.iter().any(|s| s.contains_key("os"))
+            || self.fn_type_params.contains("os")
+            || self.lookup_kind("os").is_some()
+            || self.ck.pkg_names.contains_key("os")
+            || self.file_consts.contains_key("os")
+            || self.file_untyped_consts.contains("os")
     }
 
     fn check_fn_type_arg_arity(&mut self, fn_key: &str, raw_callee: &str, span: Span) {
