@@ -24,7 +24,7 @@
 use std::collections::HashSet;
 
 use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
-use hy_diag::Diagnostic;
+use hy_diag::{Diagnostic, FixIt};
 use hy_syntax::{Block, Expr, ForKind, MatchPattern, Param, Place, PlaceKind, SelectArmKind, Stmt};
 
 impl<'a> Checker<'a> {
@@ -33,7 +33,24 @@ impl<'a> Checker<'a> {
         let Some(elem) = self.place_unassignable_at(st, target) else {
             return;
         };
+        let is_str = self.place_is_string_byte(st, elem);
         let elem = elem.render();
+        if is_str {
+            let msg = if elem == target.render() {
+                format!(
+                    "cannot assign to `{}` — it is a byte of a string, and Go strings are immutable (HYB-E2010)",
+                    elem
+                )
+            } else {
+                format!(
+                    "cannot assign to `{}` — it is part of the string byte `{}`, and Go strings are immutable (HYB-E2010)",
+                    target.render(),
+                    elem
+                )
+            };
+            self.push_string_byte(msg, &elem, target.span);
+            return;
+        }
         let msg = format!(
             "cannot assign to `{}` — it is part of the map element `{}`, and a Go map element is not addressable (HYB-E2010)",
             target.render(),
@@ -56,7 +73,18 @@ impl<'a> Checker<'a> {
         let Some(elem) = self.expr_unassignable_at(st, operand) else {
             return;
         };
+        let is_str = self.expr_is_string_byte(st, elem);
         let elem = elem.render();
+        if is_str {
+            let msg = format!(
+                "`&{}` cannot be a loan — the loan is stored back into `{}`, which is part of the string byte `{}`, and Go strings are immutable (HYB-E2010)",
+                operand.render(),
+                operand.render(),
+                elem
+            );
+            self.push_string_byte(msg, &elem, value.span());
+            return;
+        }
         let msg = format!(
             "`&{}` cannot be a loan — the loan is stored back into `{}`, which is part of the map element `{}`, and a Go map element is not addressable (HYB-E2010)",
             operand.render(),
@@ -76,6 +104,41 @@ impl<'a> Checker<'a> {
         ];
         self.diags
             .push(Diagnostic::error("HYB-E2010", self.path.clone(), span, msg).with_notes(notes));
+    }
+
+    fn push_string_byte(&mut self, msg: String, elem: &str, span: hy_diag::Span) {
+        let notes = vec![
+            "why: Go rejects a store into a string byte (`cannot assign to s[i] (neither addressable nor a map index expression)`), so an accepted Hybrid program would emit unbuildable Go".to_string(),
+        ];
+        let mut d = Diagnostic::error("HYB-E2010", self.path.clone(), span, msg).with_notes(notes);
+        // The registry's E2010 fix-its describe map elements; a string byte
+        // has its own legal route (T3).
+        d.fixits = vec![FixIt {
+            description: format!(
+                "strings are immutable (T3): convert to bytes, change them, and convert back — `b := []byte(…); b[i] = …; s = string(b)` — instead of storing into `{}`",
+                elem
+            ),
+            replacement: None,
+        }];
+        self.diags.push(d);
+    }
+
+    /// The unaddressable culprit is a byte of a string (`s[i]`), not a
+    /// map element.
+    fn place_is_string_byte(&self, st: &FnState, p: &Place) -> bool {
+        match &p.kind {
+            PlaceKind::Index { base, .. } => {
+                matches!(self.place_shape(st, base), Some(TypeShape::Str))
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_is_string_byte(&self, st: &FnState, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::Index { base, .. } => matches!(self.shape_of_expr(st, base), TypeShape::Str),
+            _ => false,
+        }
     }
 
     /// `Some(map element)` when `p` is provably not a Go assignment target.
