@@ -491,7 +491,7 @@ impl<'a> Checker<'a> {
                     let elem_ty = *elem_ty.clone();
                     let resolved_elem = self.resolve_type_alias(&elem_ty);
                     for i in items {
-                        self.check_const_overflow_init("slice literal element", &elem_ty, i, None);
+                        self.check_const_overflow_init("slice literal element", &elem_ty, i, Some(st));
                         if let Expr::SliceLit {
                             elem: None,
                             items: sub_items,
@@ -590,6 +590,30 @@ impl<'a> Checker<'a> {
 
     fn check_call_const_overflow(&mut self, st: &FnState, callee: &Expr, args: &[CallArg]) {
         let unwrapped = crate::model::unwrap_parens(callee);
+
+        // 0. Foreign fmt calls take `any` (or `...any`), where untyped int constants default to `int`
+        if let Expr::Field { base, name: method_name, .. } = unwrapped {
+            if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
+                if self.lookup_binding(st, pkg).is_none() && pkg == "fmt" {
+                    let norm = crate::foreign::normalize_go_ident_to_snake(method_name);
+                    let m = norm.as_str();
+                    let start_any_idx = match m {
+                        "print" | "println" | "sprint" | "sprintln" | "eprint" | "eprintln" | "scan" | "scanln" => 0,
+                        "printf" | "sprintf" | "eprintf" | "errorf" => 1,
+                        "fprint" | "fprintln" => 1,
+                        "fprintf" => 2,
+                        _ => usize::MAX,
+                    };
+                    if start_any_idx < usize::MAX {
+                        for a in args.iter().skip(start_any_idx) {
+                            if !a.spread {
+                                self.check_default_int_overflow(&format!("argument to fmt.{}", method_name), &a.value, Some(st));
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // 1. Built-in: append(slice, items...) and delete(map, key)
         if let Expr::Ident { name, .. } = unwrapped {

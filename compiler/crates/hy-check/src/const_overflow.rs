@@ -37,6 +37,10 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
+        if ty_name == "any" || ty_name == "interface{}" {
+            self.check_default_int_overflow(name, value, st);
+            return;
+        }
         if let Some(is_f32) = is_float_type(ty_name) {
             if let Some(f) = self.const_float_fold(value, st) {
                 let overflows = if is_f32 {
@@ -190,6 +194,10 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
+        if ty_name == "any" || ty_name == "interface{}" {
+            self.check_default_int_overflow(name, value, st);
+            return;
+        }
         if let Some(is_f32) = is_float_type(ty_name) {
             if let Some(f) = self.const_float_fold(value, st) {
                 let overflows = if is_f32 {
