@@ -1082,7 +1082,18 @@ impl<'a> Collector<'a> {
         let int_to_float_conflict = want == OpKind::Float
             && got == OpKind::Int
             && !self.is_untyped_int_const(&args[0].value);
-        if kinds_conflict(&want, &got) || int_to_float_conflict {
+        let scalar_mismatch = self.scalar_names_conflict(
+            canonical_numeric_name(&elem),
+            self.typed_value_scalar(&args[0].value),
+        );
+        let array_len_mismatch = self.sized_array_names_differ(
+            Some(elem.as_str()),
+            self.typed_value_type_name(&args[0].value).as_deref(),
+        );
+        if kinds_conflict(&want, &got)
+            || int_to_float_conflict
+            || scalar_mismatch
+            || array_len_mismatch {
             self.emit_e1002(
                 args[0].value.span(),
                 format!(
