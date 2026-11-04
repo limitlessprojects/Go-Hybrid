@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor amendment — #3295
+
+- `hyb check` now preserves channel direction in buildability operand kinds and reports HYB-E2005 when `close` targets a receive-only channel. Regression pin: `compiler/crates/hy-check/tests/close_range_direction.rs`; bidirectional and send-only controls remain accepted. Focused tests pass (13/13), corpus 130/130, and `cargo test --workspace` passes.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.
