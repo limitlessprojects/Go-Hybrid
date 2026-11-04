@@ -1311,6 +1311,7 @@ impl Emitter {
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
         let e = Self::peel_parens(e);
+        if let Expr::Move { operand, .. } | Expr::AddrOf { operand, .. } | Expr::Unary { op: UnOp::Addr, operand, .. } = e { return self.binding_kind_of(operand); }
         if let Expr::Ident { name, .. } = e {
             return self.bindings.get(name).copied().unwrap_or(BindingKind::Plain);
         }
@@ -1367,21 +1368,23 @@ impl Emitter {
         // binding resolves through the shape table (Batch I, corpus 13:
         // `s := summary(doc)?` — s.set normalizes like any rust-call
         // result).
-        if let Expr::Ident { name, .. } = call {
-            if let Some((_, _, Some(kind), _)) = self.fn_shapes.get(name.as_str()) {
-                return *kind;
+        if let Expr::Ident { name, .. } = Self::peel_parens(call) {
+            let fn_head = name.split('[').next().unwrap_or(name);
+            if !self.local_vars.contains(fn_head) {
+                if let Some((_, _, Some(kind), _)) = self.fn_shapes.get(fn_head) { return *kind; }
             }
         }
         // make(chan …) → Chan (single-var range emits the value directly).
         // Only classify as Chan if the first argument is a channel type.
         // make([]T, n) (SliceLit) and make(map[K]V) (MapLit) must remain Plain
         // so single-var range binds elements/keys rather than channel values.
-        if matches!(Self::peel_parens(call), Expr::Ident { name, .. } if name == "make") {
+        if matches!(Self::peel_parens(call), Expr::Ident { name, .. } if (name == "make" || name == "new") && !self.local_vars.contains(name.as_str()) && !self.fn_shapes.contains_key(name.as_str())) {
             return match args.first().map(|a| Self::peel_parens(&a.value)) {
-                Some(Expr::Ident { name, .. }) => self
-                    .n5_aliases
-                    .get(name)
-                    .and_then(|t| self.binding_kind_of_ty(t))
+                Some(Expr::Ident { name, span }) => self
+                    .binding_kind_of_ty(&TypeExpr::Named { name: name.clone(), span: *span })
+                    .unwrap_or(BindingKind::Plain),
+                Some(Expr::Field { base, name, span }) if matches!(Self::peel_parens(base), Expr::Ident { .. }) => self
+                    .binding_kind_of_ty(&TypeExpr::Named { name: format!("{}.{name}", base.render()), span: *span })
                     .unwrap_or(BindingKind::Plain),
                 Some(v) => self.binding_kind_of(v),
                 None => BindingKind::Plain,

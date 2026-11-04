@@ -94,6 +94,21 @@ pub(crate) enum OpKind {
     /// fail-open in every operand guard, so `op + 1`, `takes_int(op)` and
     /// `var s string = op.unwrap()` all passed and failed `go build`.
     Option(Box<OpKind>),
+    /// A declared curated foreign named type (`os.file`, `bufio.reader`,
+    /// `net.conn`, `serde_json.value`, ...) — the names
+    /// `foreign::foreign_named_type` classifies as opaque, own-handle or
+    /// borrow-handle at the A5/move boundaries (#3521).
+    ///
+    /// Deliberately NOT `Unknown`: a named Go type is never assignable to or
+    /// from the builtin scalar family, yet every kind check using these
+    /// bindings fell through the `(Unknown, _)` fail-open arm, so
+    /// `var f os.file` + `var n int = f` passed `hyb check` and died in
+    /// `go build`.
+    ///
+    /// Cross-foreign pairs stay fail-open inside `kinds_conflict`: the kind
+    /// model does not track interface satisfaction, and a concrete foreign
+    /// value may legally target a foreign interface name (`io.reader`).
+    Foreign(String),
     Void,
 }
 
@@ -119,6 +134,7 @@ impl OpKind {
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
             OpKind::Fn(..) => "fn".to_string(),
             OpKind::Option(e) => format!("option[{}]", e.label()),
+            OpKind::Foreign(n) => n.clone(),
             OpKind::Void => "void".to_string(),
         }
     }
@@ -174,6 +190,17 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Float, Int) => false,
         // A struct whose name did not resolve is not evidence of a mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
+        // A declared curated foreign named type (`os.file`, `bufio.reader`,
+        // ...) is a named Go type: it is never assignable to or from the
+        // builtin scalar family, in either direction (`go build`: cannot use
+        // f (variable of type os.File) as int value). Every OTHER pairing
+        // with a foreign side stays fail-open — interface satisfaction is not
+        // modelled here, so a closure may target `http.handler`, a reader may
+        // target `io.reader`, and foreign values inside containers keep their
+        // current permissive behavior; this arm claims exactly the scalar
+        // interop that is provable.
+        (Foreign(_), Int | Float | Bool | Str) | (Int | Float | Bool | Str, Foreign(_)) => true,
+        (Foreign(_), _) | (_, Foreign(_)) => false,
         (a, b) if a == b => false,
         // Same container shape: recurse into the element kinds.
         (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
@@ -585,6 +612,12 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // `option[T]` is a separate concern (#1671), and this pass only needs
         // the payload kind for operand/argument/initializer checks.
         OpKind::Option(_) => false,
+        // Foreign members live on the Go side: the kind model carries the
+        // type NAME (for assignability) but no member table, so a member
+        // lookup on `os.file` cannot claim absence (`f.read(...)` must keep
+        // passing — unknown-FIELD/METHOD naming on foreign values is #2203's
+        // territory, with its own surface tables).
+        OpKind::Foreign(_) => false,
     }
 }
 
@@ -3318,7 +3351,22 @@ impl<'a> Collector<'a> {
             "int" | "uint" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
             | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
-            _ => OpKind::Unknown,
+            // A curated foreign named type (`os.file`, `bufio.reader`,
+            // `net.conn`, `serde_json.value`, ...) is resolved, not
+            // unresolved: the same table #3521 uses at move boundaries. It
+            // keeps its own kind so `kinds_conflict` can refuse scalar
+            // interop; every non-scalar pairing stays fail-open there.
+            // Handles are NOT exempt: `serde_json.value` lowers to the
+            // `jsonbinding.Value` struct, so `var n int = v` dies in
+            // `go build` exactly like `os.file` does.
+            _ => match crate::foreign::foreign_named_type(name) {
+                Some(
+                    crate::model::TypeShape::ForeignOpaque(n)
+                    | crate::model::TypeShape::OwnHandle(n)
+                    | crate::model::TypeShape::BorrowHandle(n),
+                ) => OpKind::Foreign(n),
+                _ => OpKind::Unknown,
+            },
         }
     }
 
@@ -5397,9 +5445,20 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// Family A (#425): `if cond` and `for cond` require a boolean condition.
+    /// Family A (#425, #3155): `if cond` and `for cond` require a boolean condition.
     fn check_bool_condition(&mut self, cond: &Expr, construct: &str) {
         self.check_single_value_position(cond, "a boolean condition", false);
+        if matches!(unwrap_parens(cond), Expr::Lit { kind: LitKind::Nil, .. }) {
+            self.emit_e1002(
+                cond.span(),
+                format!(
+                    "non-boolean condition `nil` (untyped nil) in `{}` statement — Go requires a `bool` condition (HYB-E1002)",
+                    construct
+                ),
+                "compare the value explicitly (e.g. `x != nil`) or pass a `bool` expression",
+            );
+            return;
+        }
         let k = self.kind_of_expr(cond);
         if !matches!(k, OpKind::Unknown | OpKind::Bool) {
             self.emit_e1002(

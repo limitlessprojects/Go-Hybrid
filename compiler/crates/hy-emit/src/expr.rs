@@ -692,6 +692,7 @@ impl Emitter {
                 self.resolve_to_struct_name(fty)
             }
             Expr::StructLit { ty: Some(t), .. } => super::base_ty_name(t).and_then(|n| self.resolve_to_struct_name(&n)),
+            Expr::Call { callee, args, .. } if matches!(Self::unwrap_parens(callee), Expr::Ident { name, .. } if name == "new" && self.is_unshadowed_builtin("new")) => args.first().and_then(|a| Self::assoc_index_type_arg(&a.value)).and_then(|n| self.resolve_to_struct_name(&n)),
             _ => None,
         }
     }
@@ -781,12 +782,15 @@ impl Emitter {
             // A zero-arg/method call's result type is the member's result;
             // package constructors and user functions returning shape-known
             // foreign types resolve to their descriptor keys.
-            Expr::Call { callee, .. } => {
+            Expr::Call { callee, args, .. } => {
                 if let Some(t) = self.type_of_expr(callee) {
                     return Some(t);
                 }
                 match Self::unwrap_parens(callee) {
-                    Expr::Ident { name, .. } => {
+                    Expr::Ident { name, span } => {
+                        if name == "new" && self.is_unshadowed_builtin("new") {
+                            if let Some(BindingKind::ForeignTy(t)) = args.first().and_then(|a| Self::assoc_index_type_arg(&a.value)).and_then(|n| self.binding_kind_of_ty(&TypeExpr::Named { name: n, span: *span })) { return Some(t); }
+                        }
                         let (fn_head, _) = split_type_args(name);
                         if !self.local_vars.contains(fn_head) {
                             if let Some((_, _, Some(BindingKind::ForeignTy(t)), _)) =
@@ -885,6 +889,7 @@ impl Emitter {
             Expr::Field { base, name, .. } => {
                 Self::assoc_index_type_arg(base).map(|b| format!("{b}.{name}"))
             }
+            Expr::Index { base, index, .. } => Some(format!("{}[{}]", Self::assoc_index_type_arg(base)?, Self::assoc_index_type_arg(index)?)),
             Expr::SliceLit {
                 elem: Some(t),
                 items,
@@ -1284,10 +1289,7 @@ impl Emitter {
                 entries,
                 ..
             } if entries.is_empty() => format!("map[{}]{}", self.type_text(key), self.type_text(value)),
-            Expr::Ident { name, .. } => super::shapes::go_primitive_name(name)
-                .unwrap_or(name.as_str())
-                .to_string(),
-            other => self.emit_expr(other, 0)?,
+            other => if let Some(name) = Self::assoc_index_type_arg(other) { self.go_type_name(&name) } else { self.emit_expr(other, 0)? },
         };
         Ok(format!("new({})", ty_text))
     }

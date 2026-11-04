@@ -32,3 +32,27 @@
 - Dup protocol: #3621 was first claimer on #3620 (earlier by ~1.5 min) but MERGE-CONFLICT vs main (781 behind) -> superseded reply posted, credit to @jpereyra243-byte in #3621 reply.
 - Suites 391 -> 394. Differential 45/45 + 90/90 each landing. Worklog: this commit.
 - Next queue: #2944 -> #3666 -> #3535 -> #3519 -> #3586 -> #3423 -> #2934/#2942/#2937 (behind 5, gttps trio).
+
+## Session 97 — 2026-11-04 23:10 UTC+8 tick
+- Landed PR #2944 -> 856d4261 (hy-check: move-subexpr sendability + foreign/atomic struct leaves fail-closed + move/new/deref chan directions; fixes #2943, gttps). ALL-GREEN 395 suites.
+- Landed PR #3666 -> 8ce509e2 (hy-check: OpKind::Foreign refuses scalar interop with curated foreign named types via #3521 table; fixes #3636, Yumihariii). ALL-GREEN 396 suites.
+- Scan skipped this tick: full scan burned the 5000/hr API quota last tick (reset 16:28 UTC); worked the known queue via git protocol instead. approve --max 40 blocked by endpoint-level secondary 403 on pulls listing (comments POST fine) -> CI unblock deferred to next tick; first action next tick: retry approve, and if still 403, after 16:28 UTC primary reset.
+- Landing replies for #2944 and #3666 posted successfully (comment endpoints unaffected).
+- Suites 394 -> 396. Differential 45/45 + 90/90 both landings. Worklog: this commit.
+- Next queue: #3535 -> #3519 -> #3586 -> #3423 -> #2934/#2942/#2937 (behind 5, gttps trio) -> #2923/#3611/#1811.
+
+## Session 98 — 2026-11-05 00:10 UTC+8 tick
+- approve --max 40 succeeded (8/8 approved; secondary 403 from S97 cleared). Full scan succeeded.
+- Landed PR #3670 -> d1fa520f (hy-emit: assoc_index_type_arg Index arm + emit_new via go_type_name; new(T) in user_struct_name_of/type_of_expr guarded by is_unshadowed_builtin; fixes #3669, aswadi). ALL-GREEN 397 suites.
+- Landed PR #3668 -> 29f4e8cd (hy-check: unnamed fn param promotion in check_type_expr_with_state + new/make type operands walk shadow guard; fixes #3667, aswadi). ALL-GREEN 398 suites.
+- Landed PR #3389 -> 59bba45d (runtime/go/hybench: minVal=MaxInt64 sentinel, NaN fail-closed, uint64 bucket hi clamp; fixes #3388, Shokun123). ALL-GREEN 398 suites.
+- Suites 396 -> 398. Differential 45/45 + 90/90 all three landings. Worklog: this commit.
+- Next queue: #3362 -> #3366 -> #3611 -> #1811 -> #3438 -> #3570 -> #3441 -> #3586(behind 12) -> #3414 -> #3351 -> #3423(behind 12) -> #3472.
+
+## Session 99 — 2026-11-05 01:10 UTC+8 tick
+- approve 7/7 ok; scan ok.
+- Landed PR #3683 -> ba3e41c6 (hy-emit: binding_kind_of unwraps Move/AddrOf, generic call head strips [T], make/new classification hardened; fixes #3681, aswadi). ALL-GREEN 399 suites.
+- Landed PR #3682 -> b8a83464 (hy-check: call_shape new arm keeps name[T] via type_arg_ty, ty_of_expr new(T) -> Pointer(T), guarded vs user fn new; fixes #3680, aswadi). ALL-GREEN 400 suites.
+- Landed PR #3156 -> f91390bd (hy-check: untyped nil condition in if/for/match guard rejects HYB-E1002 fail-closed; fixes #3155, Dimank92). ALL-GREEN 401 suites.
+- Suites 398 -> 401. Differential 45/45 + 90/90 all three landings. Worklog: this commit.
+- Next queue: #3153 -> #3076 -> #2592 -> #3168 -> #3238 -> #3676 -> #3233 -> #3070 -> #3438 -> #3570 -> #3441.
