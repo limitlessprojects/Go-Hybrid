@@ -7252,6 +7252,14 @@ impl<'a> Collector<'a> {
                             "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
                         );
                     }
+                    // #3572: validate errors.wrap operand kinds
+                    if pkg == "errors"
+                        && name == "wrap"
+                        && self.lookup_kind(pkg).is_none()
+                        && args.len() == 2
+                    {
+                        self.check_errors_wrap_operand_kinds(args, span);
+                    }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -7372,6 +7380,46 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
+        }
+    }
+
+    /// #3572 - validate errors.wrap(err, message) operand kinds.
+    fn check_errors_wrap_operand_kinds(&mut self, args: &[CallArg], span: Span) {
+        let err_op = unwrap_parens(&args[0].value);
+        let err_kind = self.kind_of_expr(err_op);
+        let never_error = matches!(
+            err_kind,
+            OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str
+                | OpKind::Slice(_) | OpKind::Array(_) | OpKind::Map(_, _)
+                | OpKind::Chan(_) | OpKind::Fn(..) | OpKind::Option(_) | OpKind::Void
+        );
+        if never_error {
+            self.emit_e1002(
+                err_op.span(),
+                format!(
+                    "`errors.wrap` argument 1 is `{}`, not an error (HYB-E1002)",
+                    err_kind.label()
+                ),
+                "errors.wrap requires err to implement the error interface",
+            );
+        }
+        let msg_op = unwrap_parens(&args[1].value);
+        let msg_kind = self.kind_of_expr(msg_op);
+        let never_string = matches!(
+            msg_kind,
+            OpKind::Int | OpKind::Float | OpKind::Bool
+                | OpKind::Slice(_) | OpKind::Array(_) | OpKind::Map(_, _)
+                | OpKind::Chan(_) | OpKind::Fn(..) | OpKind::Option(_) | OpKind::Void
+        );
+        if never_string {
+            self.emit_e1002(
+                msg_op.span(),
+                format!(
+                    "`errors.wrap` argument 2 is `{}`, not a string (HYB-E1002)",
+                    msg_kind.label()
+                ),
+                "errors.wrap requires message to be a string",
+            );
         }
     }
 
