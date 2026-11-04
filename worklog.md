@@ -1668,3 +1668,12 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 377 -> 378. Final main 99dd2ffa, tree clean, remote asserts green; reply posted with full supersession evidence; no silent closes.
 - NEXT TICK QUEUE: #3499 (NO tests — scrutinize hard, manual repro mandatory) -> #3503 -> DUP CHECK: #2940 vs landed #3145 (copy widths) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
 - DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 87 — 2026-11-04 11:10 tick (0 landed; 1 GATE FAIL evidence, 1 DUP closed-out)
+
+- Full recycle; env restored. scan capped (cap-or-skip, S86 queue). approve 10/10.
+- GATE FAIL: #3499 (pedromineo, "fixes" #3429) — zero-copy Digest256Borrowed drops runtime.Pinner on the FALSE premise that Cross3S is NOSPLIT/safepoint-free. Evidence: Cross3S (bridge.go:216) has a deep path (needsDeep -> acquireDeep -> runtime.Gosched() at stack_linux.go:59 -> callDeep3 reusing the raw uintptr); stack growth in that window stales a stack-resident &data[0]. De-facto safe TODAY only because FnDigest256 is SMALL-class (fast-only) — a table fact the PR neither cites nor guards, and it would be the repo's first unpin crossing. Two acceptance paths offered (hybridge-side borrowed crossing w/ deep-leg fallback, or documented+asserted SMALL-class license + benchmarks). Triage "NO tests" flag was wrong: PR has a Go test; review-level failure, not test-level.
+- DUP CHECK: #2940 (fixes #2825) vs landed #3145 (fixes #3085) — CONFIRMED DUPLICATE. All repros empirically closed on main (int64/int32, float64/float32 width E1002; string-into-non-byte E1002; legal []byte<-string accepted). Evidence reply posted; author may close or open fresh issue for residual shapes; sweeper will handle.
+- #3503 DEFERRED (deliberate, budget): stale-base PR (counts 130->132 vs main's 133) — needs same treatment as #2284: 2 merge conflicts + 5 census fixups + 319-line deep_composite_conflict review. Pre-computed post-merge truth: corpus 135 (ACCEPT 43 · MANAGED 2 · REJECT 90). ALSO: PLAN.md +1 / STATUS.md +1 in diff need scope check.
+- No main movement this tick; main stays aa22a692 (worklog below moves it), suites 378.
+- NEXT TICK QUEUE: #3503 (top priority, pre-computed above) -> DUP CHECK: #2982 vs #2976 vs #2978 -> #1718/#1719/#3441/#3428/#3435/#3160 -> re-scan for fresh PRs (996 open). Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
