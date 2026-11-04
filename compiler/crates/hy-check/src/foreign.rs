@@ -213,8 +213,12 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
             "os",
             "open"
                 | "create"
+                | "open_file"
                 | "read_file"
                 | "read_dir"
+                | "readlink"
+                | "hostname"
+                | "getgroups"
                 | "getwd"
                 | "user_home_dir"
                 | "user_cache_dir"
@@ -227,8 +231,12 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
                 | "mkdir_temp"
                 | "Open"
                 | "Create"
+                | "OpenFile"
                 | "ReadFile"
                 | "ReadDir"
+                | "Readlink"
+                | "Hostname"
+                | "Getgroups"
                 | "Getwd"
                 | "UserHomeDir"
                 | "UserCacheDir"
@@ -239,6 +247,43 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
                 | "Lstat"
                 | "CreateTemp"
                 | "MkdirTemp",
+        ) => Some(2),
+        ("os", "pipe" | "Pipe") => Some(3),
+        (
+            "http",
+            "get"
+                | "head"
+                | "post"
+                | "post_form"
+                | "new_request"
+                | "new_request_with_context"
+                | "read_response"
+                | "read_request"
+                | "Get"
+                | "Head"
+                | "Post"
+                | "PostForm"
+                | "NewRequest"
+                | "NewRequestWithContext"
+                | "ReadResponse"
+                | "ReadRequest",
+        ) => Some(2),
+        (
+            "url",
+            "parse"
+                | "parse_request_uri"
+                | "parse_query"
+                | "query_unescape"
+                | "path_unescape"
+                | "Parse"
+                | "ParseRequestURI"
+                | "ParseQuery"
+                | "QueryUnescape"
+                | "PathUnescape",
+        ) => Some(2),
+        (
+            "json",
+            "marshal" | "marshal_indent" | "Marshal" | "MarshalIndent",
         ) => Some(2),
         (
             "io",
@@ -291,14 +336,45 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
             "net",
             "listen"
                 | "dial"
+                | "dial_timeout"
                 | "resolve_tcp_addr"
+                | "resolve_ip_addr"
+                | "resolve_udp_addr"
+                | "resolve_unix_addr"
                 | "lookup_host"
+                | "lookup_ip"
+                | "lookup_cname"
+                | "lookup_mx"
+                | "lookup_ns"
+                | "lookup_txt"
+                | "lookup_addr"
+                | "lookup_port"
+                | "parse_mac"
+                | "interface_addrs"
+                | "interfaces"
                 | "Listen"
                 | "Dial"
+                | "DialTimeout"
                 | "ResolveTCPAddr"
-                | "LookupHost",
+                | "ResolveIPAddr"
+                | "ResolveUDPAddr"
+                | "ResolveUnixAddr"
+                | "LookupHost"
+                | "LookupIP"
+                | "LookupCNAME"
+                | "LookupMX"
+                | "LookupNS"
+                | "LookupTXT"
+                | "LookupAddr"
+                | "LookupPort"
+                | "ParseMAC"
+                | "InterfaceAddrs"
+                | "Interfaces",
         ) => Some(2),
-        ("net", "split_host_port" | "SplitHostPort") => Some(3),
+        (
+            "net",
+            "split_host_port" | "parse_cidr" | "lookup_srv" | "SplitHostPort" | "ParseCIDR" | "LookupSRV",
+        ) => Some(3),
         ("hex", "decode_string" | "DecodeString") => Some(2),
         ("regex", "compile" | "match_string" | "Compile" | "MatchString") => Some(2),
         _ => None,
