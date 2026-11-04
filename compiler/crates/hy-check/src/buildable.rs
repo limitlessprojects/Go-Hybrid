@@ -1048,7 +1048,44 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #2915: `opt.or(default)` on an `option[T]` needs `default` of type `T`.
+    /// `option[int]` -> `"int"`.
+    fn option_elem_of_ty(ty: &TypeExpr) -> Option<String> {
+        match ty {
+            TypeExpr::Option { elem, .. } => Some(elem.render()),
+            TypeExpr::Named { name, .. } => name
+                .strip_prefix("option[")
+                .and_then(|r| r.strip_suffix(']'))
+                .map(|t| t.to_string()),
+            _ => None,
+        }
+    }
+
+    /// The payload element type text of an option-valued expression, when provable (#3234).
+    fn option_elem_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(inner) = tname.strip_prefix("option[").and_then(|r| r.strip_suffix(']')) {
+                        return Some(inner.to_string());
+                    }
+                }
+                None
+            }
+            Expr::StructLit { ty: Some(t), .. } => Self::option_elem_of_ty(t),
+            Expr::Call { callee, .. } => match unwrap_parens(callee) {
+                Expr::Ident { name, .. } if self.lookup_kind(name).is_none() => self
+                    .ck
+                    .fns
+                    .get(name.as_str())
+                    .filter(|f| f.results.len() == 1)
+                    .and_then(|f| Self::option_elem_of_ty(&f.results[0].ty)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// #2915, #3234: `opt.or(default)` on an `option[T]` needs `default` of type `T`.
     fn check_option_method_arg(&mut self, callee: &Expr, args: &[CallArg]) {
         let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
             return;
@@ -1065,7 +1102,23 @@ impl<'a> Collector<'a> {
         let int_to_float_conflict = want == OpKind::Float
             && got == OpKind::Int
             && !self.is_untyped_int_const(&args[0].value);
-        if kinds_conflict(&want, &got) || int_to_float_conflict {
+        let elem_ty = self.option_elem_of_expr(base);
+        let scalar_mismatch = elem_ty
+            .as_deref()
+            .and_then(canonical_numeric_name)
+            .is_some_and(|w| {
+                self.scalar_names_conflict(Some(w), self.typed_value_scalar(&args[0].value))
+            });
+        let array_len_mismatch = self.sized_array_names_differ(
+            elem_ty.as_deref(),
+            self.typed_value_type_name(&args[0].value).as_deref(),
+        );
+        if kinds_conflict(&want, &got)
+            || int_to_float_conflict
+            || scalar_mismatch
+            || array_len_mismatch
+        {
+            let elem_label = elem_ty.unwrap_or_else(|| want.label());
             self.emit_e1002(
                 args[0].value.span(),
                 format!(
@@ -1074,7 +1127,7 @@ impl<'a> Collector<'a> {
                     got.label(),
                     want.label(),
                     base.render(),
-                    want.label()
+                    elem_label
                 ),
                 "argument to `option.or` must match the option payload type",
             );
@@ -1158,6 +1211,7 @@ impl<'a> Collector<'a> {
         match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
+            Expr::Move { operand, .. } => self.typed_value_type_name(operand),
             _ => None,
         }
     }
