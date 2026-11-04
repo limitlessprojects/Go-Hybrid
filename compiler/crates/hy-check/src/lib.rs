@@ -108,7 +108,8 @@ pub fn check_file(file: &File) -> CheckResult {
     let mut ck = Checker::new(file);
 
     build_tables(&mut ck);
-    ck.check_struct_decls(); // A6: borrow-handle / pointer struct fields
+    ck.check_struct_decls();
+    ck.check_recursive_value_types(); // A6: borrow-handle / pointer struct fields
     ck.check_file_const_zero_divisors(); // Issue #149/#508: constant zero divisor in file consts
     ck.check_file_map_literal_duplicate_keys(); // Issue #687: duplicate constant keys in map literals
 
