@@ -732,16 +732,10 @@ impl<'a> Lexer<'a> {
 
     fn lex_punct(&mut self) -> Token {
         let start = self.pos();
-        let rest: String = {
-            let mut r = String::new();
-            for k in 0..4 {
-                match self.at(k) {
-                    Some(c) => r.push(c),
-                    None => break,
-                }
-            }
-            r
-        };
+        // Operator spellings are ASCII; borrow the existing UTF-8 remainder
+        // instead of allocating a short lookahead buffer for every token.
+        let rest = self.chars.as_str();
+        let first = rest.as_bytes()[0];
         // MULTI is scanned IN ORDER and matches by prefix, so the 3-char
         // compound forms must precede their 2-char prefixes (`<<=` before
         // `<<`, `>>=` before `>>`).
@@ -750,7 +744,7 @@ impl<'a> Lexer<'a> {
             "<<", ">>", "++", "--", "+=", "-=", "*=", "/=", "%=", "|=", "&=", "^=", "..",
         ];
         for m in MULTI {
-            if rest.starts_with(m) {
+            if m.as_bytes()[0] == first && rest.starts_with(m) {
                 for _ in 0..m.chars().count() {
                     self.bump();
                 }
@@ -1373,6 +1367,55 @@ mod tests {
         assert!(t.contains(&Tok::Punct("--")));
         assert!(t.contains(&Tok::Punct("+=")));
         assert!(t.contains(&Tok::Punct("...")));
+    }
+
+    #[test]
+    fn punctuation_preserves_longest_matches_at_eof() {
+        assert_eq!(
+            toks("<<=>>=... ..=<<>>..:=:"),
+            vec![
+                Tok::Punct("<<="),
+                Tok::Punct(">>="),
+                Tok::Punct("..."),
+                Tok::Punct("..="),
+                Tok::Punct("<<"),
+                Tok::Punct(">>"),
+                Tok::Punct(".."),
+                Tok::Punct(":="),
+                Tok::Punct(":"),
+                Tok::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn punctuation_preserves_scalar_columns_around_utf8_trivia() {
+        let tokens = lex("t.hy", ">>=\u{2003}+\n<-\u{2003}(").unwrap();
+        let punctuation: Vec<_> = tokens
+            .iter()
+            .filter_map(|token| match token.tok {
+                Tok::Punct(p) => Some((
+                    p,
+                    token.span.start.line,
+                    token.span.start.col,
+                    token.span.end.line,
+                    token.span.end.col,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            punctuation,
+            vec![
+                (">>=", 1, 1, 1, 4),
+                ("+", 1, 5, 1, 6),
+                ("<-", 2, 1, 2, 3),
+                ("(", 2, 4, 2, 5),
+            ]
+        );
+        let eof = tokens.last().unwrap();
+        assert_eq!(eof.tok, Tok::Eof);
+        assert_eq!((eof.span.start.line, eof.span.start.col), (2, 5));
     }
 
     #[test]

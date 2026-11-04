@@ -1,0 +1,792 @@
+{
+  "baseline_source": "e50bddcc873f83711d58b14da93823f93fbc4838",
+  "measured_lexer_sha256": "2b0dd6ce5b4ce51a1f5b38d8c8ddb36f2be76276ed6e12927a7891d93b89b924",
+  "method": "Same countingSystemexample, Rust1.99.0release/offline,10lexes per input. Input/output excluded; token drops included. Protocol registered privately before measuring; publication follows measurements.",
+  "allocation_results": {
+    "ordinary": {
+      "input_sha256": "a2f197c13a154f0ee4783b836480fece0c6dbe690cf7c46dcd4de5bf167e6383",
+      "baseline": {
+        "input_bytes": 27808,
+        "iterations": 10,
+        "tokens_per_iteration": 6009,
+        "allocs": 50060,
+        "reallocs": 110,
+        "requested_bytes": 8261630
+      },
+      "candidate": {
+        "input_bytes": 27808,
+        "iterations": 10,
+        "tokens_per_iteration": 6009,
+        "allocs": 30040,
+        "reallocs": 110,
+        "requested_bytes": 8101470
+      },
+      "allocation_call_fraction_change": -0.39992009588493804
+    },
+    "comments": {
+      "input_sha256": "77ea99a6eb1779f41220580171627307e5f7fdd2aff16755d4bef41a1c6b3376",
+      "baseline": {
+        "input_bytes": 1080014,
+        "iterations": 10,
+        "tokens_per_iteration": 3,
+        "allocs": 30,
+        "reallocs": 0,
+        "requested_bytes": 2050
+      },
+      "candidate": {
+        "input_bytes": 1080014,
+        "iterations": 10,
+        "tokens_per_iteration": 3,
+        "allocs": 30,
+        "reallocs": 0,
+        "requested_bytes": 2050
+      },
+      "allocation_call_fraction_change": 0.0
+    },
+    "unicode": {
+      "input_sha256": "105b431d9c39fd6c2ee37f344c8680d88fff3c2ae701af6e22b55abe9e5780f8",
+      "baseline": {
+        "input_bytes": 54808,
+        "iterations": 10,
+        "tokens_per_iteration": 4009,
+        "allocs": 30060,
+        "reallocs": 20100,
+        "requested_bytes": 4679470
+      },
+      "candidate": {
+        "input_bytes": 54808,
+        "iterations": 10,
+        "tokens_per_iteration": 4009,
+        "allocs": 20040,
+        "reallocs": 20100,
+        "requested_bytes": 4599310
+      },
+      "allocation_call_fraction_change": -0.33333333333333337
+    },
+    "real_corpus": {
+      "input_sha256": "b406a8e22b86d7a2a5c5369c7bcb871434b32924e53a8e1e87851fffa847fe0a",
+      "baseline": {
+        "input_bytes": 5364,
+        "iterations": 10,
+        "tokens_per_iteration": 105,
+        "allocs": 840,
+        "reallocs": 50,
+        "requested_bytes": 126420
+      },
+      "candidate": {
+        "input_bytes": 5364,
+        "iterations": 10,
+        "tokens_per_iteration": 105,
+        "allocs": 460,
+        "reallocs": 50,
+        "requested_bytes": 123380
+      },
+      "allocation_call_fraction_change": -0.45238095238095233
+    }
+  },
+  "allocation_specific_criterion_passed": true,
+  "wall_time_experiment": {
+    "selection_rule_passed": false,
+    "status": "Inconclusive for the5%regression gate: identical baseline A/A medians differ4.75%. Do not claim a reliable new speedup or an established comment regression. Original timing gate is not called passed.",
+    "summary": {
+      "ordinary": {
+        "input_bytes": 27808,
+        "input_sha256": "a2f197c13a154f0ee4783b836480fece0c6dbe690cf7c46dcd4de5bf167e6383",
+        "baseline_median_ns": 567407.125,
+        "candidate_median_ns": 408553.021,
+        "fraction_change": -0.2799649440426043,
+        "baseline_samples_ns": [
+          557885.917,
+          541434.3335,
+          567407.125,
+          619899.604,
+          788038.083
+        ],
+        "candidate_samples_ns": [
+          345493.458,
+          345539.5625,
+          432258.021,
+          429494.896,
+          408553.021
+        ]
+      },
+      "comments": {
+        "input_bytes": 1080014,
+        "input_sha256": "77ea99a6eb1779f41220580171627307e5f7fdd2aff16755d4bef41a1c6b3376",
+        "baseline_median_ns": 1111790.125,
+        "candidate_median_ns": 1170184.2085,
+        "fraction_change": 0.05252257794608495,
+        "baseline_samples_ns": [
+          1236620.6665,
+          1242137.6875,
+          1063733.375,
+          1104722.0415,
+          1111790.125
+        ],
+        "candidate_samples_ns": [
+          1220660.8125,
+          1170184.2085,
+          1082388.0625,
+          1171996.0,
+          1163173.6875
+        ]
+      },
+      "unicode": {
+        "input_bytes": 54808,
+        "input_sha256": "105b431d9c39fd6c2ee37f344c8680d88fff3c2ae701af6e22b55abe9e5780f8",
+        "baseline_median_ns": 554027.7085,
+        "candidate_median_ns": 479121.146,
+        "fraction_change": -0.13520363936815616,
+        "baseline_samples_ns": [
+          459225.8125,
+          554027.7085,
+          541781.6665,
+          562972.1875,
+          582184.75
+        ],
+        "candidate_samples_ns": [
+          443027.125,
+          406837.9375,
+          486045.4795,
+          479121.146,
+          530376.0415
+        ]
+      },
+      "real_corpus": {
+        "input_bytes": 5364,
+        "input_sha256": "b406a8e22b86d7a2a5c5369c7bcb871434b32924e53a8e1e87851fffa847fe0a",
+        "baseline_median_ns": 23073.3354,
+        "candidate_median_ns": 14813.71875,
+        "fraction_change": -0.35797237403310145,
+        "baseline_samples_ns": [
+          23073.3354,
+          20766.10415,
+          20899.71045,
+          24452.4792,
+          25971.3729
+        ],
+        "candidate_samples_ns": [
+          14326.8854,
+          14376.85835,
+          14813.71875,
+          17172.6792,
+          16592.3896
+        ]
+      }
+    },
+    "raw": [
+      {
+        "case": "ordinary",
+        "pair": 1,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 27808,
+          "iterations": 2000,
+          "tokens_per_iteration": 6009,
+          "elapsed_ns": 1115771834
+        },
+        "ns_per_lex": 557885.917
+      },
+      {
+        "case": "ordinary",
+        "pair": 1,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 27808,
+          "iterations": 2000,
+          "tokens_per_iteration": 6009,
+          "elapsed_ns": 690986916
+        },
+        "ns_per_lex": 345493.458
+      },
+      {
+        "case": "ordinary",
+        "pair": 2,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 27808,
+          "iterations": 2000,
+          "tokens_per_iteration": 6009,
+          "elapsed_ns": 691079125
+        },
+        "ns_per_lex": 345539.5625
+      },
+      {
+        "case": "ordinary",
+        "pair": 2,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 27808,
+          "iterations": 2000,
+          "tokens_per_iteration": 6009,
+          "elapsed_ns": 1082868667
+        },
+        "ns_per_lex": 541434.3335
+      },
+      {
+        "case": "ordinary",
+        "pair": 3,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 27808,
+          "iterations": 2000,
+          "tokens_per_iteration": 6009,
+          "elapsed_ns": 1134814250
+        },
+        "ns_per_lex": 567407.125
+      },
+      {
+        "case": "ordinary",
+        "pair": 3,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 27808,
+          "iterations": 2000,
+          "tokens_per_iteration": 6009,
+          "elapsed_ns": 864516042
+        },
+        "ns_per_lex": 432258.021
+      },
+      {
+        "case": "ordinary",
+        "pair": 4,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 27808,
+          "iterations": 2000,
+          "tokens_per_iteration": 6009,
+          "elapsed_ns": 858989792
+        },
+        "ns_per_lex": 429494.896
+      },
+      {
+        "case": "ordinary",
+        "pair": 4,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 27808,
+          "iterations": 2000,
+          "tokens_per_iteration": 6009,
+          "elapsed_ns": 1239799208
+        },
+        "ns_per_lex": 619899.604
+      },
+      {
+        "case": "ordinary",
+        "pair": 5,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 27808,
+          "iterations": 2000,
+          "tokens_per_iteration": 6009,
+          "elapsed_ns": 1576076166
+        },
+        "ns_per_lex": 788038.083
+      },
+      {
+        "case": "ordinary",
+        "pair": 5,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 27808,
+          "iterations": 2000,
+          "tokens_per_iteration": 6009,
+          "elapsed_ns": 817106042
+        },
+        "ns_per_lex": 408553.021
+      },
+      {
+        "case": "comments",
+        "pair": 1,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 1080014,
+          "iterations": 2000,
+          "tokens_per_iteration": 3,
+          "elapsed_ns": 2473241333
+        },
+        "ns_per_lex": 1236620.6665
+      },
+      {
+        "case": "comments",
+        "pair": 1,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 1080014,
+          "iterations": 2000,
+          "tokens_per_iteration": 3,
+          "elapsed_ns": 2441321625
+        },
+        "ns_per_lex": 1220660.8125
+      },
+      {
+        "case": "comments",
+        "pair": 2,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 1080014,
+          "iterations": 2000,
+          "tokens_per_iteration": 3,
+          "elapsed_ns": 2340368417
+        },
+        "ns_per_lex": 1170184.2085
+      },
+      {
+        "case": "comments",
+        "pair": 2,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 1080014,
+          "iterations": 2000,
+          "tokens_per_iteration": 3,
+          "elapsed_ns": 2484275375
+        },
+        "ns_per_lex": 1242137.6875
+      },
+      {
+        "case": "comments",
+        "pair": 3,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 1080014,
+          "iterations": 2000,
+          "tokens_per_iteration": 3,
+          "elapsed_ns": 2127466750
+        },
+        "ns_per_lex": 1063733.375
+      },
+      {
+        "case": "comments",
+        "pair": 3,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 1080014,
+          "iterations": 2000,
+          "tokens_per_iteration": 3,
+          "elapsed_ns": 2164776125
+        },
+        "ns_per_lex": 1082388.0625
+      },
+      {
+        "case": "comments",
+        "pair": 4,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 1080014,
+          "iterations": 2000,
+          "tokens_per_iteration": 3,
+          "elapsed_ns": 2343992000
+        },
+        "ns_per_lex": 1171996.0
+      },
+      {
+        "case": "comments",
+        "pair": 4,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 1080014,
+          "iterations": 2000,
+          "tokens_per_iteration": 3,
+          "elapsed_ns": 2209444083
+        },
+        "ns_per_lex": 1104722.0415
+      },
+      {
+        "case": "comments",
+        "pair": 5,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 1080014,
+          "iterations": 2000,
+          "tokens_per_iteration": 3,
+          "elapsed_ns": 2223580250
+        },
+        "ns_per_lex": 1111790.125
+      },
+      {
+        "case": "comments",
+        "pair": 5,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 1080014,
+          "iterations": 2000,
+          "tokens_per_iteration": 3,
+          "elapsed_ns": 2326347375
+        },
+        "ns_per_lex": 1163173.6875
+      },
+      {
+        "case": "unicode",
+        "pair": 1,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 54808,
+          "iterations": 2000,
+          "tokens_per_iteration": 4009,
+          "elapsed_ns": 918451625
+        },
+        "ns_per_lex": 459225.8125
+      },
+      {
+        "case": "unicode",
+        "pair": 1,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 54808,
+          "iterations": 2000,
+          "tokens_per_iteration": 4009,
+          "elapsed_ns": 886054250
+        },
+        "ns_per_lex": 443027.125
+      },
+      {
+        "case": "unicode",
+        "pair": 2,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 54808,
+          "iterations": 2000,
+          "tokens_per_iteration": 4009,
+          "elapsed_ns": 813675875
+        },
+        "ns_per_lex": 406837.9375
+      },
+      {
+        "case": "unicode",
+        "pair": 2,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 54808,
+          "iterations": 2000,
+          "tokens_per_iteration": 4009,
+          "elapsed_ns": 1108055417
+        },
+        "ns_per_lex": 554027.7085
+      },
+      {
+        "case": "unicode",
+        "pair": 3,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 54808,
+          "iterations": 2000,
+          "tokens_per_iteration": 4009,
+          "elapsed_ns": 1083563333
+        },
+        "ns_per_lex": 541781.6665
+      },
+      {
+        "case": "unicode",
+        "pair": 3,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 54808,
+          "iterations": 2000,
+          "tokens_per_iteration": 4009,
+          "elapsed_ns": 972090959
+        },
+        "ns_per_lex": 486045.4795
+      },
+      {
+        "case": "unicode",
+        "pair": 4,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 54808,
+          "iterations": 2000,
+          "tokens_per_iteration": 4009,
+          "elapsed_ns": 958242292
+        },
+        "ns_per_lex": 479121.146
+      },
+      {
+        "case": "unicode",
+        "pair": 4,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 54808,
+          "iterations": 2000,
+          "tokens_per_iteration": 4009,
+          "elapsed_ns": 1125944375
+        },
+        "ns_per_lex": 562972.1875
+      },
+      {
+        "case": "unicode",
+        "pair": 5,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 54808,
+          "iterations": 2000,
+          "tokens_per_iteration": 4009,
+          "elapsed_ns": 1164369500
+        },
+        "ns_per_lex": 582184.75
+      },
+      {
+        "case": "unicode",
+        "pair": 5,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 54808,
+          "iterations": 2000,
+          "tokens_per_iteration": 4009,
+          "elapsed_ns": 1060752083
+        },
+        "ns_per_lex": 530376.0415
+      },
+      {
+        "case": "real_corpus",
+        "pair": 1,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 5364,
+          "iterations": 20000,
+          "tokens_per_iteration": 105,
+          "elapsed_ns": 461466708
+        },
+        "ns_per_lex": 23073.3354
+      },
+      {
+        "case": "real_corpus",
+        "pair": 1,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 5364,
+          "iterations": 20000,
+          "tokens_per_iteration": 105,
+          "elapsed_ns": 286537708
+        },
+        "ns_per_lex": 14326.8854
+      },
+      {
+        "case": "real_corpus",
+        "pair": 2,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 5364,
+          "iterations": 20000,
+          "tokens_per_iteration": 105,
+          "elapsed_ns": 287537167
+        },
+        "ns_per_lex": 14376.85835
+      },
+      {
+        "case": "real_corpus",
+        "pair": 2,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 5364,
+          "iterations": 20000,
+          "tokens_per_iteration": 105,
+          "elapsed_ns": 415322083
+        },
+        "ns_per_lex": 20766.10415
+      },
+      {
+        "case": "real_corpus",
+        "pair": 3,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 5364,
+          "iterations": 20000,
+          "tokens_per_iteration": 105,
+          "elapsed_ns": 417994209
+        },
+        "ns_per_lex": 20899.71045
+      },
+      {
+        "case": "real_corpus",
+        "pair": 3,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 5364,
+          "iterations": 20000,
+          "tokens_per_iteration": 105,
+          "elapsed_ns": 296274375
+        },
+        "ns_per_lex": 14813.71875
+      },
+      {
+        "case": "real_corpus",
+        "pair": 4,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 5364,
+          "iterations": 20000,
+          "tokens_per_iteration": 105,
+          "elapsed_ns": 343453584
+        },
+        "ns_per_lex": 17172.6792
+      },
+      {
+        "case": "real_corpus",
+        "pair": 4,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 5364,
+          "iterations": 20000,
+          "tokens_per_iteration": 105,
+          "elapsed_ns": 489049584
+        },
+        "ns_per_lex": 24452.4792
+      },
+      {
+        "case": "real_corpus",
+        "pair": 5,
+        "label": "baseline",
+        "data": {
+          "input_bytes": 5364,
+          "iterations": 20000,
+          "tokens_per_iteration": 105,
+          "elapsed_ns": 519427458
+        },
+        "ns_per_lex": 25971.3729
+      },
+      {
+        "case": "real_corpus",
+        "pair": 5,
+        "label": "candidate",
+        "data": {
+          "input_bytes": 5364,
+          "iterations": 20000,
+          "tokens_per_iteration": 105,
+          "elapsed_ns": 331847792
+        },
+        "ns_per_lex": 16592.3896
+      }
+    ],
+    "identical_binary_control": {
+      "median_ns": {
+        "A1": 1089238.9585,
+        "A2": 1037542.0
+      },
+      "relative_difference": -0.04746154009327053,
+      "resolution_sufficient": false,
+      "raw": [
+        {
+          "pair": 1,
+          "label": "A1",
+          "ns_per_lex": 1120447.8125,
+          "whole_process_cpu_ns_per_lex": 1099892.5,
+          "data": {
+            "input_bytes": 1080014,
+            "iterations": 2000,
+            "tokens_per_iteration": 3,
+            "elapsed_ns": 2240895625
+          }
+        },
+        {
+          "pair": 1,
+          "label": "A2",
+          "ns_per_lex": 1090481.979,
+          "whole_process_cpu_ns_per_lex": 1068146.9999999998,
+          "data": {
+            "input_bytes": 1080014,
+            "iterations": 2000,
+            "tokens_per_iteration": 3,
+            "elapsed_ns": 2180963958
+          }
+        },
+        {
+          "pair": 2,
+          "label": "A2",
+          "ns_per_lex": 1037542.0,
+          "whole_process_cpu_ns_per_lex": 1026456.5000000001,
+          "data": {
+            "input_bytes": 1080014,
+            "iterations": 2000,
+            "tokens_per_iteration": 3,
+            "elapsed_ns": 2075084000
+          }
+        },
+        {
+          "pair": 2,
+          "label": "A1",
+          "ns_per_lex": 1089238.9585,
+          "whole_process_cpu_ns_per_lex": 1072972.0000000005,
+          "data": {
+            "input_bytes": 1080014,
+            "iterations": 2000,
+            "tokens_per_iteration": 3,
+            "elapsed_ns": 2178477917
+          }
+        },
+        {
+          "pair": 3,
+          "label": "A1",
+          "ns_per_lex": 1060544.4585,
+          "whole_process_cpu_ns_per_lex": 1045078.4999999998,
+          "data": {
+            "input_bytes": 1080014,
+            "iterations": 2000,
+            "tokens_per_iteration": 3,
+            "elapsed_ns": 2121088917
+          }
+        },
+        {
+          "pair": 3,
+          "label": "A2",
+          "ns_per_lex": 1037148.3125,
+          "whole_process_cpu_ns_per_lex": 1024754.5000000002,
+          "data": {
+            "input_bytes": 1080014,
+            "iterations": 2000,
+            "tokens_per_iteration": 3,
+            "elapsed_ns": 2074296625
+          }
+        },
+        {
+          "pair": 4,
+          "label": "A2",
+          "ns_per_lex": 1035169.0205,
+          "whole_process_cpu_ns_per_lex": 1025044.4999999995,
+          "data": {
+            "input_bytes": 1080014,
+            "iterations": 2000,
+            "tokens_per_iteration": 3,
+            "elapsed_ns": 2070338041
+          }
+        },
+        {
+          "pair": 4,
+          "label": "A1",
+          "ns_per_lex": 1254493.271,
+          "whole_process_cpu_ns_per_lex": 1077151.0000000007,
+          "data": {
+            "input_bytes": 1080014,
+            "iterations": 2000,
+            "tokens_per_iteration": 3,
+            "elapsed_ns": 2508986542
+          }
+        },
+        {
+          "pair": 5,
+          "label": "A1",
+          "ns_per_lex": 1077258.9585,
+          "whole_process_cpu_ns_per_lex": 1059998.0000000002,
+          "data": {
+            "input_bytes": 1080014,
+            "iterations": 2000,
+            "tokens_per_iteration": 3,
+            "elapsed_ns": 2154517917
+          }
+        },
+        {
+          "pair": 5,
+          "label": "A2",
+          "ns_per_lex": 1041095.3125,
+          "whole_process_cpu_ns_per_lex": 1029315.4999999987,
+          "data": {
+            "input_bytes": 1080014,
+            "iterations": 2000,
+            "tokens_per_iteration": 3,
+            "elapsed_ns": 2082190625
+          }
+        }
+      ]
+    }
+  },
+  "full_correctness": "Pending full workspace/corpus/differential/examples;178snapshots and2focused tests passed before this preparation commit.",
+  "limitations": "One Mac, Rust1.99.0, four retained fixtures. Allocator instrumentation can affect optimisation and compiler mayelide/combine allocations. Successful request counts and requested bytes are not RSS/live memory/runtime speed/general optimiser guarantees. No new dependencies or extra paidAI/API."
+}
