@@ -1363,27 +1363,16 @@ impl Emitter {
         // Only classify as Chan if the first argument is a channel type.
         // make([]T, n) (SliceLit) and make(map[K]V) (MapLit) must remain Plain
         // so single-var range binds elements/keys rather than channel values.
-        if matches!(call, Expr::Ident { name, .. } if name == "make") {
-            if let Some(first) = args.first() {
-                if let Expr::StructLit {
-                    ty: Some(TypeExpr::Chan { .. }),
-                    ..
-                } = &first.value
-                {
-                    return BindingKind::Chan;
-                }
-                if matches!(
-                    &first.value,
-                    Expr::MapLit { .. }
-                        | Expr::StructLit {
-                            ty: Some(TypeExpr::Map { .. }),
-                            ..
-                        }
-                ) {
-                    return BindingKind::Map;
-                }
-            }
-            return BindingKind::Plain;
+        if matches!(Self::peel_parens(call), Expr::Ident { name, .. } if name == "make") {
+            return match args.first().map(|a| Self::peel_parens(&a.value)) {
+                Some(Expr::Ident { name, .. }) => self
+                    .n5_aliases
+                    .get(name)
+                    .and_then(|t| self.binding_kind_of_ty(t))
+                    .unwrap_or(BindingKind::Plain),
+                Some(v) => self.binding_kind_of(v),
+                None => BindingKind::Plain,
+            };
         }
         BindingKind::Plain
     }
@@ -1427,10 +1416,6 @@ impl Emitter {
             Expr::Ident { name, .. } => {
                 matches!(self.bindings.get(name), Some(BindingKind::Set))
             }
-            Expr::StructLit { ty: Some(t), .. } => match t {
-                TypeExpr::Named { name, .. } => name.starts_with("set[") || name == "set",
-                _ => false,
-            },
             Expr::Field { base, name, .. } => {
                 // Recursive since #1553: `o.sub.seen` is a set field of a
                 // nested struct, not just `o.seen`. The single-hop read
@@ -1445,7 +1430,7 @@ impl Emitter {
                 }
                 false
             }
-            Expr::Call { .. } | Expr::Try { .. } => {
+            Expr::Call { .. } | Expr::Try { .. } | Expr::StructLit { .. } => {
                 self.binding_kind_of(e) == BindingKind::Set
             }
             _ => false,
