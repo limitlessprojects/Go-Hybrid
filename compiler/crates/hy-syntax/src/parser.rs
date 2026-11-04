@@ -1057,7 +1057,24 @@ impl Parser {
     }
 
     fn panic_prefix_follows(&self) -> bool {
-        matches!(self.nth(1), Tok::StrChunk(_)) || matches!(self.nth(1), Tok::RawStr(_))
+        match self.nth(1) {
+            Tok::Int(_)
+            | Tok::Float(_)
+            | Tok::CharLit(_)
+            | Tok::StrChunk(_)
+            | Tok::RawStr(_)
+            | Tok::Ident(_)
+            | Tok::Kw("true")
+            | Tok::Kw("false")
+            | Tok::Kw("fn")
+            | Tok::Kw("chan")
+            | Tok::Kw("move")
+            | Tok::Punct("!")
+            | Tok::Punct("-")
+            | Tok::Punct("&")
+            | Tok::Punct("<-") => true,
+            _ => false,
+        }
     }
 
     /// `let`/`var`/`const` local. `let x := e` and `let x = e` both normalize
