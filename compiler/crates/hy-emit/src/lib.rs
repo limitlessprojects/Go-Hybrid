@@ -1730,13 +1730,17 @@ impl Emitter {
     /// table knows gives ForeignTy(key) — members resolve field-vs-method;
     /// any other dotted type stays generic Foreign.
     fn binding_kind_of_ty(&self, t: &TypeExpr) -> Option<BindingKind> {
-        if matches!(t, TypeExpr::Chan { .. }) {
+        let resolved = match self.resolve_type_alias(t) {
+            TypeExpr::Pointer { to, .. } => self.resolve_type_alias(to),
+            inner => inner,
+        };
+        if matches!(resolved, TypeExpr::Chan { .. }) {
             return Some(BindingKind::Chan);
         }
-        if matches!(t, TypeExpr::Map { .. }) {
+        if matches!(resolved, TypeExpr::Map { .. }) {
             return Some(BindingKind::Map);
         }
-        let Some(base) = base_ty_name(t) else { return None };
+        let Some(base) = base_ty_name(resolved) else { return None };
         let name = base.as_str();
         if name.starts_with("set[") || name == "set" {
             return Some(BindingKind::Set);
