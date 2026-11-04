@@ -18,7 +18,10 @@
 //   - slow ops (µs and up): record every call directly.
 package hybench
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // SubHalf is the sub-bucket half-count: 2^10 linear sub-buckets per
 // exponent bucket ⇒ ~0.1% resolution (HDR's default).
@@ -38,7 +41,7 @@ type Histogram struct {
 
 // New allocates a histogram. The zero value is NOT usable; always New.
 func New() *Histogram {
-	h := &Histogram{subMask: SubHalf - 1, minVal: 1<<62 - 1}
+	h := &Histogram{subMask: SubHalf - 1, minVal: math.MaxInt64}
 	for e := 0; e < 64; e++ {
 		// exponent e covers magnitudes [2^e, 2^(e+1)); the sub-bucket
 		// index keeps the leading 1 implicit: shift so it drops off
@@ -99,7 +102,7 @@ func (h *Histogram) Mean() float64 {
 // ValueAt returns the ns value the given fraction (0..1) of samples fall
 // at or below (the upper bound of the bucket that crosses the rank).
 func (h *Histogram) ValueAt(fraction float64) int64 {
-	if h.count == 0 {
+	if h.count == 0 || math.IsNaN(fraction) {
 		return 0
 	}
 	if fraction <= 0 {
@@ -112,6 +115,9 @@ func (h *Histogram) ValueAt(fraction float64) int64 {
 	if rank < 1 {
 		rank = 1
 	}
+	if rank > h.count {
+		rank = h.count
+	}
 	var seen int64
 	for e := 0; e < 64; e++ {
 		for sub := 0; sub < SubHalf; sub++ {
@@ -122,9 +128,17 @@ func (h *Histogram) ValueAt(fraction float64) int64 {
 					// (sub 0 is the dedicated zero bucket)
 					return int64(sub)
 				}
-				// implicit-leading-bit regime: re-add SubHalf
+				// implicit-leading-bit regime: re-add SubHalf and clamp
+				// to the observed [minVal, maxVal] range.
 				shift := uint(h.loShift[e])
-				return (SubHalf+int64(sub)+1)<<shift - 1
+				hi := int64((uint64(SubHalf+sub+1) << shift) - 1)
+				if hi > h.maxVal {
+					return h.maxVal
+				}
+				if hi < h.minVal {
+					return h.minVal
+				}
+				return hi
 			}
 		}
 	}
