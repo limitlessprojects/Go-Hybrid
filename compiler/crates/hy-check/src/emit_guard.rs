@@ -1020,8 +1020,25 @@ impl<'a> Checker<'a> {
             }
             TypeExpr::Pointer { to, .. }
             | TypeExpr::Slice { elem: to, .. }
-            | TypeExpr::Option { elem: to, .. }
             | TypeExpr::Chan { elem: to, .. } => self.check_type_expr_with_state(st, to),
+            TypeExpr::Option { elem: to, span } => {
+                // Issue #3620: `option[T]` lowers to Go prelude generic `option[T]`.
+                // A local or parameter named `option` shadows the type in Go, causing
+                // `option (variable) is not a type` (Row 13 BUILDABLE).
+                if let Some(st) = st {
+                    if st.env_lookup("option").is_some() {
+                        let msg = "type `option` is shadowed by local value `option` in this scope — Go rejects `option (variable) is not a type` (HYB-E1002)".to_string();
+                        self.diags.push(
+                            Diagnostic::error("HYB-E1002", self.path.clone(), *span, msg)
+                                .with_notes(vec![
+                                    "why: Go resolves `option` to the in-scope local or parameter rather than the type, so the emitted program fails `go build` (GUARANTEES Row 13)".to_string(),
+                                    "fix: rename the local binding `option` so it does not shadow the type name".to_string(),
+                                ]),
+                        );
+                    }
+                }
+                self.check_type_expr_with_state(st, to);
+            }
             TypeExpr::Map { key, value, span } => {
                 // Issue #1565: `map[K]V` is a compile error in Go when `K` has
                 // no `==` (`invalid map key type []int`). Map LITERALS pass
