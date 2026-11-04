@@ -702,6 +702,7 @@ struct Collector<'a> {
     /// the state outside any body, so `Stmt::Return` can only ever see it
     /// while a body is open. `FnLit` bodies swap it like `fn_decl` does.
     fn_results: Vec<OpKind>,
+    fn_result_type_names: Vec<String>,
     /// Type-parameter names of the function whose body is currently walked
     /// (`fn new[k comparable, v any]` → {k, v}). A composite literal inside a
     /// generic signature may spell those parameters (`map[k]v{}`, zero-value
@@ -768,6 +769,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
+            fn_result_type_names: Vec::new(),
             fn_type_params: HashSet::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
@@ -1194,6 +1196,23 @@ impl<'a> Collector<'a> {
                             let elem = s[close + 1..].trim();
                             if !elem.is_empty() {
                                 return Some(elem.to_string());
+                            }
+                        }
+                    }
+                    if let Some(rest) = s.strip_prefix("map[") {
+                        let mut depth = 1;
+                        for (idx, ch) in rest.char_indices() {
+                            if ch == '[' {
+                                depth += 1;
+                            } else if ch == ']' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    let val = rest[idx + 1..].trim();
+                                    if !val.is_empty() {
+                                        return Some(val.to_string());
+                                    }
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1869,6 +1888,8 @@ impl<'a> Collector<'a> {
         }
         let result_scalars: Vec<Option<&'static str>> =
             f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+        let result_type_names: Vec<String> = f.results.iter().map(|r| r.ty.render()).collect();
+        let outer_rt = std::mem::replace(&mut self.fn_result_type_names, result_type_names);
         let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
@@ -1886,6 +1907,7 @@ impl<'a> Collector<'a> {
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
         self.fn_result_scalars = outer_scalars;
+        self.fn_result_type_names = outer_rt;
         self.fn_type_params = outer_tp;
         self.pop_scope();
     }
@@ -2976,6 +2998,9 @@ impl<'a> Collector<'a> {
                 );
                 let result_scalars: Vec<Option<&'static str>> =
                     results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+                let result_type_names: Vec<String> =
+                    results.iter().map(|r| r.ty.render()).collect();
+                let outer_rt = std::mem::replace(&mut self.fn_result_type_names, result_type_names);
                 let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
@@ -2989,6 +3014,7 @@ impl<'a> Collector<'a> {
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
                 self.fn_result_scalars = outer_scalars;
+                self.fn_result_type_names = outer_rt;
                 self.pop_scope();
             }
             Expr::Paren { inner, .. } => self.expr(inner),
@@ -5008,6 +5034,7 @@ impl<'a> Collector<'a> {
                     if !self.report_return_conflict(v, &got, w, v.span()) {
                         let got_s = self.typed_value_scalar(v);
                         self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                        self.report_array_return_mismatch(v, i, v.span());
                     }
                 }
                 return;
@@ -5040,7 +5067,23 @@ impl<'a> Collector<'a> {
             if !self.report_return_conflict(v, &got, w, v.span()) {
                 let got_s = self.typed_value_scalar(v);
                 self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                self.report_array_return_mismatch(v, i, v.span());
             }
+        }
+    }
+
+    fn report_array_return_mismatch(&mut self, val: &Expr, idx: usize, span: Span) {
+        let Some(want_name) = self.fn_result_type_names.get(idx) else { return };
+        let got_name = self.typed_value_type_name(val);
+        if self.sized_array_names_differ(Some(want_name.as_str()), got_name.as_deref()) {
+            let got_label = got_name.as_deref().unwrap_or("array");
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot return a value of type `{got_label}` from a function declaring `{want_name}` — Go refuses `cannot use ... as {want_name} value in return statement` (HYB-E1002)"
+                ),
+                "return values must match the declared result types exactly; array lengths cannot differ",
+            );
         }
     }
 
@@ -6031,15 +6074,29 @@ impl<'a> Collector<'a> {
                             (self.place_scalar(t), self.typed_value_scalar(v)),
                             (Some(tp), Some(vp)) if tp != vp
                         );
-                        if conflict || scalar_mismatch {
+                        let array_mismatch = self.sized_array_names_differ(
+                            self.place_type_name(t).as_deref(),
+                            self.typed_value_type_name(v).as_deref(),
+                        );
+                        if conflict || scalar_mismatch || array_mismatch {
+                            let (v_label, t_label) = if array_mismatch {
+                                (
+                                    self.typed_value_type_name(v)
+                                        .unwrap_or_else(|| vk.label().to_string()),
+                                    self.place_type_name(t)
+                                        .unwrap_or_else(|| tpk.label().to_string()),
+                                )
+                            } else {
+                                (vk.label().to_string(), tpk.label().to_string())
+                            };
                             self.emit_e1002(
                                 v.span(),
                                 format!(
                                     "cannot assign a value of type `{}` to `{}` (type `{}`) in parallel assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
-                                    vk.label(),
+                                    v_label,
                                     t.render(),
-                                    tpk.label(),
-                                    tpk.label()
+                                    t_label,
+                                    t_label
                                 ),
                                 "each target's declared type is fixed; write an explicit conversion when a conversion is intended",
                             );
