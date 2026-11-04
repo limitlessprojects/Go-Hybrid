@@ -18,7 +18,10 @@
 //   - slow ops (µs and up): record every call directly.
 package hybench
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // SubHalf is the sub-bucket half-count: 2^10 linear sub-buckets per
 // exponent bucket ⇒ ~0.1% resolution (HDR's default).
@@ -36,9 +39,20 @@ type Histogram struct {
 	overflow int64
 }
 
-// New allocates a histogram. The zero value is NOT usable; always New.
+// New allocates a histogram. The zero value is also lazily initialized on
+// first Record.
 func New() *Histogram {
-	h := &Histogram{subMask: SubHalf - 1, minVal: 1<<62 - 1}
+	h := &Histogram{}
+	h.ensureInit()
+	return h
+}
+
+func (h *Histogram) ensureInit() {
+	if h.subMask != 0 {
+		return
+	}
+	h.subMask = SubHalf - 1
+	h.minVal = math.MaxInt64
 	for e := 0; e < 64; e++ {
 		// exponent e covers magnitudes [2^e, 2^(e+1)); the sub-bucket
 		// index keeps the leading 1 implicit: shift so it drops off
@@ -48,7 +62,6 @@ func New() *Histogram {
 			h.loShift[e] = 0
 		}
 	}
-	return h
 }
 
 // Record one latency sample (ns). Negative values are ignored (timer
@@ -64,6 +77,7 @@ func (h *Histogram) Record(ns int64) {
 	if ns < 0 {
 		return
 	}
+	h.ensureInit()
 	h.count++
 	h.total += ns
 	if ns > h.maxVal {
@@ -97,9 +111,10 @@ func (h *Histogram) Mean() float64 {
 }
 
 // ValueAt returns the ns value the given fraction (0..1) of samples fall
-// at or below (the upper bound of the bucket that crosses the rank).
+// at or below (the upper bound of the bucket that crosses the rank, clamped
+// to [minVal, maxVal]).
 func (h *Histogram) ValueAt(fraction float64) int64 {
-	if h.count == 0 {
+	if h.count == 0 || math.IsNaN(fraction) {
 		return 0
 	}
 	if fraction <= 0 {
@@ -112,19 +127,37 @@ func (h *Histogram) ValueAt(fraction float64) int64 {
 	if rank < 1 {
 		rank = 1
 	}
+	if rank > h.count {
+		rank = h.count
+	}
 	var seen int64
 	for e := 0; e < 64; e++ {
 		for sub := 0; sub < SubHalf; sub++ {
 			seen += h.counts[e*SubHalf+sub]
 			if seen >= rank {
+				var v int64
 				if e < 10 {
 					// exact regime: the sub-bucket index IS the value
 					// (sub 0 is the dedicated zero bucket)
-					return int64(sub)
+					v = int64(sub)
+				} else {
+					// implicit-leading-bit regime: re-add SubHalf in uint64
+					// so e=62, sub=1023 does not signed-overflow int64.
+					shift := uint(h.loShift[e])
+					u := (uint64(SubHalf+sub+1) << shift) - 1
+					if u > uint64(math.MaxInt64) {
+						v = math.MaxInt64
+					} else {
+						v = int64(u)
+					}
 				}
-				// implicit-leading-bit regime: re-add SubHalf
-				shift := uint(h.loShift[e])
-				return (SubHalf+int64(sub)+1)<<shift - 1
+				if v < h.minVal {
+					return h.minVal
+				}
+				if v > h.maxVal {
+					return h.maxVal
+				}
+				return v
 			}
 		}
 	}
