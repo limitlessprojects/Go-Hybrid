@@ -552,6 +552,8 @@ impl<'a> Checker<'a> {
                 for (k, v) in entries {
                     self.check_const_overflow_init("map literal key", &key_ty, k, Some(st));
                     self.check_const_overflow_init("map literal value", &val_ty, v, Some(st));
+                    self.check_map_entry_elided_composite_guard(Some(st), &key_ty, k);
+                    self.check_map_entry_elided_composite_guard(Some(st), &val_ty, v);
                     self.check_expr_emit_guard(st, k);
                     self.check_expr_emit_guard(st, v);
                 }
@@ -1235,6 +1237,56 @@ impl<'a> Checker<'a> {
                     }
                     _ => {}
                 }
+            }
+        }
+    }
+
+    /// #3530: validate that elided array or slice composite literals in map keys
+    /// or values respect array length bounds (`HYB-E6004`) and element const-overflow (`HYB-E6002`).
+    fn check_map_entry_elided_composite_guard(
+        &mut self,
+        st: Option<&FnState>,
+        expected_ty: &TypeExpr,
+        expr: &Expr,
+    ) {
+        let resolved = self.resolve_type_alias(expected_ty);
+        if let Expr::SliceLit {
+            elem: None,
+            items: sub_items,
+            span: sub_span,
+        } = unwrap_parens(expr)
+        {
+            match &resolved {
+                TypeExpr::Array { .. } => {
+                    self.check_array_lit_emit_guard(st, &resolved, sub_items, *sub_span);
+                }
+                TypeExpr::Slice { elem: sub_elem, .. } => {
+                    let resolved_sub = self.resolve_type_alias(sub_elem);
+                    for sub_i in sub_items {
+                        self.check_const_overflow_init(
+                            "slice literal element",
+                            sub_elem,
+                            sub_i,
+                            st,
+                        );
+                        if let Expr::SliceLit {
+                            elem: None,
+                            items: nested_items,
+                            span: nested_span,
+                        } = unwrap_parens(sub_i)
+                        {
+                            if matches!(resolved_sub, TypeExpr::Array { .. }) {
+                                self.check_array_lit_emit_guard(
+                                    st,
+                                    &resolved_sub,
+                                    nested_items,
+                                    *nested_span,
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
