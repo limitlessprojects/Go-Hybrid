@@ -849,6 +849,22 @@ impl<'a> Collector<'a> {
         self.copy_var_scopes.pop();
     }
 
+    /// The Go spelling of a typed array composite literal (`[3]int{..}`,
+    /// or `[...]int{a, b}` with its element count), when the length is a
+    /// plain decimal literal. Everything else fails open.
+    fn array_lit_type_name(e: &Expr) -> Option<String> {
+        let (len, elem, _ty) = e.as_array_lit()?;
+        let n = match len {
+            Some(Expr::Lit { kind: LitKind::Int(s), .. }) if s.chars().all(|c| c.is_ascii_digit()) => s.clone(),
+            None => match unwrap_parens(e) {
+                Expr::SliceLit { items, .. } => items.len().to_string(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(format!("[{}]{}", n, elem.render()))
+    }
+
     fn bind_type_name(&mut self, name: &str, type_name: String) {
         if name != "_" {
             if let Some(top) = self.type_name_scopes.last_mut() {
@@ -2056,7 +2072,12 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                // `a := [3]int{..}` / `[...]int{..}` carries a
+                // sized-array spelling so `a == b` / `b = a` length checks
+                // (#2771) also see literal-initialised locals.
+                if let Some(spelling) = Self::array_lit_type_name(val) {
+                    self.bind_type_name(name, spelling);
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
                 }
             }
