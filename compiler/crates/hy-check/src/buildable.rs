@@ -84,6 +84,7 @@ pub(crate) enum OpKind {
     Map(Box<OpKind>, Box<OpKind>),
     Chan(Box<OpKind>),
     Struct(Option<String>),
+    Enum(Option<String>),
     Pointer(Box<OpKind>),
     /// Function kind: result kinds, plus the declared parameter count when the
     /// signature is known (`None` = unknown, e.g. a `fn`-typed value whose
@@ -131,6 +132,8 @@ impl OpKind {
             OpKind::Chan(e) => format!("chan {}", e.label()),
             OpKind::Struct(Some(n)) => format!("struct {}", n),
             OpKind::Struct(None) => "struct".to_string(),
+            OpKind::Enum(Some(n)) => n.clone(),
+            OpKind::Enum(None) => "enum".to_string(),
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
             OpKind::Fn(res, params) => {
                 let p_str = match params {
@@ -215,6 +218,8 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // interop that is provable.
         (Foreign(_), Int | Float | Bool | Str) | (Int | Float | Bool | Str, Foreign(_)) => true,
         (Foreign(_), _) | (_, Foreign(_)) => false,
+        // An enum whose name did not resolve is not evidence of a mismatch.
+        (Enum(None), _) | (_, Enum(None)) => false,
         (a, b) if a == b => false,
         // Same container shape: recurse into the element kinds.
         (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
@@ -523,6 +528,7 @@ fn is_non_nilable(k: &OpKind) -> bool {
             | OpKind::Bool
             | OpKind::Str
             | OpKind::Struct(_)
+            | OpKind::Enum(_)
             | OpKind::Array(_)
             | OpKind::Option(_)
     )
@@ -560,6 +566,11 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
 
         // Struct targets: Go forbids converting non-structs to structs.
         (Struct(_), other) if !matches!(other, Unknown | Struct(_)) => true,
+
+        // Enum conversions: enums cannot convert to or from non-enums (except interface target).
+        (Enum(_), other) if !matches!(other, Unknown | Enum(_) | Interface) => true,
+        (other, Enum(_)) if !matches!(other, Unknown | Enum(_) | Interface) => true,
+        (Enum(Some(a)), Enum(Some(b))) => a != b,
 
         // Bool target: only bool can convert to bool.
         (Bool, other) if !matches!(other, Unknown | Bool) => true,
@@ -659,6 +670,8 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // passing — unknown-FIELD/METHOD naming on foreign values is #2203's
         // territory, with its own surface tables).
         OpKind::Foreign(_) => false,
+        OpKind::Enum(None) => false,
+        OpKind::Enum(Some(_)) => true,
     }
 }
 
@@ -2542,12 +2555,35 @@ impl<'a> Collector<'a> {
                                     );
                                 }
                             }
+                            if let OpKind::Enum(Some(ename)) = &subject_kind {
+                                if let Some(variant) = segments.last() {
+                                    if let Some(expected_variants) = self.ck.enums.get(ename.as_str()) {
+                                        if !expected_variants.iter().any(|v| v == variant) {
+                                            self.emit_e1002(
+                                                subject.span(),
+                                                format!(
+                                                    "pattern `{}` is not a variant of enum `{}` (HYB-E1002)",
+                                                    variant, ename
+                                                ),
+                                                "match arms must match variants declared on the matched enum",
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             if let Some(b) = binding {
                                 self.define_elidable(b, subject.span());
                                 // #2915: payload binding `some(v)` inherits the element type of `option[T]`.
                                 let bind_k = if segments.first().map(|s| s.as_str()) == Some("some") {
                                     if let OpKind::Option(elem) = &subject_kind {
                                         (**elem).clone()
+                                    } else {
+                                        OpKind::Unknown
+                                    }
+                                } else if let OpKind::Enum(Some(ref ename)) = &subject_kind {
+                                    let vname = segments.last().map(|s| s.as_str()).unwrap_or("");
+                                    if let Some(pty) = self.enum_variant_payload(ename, vname) {
+                                        self.kind_of_ty(&pty, 0)
                                     } else {
                                         OpKind::Unknown
                                     }
@@ -2930,6 +2966,17 @@ impl<'a> Collector<'a> {
                             name
                         ),
                         "an `any` value must be asserted to a concrete type before its fields can be read",
+                    );
+                }
+                if let OpKind::Enum(Some(ename)) = self.kind_of_expr(base) {
+                    self.emit_e1002(
+                        *span,
+                        format!(
+                            "cannot access field `{}` on enum `{}`: enums have no fields (HYB-E1002)",
+                            name,
+                            ename
+                        ),
+                        "enums have no fields; use `match` to inspect variants",
                     );
                 }
                 self.check_field_selector(base, name, *span);
@@ -3590,6 +3637,9 @@ impl<'a> Collector<'a> {
         if self.ck.structs.contains_key(base) || self.ck.struct_type_params.contains_key(base) {
             return OpKind::Struct(Some(name.to_string()));
         }
+        if self.ck.enums.contains_key(base) {
+            return OpKind::Enum(Some(name.to_string()));
+        }
         if let Some(target) = self.ck.type_aliases.get(base) {
             return self.kind_of_ty(target, depth + 1);
         }
@@ -3856,6 +3906,21 @@ impl<'a> Collector<'a> {
                 if name == "true" || name == "false" {
                     return OpKind::Bool;
                 }
+                let matching_enums: Vec<&String> = self
+                    .ck
+                    .enums
+                    .iter()
+                    .filter_map(|(ename, vs)| {
+                        if vs.iter().any(|v| v == name) {
+                            Some(ename)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if matching_enums.len() == 1 {
+                    return OpKind::Enum(Some(matching_enums[0].clone()));
+                }
                 let head = Checker::base_named_type_str(name);
                 if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
                     return OpKind::Fn(
@@ -3968,6 +4033,13 @@ impl<'a> Collector<'a> {
                 let bk = self.kind_of_expr(base);
                 if let Some(k) = self.struct_field_kind(&bk, name) {
                     return k;
+                }
+                if let Expr::Ident { name: root, .. } = unwrap_parens(base) {
+                    if let Some(vs) = self.ck.enums.get(root.as_str()) {
+                        if vs.iter().any(|v| v == name) {
+                            return OpKind::Enum(Some(root.clone()));
+                        }
+                    }
                 }
                 // #682 U1: a method value (`f := z.add`) is a function value
                 // whose receiver is already bound, so its arity is the
@@ -4100,6 +4172,21 @@ impl<'a> Collector<'a> {
                     }
                     _ => {}
                 }
+                let matching_enums: Vec<&String> = self
+                    .ck
+                    .enums
+                    .iter()
+                    .filter_map(|(ename, vs)| {
+                        if vs.iter().any(|v| v == name) {
+                            Some(ename)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if matching_enums.len() == 1 {
+                    return Some(vec![OpKind::Enum(Some(matching_enums[0].clone()))]);
+                }
                 let conv = self.kind_of_named(name, 0);
                 if !matches!(conv, OpKind::Unknown | OpKind::Struct(_)) {
                     return Some(vec![conv]);
@@ -4116,6 +4203,13 @@ impl<'a> Collector<'a> {
                 None
             }
             Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: root, .. } = unwrap_parens(base) {
+                    if let Some(vs) = self.ck.enums.get(root.as_str()) {
+                        if vs.iter().any(|v| v == name) {
+                            return Some(vec![OpKind::Enum(Some(root.clone()))]);
+                        }
+                    }
+                }
                 let bk = self.kind_of_expr(base);
                 // #2823: the option payload methods carry a real result kind —
                 // `unwrap()` / `or(d)` yield the payload, `is_some()` /
@@ -7656,11 +7750,34 @@ impl<'a> Collector<'a> {
                     if name == "append" {
                         self.check_append_elements(args);
                     }
+                    let matching_enums: Vec<&String> = self
+                        .ck
+                        .enums
+                        .iter()
+                        .filter_map(|(ename, vs)| {
+                            if vs.iter().any(|v| v == name) {
+                                Some(ename)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if matching_enums.len() == 1 {
+                        self.check_enum_variant_constructor_call(matching_enums[0], name, args, span);
+                    }
                     self.check_user_fn_arity(name, args, span);
                     self.check_user_fn_arg_types(name, args);
                 }
             }
             Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: root, .. } = unwrap_parens(base) {
+                    if let Some(vs) = self.ck.enums.get(root.as_str()) {
+                        if vs.iter().any(|v| v == name) {
+                            self.check_enum_variant_constructor_call(root, name, args, span);
+                            return;
+                        }
+                    }
+                }
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
                     if pkg == "errors"
                         && name == "wrap"
@@ -7903,6 +8020,85 @@ impl<'a> Collector<'a> {
 
     fn is_fmt_shadowed(&self) -> bool {
         self.is_pkg_symbol_shadowed("fmt")
+    }
+
+    fn enum_variant_payload(&self, ename: &str, vname: &str) -> Option<TypeExpr> {
+        for d in &self.ck.file.decls {
+            if let Decl::Enum(e) = d {
+                if e.name == ename {
+                    for v in &e.variants {
+                        if v.name == vname {
+                            return v.payload.clone();
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn check_enum_variant_constructor_call(
+        &mut self,
+        root: &str,
+        vname: &str,
+        args: &[CallArg],
+        span: Span,
+    ) {
+        let payload = self.enum_variant_payload(root, vname);
+        match (payload, args.len()) {
+            (None, 0) => {}
+            (None, n) => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "enum variant `{}.{}` takes no payload, found {} arguments (HYB-E1002)",
+                        root, vname, n
+                    ),
+                    "payload-free enum variants take no arguments",
+                );
+            }
+            (Some(_), 0) => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "enum variant `{}.{}` requires 1 payload argument, found 0 (HYB-E1002)",
+                        root, vname
+                    ),
+                    "provide the required payload argument",
+                );
+            }
+            (Some(ty), 1) => {
+                let want = self.kind_of_ty(&ty, 0);
+                let got = self.kind_of_expr(&args[0].value);
+                let int_to_float_conflict = want == OpKind::Float
+                    && got == OpKind::Int
+                    && !self.is_untyped_int_const(&args[0].value);
+                if kinds_conflict(&want, &got) || int_to_float_conflict {
+                    self.emit_e1002(
+                        args[0].value.span(),
+                        format!(
+                            "cannot use `{}` (type `{}`) as `{}` payload in `{}.{}` (HYB-E1002)",
+                            args[0].value.render(),
+                            got.label(),
+                            want.label(),
+                            root,
+                            vname
+                        ),
+                        "variant payload argument type must match the declared variant payload type",
+                    );
+                }
+            }
+            (Some(_), n) => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "enum variant `{}.{}` takes 1 payload argument, found {} (HYB-E1002)",
+                        root, vname, n
+                    ),
+                    "variants accept at most 1 payload argument",
+                );
+            }
+        }
     }
 
     fn check_fn_type_arg_arity(&mut self, fn_key: &str, raw_callee: &str, span: Span) {
