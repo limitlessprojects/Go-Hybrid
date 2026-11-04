@@ -380,6 +380,31 @@ fn is_sized_array_spelling(s: &str) -> bool {
 }
 
 /// #3280 — parse a fixed-size array type into `(dimension, element_type)`.
+/// #3161 — extracts the canonical numeric key scalar from a `map[K]V` type spelling.
+fn map_key_scalar_from_type_name(tname: &str) -> Option<&'static str> {
+    let t = tname.trim();
+    if let Some(rest) = t.strip_prefix("map[") {
+        let mut depth = 1;
+        let mut end = None;
+        for (idx, ch) in rest.char_indices() {
+            if ch == '[' {
+                depth += 1;
+            } else if ch == ']' {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(idx);
+                    break;
+                }
+            }
+        }
+        if let Some(end_idx) = end {
+            let key_str = &rest[..end_idx];
+            return canonical_numeric_name(key_str);
+        }
+    }
+    None
+}
+
 fn parse_sized_array(s: &str) -> Option<(&str, &str)> {
     let t = s.trim();
     if !t.starts_with('[') {
@@ -864,6 +889,41 @@ impl<'a> Collector<'a> {
             }
         }
         None
+    }
+
+    fn map_type_name_of_expr(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::MapLit { key, value, .. } => {
+                Some(format!("map[{}]{}", key.render(), value.render()))
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            let fb = unwrap_parens(&first.value);
+                            if let Expr::MapLit { key, value, .. } = fb {
+                                return Some(format!("map[{}]{}", key.render(), value.render()));
+                            }
+                            let rendered = first.value.render();
+                            if rendered.starts_with("map[") {
+                                return Some(rendered);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if tname.starts_with("map[") {
+                        return Some(tname);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     fn slice_element_type_name(&self, e: &Expr) -> Option<String> {
@@ -2075,6 +2135,8 @@ impl<'a> Collector<'a> {
                     self.bind_type_name(name, tn);
                 } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Some(mt) = self.map_type_name_of_expr(val) {
+                    self.bind_type_name(name, mt);
                 }
             }
         }
@@ -6260,12 +6322,30 @@ impl<'a> Collector<'a> {
     /// gives None and the caller fails open.
     fn map_key_scalar_name(&self, base: Option<&Expr>) -> Option<&'static str> {
         let base = base?;
-        let Expr::Ident { name, .. } = unwrap_parens(base) else {
-            return None;
-        };
-        let ty = self.type_name_scopes.iter().rev().find_map(|l| l.get(name))?;
-        let key = ty.strip_prefix("map[")?.split(']').next()?;
-        canonical_numeric_name(key)
+        let bare = unwrap_parens(base);
+        match bare {
+            Expr::Ident { name, .. } => {
+                let ty = self.type_name_scopes.iter().rev().find_map(|l| l.get(name))?;
+                map_key_scalar_from_type_name(ty)
+            }
+            Expr::MapLit { key, .. } => self.scalar_of_ty(key),
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            let fb = unwrap_parens(&first.value);
+                            if let Expr::MapLit { key, .. } = fb {
+                                return self.scalar_of_ty(key);
+                            }
+                            let rendered = first.value.render();
+                            return map_key_scalar_from_type_name(&rendered);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     fn check_index_kind(
@@ -7881,14 +7961,20 @@ impl<'a> Collector<'a> {
                             let int_to_float_conflict = want == OpKind::Float
                                 && got == OpKind::Int
                                 && !self.is_untyped_int_const(key_arg);
-                            if kinds_conflict(&want, &got) || int_to_float_conflict {
+                            let set_scalar = canonical_numeric_name(&elem);
+                            let arg_scalar = self.typed_value_scalar(key_arg);
+                            let width_conflict = matches!(
+                                (set_scalar, arg_scalar),
+                                (Some(a), Some(b)) if a != b
+                            );
+                            if kinds_conflict(&want, &got) || int_to_float_conflict || width_conflict {
                                 self.emit_e2005(
                                     span,
                                     format!(
                                         "cannot use `{}` (type `{}`) as element type `{}` in `delete` on `set[{}]` (HYB-E2005)",
                                         key_arg.render(),
-                                        got.label(),
-                                        want.label(),
+                                        arg_scalar.map(|s| s.to_string()).unwrap_or_else(|| got.label()),
+                                        elem,
                                         elem
                                     ),
                                     "the second argument to `delete(s, v)` must match the set's element type",
