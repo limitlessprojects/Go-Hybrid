@@ -7204,6 +7204,30 @@ impl<'a> Collector<'a> {
                             "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
                         );
                     }
+                    // #3598: `fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to
+                    // `fmt.Fprint*(os.Stderr, ...)` in `hy-emit`. When `os` is shadowed by
+                    // an in-scope parameter, local binding, or package-level declaration,
+                    // emitted Go fails to compile (Row 13 BUILDABLE).
+                    if pkg == "fmt"
+                        && matches!(name.as_str(), "eprint" | "eprintln" | "eprintf")
+                        && self.lookup_kind(pkg).is_none()
+                    {
+                        let os_shadowed = self.scopes.iter().any(|s| s.contains_key("os"))
+                            || self.lookup_kind("os").is_some()
+                            || self.ck.pkg_names.contains_key("os")
+                            || self.file_consts.contains_key("os")
+                            || self.file_untyped_consts.contains("os");
+                        if os_shadowed {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot call `fmt.{}` because `os` is shadowed by an in-scope declaration (HYB-E1002)",
+                                    name
+                                ),
+                                "`fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to `os.Stderr`; rename the shadowing `os` binding so `os.Stderr` is accessible",
+                            );
+                        }
+                    }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
