@@ -1251,21 +1251,13 @@ fn is_nil_literal(e: &Expr) -> bool {
     matches!(unwrap_parens(e), Expr::Lit { kind: LitKind::Nil, .. })
 }
 
-fn is_non_numeric_literal(e: &Expr) -> bool {
-    matches!(
-        unwrap_parens(e),
-        Expr::Lit {
-            kind: LitKind::Str(_) | LitKind::RawStr(_) | LitKind::Bool(_) | LitKind::Nil,
-            ..
-        }
-    )
-}
-
 fn is_composite_literal(e: &Expr) -> bool {
-    matches!(
-        unwrap_parens(e),
-        Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
-    )
+    match unwrap_parens(e) {
+        Expr::SliceLit { items, .. } => !items.is_empty(),
+        Expr::MapLit { entries, .. } => !entries.is_empty(),
+        Expr::StructLit { fields, .. } => !fields.is_empty(),
+        _ => false,
+    }
 }
 
 fn is_non_numeric_or_composite_literal(e: &Expr) -> bool {
