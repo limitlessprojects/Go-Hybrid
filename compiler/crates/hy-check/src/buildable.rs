@@ -1092,10 +1092,12 @@ impl<'a> Collector<'a> {
             }
             PlaceKind::Index { base, .. } => {
                 let bk = self.kind_of_place(base);
-                if bk == OpKind::Str {
+                if bk == OpKind::Str || matches!(bk, OpKind::Pointer(inner) if *inner == OpKind::Str) {
                     Some("uint8")
                 } else if let Some(be) = place_as_expr(base) {
                     self.container_elem_scalar_of_expr(&be)
+                } else if let PlaceKind::AddrOf { base: inner } = &base.kind {
+                    self.place_scalar(inner)
                 } else {
                     None
                 }
@@ -1278,6 +1280,8 @@ impl<'a> Collector<'a> {
             TypeExpr::Map { value, .. } => self.scalar_of_ty(value),
             TypeExpr::Pointer { to, .. } => match to.as_ref() {
                 TypeExpr::Array { elem, .. } => self.scalar_of_ty(elem),
+                TypeExpr::Slice { elem, .. } => self.scalar_of_ty(elem),
+                TypeExpr::Map { value, .. } => self.scalar_of_ty(value),
                 _ => None,
             },
             _ => None,
