@@ -2453,9 +2453,22 @@ impl Emitter {
         // a short explicit return means nil. When the fn has named results,
         // bare `return` (`values.is_empty()`) must stay naked so Go returns
         // the live named result variables instead of clobbering them to zero.
+        //
+        // Go's multi-value forward is the exception: `return two()` where
+        // `two()` already yields every result (`(int, error)`) must stay
+        // as written — padding it produced `return two(), nil`, which
+        // `go build` rejects ("multiple-value … in single-value context").
+        let forwards_all_results = values.len() == 1
+            && self.cur_fn_error_returns.as_ref().is_some_and(|zeros| {
+                zeros.len() >= 2
+                    && matches!(&values[0], Expr::Call { .. })
+                    && self
+                        .call_results(&values[0])
+                        .is_some_and(|(n, err)| n + usize::from(err) == zeros.len())
+            });
         if !(values.is_empty() && self.cur_fn_has_named_results) {
             if let Some(zeros) = &self.cur_fn_error_returns {
-                while vs.len() < zeros.len() {
+                while !forwards_all_results && vs.len() < zeros.len() {
                     let i = vs.len();
                     let z = &zeros[i];
                     vs.push(if z.is_empty() {
