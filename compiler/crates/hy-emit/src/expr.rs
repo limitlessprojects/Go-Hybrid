@@ -703,7 +703,7 @@ impl Emitter {
     /// aliased hop dropped the chain exactly like a missing recursion did.
     /// A cycle (`type a = b; type b = a`) is not resolvable by Go either;
     /// bounded walk returns None.
-    fn resolve_to_struct_name(&self, start: &str) -> Option<&str> {
+    pub(crate) fn resolve_to_struct_name(&self, start: &str) -> Option<&str> {
         let mut cur = std::borrow::Cow::Borrowed(start);
         for _ in 0..16 {
             if let Some((k, _)) = self.struct_fields.get_key_value(cur.split('[').next().unwrap_or(cur.as_ref())) {
