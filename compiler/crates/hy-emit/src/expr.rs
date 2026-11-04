@@ -158,11 +158,17 @@ impl Emitter {
                     ));
                 }
                 let (head, type_args) = split_type_args(name);
+                let go_head =
+                    if self.local_vars.contains(head) || self.user_top_values.contains(head) {
+                        super::mangle_reserved_ident(head)
+                    } else {
+                        head.to_string()
+                    };
                 if let Some(ta) = type_args {
                     let translated = self.translate_type_args_suffix(ta);
-                    return Ok(format!("{}{}", head, translated));
+                    return Ok(format!("{}{}", go_head, translated));
                 }
-                Ok(name.clone())
+                Ok(go_head)
             }
 
             Expr::Lit { kind, .. } => Ok(self.lit_text(kind)),
@@ -371,7 +377,13 @@ impl Emitter {
                     };
                 let rendered_params = params
                     .iter()
-                    .map(|p| format!("{} {}", p.name, self.type_text(&p.ty)))
+                    .map(|p| {
+                        format!(
+                            "{} {}",
+                            super::mangle_reserved_ident(&p.name),
+                            self.type_text(&p.ty)
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 // Hints from closure param types (example-06's w, r) —
@@ -422,7 +434,7 @@ impl Emitter {
                         .first()
                         .map(|p| p.name.clone())
                         .unwrap_or_else(|| w.to_string());
-                    self.handler_writer = Some(name);
+                    self.handler_writer = Some(super::mangle_reserved_ident(&name));
                 }
                 // E4: a closure's `?` binds to the closure's OWN results,
                 // never the enclosing fn's — not main's wrapper `hyErr` (an
@@ -932,7 +944,9 @@ impl Emitter {
     }
 
     fn is_unshadowed_builtin(&self, name: &str) -> bool {
-        !self.local_vars.contains(name) && !self.fn_shapes.contains_key(name)
+        !self.local_vars.contains(name)
+            && !self.user_top_values.contains(name)
+            && !self.fn_shapes.contains_key(name)
     }
 
     pub(crate) fn emit_call(
@@ -965,7 +979,10 @@ impl Emitter {
                 // package root, so its call used to fall through this whole
                 // block, emit verbatim, and die in the toolchain with
                 // `undefined: flate2`.
-                if !self.local_vars.contains(pkg) && lookup_unbound_crate(pkg).is_some() {
+                if !self.local_vars.contains(pkg)
+                    && !self.user_top_values.contains(pkg)
+                    && lookup_unbound_crate(pkg).is_some()
+                {
                     return Err(EmitError::unbound_crate(pkg));
                 }
                 if self.is_unshadowed_pkg_root(pkg) {
@@ -1221,7 +1238,7 @@ impl Emitter {
             } if entries.is_empty() => {
                 format!("map[{}]{}", self.type_text(key), self.type_text(value))
             }
-            Expr::Ident { name, .. } => name.clone(),
+            Expr::Ident { name, .. } => self.go_type_name(name),
             other => {
                 return Err(EmitError::unsupported(format!(
                     "`make` first argument must be a type; got value `{}`",
@@ -1284,9 +1301,7 @@ impl Emitter {
                 entries,
                 ..
             } if entries.is_empty() => format!("map[{}]{}", self.type_text(key), self.type_text(value)),
-            Expr::Ident { name, .. } => super::shapes::go_primitive_name(name)
-                .unwrap_or(name.as_str())
-                .to_string(),
+            Expr::Ident { name, .. } => self.go_type_name(name),
             other => self.emit_expr(other, 0)?,
         };
         Ok(format!("new({})", ty_text))

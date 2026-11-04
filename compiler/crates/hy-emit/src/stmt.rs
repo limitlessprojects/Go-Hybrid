@@ -251,7 +251,11 @@ impl Emitter {
                                     let read = names[0] != "_"
                                         && crate::rangebind::body_reads(&arm.body, &names[0]);
                                     if read {
-                                        format!("case {} := <-{}:", names[0], c)
+                                        format!(
+                                            "case {} := <-{}:",
+                                            super::mangle_reserved_ident(&names[0]),
+                                            c
+                                        )
                                     } else {
                                         format!("case <-{}:", c)
                                     }
@@ -266,15 +270,17 @@ impl Emitter {
                                         && crate::rangebind::body_reads(&arm.body, &names[0]);
                                     let b_read = names[1] != "_"
                                         && crate::rangebind::body_reads(&arm.body, &names[1]);
+                                    let n0 = super::mangle_reserved_ident(&names[0]);
+                                    let n1 = super::mangle_reserved_ident(&names[1]);
                                     match (a_read, b_read) {
                                         (true, true) => {
-                                            format!("case {}, {} := <-{}:", names[0], names[1], c)
+                                            format!("case {}, {} := <-{}:", n0, n1, c)
                                         }
                                         (true, false) => {
-                                            format!("case {}, _ := <-{}:", names[0], c)
+                                            format!("case {}, _ := <-{}:", n0, c)
                                         }
                                         (false, true) => {
-                                            format!("case _, {} := <-{}:", names[1], c)
+                                            format!("case _, {} := <-{}:", n1, c)
                                         }
                                         (false, false) => format!("case <-{}:", c),
                                     }
@@ -354,6 +360,14 @@ impl Emitter {
     // -----------------------------------------------------------------------
     // Local bindings (Define / Let / Var / Const) + the `?` desugar (E3)
     // -----------------------------------------------------------------------
+
+    fn mangle_name_list(names: &[String]) -> String {
+        names
+            .iter()
+            .map(|n| super::mangle_reserved_ident(n))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 
     fn emit_local(&mut self, l: &LocalDecl) -> Result<(), EmitError> {
         self.emit_local_in_seq(l, &[])
@@ -462,15 +476,16 @@ impl Emitter {
                     .first()
                     .and_then(|v| self.slot_loan_alias_rhs(v))
                     .filter(|_| is_ptr_ty);
+                let go_names = Self::mangle_name_list(&l.names);
                 match (&ty, l.values.first()) {
                     // N5: a zero map (or a struct carrying one) allocates
                     // at its declaration (zeroinit.rs, issue #645).
                     (Some(t), None) => match l.ty.as_ref().and_then(|ty| self.n5_zero_init(ty)) {
                         Some(init) => {
                             let inits = vec![init; l.names.len()].join(", ");
-                            self.push(&format!("var {} {} = {}", l.names.join(", "), t, inits))
+                            self.push(&format!("var {} {} = {}", go_names, t, inits))
                         }
-                        None => self.push(&format!("var {} {}", l.names.join(", "), t)),
+                        None => self.push(&format!("var {} {}", go_names, t)),
                     },
                     (Some(t), Some(v)) => {
                         self.hoist_tries_expr(v)?;
@@ -478,7 +493,7 @@ impl Emitter {
                         if matches!(alias, Some((_, true))) {
                             e = format!("&{}", e);
                         }
-                        self.push(&format!("var {} {} = {}", l.names.join(", "), t, e));
+                        self.push(&format!("var {} {} = {}", go_names, t, e));
                     }
                     (None, Some(v)) => {
                         self.hoist_tries_expr(v)?;
@@ -486,7 +501,7 @@ impl Emitter {
                         if matches!(alias, Some((_, true))) {
                             e = format!("&{}", e);
                         }
-                        self.push(&format!("var {} = {}", l.names.join(", "), e));
+                        self.push(&format!("var {} = {}", go_names, e));
                     }
                     (None, None) => {
                         return Err(EmitError::unsupported(
@@ -540,7 +555,7 @@ impl Emitter {
                     Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
                 );
                 let kw = if composite { "var" } else { "const" };
-                let names = l.names.join(", ");
+                let names = Self::mangle_name_list(&l.names);
                 match &l.ty {
                     Some(t) => {
                         let ty = self.type_text(t);
@@ -601,7 +616,10 @@ impl Emitter {
                         self.emit_slot_loan_place(operand, name, &l.names, rest)?;
                     val_texts.push(read_place);
                     if name != "_" {
-                        new_loans.push((name.clone(), format!("{} = {}", write_place, name)));
+                        new_loans.push((
+                            name.clone(),
+                            format!("{} = {}", write_place, super::mangle_reserved_ident(name)),
+                        ));
                     }
                 } else if let Some((loan_root, is_val_loan)) = self.slot_loan_alias_rhs(v) {
                     let e = self.emit_expr(v, 0)?;
@@ -639,7 +657,7 @@ impl Emitter {
             }
             self.push(&format!(
                 "{} := {}",
-                l.names.join(", "),
+                Self::mangle_name_list(&l.names),
                 val_texts.join(", ")
             ));
             if let Some(frame) = self.loan_frames.last_mut() {
@@ -673,7 +691,7 @@ impl Emitter {
                 self.flush_loan_for_name(name);
             }
         }
-        let names = l.names.join(", ");
+        let names = Self::mangle_name_list(&l.names);
         self.push(&format!("{} := {}", names, values.join(", ")));
         // A struct-literal define carries the receiver's struct name
         // (Batch I): `stats := pool_stats{}` — field chains type through
@@ -1177,7 +1195,11 @@ impl Emitter {
             self.hoist_tries_expr(call)?;
             let temp = self.next_temp("hyErr");
             let call_text = self.emit_expr(call, 0)?;
-            let mut names = l.names.clone();
+            let mut names: Vec<String> = l
+                .names
+                .iter()
+                .map(|n| super::mangle_reserved_ident(n))
+                .collect();
             names.push(temp.clone());
             self.push(&format!("{} := {}", names.join(", "), call_text));
             self.push(&format!("if {} != nil {{", temp));
@@ -1202,7 +1224,11 @@ impl Emitter {
         self.hoist_tries_expr(call)?;
         let temp = self.next_temp("hyErr");
         let call_text = self.emit_expr(call, 0)?;
-        let mut names = l.names.clone();
+        let mut names: Vec<String> = l
+            .names
+            .iter()
+            .map(|n| super::mangle_reserved_ident(n))
+            .collect();
         names.push(temp.clone());
         self.push(&format!("{} := {}", names.join(", "), call_text));
         self.push(&format!("if {} != nil {{", temp));
@@ -1270,7 +1296,7 @@ impl Emitter {
         self.use_package("strings");
         self.push(&format!(
             "{} := {}.Code, strings.TrimSuffix({}.Body.String(), \"\\n\")",
-            l.names.join(", "),
+            Self::mangle_name_list(&l.names),
             rec,
             rec
         ));
@@ -1285,7 +1311,7 @@ impl Emitter {
             Some(self.binding_kind_of(&values[0]))
         } else {
             None
-        };
+        } ;
         let ptr_flags: Vec<bool> = if names.len() == values.len() {
             values.iter().map(|v| self.expr_is_pointer(v)).collect()
         } else {
@@ -1494,11 +1520,17 @@ impl Emitter {
                         let copy = self.next_temp("hyLoan");
                         self.push(&format!("{} := {}", copy, read_place));
                         rhs_texts.push(format!("&{}", copy));
-                        new_loans.push((name.clone(), format!("{} = *{}", write_place, name)));
+                        new_loans.push((
+                            name.clone(),
+                            format!("{} = *{}", write_place, super::mangle_reserved_ident(name)),
+                        ));
                     } else {
                         rhs_texts.push(read_place);
                         if name != "_" {
-                            new_loans.push((name.clone(), format!("{} = {}", write_place, name)));
+                            new_loans.push((
+                                name.clone(),
+                                format!("{} = {}", write_place, super::mangle_reserved_ident(name)),
+                            ));
                         }
                     }
                 } else if let Some((loan_root, is_val_loan)) = self.slot_loan_alias_rhs(v) {
@@ -1519,7 +1551,11 @@ impl Emitter {
                     .or_default()
                     .insert(alias_name);
             }
-            self.push(&format!("{} = {}", names.join(", "), rhs_texts.join(", ")));
+            self.push(&format!(
+                "{} = {}",
+                Self::mangle_name_list(&names),
+                rhs_texts.join(", ")
+            ));
             if let Some(frame) = self.loan_frames.last_mut() {
                 frame.extend(new_loans);
             }
@@ -1642,7 +1678,7 @@ impl Emitter {
     /// (M4); our own struct members stay verbatim.
     pub fn emit_place(&mut self, p: &Place) -> Result<String, EmitError> {
         match &p.kind {
-            PlaceKind::Ident(n) => Ok(n.clone()),
+            PlaceKind::Ident(n) => Ok(super::mangle_reserved_ident(n)),
             PlaceKind::Index { base, index } => {
                 let b = self.emit_place(base)?;
                 let i = self.emit_expr(index, 0)?;
@@ -1924,7 +1960,7 @@ impl Emitter {
                         self.register_var_ty(&l.names[0], t);
                     }
                 }
-                let names = l.names.join(", ");
+                let names = Self::mangle_name_list(&l.names);
                 Ok(match (&l.ty, values.len()) {
                     (Some(t), 1) => format!("{} := {} {}", names, self.type_text(t), values[0]),
                     _ => format!("{} := {}", names, values.join(", ")),
@@ -2133,7 +2169,7 @@ impl Emitter {
                     self.next_temp("hyBlank")
                 } else {
                     self.shadow_local_name(var);
-                    var.clone()
+                    super::mangle_reserved_ident(var)
                 };
                 if *inclusive {
                     // Issue #322: `for v := lo; v <= hi; v++` wraps past the
@@ -2179,13 +2215,14 @@ impl Emitter {
                         // Drop the binding to `for range e`, completing the
                         // unread-binding lowering from issue #139.
                         let read = vars[0] != "_" && crate::rangebind::body_reads(body, &vars[0]);
+                        let v0_go = super::mangle_reserved_ident(&vars[0]);
                         if self.is_set_expr(expr) {
                             self.shadow_local_names(vars);
                             if !read {
                                 self.local_vars.remove(&vars[0]);
                                 format!("for range {}.m {{", e)
                             } else {
-                                format!("for {} := range {}.m {{", vars[0], e)
+                                format!("for {} := range {}.m {{", v0_go, e)
                             }
                         } else if !read {
                             self.shadow_local_names(vars);
@@ -2201,7 +2238,7 @@ impl Emitter {
                             // the KEY (#2945) — Go's own single-var form.
                             if over_chan || self.is_map_expr(expr) {
                                 self.shadow_local_names(vars);
-                                format!("for {} := range {} {{", vars[0], e)
+                                format!("for {} := range {} {{", v0_go, e)
                             } else {
                                 // A rust-handle slice (ForeignTy binding)
                                 // ranges value-elements of that handle type
@@ -2222,7 +2259,7 @@ impl Emitter {
                                     self.bindings
                                         .insert(vars[0].clone(), BindingKind::ForeignTy(t));
                                 }
-                                format!("for _, {} := range {} {{", vars[0], e)
+                                format!("for _, {} := range {} {{", v0_go, e)
                             }
                         }
                     }
@@ -2246,13 +2283,13 @@ impl Emitter {
                         // Same lowering the one-variable form already uses.
                         // Issue #139.
                         let a = if crate::rangebind::body_reads(body, &vars[0]) {
-                            vars[0].clone()
+                            super::mangle_reserved_ident(&vars[0])
                         } else {
                             self.local_vars.remove(&vars[0]);
                             "_".to_string()
                         };
                         let c = if crate::rangebind::body_reads(body, &vars[1]) {
-                            vars[1].clone()
+                            super::mangle_reserved_ident(&vars[1])
                         } else {
                             self.local_vars.remove(&vars[1]);
                             "_".to_string()
@@ -2667,7 +2704,8 @@ impl Emitter {
                         .as_ref()
                         .is_some_and(|g| crate::rangebind::expr_reads(g, b0))
                 {
-                    self.push(&format!("{} := {}.val", b0, temp));
+                    let b0_go = super::mangle_reserved_ident(b0);
+                    self.push(&format!("{} := {}.val", b0_go, temp));
                     prebound_guard_var = Some((*b0).clone());
                 }
             }
@@ -2675,6 +2713,7 @@ impl Emitter {
             for (binding, arm) in reachable_some_arms.iter() {
                 let saved_scope = self.save_scope();
                 self.shadow_local_name(binding);
+                let binding_go = super::mangle_reserved_ident(binding);
                 let arm_res = (|| -> Result<bool, EmitError> {
                     match &arm.guard {
                         Some(g) => {
@@ -2684,7 +2723,7 @@ impl Emitter {
                             self.indent += 1;
                             let prebound = prebound_guard_var.as_deref() == Some(binding.as_str());
                             if *binding != "_" && !prebound && crate::rangebind::body_reads(&arm.body, binding) {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", binding_go, temp));
                             } else if !prebound {
                                 self.local_vars.remove(*binding);
                             }
@@ -2716,7 +2755,7 @@ impl Emitter {
                             let wraps_body =
                                 injects && arm_body_redefines_binding(&arm.body, binding);
                             if injects {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", binding_go, temp));
                             } else if !prebound {
                                 self.local_vars.remove(*binding);
                             }
@@ -2776,13 +2815,14 @@ impl Emitter {
                 self.indent += 1;
                 let saved_scope = self.save_scope();
                 self.shadow_local_name(binding);
+                let binding_go = super::mangle_reserved_ident(binding);
                 let arm_res = (|| -> Result<(), EmitError> {
                     match &arm.guard {
                         Some(g) => {
                             let guard_reads =
                                 *binding != "_" && crate::rangebind::expr_reads(g, binding);
                             if guard_reads {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", binding_go, temp));
                             }
                             self.hoist_tries_expr(g)?;
                             let gt = self.emit_expr(g, 0)?;
@@ -2793,7 +2833,7 @@ impl Emitter {
                                 && !guard_reads
                                 && crate::rangebind::body_reads(&arm.body, binding)
                             {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", binding_go, temp));
                             } else if !guard_reads {
                                 self.local_vars.remove(*binding);
                             }
@@ -2814,7 +2854,7 @@ impl Emitter {
                             let wraps_body =
                                 injects && arm_body_redefines_binding(&arm.body, binding);
                             if injects {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", binding_go, temp));
                             } else {
                                 self.local_vars.remove(*binding);
                             }
@@ -2879,12 +2919,13 @@ impl Emitter {
                 }
                 let saved_scope = self.save_scope();
                 self.shadow_local_name(binding);
+                let binding_go = super::mangle_reserved_ident(binding);
                 let arm_res = (|| -> Result<(), EmitError> {
                     let g = arm.guard.as_ref().unwrap();
                     let guard_reads =
                         *binding != "_" && crate::rangebind::expr_reads(g, binding);
                     if guard_reads {
-                        self.push(&format!("{} := {}.val", binding, temp));
+                        self.push(&format!("{} := {}.val", binding_go, temp));
                     }
                     self.hoist_tries_expr(g)?;
                     let gt = self.emit_expr(g, 0)?;
@@ -2895,7 +2936,7 @@ impl Emitter {
                         && !guard_reads
                         && crate::rangebind::body_reads(&arm.body, binding)
                     {
-                        self.push(&format!("{} := {}.val", binding, temp));
+                        self.push(&format!("{} := {}.val", binding_go, temp));
                     } else if !guard_reads {
                         self.local_vars.remove(*binding);
                     }
