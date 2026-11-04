@@ -2249,7 +2249,7 @@ impl<'a> Checker<'a> {
         false
     }
 
-    fn call_param_is_pointer(&self, st: &FnState, callee: &Expr, idx: usize) -> bool {
+    pub(crate) fn call_param_is_pointer(&self, st: &FnState, callee: &Expr, idx: usize) -> bool {
         match unwrap_parens(callee) {
             Expr::Ident { name, .. } => {
                 if let Some(b) = self.lookup_binding(st, name) {
@@ -2308,7 +2308,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn call_receiver_is_pointer(&self, st: &FnState, callee: &Expr) -> bool {
+    pub(crate) fn call_receiver_is_pointer(&self, st: &FnState, callee: &Expr) -> bool {
         let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
             return false;
         };

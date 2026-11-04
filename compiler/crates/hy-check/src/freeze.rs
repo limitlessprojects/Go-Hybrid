@@ -605,12 +605,16 @@ impl<'a> Checker<'a> {
     /// loop-carried moves active; local definitions (`chunk := ...`, corpus 15)
     /// live in inner scopes and are discarded when `scopes` is truncated to
     /// `outer_depth`.
-    fn is_single_iteration_loop(for_stmt: Option<&hy_syntax::Stmt>) -> bool {
+    fn is_single_iteration_loop(
+        &self,
+        st: &FnState,
+        for_stmt: Option<&hy_syntax::Stmt>,
+    ) -> bool {
         let Some(hy_syntax::Stmt::For { kind, body, .. }) = for_stmt else {
             return false;
         };
         if let hy_syntax::ForKind::Range { var, lo, hi, inclusive } = kind {
-            if Self::is_loop_var_mutated(var, &body.stmts) {
+            if self.is_loop_var_mutated(st, var, &body.stmts) {
                 return false;
             }
             if let (Some(lo_val), Some(hi_val)) = (Self::as_int_lit(lo), Self::as_int_lit(hi)) {
@@ -637,143 +641,177 @@ impl<'a> Checker<'a> {
         false
     }
 
-    fn is_loop_var_mutated(var: &str, stmts: &[hy_syntax::Stmt]) -> bool {
-        stmts.iter().any(|s| Self::stmt_mutates_var(s, var))
+    fn is_loop_var_mutated(&self, st: &FnState, var: &str, stmts: &[hy_syntax::Stmt]) -> bool {
+        stmts.iter().any(|s| self.stmt_mutates_var(st, s, var))
     }
 
-    fn stmt_mutates_var(stmt: &hy_syntax::Stmt, var: &str) -> bool {
+    fn stmt_mutates_var(&self, st: &FnState, stmt: &hy_syntax::Stmt, var: &str) -> bool {
         match stmt {
             hy_syntax::Stmt::Assign { targets, values, .. } => {
                 if targets.iter().any(|t| t.root() == var) {
                     return true;
                 }
-                values.iter().any(|v| Self::expr_mutates_var(v, var))
+                values.iter().any(|v| self.expr_mutates_var(st, v, var))
             }
             hy_syntax::Stmt::Local(l) => {
-                l.values.iter().any(|v| Self::expr_mutates_var(v, var))
+                l.values.iter().any(|v| self.expr_mutates_var(st, v, var))
             }
-            hy_syntax::Stmt::Expr { expr, .. } => Self::expr_mutates_var(expr, var),
+            hy_syntax::Stmt::Expr { expr, .. } => self.expr_mutates_var(st, expr, var),
             hy_syntax::Stmt::Send { chan, value, .. } => {
-                Self::expr_mutates_var(chan, var) || Self::expr_mutates_var(value, var)
+                self.expr_mutates_var(st, chan, var) || self.expr_mutates_var(st, value, var)
             }
             hy_syntax::Stmt::If { init, cond, then, otherwise, .. } => {
-                init.as_ref().map_or(false, |s| Self::stmt_mutates_var(s, var))
-                    || Self::expr_mutates_var(cond, var)
-                    || Self::is_loop_var_mutated(var, &then.stmts)
-                    || otherwise.as_ref().map_or(false, |s| Self::stmt_mutates_var(s, var))
+                init.as_ref().map_or(false, |s| self.stmt_mutates_var(st, s, var))
+                    || self.expr_mutates_var(st, cond, var)
+                    || self.is_loop_var_mutated(st, var, &then.stmts)
+                    || otherwise.as_ref().map_or(false, |s| self.stmt_mutates_var(st, s, var))
             }
             hy_syntax::Stmt::For { kind, body, .. } => {
                 match kind {
                     hy_syntax::ForKind::While { cond } => {
-                        if Self::expr_mutates_var(cond, var) {
+                        if self.expr_mutates_var(st, cond, var) {
                             return true;
                         }
                     }
                     hy_syntax::ForKind::Range { lo, hi, .. } => {
-                        if Self::expr_mutates_var(lo, var) || Self::expr_mutates_var(hi, var) {
+                        if self.expr_mutates_var(st, lo, var) || self.expr_mutates_var(st, hi, var) {
                             return true;
                         }
                     }
                     hy_syntax::ForKind::Iterate { expr, .. } => {
-                        if Self::expr_mutates_var(expr, var) {
+                        if self.expr_mutates_var(st, expr, var) {
                             return true;
                         }
                     }
                     hy_syntax::ForKind::Infinite => {}
                 }
-                Self::is_loop_var_mutated(var, &body.stmts)
+                self.is_loop_var_mutated(st, var, &body.stmts)
             }
             hy_syntax::Stmt::Return { values, .. } => {
-                values.iter().any(|v| Self::expr_mutates_var(v, var))
+                values.iter().any(|v| self.expr_mutates_var(st, v, var))
             }
             hy_syntax::Stmt::Task { callee, args, .. } => {
-                Self::expr_mutates_var(callee, var)
-                    || args.iter().any(|a| Self::expr_mutates_var(&a.value, var))
-            }
-            hy_syntax::Stmt::Managed { body, .. } => {
-                Self::is_loop_var_mutated(var, &body.stmts)
-            }
-            hy_syntax::Stmt::Match { subject, arms, .. } => {
-                Self::expr_mutates_var(subject, var)
-                    || arms.iter().any(|arm| {
-                        arm.guard.as_ref().map_or(false, |g| Self::expr_mutates_var(g, var))
-                            || Self::is_loop_var_mutated(var, &arm.body.stmts)
+                if let hy_syntax::Expr::Field { base, .. } =
+                    crate::model::unwrap_parens(callee)
+                {
+                    if self.call_receiver_is_pointer(st, callee)
+                        && Self::expr_is_or_touches_var(base, var)
+                    {
+                        return true;
+                    }
+                }
+                self.expr_mutates_var(st, callee, var)
+                    || args.iter().enumerate().any(|(i, a)| {
+                        (self.call_param_is_pointer(st, callee, i)
+                            && Self::expr_is_or_touches_var(&a.value, var)
+                            && !matches!(
+                                self.shape_of_expr(st, &a.value),
+                                crate::model::TypeShape::Pointer(_)
+                            ))
+                            || self.expr_mutates_var(st, &a.value, var)
                     })
             }
-            hy_syntax::Stmt::Defer { call, .. } => Self::expr_mutates_var(call, var),
-            hy_syntax::Stmt::Block { block, .. } => Self::is_loop_var_mutated(var, &block.stmts),
+            hy_syntax::Stmt::Managed { body, .. } => {
+                self.is_loop_var_mutated(st, var, &body.stmts)
+            }
+            hy_syntax::Stmt::Match { subject, arms, .. } => {
+                self.expr_mutates_var(st, subject, var)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().map_or(false, |g| self.expr_mutates_var(st, g, var))
+                            || self.is_loop_var_mutated(st, var, &arm.body.stmts)
+                    })
+            }
+            hy_syntax::Stmt::Defer { call, .. } => self.expr_mutates_var(st, call, var),
+            hy_syntax::Stmt::Block { block, .. } => self.is_loop_var_mutated(st, var, &block.stmts),
             hy_syntax::Stmt::Select { arms, .. } => arms.iter().any(|arm| {
                 let kind_mutates = match &arm.kind {
                     hy_syntax::SelectArmKind::Send { chan, value, .. } => {
-                        Self::expr_mutates_var(chan, var) || Self::expr_mutates_var(value, var)
+                        self.expr_mutates_var(st, chan, var) || self.expr_mutates_var(st, value, var)
                     }
                     hy_syntax::SelectArmKind::Recv { chan, .. } => {
-                        Self::expr_mutates_var(chan, var)
+                        self.expr_mutates_var(st, chan, var)
                     }
                     hy_syntax::SelectArmKind::Default => false,
                 };
-                kind_mutates || Self::is_loop_var_mutated(var, &arm.body.stmts)
+                kind_mutates || self.is_loop_var_mutated(st, var, &arm.body.stmts)
             }),
             hy_syntax::Stmt::Break { .. } | hy_syntax::Stmt::Continue { .. } => false,
         }
     }
 
-    fn expr_mutates_var(expr: &hy_syntax::Expr, var: &str) -> bool {
+    fn expr_mutates_var(&self, st: &FnState, expr: &hy_syntax::Expr, var: &str) -> bool {
         match expr {
             hy_syntax::Expr::Ident { .. } | hy_syntax::Expr::Lit { .. } => false,
             hy_syntax::Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
-                hy_syntax::InterpPart::Expr(e) => Self::expr_mutates_var(e, var),
+                hy_syntax::InterpPart::Expr(e) => self.expr_mutates_var(st, e, var),
                 hy_syntax::InterpPart::Lit(_) => false,
             }),
             hy_syntax::Expr::Binary { lhs, rhs, .. } => {
-                Self::expr_mutates_var(lhs, var) || Self::expr_mutates_var(rhs, var)
+                self.expr_mutates_var(st, lhs, var) || self.expr_mutates_var(st, rhs, var)
             }
             hy_syntax::Expr::Unary { op, operand, .. } => {
                 if *op == hy_syntax::UnOp::Addr && Self::expr_is_or_touches_var(operand, var) {
                     return true;
                 }
-                Self::expr_mutates_var(operand, var)
+                self.expr_mutates_var(st, operand, var)
             }
             hy_syntax::Expr::AddrOf { operand, .. } => {
                 if Self::expr_is_or_touches_var(operand, var) {
                     return true;
                 }
-                Self::expr_mutates_var(operand, var)
+                self.expr_mutates_var(st, operand, var)
             }
             hy_syntax::Expr::Move { operand, .. } => {
                 if Self::expr_is_or_touches_var(operand, var) {
                     return true;
                 }
-                Self::expr_mutates_var(operand, var)
+                self.expr_mutates_var(st, operand, var)
             }
-            hy_syntax::Expr::Try { operand, .. } => Self::expr_mutates_var(operand, var),
-            hy_syntax::Expr::Receive { chan, .. } => Self::expr_mutates_var(chan, var),
+            hy_syntax::Expr::Try { operand, .. } => self.expr_mutates_var(st, operand, var),
+            hy_syntax::Expr::Receive { chan, .. } => self.expr_mutates_var(st, chan, var),
             hy_syntax::Expr::Index { base, index, .. } => {
-                Self::expr_mutates_var(base, var) || Self::expr_mutates_var(index, var)
+                self.expr_mutates_var(st, base, var) || self.expr_mutates_var(st, index, var)
             }
             hy_syntax::Expr::Slice { base, lo, hi, .. } => {
-                Self::expr_mutates_var(base, var)
-                    || lo.as_ref().map_or(false, |e| Self::expr_mutates_var(e, var))
-                    || hi.as_ref().map_or(false, |e| Self::expr_mutates_var(e, var))
+                self.expr_mutates_var(st, base, var)
+                    || lo.as_ref().map_or(false, |e| self.expr_mutates_var(st, e, var))
+                    || hi.as_ref().map_or(false, |e| self.expr_mutates_var(st, e, var))
             }
-            hy_syntax::Expr::Field { base, .. } => Self::expr_mutates_var(base, var),
+            hy_syntax::Expr::Field { base, .. } => self.expr_mutates_var(st, base, var),
             hy_syntax::Expr::Call { callee, args, .. } => {
-                Self::expr_mutates_var(callee, var)
-                    || args.iter().any(|a| Self::expr_mutates_var(&a.value, var))
+                if let hy_syntax::Expr::Field { base, .. } =
+                    crate::model::unwrap_parens(callee)
+                {
+                    if self.call_receiver_is_pointer(st, callee)
+                        && Self::expr_is_or_touches_var(base, var)
+                    {
+                        return true;
+                    }
+                }
+                self.expr_mutates_var(st, callee, var)
+                    || args.iter().enumerate().any(|(i, a)| {
+                        (self.call_param_is_pointer(st, callee, i)
+                            && Self::expr_is_or_touches_var(&a.value, var)
+                            && !matches!(
+                                self.shape_of_expr(st, &a.value),
+                                crate::model::TypeShape::Pointer(_)
+                            ))
+                            || self.expr_mutates_var(st, &a.value, var)
+                    })
             }
             hy_syntax::Expr::StructLit { fields, .. } => {
-                fields.iter().any(|f| Self::expr_mutates_var(&f.value, var))
+                fields.iter().any(|f| self.expr_mutates_var(st, &f.value, var))
             }
             hy_syntax::Expr::SliceLit { items, .. } => {
-                items.iter().any(|e| Self::expr_mutates_var(e, var))
+                items.iter().any(|e| self.expr_mutates_var(st, e, var))
             }
             hy_syntax::Expr::MapLit { entries, .. } => entries
                 .iter()
-                .any(|(k, v)| Self::expr_mutates_var(k, var) || Self::expr_mutates_var(v, var)),
+                .any(|(k, v)| self.expr_mutates_var(st, k, var) || self.expr_mutates_var(st, v, var)),
             hy_syntax::Expr::FnLit { body, .. } => {
-                Self::is_loop_var_mutated(var, &body.stmts)
+                self.is_loop_var_mutated(st, var, &body.stmts)
             }
-            hy_syntax::Expr::Paren { inner, .. } => Self::expr_mutates_var(inner, var),
+            hy_syntax::Expr::Paren { inner, .. } => self.expr_mutates_var(st, inner, var),
         }
     }
 
@@ -1079,7 +1117,7 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        if Self::is_single_iteration_loop(loop_stmts.first().map(|(s, _)| *s)) {
+        if self.is_single_iteration_loop(st, loop_stmts.first().map(|(s, _)| *s)) {
             return;
         }
 
