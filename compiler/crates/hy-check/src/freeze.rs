@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 pub(crate) fn resolve_alias(st: &FnState, name: &str) -> String {
     let mut cur = name.to_string();
     let mut seen: Vec<String> = vec![cur.clone()];
-    for _ in 0..16 {
+    loop {
         match st.aliases.get(&cur) {
             Some(next) => {
                 if let Some(pos) = seen.iter().position(|s| s == next) {

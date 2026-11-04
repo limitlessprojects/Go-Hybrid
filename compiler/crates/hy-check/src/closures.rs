@@ -42,8 +42,9 @@ pub(crate) fn check_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, body:
             for (k, v) in s_env {
                 let mut b = v.clone();
                 if let Some(cur) = scoped_st.env.get(k) {
-                    b.moved = b.moved.or_else(|| cur.moved.clone());
-                    b.non_owned_origin = b.non_owned_origin.or_else(|| cur.non_owned_origin.clone());
+                    // Issue #1393: prefer current moved state over stale snapshot
+                    b.moved = cur.moved.clone().or_else(|| b.moved.clone());
+                    b.non_owned_origin = cur.non_owned_origin.clone().or_else(|| b.non_owned_origin.clone());
                 }
                 scoped_st.env.insert(k.clone(), b);
             }
@@ -1836,14 +1837,28 @@ fn inspect_later_defer_fate(
     }
 
     let mut rebound_self = false;
+    let mut scope_depth: i32 = 0;
     for (stmt, idx) in &flat.stmts {
         if *idx <= defer_idx || flat.in_managed(*idx) {
             continue;
         }
+        if let Some(events) = flat.events.get(idx) {
+            for ev in events {
+                match ev {
+                    crate::walk::ScopeEvent::Push => scope_depth += 1,
+                    crate::walk::ScopeEvent::Pop => {
+                        if scope_depth > 0 {
+                            scope_depth -= 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         if let Some(mv) = stmt_moves_watched_binding(stmt, &watch) {
             return LaterDeferFate::Moved(mv);
         }
-        update_post_defer_watch(ck, st, stmt, name, &mut watch, &mut rebound_self);
+        update_post_defer_watch(ck, st, stmt, name, &mut watch, &mut rebound_self, scope_depth == 0);
     }
     if rebound_self {
         LaterDeferFate::ReboundBeforeMove
@@ -1995,15 +2010,18 @@ fn update_post_defer_watch(
     deferred_name: &str,
     watch: &mut std::collections::HashSet<String>,
     rebound_self: &mut bool,
+    allow_rebind: bool,
 ) {
     let mut handle_bind = |target: &str, val: Option<&Expr>| {
         if target == "_" {
             return;
         }
         let Some(v) = val else {
-            watch.remove(target);
-            if target == deferred_name {
-                *rebound_self = true;
+            if allow_rebind {
+                watch.remove(target);
+                if target == deferred_name {
+                    *rebound_self = true;
+                }
             }
             return;
         };
@@ -2012,7 +2030,7 @@ fn update_post_defer_watch(
             .any(|w| ck.value_reads_storage_of(st, v, w));
         if reads_watched {
             watch.insert(target.to_string());
-        } else {
+        } else if allow_rebind {
             watch.remove(target);
             if target == deferred_name {
                 *rebound_self = true;
