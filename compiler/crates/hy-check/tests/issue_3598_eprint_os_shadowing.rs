@@ -132,7 +132,7 @@ import "fmt"
 import "os"
 
 fn main() {
-    _ = os.Args
+    _ = os.args
     fmt.eprintln("standard error output")
 }
 "#;
