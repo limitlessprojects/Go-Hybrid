@@ -1774,27 +1774,272 @@ impl<'a> Checker<'a> {
         if let Some(operand) = as_addr_of(bare) {
             return self.const_array_len_at(operand, use_pos, depth + 1);
         }
+        if let Some(ty) = self.expr_array_type_at(bare, use_pos, depth + 1) {
+            if let Some(len) = self.array_len_of_ty(&ty) {
+                return Some(len);
+            }
+        }
+        self.array_lit_len(bare, depth + 1)
+    }
+
+    /// Resolve the static `TypeExpr` of `expr` at `use_pos` so composite array
+    /// operands (`a[i][j]`, `s.arr[i]`, `f()[i]`, `s[0].arr[i]`, `(&a)[i][j]`,
+    /// `m[k][i]`) carry their fixed array length into `const_array_len_at`.
+    fn expr_array_type_at(
+        &self,
+        expr: &Expr,
+        use_pos: hy_diag::Pos,
+        depth: usize,
+    ) -> Option<TypeExpr> {
+        if depth > 32 {
+            return None;
+        }
+        let bare = unwrap_parens(expr);
+        if let Some(operand) = as_addr_of(bare) {
+            let inner = self.expr_array_type_at(operand, use_pos, depth + 1)?;
+            return Some(TypeExpr::Pointer {
+                to: Box::new(inner),
+                span: bare.span(),
+            });
+        }
         match bare {
-            Expr::Ident { name, span: id_span, .. } => {
+            Expr::Move { operand, .. } | Expr::Try { operand, .. } => {
+                self.expr_array_type_at(operand, use_pos, depth + 1)
+            }
+            Expr::Ident {
+                name,
+                span: id_span,
+                ..
+            } => {
                 if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
                     if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
                         if let Some(ty) = sight.ty {
-                            if let Some(len) = self.array_len_of_ty(ty) {
-                                return Some(len);
-                            }
+                            return Some(ty.clone());
                         }
                         if let Some(value) = sight.value {
-                            if let Some(len) = self.const_array_len_at(value, use_pos, depth + 1) {
-                                return Some(len);
-                            }
+                            return self.expr_array_type_at(value, use_pos, depth + 1);
                         }
                     }
                     return None;
                 }
-                self.param_array_len_at(name, id_span.start)
+                if let Some(pty) = self.param_type_at(name, id_span.start) {
+                    return Some(pty);
+                }
+                if let Some(b) = self.consts.get(name.as_str()) {
+                    if let Some(ty) = &b.ty {
+                        return Some(ty.clone());
+                    }
+                    if let Some(val) = self.const_values.get(name.as_str()) {
+                        return self.expr_array_type_at(val, use_pos, depth + 1);
+                    }
+                }
+                None
             }
-            other => self.array_lit_len(other, depth + 1),
+            Expr::SliceLit {
+                elem: Some(elem),
+                items,
+                span,
+            } => {
+                if let Some((len_opt, inner_elem, arr_ty)) = bare.as_array_lit() {
+                    if len_opt.is_some() {
+                        return Some(arr_ty.clone());
+                    }
+                    return Some(TypeExpr::Array {
+                        len: Some(Box::new(Expr::Lit {
+                            kind: hy_syntax::LitKind::Int(items.len().to_string()),
+                            span: *span,
+                        })),
+                        elem: Box::new(inner_elem.clone()),
+                        span: *span,
+                    });
+                }
+                match self.resolve_type_alias(elem) {
+                    TypeExpr::Array {
+                        len: Some(len),
+                        elem: inner_elem,
+                        span: a_span,
+                    } => Some(TypeExpr::Array {
+                        len: Some(len),
+                        elem: inner_elem,
+                        span: a_span,
+                    }),
+                    TypeExpr::Array {
+                        len: None,
+                        elem: inner_elem,
+                        span: a_span,
+                    } => Some(TypeExpr::Array {
+                        len: Some(Box::new(Expr::Lit {
+                            kind: hy_syntax::LitKind::Int(items.len().to_string()),
+                            span: *span,
+                        })),
+                        elem: inner_elem,
+                        span: a_span,
+                    }),
+                    _ => Some(TypeExpr::Slice {
+                        elem: elem.clone(),
+                        span: *span,
+                    }),
+                }
+            }
+            Expr::StructLit { ty, .. } => ty.clone(),
+            Expr::MapLit {
+                key, value, span, ..
+            } => Some(TypeExpr::Map {
+                key: key.clone(),
+                value: value.clone(),
+                span: *span,
+            }),
+            Expr::Index { base, .. } => {
+                let base_ty = self.expr_array_type_at(base, use_pos, depth + 1)?;
+                match self.peel_pointer_and_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(*elem),
+                    TypeExpr::Map { value, .. } => Some(*value),
+                    _ => None,
+                }
+            }
+            Expr::Slice { base, span, .. } => {
+                let base_ty = self.expr_array_type_at(base, use_pos, depth + 1)?;
+                match self.peel_pointer_and_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        Some(TypeExpr::Slice {
+                            elem,
+                            span: *span,
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            Expr::Field { base, name, .. } => {
+                let base_ty = self.expr_array_type_at(base, use_pos, depth + 1)?;
+                let resolved = self.resolve_type_alias(&base_ty);
+                self.struct_fields_for_type(&resolved)?
+                    .into_iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, t)| t)
+            }
+            Expr::Receive { chan, .. } => {
+                let chan_ty = self.expr_array_type_at(chan, use_pos, depth + 1)?;
+                match self.peel_pointer_and_alias(&chan_ty) {
+                    TypeExpr::Chan { elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            Expr::Call { callee, args, span } => match unwrap_parens(callee) {
+                Expr::FnLit { results, .. } => results.first().map(|r| r.ty.clone()),
+                Expr::Ident {
+                    name,
+                    span: id_span,
+                } => {
+                    if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                        if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
+                            if let Some(ty) = sight.ty {
+                                if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(ty) {
+                                    return results.first().cloned();
+                                }
+                            }
+                            if let Some(val) = sight.value {
+                                if let Expr::FnLit { results, .. } = unwrap_parens(val) {
+                                    return results.first().map(|r| r.ty.clone());
+                                }
+                            }
+                        }
+                        return None;
+                    }
+                    if let Some(pty) = self.param_type_at(name, id_span.start) {
+                        if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&pty) {
+                            return results.first().cloned();
+                        }
+                        return None;
+                    }
+                    if name == "make" {
+                        let first = args.first()?;
+                        return match unwrap_parens(&first.value) {
+                            Expr::Ident { name: tname, .. } => {
+                                self.type_aliases.get(tname.as_str()).cloned()
+                            }
+                            other => self.expr_array_type_at(other, use_pos, depth + 1),
+                        };
+                    }
+                    if name == "new" && args.len() == 1 && !self.fns.contains_key("new") {
+                        let first = &args[0].value;
+                        let inner = match unwrap_parens(first) {
+                            Expr::Ident {
+                                name: tname,
+                                span: tspan,
+                            } => Some(TypeExpr::Named {
+                                name: tname.clone(),
+                                span: *tspan,
+                            }),
+                            other => self.expr_array_type_at(other, use_pos, depth + 1),
+                        }?;
+                        return Some(TypeExpr::Pointer {
+                            to: Box::new(inner),
+                            span: *span,
+                        });
+                    }
+                    let head = Self::base_named_type_str(name);
+                    self.fns
+                        .get(name.as_str())
+                        .or_else(|| self.fns.get(head))
+                        .filter(|f| f.results.len() == 1)
+                        .map(|f| f.results[0].ty.clone())
+                }
+                Expr::Field { base, name, .. } => {
+                    let head = Self::base_named_type_str(name);
+                    if let Expr::Ident {
+                        name: root,
+                        span: rspan,
+                    } = unwrap_parens(base)
+                    {
+                        if self.resolve_local_binding_at(root, rspan.start).is_none()
+                            && self.param_type_at(root, rspan.start).is_none()
+                        {
+                            let full = format!("{}.{}", root, head);
+                            if let Some(f) = self.fns.get(full.as_str()) {
+                                if f.results.len() == 1 {
+                                    return Some(f.results[0].ty.clone());
+                                }
+                            }
+                        }
+                    }
+                    let base_ty = self.expr_array_type_at(base, use_pos, depth + 1)?;
+                    let peeled = self.peel_pointer_and_alias(&base_ty);
+                    let sn = Self::base_named_type(&peeled)?;
+                    self.method_decls
+                        .get(&(sn, head.to_string()))
+                        .filter(|m| m.results.len() == 1)
+                        .map(|m| m.results[0].ty.clone())
+                }
+                _ => None,
+            },
+            _ => None,
         }
+    }
+
+    fn param_type_at(&self, name: &str, use_pos: hy_diag::Pos) -> Option<TypeExpr> {
+        for decl in &self.file.decls {
+            if let hy_syntax::Decl::Fn(f) = decl {
+                if span_contains(f.span, use_pos) {
+                    if let Some(recv) = &f.receiver {
+                        if recv.name == name {
+                            return Some(recv.ty.clone());
+                        }
+                    }
+                    for p in &f.params {
+                        if p.name == name {
+                            return Some(p.ty.clone());
+                        }
+                    }
+                    for r in &f.results {
+                        if r.name.as_deref() == Some(name) {
+                            return Some(r.ty.clone());
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        None
     }
 
     /// The length carried by an array type (`[3]int`, `*[3]int`, aliases), or
@@ -1833,24 +2078,6 @@ impl<'a> Checker<'a> {
             TypeExpr::Array { len: None, .. } => Some(items.len() as i128),
             _ => None,
         }
-    }
-
-    /// Declared length of the fixed-size array parameter `name`, when the use
-    /// site sits inside that function.
-    fn param_array_len_at(&self, name: &str, use_pos: hy_diag::Pos) -> Option<i128> {
-        for decl in &self.file.decls {
-            if let hy_syntax::Decl::Fn(f) = decl {
-                if span_contains(f.span, use_pos) {
-                    for p in &f.params {
-                        if p.name == name {
-                            return self.array_len_of_ty(&p.ty);
-                        }
-                    }
-                    return None;
-                }
-            }
-        }
-        None
     }
 
     fn scan_block_for_local_const<'b>(
