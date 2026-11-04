@@ -2821,8 +2821,12 @@ impl<'a> Collector<'a> {
                 );
                 if type_first_arg {
                     if let Some(first_arg) = args.first() {
-                        if let Expr::Ident { name, span } = unwrap_parens(&first_arg.value) {
+                        let bare_first = unwrap_parens(&first_arg.value);
+                        if let Expr::Ident { name, span } = bare_first {
                             self.check_named_type_instantiation(name, *span);
+                        } else if let Expr::Index { span, .. } = bare_first {
+                            let type_str = Self::type_expr_str_from_expr(bare_first);
+                            self.check_named_type_instantiation(&type_str, *span);
                         }
                     }
                 }
@@ -3177,6 +3181,27 @@ impl<'a> Collector<'a> {
                 ),
                 "map key types must be comparable (primitives, pointers, strings, or structs without slice/map fields)",
             );
+        }
+    }
+
+    fn type_expr_str_from_expr(e: &Expr) -> String {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => name.clone(),
+            Expr::Index { base, index, .. } => {
+                format!(
+                    "{}[{}]",
+                    Self::type_expr_str_from_expr(base),
+                    Self::type_expr_str_from_expr(index)
+                )
+            }
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                ..
+            } if items.is_empty() => {
+                format!("[]{}", t.render())
+            }
+            other => other.render(),
         }
     }
 
@@ -3914,11 +3939,33 @@ impl<'a> Collector<'a> {
                     }
                 }
             }
+            Expr::Index { .. } => {
+                let rendered = Self::type_expr_str_from_expr(bare);
+                let k = self.kind_of_named(&rendered, 0);
+                if k != OpKind::Unknown {
+                    k
+                } else {
+                    let head = Checker::base_named_type_str(&rendered);
+                    if self.ck.structs.contains_key(head)
+                        || self.ck.struct_type_params.contains_key(head)
+                    {
+                        OpKind::Struct(Some(rendered))
+                    } else {
+                        OpKind::Unknown
+                    }
+                }
+            }
             Expr::SliceLit {
                 elem: Some(t),
                 items,
                 ..
-            } if items.is_empty() => OpKind::Slice(Box::new(self.kind_of_ty(t, 0))),
+            } if items.is_empty() => {
+                if let Some((_, inner_elem, _)) = bare.as_array_lit() {
+                    OpKind::Array(Box::new(self.kind_of_ty(inner_elem, 0)))
+                } else {
+                    OpKind::Slice(Box::new(self.kind_of_ty(t, 0)))
+                }
+            }
             Expr::MapLit {
                 key,
                 value,
@@ -8131,6 +8178,65 @@ impl<'a> Collector<'a> {
                         span,
                         format!("cannot use `{}` as type in argument to `new` (HYB-E2005)", op.render()),
                         "`new` takes a type name — not an expression",
+                    );
+                }
+            }
+            Expr::Index { base, .. } => {
+                let b_bare = unwrap_parens(base);
+                if let Expr::Ident { name: bname, .. } = b_bare {
+                    if self.lookup_kind(bname).is_some() {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "cannot use `{}` as type in argument to `new` (HYB-E2005)",
+                                op.render()
+                            ),
+                            "`new` takes a type — not an index expression on a variable",
+                        );
+                    } else if self.file_consts.contains_key(bname) {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "cannot use `{}` as type in argument to `new` (HYB-E2005)",
+                                op.render()
+                            ),
+                            "`new` takes a type — not an index expression on a constant",
+                        );
+                    } else if self.ck.fns.contains_key(bname) {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "cannot use `{}` as type in argument to `new` (HYB-E2005)",
+                                op.render()
+                            ),
+                            "`new` takes a type — not an index expression on a function",
+                        );
+                    } else if bname == "set"
+                        || bname == "map"
+                        || bname == "option"
+                        || self.ck.structs.contains_key(bname.as_str())
+                        || self.ck.struct_type_params.contains_key(bname.as_str())
+                        || self.ck.type_aliases.contains_key(bname.as_str())
+                    {
+                        // Accepted generic type operand to `new` (e.g. `new(box[int])`, `new(G[T])`)
+                    } else {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "argument to `new` must be a type, found expression `{}` (HYB-E2005)",
+                                op.render()
+                            ),
+                            "`new` takes a type name — not a value or expression",
+                        );
+                    }
+                } else {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "argument to `new` must be a type, found expression `{}` (HYB-E2005)",
+                            op.render()
+                        ),
+                        "`new` takes a type name — not a value or expression",
                     );
                 }
             }
