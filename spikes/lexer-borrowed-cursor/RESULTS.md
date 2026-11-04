@@ -85,3 +85,30 @@ The final evidence update preserves all three tested Rust files byte-for-byte.
 Hosted CI, maintainer review, any award and payment remain unconfirmed.
 AI-assisted implementation, measurement and test execution; no independent
 human review is claimed.
+
+## Identifier follow-up — 4 November 2026
+
+A private call-site count profile on submitted head `2deb0be3f4136aa314aacd72b2870837c6831af7` found 12,912 of 56,835 ordinary-input lookaheads in identifier scanning (22.7%); the comment-heavy fixture had only 14 there. These are call frequencies, not CPU samples. A separate token count found 1,002 keyword tokens in the ordinary fixture.
+
+The follow-up scans the existing ASCII identifier grammar over `Chars::as_str()`, keeps the prefix borrowed for case/context/keyword checks, and creates an owned string only for `Tok::Ident`. Consumed ASCII bytes are scalar columns; the first non-identifier byte stays at a UTF-8 boundary. Comment, string, numeric, keyword and diagnostic rules are unchanged. No dependency or whole-source character copy is added.
+
+The first prefix-scanning candidate still created a String for keyword tokens and improved the ordinary median by 4.0%, below the locally recorded 5% selection target. It was refined rather than published. The final borrowed-keyword candidate is code `046dfa9a0ef37ad6f242faac2a164a00fa7e9df6`. Selection thresholds and the deterministic real-file choice were recorded locally before timing, not publicly committed in advance; this is an observed follow-up report, not a claim of public preregistration.
+
+Same Apple M2/macOS arm64 host and Rust 1.99.0 release profile. Each case used five fresh alternating baseline/candidate process pairs. Generated cases used 2,000 lexes/process; the real-source case used 20,000 after the first version's roughly 25 ms process duration proved too short. The following values are medians of process-average ms/lex, compared with the submitted `2deb0be` head, not the original `Vec<char>` baseline:
+
+| Input | Bytes | Submitted head ms/lex | Follow-up ms/lex | Change |
+| --- | ---: | ---: | ---: | ---: |
+| ordinary | 27,808 | 0.370888 | 0.339594 | -8.44% |
+| comments | 1,080,014 | 0.689550 | 0.687894 | -0.24% |
+| unicode | 54,808 | 0.321784 | 0.280643 | -12.79% |
+| real_corpus | 5,364 | 0.012316 | 0.012220 | -0.78% |
+
+The real case is `tests/checker-corpus/45-composite-literal-embeds-shared-map.hy`, the largest lex-valid tracked input among the existing snapshot set, chosen before timings. The small real/comment changes are reported without a significance claim. No universal speedup, new RSS, CPU-sample or allocation-counter result is claimed. Do not combine these ratios with the older cursor-only measurements to infer a newly measured result against the original baseline.
+
+[All follow-up observations, input/source/binary hashes and method](identifier-followup-2026-11-04.json). Recreate the three generated files with the unchanged `inputs.py`; their regenerated hashes were checked against the measured files. Build and keep the existing `lexer_cursor` release example at both source revisions, then run `bench FILE 2000` (or `20000` for the real case) in five alternating pairs. Input read is outside the internal timer; token construction/drop is included. No new API/model, cloud job, package download or measured memory bound. Existing nonfatal strip/libLLVM warnings remain.
+
+Full token/diagnostic snapshot bytes still match on all 175 tracked `.hy` files plus the three generated fixtures. Two additional public API regressions pin a long ASCII identifier before Unicode whitespace/operator positions and a long identifier ending at EOF; the position test file now has four passing tests.
+
+Complete local validation at code `046dfa9a0ef37ad6f242faac2a164a00fa7e9df6`: **2,633 workspace tests passed**, zero failed/ignored; fresh compiler build; **130/130** checker verdicts; **42/42** accepted build-and-run plus **88/88** rejected differential cases; all **ten examples** passed. Tested source and test bytes are unchanged by this evidence update.
+
+Whole-file `rustfmt --check` finds pre-existing differences elsewhere in the unchanged lexer baseline. The changed method is identical to pinned rustfmt output; the modified regression test file and existing example formatting checks pass. Those unrelated formatting differences are retained, not described as a full-file pass. Hosted verification for this follow-up, maintainer review, merge, award and payment remain pending.

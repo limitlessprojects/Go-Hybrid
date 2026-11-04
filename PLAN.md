@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor follow-up — 2026-11-04: lexer identifiers
+
+Preserve the borrowed cursor and scan ASCII identifier prefixes directly, borrowing keyword text and owning only Ident strings. Code046dfa9 retains all178token/diagnostic snapshots; four position regressions pass. Paired macOS/Rust1.99 observations versus submitted2deb0be: ordinary8.4%faster, Unicode12.8%faster, comment/real cases nearly unchanged; no newRSS/universal-speed claim. Full local workspace2633passed, corpus130/130, differential42+88, ten examples. Raw data and honest private-preregistration/format limits are in `spikes/lexer-borrowed-cursor/RESULTS.md`. New-head hosted CI, review, merge and reward/payment remain pending.
+
 ## Contributor validation — borrowed lexer cursor (2026-11-03)
 
 - The private cursor borrows UTF-8 instead of making a full `Vec<char>` copy. No grammar, API or diagnostic change is intended; token strings still allocate.
