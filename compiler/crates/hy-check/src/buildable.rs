@@ -85,6 +85,7 @@ pub(crate) enum OpKind {
     Chan(Box<OpKind>),
     Struct(Option<String>),
     Pointer(Box<OpKind>),
+    Foreign(String),
     /// Function kind: result kinds, plus the declared parameter count when the
     /// signature is known (`None` = unknown, e.g. a `fn`-typed value whose
     /// declaration is out of reach). The count is what closes the
@@ -113,6 +114,7 @@ impl OpKind {
             OpKind::Struct(Some(n)) => format!("struct {}", n),
             OpKind::Struct(None) => "struct".to_string(),
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
+            OpKind::Foreign(n) => n.clone(),
             OpKind::Fn(..) => "fn".to_string(),
             OpKind::Void => "void".to_string(),
         }
@@ -166,6 +168,8 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
             kinds_conflict(a, b)
         }
         (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
+        (Foreign(_), Int | Float | Bool | Str) | (Int | Float | Bool | Str, Foreign(_)) => true,
+        (Foreign(_), _) | (_, Foreign(_)) => false,
         (Pointer(a), Pointer(b)) => kinds_conflict(a, b),
         // Fn kinds only carry results here, so a result match is not proof of
         // a signature match; stay permissive.
@@ -299,6 +303,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
             is_fully_resolved(e)
         }
         OpKind::Map(k, v) => is_fully_resolved(k) && is_fully_resolved(v),
+        OpKind::Foreign(_) => false,
         // A fn kind only carries results here, so it is not evidence about
         // members either way.
         OpKind::Fn(..) => false,
@@ -1702,7 +1707,14 @@ impl<'a> Collector<'a> {
             "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
             | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
-            _ => OpKind::Unknown,
+            _ => match crate::foreign::foreign_named_type(name) {
+                Some(
+                    crate::model::TypeShape::ForeignOpaque(n)
+                    | crate::model::TypeShape::OwnHandle(n)
+                    | crate::model::TypeShape::BorrowHandle(n),
+                ) => OpKind::Foreign(n),
+                _ => OpKind::Unknown,
+            },
         }
     }
 
