@@ -620,6 +620,13 @@ impl<'a> Checker<'a> {
                             .map(|t| self.resolve_type_alias(&t))
                             .and_then(|t| match t {
                                 TypeExpr::Map { key, .. } => Some(*key),
+                                TypeExpr::Named { ref name, span } if name.starts_with("set[") && name.ends_with(']') => {
+                                    let inner = &name[4..name.len() - 1];
+                                    Some(TypeExpr::Named {
+                                        name: inner.to_string(),
+                                        span,
+                                    })
+                                }
                                 _ => None,
                             });
                         if let Some(key_ty) = key_ty {
@@ -694,6 +701,17 @@ impl<'a> Checker<'a> {
             }
             _ => None,
         };
+
+        let param_types = param_types.or_else(|| {
+            let ty = self.ty_of_expr(st, unwrapped)?;
+            let resolved = self.resolve_type_alias(&ty);
+            match resolved {
+                TypeExpr::Fn { params, .. } => {
+                    Some(params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
+                }
+                _ => None,
+            }
+        });
 
         if let Some(params) = param_types {
             for (i, a) in args.iter().enumerate() {
