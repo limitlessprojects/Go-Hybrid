@@ -1125,8 +1125,25 @@ impl<'a> Collector<'a> {
         match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                self.struct_field_type_name(&bk, name)
+            }
             _ => None,
         }
+    }
+
+    /// #3516 — returns the type parameter name if `e` has a bare generic type parameter type.
+    fn generic_type_param_name(&self, e: &Expr) -> Option<String> {
+        if self.fn_type_params.is_empty() {
+            return None;
+        }
+        if let Some(tname) = self.typed_value_type_name(e) {
+            if self.fn_type_params.contains(&tname) {
+                return Some(tname);
+            }
+        }
+        None
     }
 
     /// #2771 — the declared Go spelling of a simple local assignment target.
@@ -1827,10 +1844,30 @@ impl<'a> Collector<'a> {
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
-        let outer_tp = std::mem::replace(
-            &mut self.fn_type_params,
-            f.type_params.iter().map(|p| p.name.clone()).collect(),
-        );
+        let mut tparams: HashSet<String> = f.type_params.iter().map(|p| p.name.clone()).collect();
+        if let Some(r) = &f.receiver {
+            let r_name = match &r.ty {
+                TypeExpr::Named { name, .. } => Some(name.as_str()),
+                TypeExpr::Pointer { to, .. } => match &**to {
+                    TypeExpr::Named { name, .. } => Some(name.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(rn) = r_name {
+                if let Some(start) = rn.find('[') {
+                    if let Some(end) = rn.rfind(']') {
+                        for param in rn[start + 1..end].split(',') {
+                            let p = param.trim();
+                            if !p.is_empty() {
+                                tparams.insert(p.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let outer_tp = std::mem::replace(&mut self.fn_type_params, tparams);
         let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
         let outer_select = std::mem::replace(&mut self.select_depth, 0);
         self.block_stmts(body);
@@ -2023,8 +2060,12 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                if let Some((_, _, array_ty)) = unwrap_parens(val).as_array_lit() {
+                    self.bind_type_name(name, array_ty.render());
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Some(tname) = self.typed_value_type_name(val) {
+                    self.bind_type_name(name, tname);
                 }
             }
         }
@@ -7643,6 +7684,18 @@ impl<'a> Collector<'a> {
                 if builtins_already_flags_len_cap(op, false) {
                     return;
                 }
+                if let Some(tp) = self.generic_type_param_name(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type parameter `{}`) for built-in `len` (HYB-E2005)",
+                            op.render(),
+                            tp
+                        ),
+                        "`len` accepts a string, slice, array, map, or channel",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 let ok = matches!(
                     ak,
@@ -7676,6 +7729,18 @@ impl<'a> Collector<'a> {
                 if builtins_already_flags_len_cap(op, true) {
                     return;
                 }
+                if let Some(tp) = self.generic_type_param_name(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type parameter `{}`) for built-in `cap` (HYB-E2005)",
+                            op.render(),
+                            tp
+                        ),
+                        "`cap` accepts a slice, array, or channel — maps and strings have no capacity",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 let ok = matches!(
                     ak,
@@ -7704,6 +7769,18 @@ impl<'a> Collector<'a> {
                 if builtins_already_flags_close(op) {
                     return;
                 }
+                if let Some(tp) = self.generic_type_param_name(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot close non-channel `{}` (type parameter `{}`) (HYB-E2005)",
+                            op.render(),
+                            tp
+                        ),
+                        "`close` requires a bidirectional or send-only channel (`chan T` or `chan<- T`)",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 if !matches!(ak, OpKind::Unknown | OpKind::Chan(_)) {
                     self.emit_e2005(
@@ -7723,6 +7800,18 @@ impl<'a> Collector<'a> {
                 }
                 let map_arg = &args[0].value;
                 let key_arg = &args[1].value;
+                if let Some(tp) = self.generic_type_param_name(map_arg) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type parameter `{}`) is not a map in `delete` (HYB-E2005)",
+                            map_arg.render(),
+                            tp
+                        ),
+                        "`delete(m, k)` requires a map as its first argument",
+                    );
+                    return;
+                }
                 let mk = self.kind_of_expr(map_arg);
                 match &mk {
                     // #2474: `delete(s, v)` on a `set[T]` (lowered to
@@ -7809,6 +7898,18 @@ impl<'a> Collector<'a> {
                     return;
                 }
                 let slice_arg = &args[0].value;
+                if let Some(tp) = self.generic_type_param_name(slice_arg) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid `append`: first argument `{}` (type parameter `{}`) must be a slice (HYB-E2005)",
+                            slice_arg.render(),
+                            tp
+                        ),
+                        "the first argument to `append(xs, ...)` must be a slice (`[]T`)",
+                    );
+                    return;
+                }
                 let sk = self.kind_of_expr(slice_arg);
                 if !matches!(sk, OpKind::Unknown | OpKind::Slice(_)) {
                     self.emit_e2005(
@@ -7828,6 +7929,30 @@ impl<'a> Collector<'a> {
                 }
                 let dst_arg = &args[0].value;
                 let src_arg = &args[1].value;
+                if let Some(tp) = self.generic_type_param_name(dst_arg) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "first argument to `copy` must be a slice, found `{}` (type parameter `{}`) (HYB-E2005)",
+                            dst_arg.render(),
+                            tp
+                        ),
+                        "the first argument to `copy(dst, src)` must be a slice (`[]T`)",
+                    );
+                    return;
+                }
+                if let Some(tp) = self.generic_type_param_name(src_arg) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "second argument to `copy` must be a slice or string, found `{}` (type parameter `{}`) (HYB-E2005)",
+                            src_arg.render(),
+                            tp
+                        ),
+                        "the second argument to `copy(dst, src)` must be a slice (`[]T`) or string",
+                    );
+                    return;
+                }
                 let dk = self.kind_of_expr(dst_arg);
                 let sk = self.kind_of_expr(src_arg);
 
@@ -7909,6 +8034,18 @@ impl<'a> Collector<'a> {
                     return; // arity handled by builtins.rs
                 }
                 let op = &args[0].value;
+                if let Some(tp) = self.generic_type_param_name(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot clear non-slice/map `{}` (type parameter `{}`) (HYB-E2005)",
+                            op.render(),
+                            tp
+                        ),
+                        "`clear` requires a slice or map operand",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Map(_, _)) {
                     self.emit_e2005(
@@ -7934,6 +8071,18 @@ impl<'a> Collector<'a> {
                 let mut first_arg: Option<(&Expr, OpKind)> = None;
                 let mut first_typed_scalar: Option<(&Expr, &'static str)> = None;
                 for arg in args {
+                    if let Some(tp) = self.generic_type_param_name(&arg.value) {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "invalid argument `{}` (type parameter `{}`) for `{name}`: type parameter has no order (HYB-E2005)",
+                                arg.value.render(),
+                                tp
+                            ),
+                            "the arguments to `min` and `max` must have ordered type (integers, floats, or strings)",
+                        );
+                        return;
+                    }
                     let k = self.kind_of_expr(&arg.value);
                     if matches!(k, OpKind::Unknown | OpKind::Void) {
                         continue;
