@@ -595,8 +595,8 @@ impl<'a> Checker<'a> {
         if let Expr::Field { base, name: method_name, .. } = unwrapped {
             if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
                 if self.lookup_binding(st, pkg).is_none() && pkg == "fmt" {
-                    let norm = crate::foreign::normalize_go_ident_to_snake(method_name);
-                    let m = norm.as_str();
+                    let lower = method_name.to_ascii_lowercase();
+                    let m = lower.as_str();
                     let start_any_idx = match m {
                         "print" | "println" | "sprint" | "sprintln" | "eprint" | "eprintln" | "scan" | "scanln" => 0,
                         "printf" | "sprintf" | "eprintf" | "errorf" => 1,

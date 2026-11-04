@@ -195,7 +195,7 @@ impl<'a> Checker<'a> {
             return;
         };
         if ty_name == "any" || ty_name == "interface{}" {
-            self.check_default_int_overflow(name, value, st);
+            self.check_default_int_overflow(target, value, st);
             return;
         }
         if let Some(is_f32) = is_float_type(ty_name) {
