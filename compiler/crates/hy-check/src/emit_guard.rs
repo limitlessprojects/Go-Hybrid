@@ -469,6 +469,16 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if (name == "new" || name == "make") && st.env_lookup(name).is_none()) {
+                    if let Some(a0) = args.first() {
+                        let tname = match unwrap_parens(&a0.value) {
+                            Expr::Ident { name, .. } => Some(name.clone()),
+                            Expr::Index { base, index, .. } => Some(format!("{}[{}]", base.render(), index.render())),
+                            _ => None,
+                        };
+                        if let Some(name) = tname { self.check_type_expr_with_state(Some(st), &TypeExpr::Named { name, span: a0.value.span() }); }
+                    }
+                }
                 self.check_call_const_overflow(st, callee, args);
                 self.check_expr_emit_guard(st, callee);
                 for a in args {
@@ -1052,7 +1062,8 @@ impl<'a> Checker<'a> {
                 params, results, ..
             } => {
                 for p in params {
-                    self.check_type_expr_with_state(st, &p.ty);
+                    let pty = if matches!(&p.ty, TypeExpr::Named { name, .. } if name.is_empty()) { TypeExpr::Named { name: p.name.clone(), span: p.span } } else { p.ty.clone() };
+                    self.check_type_expr_with_state(st, &pty);
                 }
                 for r in results {
                     self.check_type_expr_with_state(st, r);
