@@ -50,25 +50,201 @@ def shell_words(line):
     return list(lexer)
 
 
+def is_root_cwd(cwd):
+    if cwd is None:
+        return True
+    c = cwd.strip().strip("'\"").strip()
+    return c in ("", ".", "./", "${{ github.workspace }}")
+
+
 def python_commands(workflow_text):
-    """Yield arguments of explicit, single-line Python invocations."""
-    for line in workflow_text.splitlines():
+    """
+    Yields arguments of explicit Python invocations that run in the repository root.
+    Invocations with a non-root working-directory (step, job, or workflow level)
+    are ignored because they do not execute repository-root test files.
+    """
+    lines = workflow_text.splitlines()
+
+    # Pass 1: check top-level workflow defaults
+    workflow_default_cwd = None
+    for i, line in enumerate(lines):
+        s = line.strip()
+        ind = len(line) - len(line.lstrip())
+        if ind == 0 and s.startswith("defaults:"):
+            for l2 in lines[i+1:]:
+                s2 = l2.strip()
+                ind2 = len(l2) - len(l2.lstrip())
+                if s2 and not s2.startswith("#"):
+                    if ind2 == 0:
+                        break
+                    m_wd = re.search(r"working-directory:\s*(.*)", s2)
+                    if m_wd:
+                        workflow_default_cwd = m_wd.group(1).strip()
+            break
+
+    # If the file does not define jobs, treat as a raw snippet
+    has_jobs = any(l.strip().startswith("jobs:") for l in lines)
+    if not has_jobs:
+        if not is_root_cwd(workflow_default_cwd):
+            return
+        for line in lines:
+            line = line.strip()
+            inline_run = re.match(r"(?:-\s+)?run:\s*(.*)", line)
+            if inline_run:
+                line = inline_run.group(1)
+            try:
+                tokens = shell_words(line)
+                if inline_run and len(tokens) == 1:
+                    tokens = shell_words(tokens[0])
+            except ValueError:
+                continue
+            if tokens and PYTHON_RE.fullmatch(tokens[0]):
+                end = next((i for i, token in enumerate(tokens)
+                            if token and all(c in ";&|<>()" for c in token)), len(tokens))
+                # Issue #2880: an OR-list (`||`), pipeline (`|`), or background
+            # operator (`&`) masks a non-zero exit status under `set -e`
+            # (without `pipefail`), so a failing test suite would not fail CI.
+            if any(
+                    token and all(c in ";&|<>()" for c in token)
+                    and ("|" in token or "&" in token.replace("&&", ""))
+                    for token in tokens[end:]
+                ):
+                    continue
+                arguments = tokens[1:end]
+                while arguments:
+                    option = arguments[0]
+                    if PYTHON_FLAGS_RE.fullmatch(option):
+                        arguments = arguments[1:]
+                    elif option in ("-W", "-X", "--check-hash-based-pycs"):
+                        arguments = arguments[2:]
+                    elif option.startswith(("-W", "-X")):
+                        arguments = arguments[1:]
+                    elif option == "--":
+                        arguments = arguments[1:]
+                        break
+                    else:
+                        break
+                yield arguments
+        return
+
+    # Full workflow with jobs: parse jobs and steps
+    # We find each job's default cwd, and each step's cwd
+    job_default_cwd = workflow_default_cwd
+    current_job_indent = None
+    
+    # Pre-split into lines with their effective cwd
+    # An effective cwd is root or non-root
+    line_cwds = [workflow_default_cwd] * len(lines)
+
+    # Let's track jobs and steps by line ranges
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        s = line.strip()
+        ind = len(line) - len(line.lstrip())
+        if ind == 0 and s.startswith("jobs:"):
+            i += 1
+            while i < len(lines):
+                l_job = lines[i]
+                s_job = l_job.strip()
+                ind_job = len(l_job) - len(l_job.lstrip())
+                if s_job and not s_job.startswith("#"):
+                    if ind_job == 0:
+                        break
+                    if s_job.endswith(":") and not s_job.startswith("-") and (current_job_indent is None or ind_job <= current_job_indent):
+                        current_job_indent = ind_job
+                        cur_job_cwd = workflow_default_cwd
+                        i += 1
+                        while i < len(lines):
+                            l_body = lines[i]
+                            s_body = l_body.strip()
+                            ind_body = len(l_body) - len(l_body.lstrip())
+                            if s_body and not s_body.startswith("#"):
+                                if ind_body <= current_job_indent:
+                                    break
+                                # Job defaults
+                                if s_body.startswith("defaults:"):
+                                    def_ind = ind_body
+                                    i += 1
+                                    while i < len(lines):
+                                        s_def = lines[i].strip()
+                                        ind_def = len(lines[i]) - len(lines[i].lstrip())
+                                        if s_def and not s_def.startswith("#"):
+                                            if ind_def <= def_ind:
+                                                break
+                                            m_wd = re.search(r"working-directory:\s*(.*)", s_def)
+                                            if m_wd:
+                                                cur_job_cwd = m_wd.group(1).strip()
+                                        i += 1
+                                    continue
+                                # Steps
+                                if s_body.startswith("steps:"):
+                                    steps_ind = ind_body
+                                    i += 1
+                                    step_start_idx = None
+                                    step_line_indices = []
+                                    while i < len(lines):
+                                        s_step = lines[i].strip()
+                                        ind_step = len(lines[i]) - len(lines[i].lstrip())
+                                        if s_step and not s_step.startswith("#"):
+                                            if ind_step <= steps_ind:
+                                                break
+                                            if s_step.startswith("-"):
+                                                # End previous step
+                                                if step_line_indices:
+                                                    # Determine step cwd
+                                                    s_cwd = cur_job_cwd
+                                                    for idx in step_line_indices:
+                                                        m_wd = re.search(r"(?:^|-\s+)?working-directory:\s*(.*)", lines[idx].strip())
+                                                        if m_wd:
+                                                            s_cwd = m_wd.group(1).strip()
+                                                    for idx in step_line_indices:
+                                                        line_cwds[idx] = s_cwd
+                                                    step_line_indices = []
+                                            step_line_indices.append(i)
+                                        i += 1
+                                    if step_line_indices:
+                                        s_cwd = cur_job_cwd
+                                        for idx in step_line_indices:
+                                            m_wd = re.search(r"(?:^|-\s+)?working-directory:\s*(.*)", lines[idx].strip())
+                                            if m_wd:
+                                                s_cwd = m_wd.group(1).strip()
+                                        for idx in step_line_indices:
+                                            line_cwds[idx] = s_cwd
+                                    continue
+                            i += 1
+                        continue
+                i += 1
+            continue
+        i += 1
+
+    # Now iterate lines and yield python commands if line_cwd is root
+    for idx, line in enumerate(lines):
+        cwd = line_cwds[idx]
+        if not is_root_cwd(cwd):
+            continue
         line = line.strip()
         inline_run = re.match(r"(?:-\s+)?run:\s*(.*)", line)
         if inline_run:
             line = inline_run.group(1)
         try:
             tokens = shell_words(line)
-            # A quoted YAML run scalar wraps the whole shell command.
             if inline_run and len(tokens) == 1:
                 tokens = shell_words(tokens[0])
         except ValueError:
             continue
         if tokens and PYTHON_RE.fullmatch(tokens[0]):
-            # Only the first simple command is covered. A following echo's
-            # -p flag must never become another unittest discovery pattern.
             end = next((i for i, token in enumerate(tokens)
                         if token and all(c in ";&|<>()" for c in token)), len(tokens))
+            # Issue #2880: an OR-list (`||`), pipeline (`|`), or background
+            # operator (`&`) masks a non-zero exit status under `set -e`
+            # (without `pipefail`), so a failing test suite would not fail CI.
+            if any(
+                token and all(c in ";&|<>()" for c in token)
+                and ("|" in token or "&" in token.replace("&&", ""))
+                for token in tokens[end:]
+            ):
+                continue
             arguments = tokens[1:end]
             while arguments:
                 option = arguments[0]
@@ -82,8 +258,9 @@ def python_commands(workflow_text):
                     arguments = arguments[1:]
                     break
                 else:
-                    break  # In particular, never interpret a -c string.
+                    break
             yield arguments
+
 
 
 # Directories whose test files this guard covers, and how each is invoked.
