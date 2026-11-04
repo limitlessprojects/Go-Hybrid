@@ -1828,7 +1828,12 @@ impl<'a> Checker<'a> {
                             // projected type so later `<-sub[0]` receives
                             // resolve their direction (the "known remaining
                             // sibling" in recv_composite_channel_operands.rs).
-                            .or_else(|| self.composite_type_expr(&pre_st, value)),
+                            .or_else(|| self.composite_type_expr(&pre_st, value))
+                            .or_else(|| {
+                                (!immutable)
+                                    .then(|| self.default_untyped_local_ty(&pre_st, value))
+                                    .flatten()
+                            }),
                     ),
                 };
                 let is_fresh_copy = self.call_returns_fresh_copy(&pre_st, value);
