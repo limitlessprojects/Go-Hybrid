@@ -2188,7 +2188,7 @@ impl<'a> Checker<'a> {
                     for (got_ty, param) in got_tys.iter().zip(params.iter()) {
                         self.check_chan_dir_coercion(
                             got_ty,
-                            &param.ty,
+                            &Self::fn_param_ty(param),
                             args[0].value.span(),
                             &args[0].value.render(),
                         );
@@ -2205,7 +2205,7 @@ impl<'a> Checker<'a> {
                         params.get(i)
                     };
                     if let Some(p) = want_param {
-                        self.check_expr_against_ty(&arg.value, &p.ty, env);
+                        self.check_expr_against_ty(&arg.value, &Self::fn_param_ty(p), env);
                     }
                 }
             }
@@ -2396,7 +2396,7 @@ impl<'a> Checker<'a> {
                     && pa
                         .iter()
                         .zip(pb.iter())
-                        .any(|(a, b)| self.chan_dir_coercion_violation(&a.ty, &b.ty, false)))
+                        .any(|(a, b)| self.chan_dir_coercion_violation(&Self::fn_param_ty(a), &Self::fn_param_ty(b), false)))
                     || (ra.len() == rb.len()
                         && ra
                             .iter()
@@ -2525,7 +2525,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|p| hy_syntax::Param {
                         name: p.name.clone(),
-                        ty: Self::substitute_type_params(&p.ty, subst),
+                        ty: Self::substitute_type_params(&Self::fn_param_ty(p), subst),
                         span: p.span,
                     })
                     .collect(),
@@ -2536,6 +2536,9 @@ impl<'a> Checker<'a> {
                 span: *span,
             },
         }
+    }
+    fn fn_param_ty(p: &hy_syntax::Param) -> hy_syntax::TypeExpr {
+        if matches!(&p.ty, hy_syntax::TypeExpr::Named { name, .. } if name.is_empty()) { hy_syntax::TypeExpr::Named { name: p.name.clone(), span: p.span } } else { p.ty.clone() }
     }
 
     pub(crate) fn peel_pointer_and_alias(&self, ty: &hy_syntax::TypeExpr) -> hy_syntax::TypeExpr {
@@ -2680,7 +2683,7 @@ impl<'a> Checker<'a> {
             ) => {
                 if pp.len() == ap.len() {
                     for (p, a) in pp.iter().zip(ap.iter()) {
-                        self.infer_type_param_bindings(&p.ty, &a.ty, tp_names, out);
+                        self.infer_type_param_bindings(&Self::fn_param_ty(p), &Self::fn_param_ty(a), tp_names, out);
                     }
                 }
                 if pr.len() == ar.len() {
