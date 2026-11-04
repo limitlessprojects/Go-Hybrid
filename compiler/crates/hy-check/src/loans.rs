@@ -3234,7 +3234,14 @@ impl<'a> Checker<'a> {
                     decl.params.iter().map(|p| p.name.clone()).collect();
                 bound.extend(decl.results.iter().filter_map(|r| r.name.clone()));
                 for (i, p) in decl.params.iter().enumerate() {
-                    if let Some(arg) = cr.args.get(i) {
+                    let arg_opt = cr.args.get(i).or_else(|| {
+                        if cr.args.len() == 1 && decl.params.len() > 1 {
+                            cr.args.first()
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(arg) = arg_opt {
                         slots.push((
                             p.name.clone(),
                             self.shape_of_type(&p.ty),
@@ -7700,6 +7707,23 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn expr_or_multi_call_may_share(&self, st: &FnState, expr: &Expr) -> bool {
+        let inner = crate::model::unwrap_parens(expr);
+        let sh = self.shape_of_expr(st, inner);
+        if self.shape_may_share(&sh) || matches!(sh, TypeShape::Unknown) {
+            return true;
+        }
+        if let Expr::Call { callee, .. } = inner {
+            if let Some(results) = self.call_result_tys(st, callee) {
+                return results.iter().any(|ty| {
+                    let s = self.shape_of_type(ty);
+                    self.shape_may_share(&s) || matches!(s, TypeShape::Unknown)
+                });
+            }
+        }
+        false
+    }
+
     /// Resolve a call argument expression to a `const` root when the argument
     /// passes mutable reference storage (map, slice, pointer, `&const_val`, or
     /// a struct/array carrying reference fields) backed by that `const` (#188).
@@ -7732,8 +7756,7 @@ impl<'a> Checker<'a> {
             }
             return None;
         }
-        let arg_shape = self.shape_of_expr(st, inner);
-        if !(self.shape_may_share(&arg_shape) || matches!(arg_shape, TypeShape::Unknown)) {
+        if !self.expr_or_multi_call_may_share(st, inner) {
             return None;
         }
         let mut roots = Vec::new();
@@ -7921,13 +7944,27 @@ impl<'a> Checker<'a> {
                     if declared.contains(name) {
                         (false, true)
                     } else if let Some(decl) = self.fns.get(name) {
-                        match decl.params.get(i) {
-                            Some(p) => {
-                                let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
-                                    || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
-                                (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
+                        if cr.args.len() == 1 && decl.params.len() > 1 {
+                            let is_ptr = decl.params.iter().any(|p| {
+                                matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                    || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
+                            });
+                            let mutates = decl.params.iter().any(|p| {
+                                let ps = self.shape_of_type(&p.ty);
+                                (self.shape_may_share(&ps)
+                                    || matches!(ps, TypeShape::Unknown | TypeShape::Pointer(_)))
+                                    && self.fn_mutates_const_param(decl, &p.name, 0)
+                            });
+                            (is_ptr, mutates)
+                        } else {
+                            match decl.params.get(i) {
+                                Some(p) => {
+                                    let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                        || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
+                                    (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
+                                }
+                                None => (false, true),
                             }
-                            None => (false, true),
                         }
                     } else if self.lookup_binding(st, name).is_some() {
                         indirect_callee_effect(callee)
@@ -8695,60 +8732,15 @@ impl<'a> Checker<'a> {
     /// HYB-E6002 constant overflow checks on assignment targets).
     // ponytail: resolves direct ident, index, and struct field targets via package struct definitions.
     pub(crate) fn place_target_ty(&self, st: &FnState, p: &Place) -> Option<hy_syntax::TypeExpr> {
-        enum Step<'a> {
-            Index,
-            Field(&'a str),
-        }
-        let mut steps = Vec::new();
-        let mut walker = p;
-        loop {
-            match &walker.kind {
-                PlaceKind::Index { base, .. } => {
-                    steps.push(Step::Index);
-                    walker = base;
-                }
-                PlaceKind::Field { base, name } => {
-                    steps.push(Step::Field(name.as_str()));
-                    walker = base;
-                }
-                PlaceKind::AddrOf { base } => {
-                    walker = base;
-                }
-                PlaceKind::Ident(name) => {
-                    let b = self.lookup_binding(st, name)?;
-                    let mut cur = b.ty.as_ref()?;
-                    steps.reverse();
-                    for step in steps {
-                        while let hy_syntax::TypeExpr::Pointer { to, .. } = cur {
-                            cur = to.as_ref();
-                        }
-                        match step {
-                            Step::Index => match cur {
-                                hy_syntax::TypeExpr::Array { elem, .. }
-                                | hy_syntax::TypeExpr::Slice { elem, .. } => {
-                                    cur = elem.as_ref();
-                                }
-                                hy_syntax::TypeExpr::Map { value, .. } => {
-                                    cur = value.as_ref();
-                                }
-                                _ => return None,
-                            },
-                            Step::Field(field_name) => match cur {
-                                hy_syntax::TypeExpr::Named {
-                                    name: struct_name, ..
-                                } => {
-                                    let fields = self.structs.get(struct_name)?;
-                                    let (_, field_ty) =
-                                        fields.iter().find(|(f, _)| f == field_name)?;
-                                    cur = field_ty;
-                                }
-                                _ => return None,
-                            },
-                        }
-                    }
-                    return Some(cur.clone());
-                }
-            }
+        match &p.kind {
+            PlaceKind::Ident(name) => self.lookup_binding(st, name)?.ty.clone(),
+            PlaceKind::AddrOf { base } => self.place_target_ty(st, base),
+            PlaceKind::Index { base, .. } => match self.peel_pointer_and_alias(&self.place_target_ty(st, base)?) {
+                hy_syntax::TypeExpr::Array { elem, .. } | hy_syntax::TypeExpr::Slice { elem, .. } => Some(*elem),
+                hy_syntax::TypeExpr::Map { value, .. } => Some(*value),
+                _ => None,
+            },
+            PlaceKind::Field { base, name } => self.struct_fields_for_type(&self.place_target_ty(st, base)?)?.into_iter().find(|(f, _)| f == name).map(|(_, ty)| ty),
         }
     }
 

@@ -19,8 +19,8 @@
 //! exactly once via `Expr::FnLit`.
 
 use crate::const_overflow::{
-    const_float_value, const_int_fold_with, const_int_value, fixed_width_int_range, fold_bin,
-    parse_int_lit, ConstFold, ConstInt,
+    const_float_value, const_int_value, fixed_width_int_range, fold_bin, parse_int_lit, ConstFold,
+    ConstInt,
 };
 use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
@@ -62,17 +62,17 @@ impl ConstKeyVal {
 /// length resolver must also see `var`/`let`/`:=` bindings, because an array's
 /// length lives in its *type* whether or not the binding is constant.
 #[derive(Debug, Clone, Copy)]
-struct BindingSight<'b> {
-    ty: &'b Option<TypeExpr>,
-    value: Option<&'b Expr>,
-    pos: hy_diag::Pos,
-    is_const: bool,
+pub(crate) struct BindingSight<'b> {
+    pub(crate) ty: &'b Option<TypeExpr>,
+    pub(crate) value: Option<&'b Expr>,
+    pub(crate) pos: hy_diag::Pos,
+    pub(crate) is_const: bool,
 }
 
 impl<'b> BindingSight<'b> {
     /// The initializer the constant folders may fold: only a `const` binding
     /// has one, exactly as the pre-split walk behaved.
-    fn constant_initializer(&self) -> Option<&'b Expr> {
+    pub(crate) fn constant_initializer(&self) -> Option<&'b Expr> {
         if self.is_const {
             self.value
         } else {
@@ -144,7 +144,7 @@ impl<'a> Checker<'a> {
                 }
                 // `x <<= -1` — the compound form of HYB-E6005.
                 if matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) && values.len() == 1 {
-                    self.check_negative_shift(&values[0], *span);
+                    self.check_negative_shift(st, &values[0], *span);
                 }
                 if deep {
                     for (t, v) in targets.iter().zip(values.iter()) {
@@ -239,7 +239,7 @@ impl<'a> Checker<'a> {
                 for (i, v) in values.iter().enumerate() {
                     if let Some(res_ty) = st.result_types.get(i) {
                         let resolved_ty = self.resolve_type_alias(res_ty);
-                        self.check_const_overflow_init("return statement", &resolved_ty, v, None);
+                        self.check_const_overflow_init("return statement", &resolved_ty, v, Some(st));
                     }
                     self.check_expr_emit_guard(st, v);
                 }
@@ -323,13 +323,20 @@ impl<'a> Checker<'a> {
                                     TypeShape::Chan(e) => *e,
                                     _ => TypeShape::Unknown,
                                 };
+                                let elem_ty = self.chan_elem_ty(st, chan);
                                 for (i, n) in names.iter().enumerate() {
-                                    let shape = if i == 0 {
-                                        elem.clone()
+                                    let (shape, ty) = if i == 0 {
+                                        (elem.clone(), elem_ty.clone())
                                     } else {
-                                        TypeShape::Primitive
+                                        (
+                                            TypeShape::Primitive,
+                                            Some(TypeExpr::Named {
+                                                name: "bool".to_string(),
+                                                span: chan.span(),
+                                            }),
+                                        )
                                     };
-                                    self.define_binding(st, n, shape, None, false, false, false);
+                                    self.define_binding(st, n, shape, ty, false, false, false);
                                 }
                             }
                         }
@@ -417,7 +424,7 @@ impl<'a> Checker<'a> {
                 self.check_expr_emit_guard(st, rhs);
                 match op {
                     BinOp::Eq | BinOp::Ne => self.check_equality(st, lhs, rhs, *span),
-                    BinOp::Shl | BinOp::Shr => self.check_negative_shift(rhs, *span),
+                    BinOp::Shl | BinOp::Shr => self.check_negative_shift(st, rhs, *span),
                     _ => {}
                 }
                 self.check_binary_const_overflow(st, *op, lhs, rhs);
@@ -462,6 +469,16 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if (name == "new" || name == "make") && st.env_lookup(name).is_none()) {
+                    if let Some(a0) = args.first() {
+                        let tname = match unwrap_parens(&a0.value) {
+                            Expr::Ident { name, .. } => Some(name.clone()),
+                            Expr::Index { base, index, .. } => Some(format!("{}[{}]", base.render(), index.render())),
+                            _ => None,
+                        };
+                        if let Some(name) = tname { self.check_type_expr_with_state(Some(st), &TypeExpr::Named { name, span: a0.value.span() }); }
+                    }
+                }
                 self.check_call_const_overflow(st, callee, args);
                 self.check_expr_emit_guard(st, callee);
                 for a in args {
@@ -471,25 +488,20 @@ impl<'a> Checker<'a> {
             Expr::StructLit { ty, fields, .. } => {
                 if let Some(t) = ty {
                     self.check_type_expr_with_state(Some(st), t);
-                }
-                if let Some(TypeExpr::Named { name, .. }) = ty {
-                    let mut sname = name.clone();
-                    while let Some(TypeExpr::Named { name: target, .. }) =
-                        self.type_aliases.get(&sname)
-                    {
-                        sname = target.clone();
-                    }
-                    if let Some(struct_fields) = self.structs.get(&sname).cloned() {
-                        for f in fields {
-                            if let Some((_, f_ty)) =
-                                struct_fields.iter().find(|(fname, _)| fname == &f.name)
-                            {
-                                self.check_const_overflow_init(
-                                    &format!("{}.{}", sname, f.name),
-                                    f_ty,
-                                    &f.value,
-                                    None,
-                                );
+                    if let TypeExpr::Named { name: sname, .. } = self.resolve_type_alias(t) {
+                        let base_sname = Self::base_named_type_str(&sname);
+                        if let Some(struct_fields) = self.struct_fields_for_sname(&sname) {
+                            for f in fields {
+                                if let Some((_, f_ty)) =
+                                    struct_fields.iter().find(|(fname, _)| fname == &f.name)
+                                {
+                                    self.check_const_overflow_init(
+                                        &format!("{}.{}", base_sname, f.name),
+                                        f_ty,
+                                        &f.value,
+                                        Some(st),
+                                    );
+                                }
                             }
                         }
                     }
@@ -510,7 +522,7 @@ impl<'a> Checker<'a> {
                     let elem_ty = *elem_ty.clone();
                     let resolved_elem = self.resolve_type_alias(&elem_ty);
                     for i in items {
-                        self.check_const_overflow_init("slice literal element", &elem_ty, i, None);
+                        self.check_const_overflow_init("slice literal element", &elem_ty, i, Some(st));
                         if let Expr::SliceLit {
                             elem: None,
                             items: sub_items,
@@ -536,16 +548,20 @@ impl<'a> Checker<'a> {
                 key,
                 value,
                 entries,
-                ..
+                span,
             } => {
+                // A literal's `key`/`value` are checked one level down, so the
+                // `TypeExpr::Map` arm above never sees them — the key still has
+                // to be comparable (#1565).
+                self.check_map_key_type(key, *span);
                 self.check_type_expr_with_state(Some(st), key);
                 self.check_type_expr_with_state(Some(st), value);
                 let key_ty = *key.clone();
                 let val_ty = *value.clone();
                 self.check_map_literal_duplicate_keys(entries, Some(st));
                 for (k, v) in entries {
-                    self.check_const_overflow_init("map literal key", &key_ty, k, None);
-                    self.check_const_overflow_init("map literal value", &val_ty, v, None);
+                    self.check_const_overflow_init("map literal key", &key_ty, k, Some(st));
+                    self.check_const_overflow_init("map literal value", &val_ty, v, Some(st));
                     self.check_expr_emit_guard(st, k);
                     self.check_expr_emit_guard(st, v);
                 }
@@ -639,7 +655,7 @@ impl<'a> Checker<'a> {
                             .map(|t| self.resolve_type_alias(&t))
                             .and_then(|t| match t {
                                 TypeExpr::Map { key, .. } => Some(*key),
-                                _ => None,
+                                _ => self.set_elem_type(&t),
                             });
                         if let Some(key_ty) = key_ty {
                             let resolved_key = self.resolve_type_alias(&key_ty);
@@ -653,21 +669,6 @@ impl<'a> Checker<'a> {
 
         // 2. Resolve parameter list
         let param_types: Option<Vec<(String, TypeExpr)>> = match unwrapped {
-            Expr::Ident { name, .. } => {
-                if self.lookup_binding(st, name).is_none() {
-                    self.fns.get(name.as_str()).map(|decl| {
-                        decl.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect()
-                    })
-                } else if let Some(b) = self.lookup_binding(st, name) {
-                    if let Some(TypeExpr::Fn { params, .. }) = &b.ty {
-                        Some(params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
             Expr::Field { base, name: method_name, .. } => {
                 let is_pkg = if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
                     self.lookup_binding(st, pkg).is_none()
@@ -708,11 +709,15 @@ impl<'a> Checker<'a> {
                     decl.map(|d| d.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
                 }
             }
-            Expr::FnLit { params, .. } => {
-                Some(params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
-            }
             _ => None,
-        };
+        }
+        .or_else(|| match self.ty_of_expr(st, unwrapped).map(|t| self.resolve_type_alias(&t))? {
+            TypeExpr::Fn { params, .. } => Some(params.into_iter().map(|p| match &p.ty {
+                TypeExpr::Named { name, span } if name.is_empty() => (p.name.clone(), TypeExpr::Named { name: p.name, span: *span }),
+                _ => (p.name, p.ty),
+            }).collect()),
+            _ => None,
+        });
 
         if let Some(params) = param_types {
             for (i, a) in args.iter().enumerate() {
@@ -730,7 +735,7 @@ impl<'a> Checker<'a> {
                         &format!("parameter `{}`", p_name),
                         &resolved_ty,
                         &a.value,
-                        None,
+                        Some(st),
                     );
                 }
             }
@@ -840,8 +845,8 @@ impl<'a> Checker<'a> {
     // B4 — constant negative shift counts (HYB-E6005)
     // ------------------------------------------------------------------
 
-    fn check_negative_shift(&mut self, rhs: &Expr, span: Span) {
-        let Some(v) = const_int_value(rhs) else {
+    fn check_negative_shift(&mut self, st: &FnState, rhs: &Expr, span: Span) {
+        let ConstFold::Val(v) = self.const_int_fold_expr(rhs, Some(st)) else {
             return;
         };
         if v >= 0 {
@@ -1025,9 +1030,31 @@ impl<'a> Checker<'a> {
             }
             TypeExpr::Pointer { to, .. }
             | TypeExpr::Slice { elem: to, .. }
-            | TypeExpr::Option { elem: to, .. }
             | TypeExpr::Chan { elem: to, .. } => self.check_type_expr_with_state(st, to),
-            TypeExpr::Map { key, value, .. } => {
+            TypeExpr::Option { elem: to, span } => {
+                // Issue #3620: `option[T]` lowers to Go prelude generic `option[T]`.
+                // A local or parameter named `option` shadows the type in Go, causing
+                // `option (variable) is not a type` (Row 13 BUILDABLE).
+                if let Some(st) = st {
+                    if st.env_lookup("option").is_some() {
+                        let msg = "type `option` is shadowed by local value `option` in this scope — Go rejects `option (variable) is not a type` (HYB-E1002)".to_string();
+                        self.diags.push(
+                            Diagnostic::error("HYB-E1002", self.path.clone(), *span, msg)
+                                .with_notes(vec![
+                                    "why: Go resolves `option` to the in-scope local or parameter rather than the type, so the emitted program fails `go build` (GUARANTEES Row 13)".to_string(),
+                                    "fix: rename the local binding `option` so it does not shadow the type name".to_string(),
+                                ]),
+                        );
+                    }
+                }
+                self.check_type_expr_with_state(st, to);
+            }
+            TypeExpr::Map { key, value, span } => {
+                // Issue #1565: `map[K]V` is a compile error in Go when `K` has
+                // no `==` (`invalid map key type []int`). Map LITERALS pass
+                // their key/value types here one level down (see Expr::MapLit
+                // below), so this arm and that call site share the helper.
+                self.check_map_key_type(key, *span);
                 self.check_type_expr_with_state(st, key);
                 self.check_type_expr_with_state(st, value);
             }
@@ -1035,14 +1062,62 @@ impl<'a> Checker<'a> {
                 params, results, ..
             } => {
                 for p in params {
-                    self.check_type_expr_with_state(st, &p.ty);
+                    let pty = if matches!(&p.ty, TypeExpr::Named { name, .. } if name.is_empty()) { TypeExpr::Named { name: p.name.clone(), span: p.span } } else { p.ty.clone() };
+                    self.check_type_expr_with_state(st, &pty);
                 }
                 for r in results {
                     self.check_type_expr_with_state(st, r);
                 }
             }
-            TypeExpr::Named { .. } => {}
+            TypeExpr::Named { name, span } => {
+                if let Some(st) = st {
+                    for tok in name.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.') {
+                        if !tok.is_empty() && st.env_lookup(tok).is_some() {
+                            let msg = format!(
+                                "type `{}` is shadowed by local value `{}` in this scope ? Go rejects `{tok} (variable) is not a type` (HYB-E1002)",
+                                name, tok
+                            );
+                            self.diags.push(
+                                Diagnostic::error("HYB-E1002", self.path.clone(), *span, msg)
+                                    .with_notes(vec![
+                                        format!(
+                                            "why: Go resolves `{tok}` to the in-scope local or parameter rather than the type, so the emitted program fails `go build` (GUARANTEES Row 13)"
+                                        ),
+                                        format!(
+                                            "fix: rename the local binding `{tok}` so it does not shadow the type name"
+                                        ),
+                                    ]),
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    /// Issue #1565: a `map[K]V` key type must be comparable in Go. Only
+    /// PROVEN-incomparable shapes reject (`incomparable_noun`): slice, map,
+    /// function, an array with such an element, or a struct carrying one.
+    /// `any`/interfaces, pointers, channels, type parameters and unresolved
+    /// shapes stay fail-open.
+    fn check_map_key_type(&mut self, key: &TypeExpr, span: Span) {
+        let key_shape = self.shape_of_type(key);
+        let Some(noun) = self.incomparable_noun(&key_shape) else {
+            return;
+        };
+        let msg = format!(
+            "invalid map key type `{}`: a `{}` has no `==` in Go, so `map[K]V` is rejected at compile time (HYB-E1002)",
+            key.render(),
+            noun
+        );
+        let notes = vec![
+            "why: Go requires map keys to be comparable; the checker accepted the type and the emitter copied it verbatim, so the program failed later with `invalid map key type` (issue #1565, GUARANTEES row 13 BUILDABLE)".to_string(),
+            "fix: key by a comparable value (`string`, an int type, a pointer or chan), or by a canonical form of the value — e.g. a joined string or a `[N]byte` hash of the slice".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E1002", self.path.clone(), span, msg).with_notes(notes),
+        );
     }
 
     pub(crate) fn eval_array_len_const(&self, len: &Expr) -> Option<usize> {
@@ -1633,7 +1708,7 @@ impl<'a> Checker<'a> {
         None
     }
 
-    fn is_non_int_type(&self, ty: &TypeExpr) -> bool {
+    pub(crate) fn is_non_int_type(&self, ty: &TypeExpr) -> bool {
         let resolved = self.resolve_type_alias(ty);
         is_non_int_primitive_type(&resolved)
     }
@@ -1660,7 +1735,7 @@ impl<'a> Checker<'a> {
     /// may fold) from a `var`/`let`/`:=` binding; the type ascription is
     /// reported for every local, because a fixed-size array carries its length
     /// in its type.
-    fn resolve_local_binding_at(
+    pub(crate) fn resolve_local_binding_at(
         &self,
         name: &str,
         use_pos: hy_diag::Pos,
@@ -2151,7 +2226,7 @@ impl<'a> Checker<'a> {
     ///
     /// `None` means "not provably a fixed-width integer". This predicate
     /// gates a diagnostic, so an unknown shape must fail open.
-    fn fixed_width_int_ty_of(&self, st: &FnState, e: &Expr) -> Option<(String, i128, i128)> {
+    pub(crate) fn fixed_width_int_ty_of(&self, st: &FnState, e: &Expr) -> Option<(String, i128, i128)> {
         let e = unwrap_parens(e);
         if let Some(ty) = self.ty_of_expr(st, e) {
             if let TypeExpr::Named { name, .. } = self.resolve_type_alias(&ty) {
@@ -2254,8 +2329,8 @@ impl<'a> Checker<'a> {
             return;
         };
 
-        let l = const_int_fold_with(lhs, &self.const_values, 0, Some(st));
-        let r = const_int_fold_with(rhs, &self.const_values, 0, Some(st));
+        let l = self.const_int_fold_expr(lhs, Some(st));
+        let r = self.const_int_fold_expr(rhs, Some(st));
         match fold_bin(op, l, r) {
             ConstFold::Val(v) if v < lo || v > hi => {
                 self.emit_typed_const_overflow(&ty_name, Some(v), lo, hi, span, expr);
@@ -2274,7 +2349,7 @@ impl<'a> Checker<'a> {
         let Some((ty_name, lo, hi)) = self.fixed_width_int_ty_of(st, operand) else {
             return;
         };
-        let ConstFold::Val(v) = const_int_fold_with(operand, &self.const_values, 0, Some(st))
+        let ConstFold::Val(v) = self.const_int_fold_expr(operand, Some(st))
         else {
             return;
         };

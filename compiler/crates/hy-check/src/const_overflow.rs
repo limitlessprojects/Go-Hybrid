@@ -76,7 +76,7 @@ impl<'a> Checker<'a> {
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.const_int_fold_expr(value, st) {
             ConstFold::NotConst => {}
             ConstFold::TooBig => {
                 let span = value.span();
@@ -229,7 +229,7 @@ impl<'a> Checker<'a> {
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.const_int_fold_expr(value, st) {
             ConstFold::NotConst => {}
             ConstFold::TooBig => {
                 let span = value.span();
@@ -325,8 +325,13 @@ impl<'a> Checker<'a> {
         value: &Expr,
         st: Option<&FnState>,
     ) {
+        if let Some(st) = st {
+            if self.fixed_width_int_ty_of(st, value).is_some() {
+                return;
+            }
+        }
         let (lo, hi) = target_int_range();
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.const_int_fold_expr(value, st) {
             ConstFold::NotConst => return,
             ConstFold::Val(v) if v >= lo && v <= hi => return,
             ConstFold::Val(_) | ConstFold::TooBig => {}
@@ -381,6 +386,80 @@ impl<'a> Checker<'a> {
                     Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
                 );
             }
+        }
+    }
+
+    /// Fold a constant integer expression, resolving both function-local `const`
+    /// declarations and file-level `const` declarations.
+    pub(crate) fn const_int_fold_expr(&self, e: &Expr, st: Option<&FnState>) -> ConstFold {
+        self.const_int_fold_at(e, st, 0)
+    }
+
+    pub(crate) fn const_int_fold_at(
+        &self,
+        e: &Expr,
+        st: Option<&FnState>,
+        depth: u32,
+    ) -> ConstFold {
+        if depth >= 16 {
+            return ConstFold::NotConst;
+        }
+        match unwrap_parens(e) {
+            Expr::Ident {
+                name,
+                span: id_span,
+            } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                    let Some(init_expr) = sight.constant_initializer() else {
+                        return ConstFold::NotConst;
+                    };
+                    if sight.ty.as_ref().is_some_and(|ty| self.is_non_int_type(ty)) {
+                        return ConstFold::NotConst;
+                    }
+                    if (sight.pos.line, sight.pos.col) == (id_span.start.line, id_span.start.col) {
+                        return ConstFold::NotConst;
+                    }
+                    return self.const_int_fold_at(init_expr, st, depth + 1);
+                }
+                if st.is_some_and(|s| s.env_lookup(name).is_some()) {
+                    return ConstFold::NotConst;
+                }
+                if let Some(v) = self.const_values.get(name) {
+                    return self.const_int_fold_at(v, None, depth + 1);
+                }
+                ConstFold::NotConst
+            }
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => match self.const_int_fold_at(operand, st, depth + 1) {
+                ConstFold::Val(v) => v
+                    .checked_neg()
+                    .map(ConstFold::Val)
+                    .unwrap_or(ConstFold::TooBig),
+                ConstFold::NotConst => ConstFold::NotConst,
+                ConstFold::TooBig => ConstFold::TooBig,
+            },
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let l = self.const_int_fold_at(lhs, st, depth + 1);
+                let r = self.const_int_fold_at(rhs, st, depth + 1);
+                fold_bin(*op, l, r)
+            }
+            Expr::Call { callee, args, .. } if args.len() == 1 => {
+                let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+                    return ConstFold::NotConst;
+                };
+                let Some((lo, hi)) = fixed_width_int_range(name) else {
+                    return ConstFold::NotConst;
+                };
+                match self.const_int_fold_at(&args[0].value, st, depth + 1) {
+                    ConstFold::Val(v) => ConstFold::Val(wrap_into(v, lo, hi)),
+                    ConstFold::TooBig => ConstFold::TooBig,
+                    ConstFold::NotConst => ConstFold::NotConst,
+                }
+            }
+            other => const_int_fold_with(other, &self.const_values, depth, st),
         }
     }
 
@@ -630,8 +709,14 @@ impl<'a> Checker<'a> {
             ..
         } = callee
         {
-            if items.is_empty() && callee.as_array_lit().is_none() {
-                self.check_slice_conversion(t, arg, span);
+            if items.is_empty() {
+                if let Some((_, _, arr_ty)) = callee.as_array_lit() {
+                    if let Some(c) = conv_const(arg) {
+                        self.emit_conv_kind_error(&arr_ty.render(), &c, arg, span);
+                    }
+                } else {
+                    self.check_slice_conversion(t, arg, span);
+                }
                 return;
             }
         }
@@ -814,7 +899,7 @@ impl<'a> Checker<'a> {
             // exceeds i128's max (1.7e38), so integer/runes always fit.
             // Past-i128 literals carry their f64 reading and still have to
             // respect f32's max (`float32(1e40)` overflows f32 in Go).
-            "f32" | "f64" | "float32" | "float64" => match c {
+            "f32" | "f64" | "float32" | "float64" | "c64" | "c128" | "complex64" | "complex128" => match c {
                 ConvConst::Float(f) | ConvConst::Huge { f, .. } => {
                     let overflows = !f.is_finite()
                         || (is_f32_target(target) && f.abs() > f32::MAX as f64);
@@ -880,6 +965,11 @@ impl<'a> Checker<'a> {
                     self.emit_conv_kind_error(target, c, arg, span)
                 }
             },
+            "bool" => {
+                if !matches!(c, ConvConst::Bool) {
+                    self.emit_conv_kind_error(target, c, arg, span);
+                }
+            }
             _ => {}
         }
     }
@@ -984,7 +1074,13 @@ fn conv_const(e: &Expr) -> Option<ConvConst> {
             ConvConst::Huge { f, lt_512 } => Some(ConvConst::Huge { f: -f, lt_512 }),
             other => Some(other),
         },
-        _ => None,
+        _ => {
+            if let Some(v) = crate::arith::const_eval_int(e) {
+                Some(ConvConst::Int(v))
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -1040,7 +1136,10 @@ fn huge_int_as_f64(s: &str) -> f64 {
 /// True when `name` is a built-in conversion target of `Type(const)` calls.
 fn is_conversion_target(name: &str) -> bool {
     fixed_width_int_range(name).is_some()
-        || matches!(name, "f32" | "f64" | "float32" | "float64" | "string")
+        || matches!(
+            name,
+            "f32" | "f64" | "float32" | "float64" | "c64" | "c128" | "complex64" | "complex128" | "string" | "bool"
+        )
 }
 
 /// Targets the emitter's SPEC X4 fold skips (`bits >= 64`) — constants here
@@ -1053,7 +1152,7 @@ fn is_64bit_int_target(name: &str) -> bool {
 }
 
 fn is_f32_target(name: &str) -> bool {
-    matches!(name, "f32" | "float32")
+    matches!(name, "f32" | "float32" | "c64" | "complex64")
 }
 
 /// The built-in float TYPES as spelled in an ascription: `Some(true)` =
