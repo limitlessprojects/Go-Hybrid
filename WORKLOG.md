@@ -32,3 +32,11 @@
 - Dup protocol: #3621 was first claimer on #3620 (earlier by ~1.5 min) but MERGE-CONFLICT vs main (781 behind) -> superseded reply posted, credit to @jpereyra243-byte in #3621 reply.
 - Suites 391 -> 394. Differential 45/45 + 90/90 each landing. Worklog: this commit.
 - Next queue: #2944 -> #3666 -> #3535 -> #3519 -> #3586 -> #3423 -> #2934/#2942/#2937 (behind 5, gttps trio).
+
+## Session 97 — 2026-11-04 23:10 UTC+8 tick
+- Landed PR #2944 -> 856d4261 (hy-check: move-subexpr sendability + foreign/atomic struct leaves fail-closed + move/new/deref chan directions; fixes #2943, gttps). ALL-GREEN 395 suites.
+- Landed PR #3666 -> 8ce509e2 (hy-check: OpKind::Foreign refuses scalar interop with curated foreign named types via #3521 table; fixes #3636, Yumihariii). ALL-GREEN 396 suites.
+- Scan skipped this tick: full scan burned the 5000/hr API quota last tick (reset 16:28 UTC); worked the known queue via git protocol instead. approve --max 40 blocked by endpoint-level secondary 403 on pulls listing (comments POST fine) -> CI unblock deferred to next tick; first action next tick: retry approve, and if still 403, after 16:28 UTC primary reset.
+- Landing replies for #2944 and #3666 posted successfully (comment endpoints unaffected).
+- Suites 394 -> 396. Differential 45/45 + 90/90 both landings. Worklog: this commit.
+- Next queue: #3535 -> #3519 -> #3586 -> #3423 -> #2934/#2942/#2937 (behind 5, gttps trio) -> #2923/#3611/#1811.
