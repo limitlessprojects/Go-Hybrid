@@ -120,6 +120,18 @@ impl Parser {
     /// expression-statement `<-` fusion guard — Hybrid has no Go-style
     /// automatic semicolon insertion, so statements are newline-delimited
     /// wherever a continuation would change meaning.
+    fn at_literal_start(&self) -> bool {
+        matches!(
+            self.cur(),
+            Tok::Int(_)
+                | Tok::Float(_)
+                | Tok::CharLit(_)
+                | Tok::StrChunk(_)
+                | Tok::StrEnd
+                | Tok::RawStr(_)
+        )
+    }
+
     fn same_line_as_prev(&self) -> bool {
         self.pos > 0
             && self.toks[self.pos].span.start.line == self.toks[self.pos - 1].span.end.line
@@ -812,6 +824,11 @@ impl Parser {
         while !self.at_punct("}") {
             if self.at_eof() {
                 return self.err("unterminated block: expected '}'");
+            }
+            if !stmts.is_empty() && self.same_line_as_prev() && self.at_literal_start() {
+                let _ = self.err::<()>("unexpected literal after complete statement on same line: statements must be separated by a newline");
+                self.sync_stmt();
+                continue;
             }
             match self.parse_stmt() {
                 Ok(s) => stmts.push(s),
