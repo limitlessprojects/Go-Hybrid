@@ -5224,6 +5224,23 @@ impl<'a> Collector<'a> {
                 continue;
             }
             let got = self.kind_of_expr(&extra.value);
+            let dst_elem_ty = self.slice_element_type_name(&first.value);
+            // #3518: reject untyped nil passed to non-nilable slice element types
+            if Checker::is_nil_literal(&extra.value) && is_non_nilable(&elem) {
+                let elem_label = match dst_elem_ty.as_deref() {
+                    Some(d) => d.to_string(),
+                    None => elem.label().to_string(),
+                };
+                self.emit_e1002(
+                    extra.value.span(),
+                    format!(
+                        "cannot use nil as `{}` value in argument to append (HYB-E1002)",
+                        elem_label
+                    ),
+                    "the appended values must be assignable to the slice's element type",
+                );
+                continue;
+            }
             let int_to_float_conflict = elem == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&extra.value);
@@ -7797,6 +7814,19 @@ impl<'a> Collector<'a> {
                     OpKind::Unknown => {
                         if let Some(elem) = self.set_elem_of_expr(map_arg) {
                             let want = self.kind_of_named(&elem, 0);
+                            // #3518: reject untyped nil passed to non-nilable set element types
+                            if Checker::is_nil_literal(key_arg) && is_non_nilable(&want) {
+                                self.emit_e2005(
+                                    span,
+                                    format!(
+                                        "cannot use `nil` as element type `{}` in `delete` on `set[{}]` (HYB-E2005)",
+                                        want.label(),
+                                        elem
+                                    ),
+                                    "the second argument to `delete(s, v)` must match the set's element type",
+                                );
+                                return;
+                            }
                             let got = self.kind_of_expr(key_arg);
                             let int_to_float_conflict = want == OpKind::Float
                                 && got == OpKind::Int
@@ -7830,6 +7860,21 @@ impl<'a> Collector<'a> {
                             (del_key_scalar, del_arg_scalar),
                             (Some(a), Some(b)) if a != b
                         );
+                        // #3518: reject untyped nil passed to non-nilable map key types
+                        if Checker::is_nil_literal(key_arg) && is_non_nilable(k_expected) {
+                            let k_label = del_key_scalar
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| k_expected.label());
+                            self.emit_e2005(
+                                span,
+                                format!(
+                                    "cannot use `nil` as key type `{}` in `delete` (HYB-E2005)",
+                                    k_label
+                                ),
+                                "the second argument to `delete(m, k)` must match the map's key type",
+                            );
+                            return;
+                        }
                         if (**k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
                             && kk != **k_expected
