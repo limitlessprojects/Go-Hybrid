@@ -24,3 +24,11 @@
   - **#3645 (v2)** -> `72f87100` (aswadi, fixes #3644, first claimant vs #3649): v1 gate-failed in s94; v2 adds empty-name param remap in the ty_of_expr fallback. End-to-end CLI verified: issue reproducer both parts fire E6002; alias set-delete, index callee, call-result callee, generic named-param field all fire. Residual (out of issue scope): nameless generic param `fn(t)` in holder[t] still silent via CLI — flagged as follow-up in landing reply. Suites 391.
 - **Deep forensics (v1->v2 review)**: v1 suite passed only via in-process call-order state warmth — CLI (cold single check) did not fire for the field case. Two test binaries deterministically diverged on identical source/rustlib; root cause chain: type-position nameless fn params parse with empty Named type name; my probes used `fn(t)` (nameless) while the v2 suite uses `fn(x t)` (named). Lesson recorded: landing verification must include the CLI binary, not only check_file; byte-compare (od) test fixtures before claiming divergence.
 - NEXT TICK QUEUE: #3622 (behind 10) -> #3554 -> #3535 -> #3519 -> gttps batch #2934/#2942/#2937/#2944/#2661/#2923/#2670 (check family overlaps) -> #3611 -> #1811.
+
+## Session 96 — 2026-11-04 22:10 UTC+8 tick
+- Landed PR #3665 -> aff2dd0c (hy-emit: type_of_expr follows n5_aliases for foreign-alias fields; resolve_to_struct_name strips generic args; user_struct_name_of handles StructLit; fixes #3664, follow-up to #3656). ALL-GREEN 392 suites.
+- Landed PR #3663 -> 69f4cd65 (hy-check: fn_param_ty promotes unnamed fn(t) params before substitute_type_params/chan-dir/infer paths; fixes #3662, closes #3645 residual). ALL-GREEN 393 suites.
+- Landed PR #3622 -> a6d421b0 (hy-check: TypeExpr::Option shadow guard, HYB-E1002 when local/param `option` shadows prelude generic; fixes #3620). ALL-GREEN 394 suites.
+- Dup protocol: #3621 was first claimer on #3620 (earlier by ~1.5 min) but MERGE-CONFLICT vs main (781 behind) -> superseded reply posted, credit to @jpereyra243-byte in #3621 reply.
+- Suites 391 -> 394. Differential 45/45 + 90/90 each landing. Worklog: this commit.
+- Next queue: #2944 -> #3666 -> #3535 -> #3519 -> #3586 -> #3423 -> #2934/#2942/#2937 (behind 5, gttps trio).
