@@ -16,3 +16,11 @@
 - **Tooling note**: text-output layer can swallow "[h" sequences (rendered &[hy_syntax::Stmt] as &y_syntax::Stmt]) — false syntax-error alarm; hexdump (od) is authoritative. cargo check/rustc microtest used to settle.
 - both landed batteries vs then-main: merge gate CLEAN, corpus 135 tripwire not fired, differential 45/45+90/90 FULL AGREEMENT.
 - **NEXT TICK QUEUE**: #3622 (fixes #3620, behind 5) -> #3554 (underscore canonical) -> #3535 -> #3519 -> #2878/#2885 (check family overlap with landed #3503) -> #3423 -> #3414 -> #2298 -> #3351 -> #3472.
+
+## Session 95 (2026-11-04 21:10+08 tick)
+- env fully recycled; standard restore. Mirror rolled back, pull caught up to f1a8803f (s94).
+- **2 landed**:
+  - **#3656** -> `9554fdbd` (aswadi, fixes #3655, first claimant vs #3657): place targets + local rebindings resolve struct/foreign aliases — var_struct registration for rebinds (single_hint guard, values.len()==1), type_of_place Field via n5_structs->binding_kind_of_ty ForeignTy, user_struct_name_of_place Field via resolve_type_alias+base_ty_name canonical key. Suites 390 (new place_and_rebind_struct_alias_3655).
+  - **#3645 (v2)** -> `72f87100` (aswadi, fixes #3644, first claimant vs #3649): v1 gate-failed in s94; v2 adds empty-name param remap in the ty_of_expr fallback. End-to-end CLI verified: issue reproducer both parts fire E6002; alias set-delete, index callee, call-result callee, generic named-param field all fire. Residual (out of issue scope): nameless generic param `fn(t)` in holder[t] still silent via CLI — flagged as follow-up in landing reply. Suites 391.
+- **Deep forensics (v1->v2 review)**: v1 suite passed only via in-process call-order state warmth — CLI (cold single check) did not fire for the field case. Two test binaries deterministically diverged on identical source/rustlib; root cause chain: type-position nameless fn params parse with empty Named type name; my probes used `fn(t)` (nameless) while the v2 suite uses `fn(x t)` (named). Lesson recorded: landing verification must include the CLI binary, not only check_file; byte-compare (od) test fixtures before claiming divergence.
+- NEXT TICK QUEUE: #3622 (behind 10) -> #3554 -> #3535 -> #3519 -> gttps batch #2934/#2942/#2937/#2944/#2661/#2923/#2670 (check family overlaps) -> #3611 -> #1811.
