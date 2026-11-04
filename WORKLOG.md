@@ -81,3 +81,13 @@
 - Disk: recurring ENOSPC pattern when target rebuilds cold — standard mitigation now: rm -rf target/debug/incremental /tmp/verify-wt /tmp/hydiff-* then rerun (incremental loss costs ~2-4 min on warm deps).
 - Suites 406 -> 408. Worklog: this commit.
 - Next queue: #3702 -> #3612 -> #3614 -> #3616 -> #2934 -> #3362 -> #2937 -> #3558 -> #2661.
+
+## Session 103 — 2026-11-05 06:10 UTC+8 tick
+- API quota burned by scan (403 rate-limit) + tool 10-min cap discovered: background processes die between calls — battery now run manually in 4 steps (merge gate / cargo / corpus / differential), each its own call, logs to /tmp/vp-*.log.
+- Landed PR #3702 -> 7c763912 (hy-check: slot-loan addressability unwraps Try+move, reject HYB-E2010; fixes #3698, aswadi). ALL-GREEN 409 suites.
+- Landed PR #3612 -> bfe8a141 (typed_value_type_name folds [constN]T via const_int_value(_at), [...]T from items.len(); fixes #3599, dextermos-dev). ALL-GREEN 410 suites.
+- Landed PR #3614 -> 70c4f08f (fmt.eprint* rejected when os shadowed via is_os_shadowed 6-probe; audited probes vs import table — no false-positive path; fixes #3598, dextermos-dev). ALL-GREEN 411 suites. NOTE: merge msg lost 2 fragments to shell backtick substitution; force-push to repair blocked by branch protection — tree+evidence unaffected, disclosed in PR reply. Rule reaffirmed: no backticks in -m ever.
+- Landed PR #3616 -> 108512ab (MatchTarget::NonOption: some/none on non-option match subject fail-closed HYB-E5001, lit_type_name + shape fallback; fixes #3613, dextermos-dev). ALL-GREEN 412 suites.
+- Suites 408 -> 412. Differential 45/45 + 90/90 all four landings; corpus 135 tripwire not fired x4.
+- Worklog: this commit.
+- Next queue: #2934 -> #3362 -> #2937 -> #3558 -> #2661 -> #3366 -> #3611 -> #3355.
