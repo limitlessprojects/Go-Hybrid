@@ -1761,6 +1761,66 @@ impl<'a> Checker<'a> {
     /// an array", so an unknown length can never turn a legal program into a
     /// diagnostic. An array's length is part of its type, so `var`/`let`/`:=`
     /// bindings and parameters count too, not only `const`.
+    fn elem_ty_of_array_expr(&self, base: &Expr, use_pos: hy_diag::Pos, depth: usize) -> Option<TypeExpr> {
+        let ty = self.ty_of_expr_at_pos(base, use_pos, depth)?;
+        match self.resolve_type_alias(&ty) {
+            TypeExpr::Array { elem, .. } | TypeExpr::Slice { elem, .. } => Some(*elem),
+            _ => None,
+        }
+    }
+
+    fn struct_field_ty_of_expr(&self, base: &Expr, field_name: &str, use_pos: hy_diag::Pos, depth: usize) -> Option<TypeExpr> {
+        let base_ty = self.ty_of_expr_at_pos(base, use_pos, depth)?;
+        let fields = self.struct_fields_for_type(&base_ty)?;
+        fields.into_iter().find(|(n, _)| n == field_name).map(|(_, t)| t)
+    }
+
+    fn call_ret_ty_of_expr(&self, callee: &Expr, _use_pos: hy_diag::Pos, _depth: usize) -> Option<TypeExpr> {
+        let bare = unwrap_parens(callee);
+        let name = match bare {
+            Expr::Ident { name, .. } => name.as_str(),
+            _ => return None,
+        };
+        let head = Self::base_named_type_str(name);
+        let f = self.fns.get(name).or_else(|| self.fns.get(head))?;
+        f.results.first().map(|r| r.ty.clone())
+    }
+
+    fn ty_of_expr_at_pos(&self, expr: &Expr, use_pos: hy_diag::Pos, depth: usize) -> Option<TypeExpr> {
+        if depth > 32 {
+            return None;
+        }
+        let bare = unwrap_parens(expr);
+        match bare {
+            Expr::Ident { name, span: id_span, .. } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                    if let Some(ty) = sight.ty {
+                        return Some(ty.clone());
+                    }
+                    if let Some(val) = sight.value {
+                        return self.ty_of_expr_at_pos(val, use_pos, depth + 1);
+                    }
+                }
+                for decl in &self.file.decls {
+                    if let hy_syntax::Decl::Fn(f) = decl {
+                        if span_contains(f.span, id_span.start) {
+                            for p in &f.params {
+                                if p.name == *name {
+                                    return Some(p.ty.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Index { base, .. } => self.elem_ty_of_array_expr(base, use_pos, depth + 1),
+            Expr::Field { base, name, .. } => self.struct_field_ty_of_expr(base, name, use_pos, depth + 1),
+            Expr::Call { callee, .. } => self.call_ret_ty_of_expr(callee, use_pos, depth + 1),
+            _ => None,
+        }
+    }
+
     pub(crate) fn const_array_len_at(
         &self,
         expr: &Expr,
@@ -1792,6 +1852,18 @@ impl<'a> Checker<'a> {
                     return None;
                 }
                 self.param_array_len_at(name, id_span.start)
+            }
+            Expr::Index { base, .. } => {
+                let elem_ty = self.elem_ty_of_array_expr(base, use_pos, depth + 1)?;
+                self.array_len_of_ty(&elem_ty)
+            }
+            Expr::Field { base, name, .. } => {
+                let f_ty = self.struct_field_ty_of_expr(base, name, use_pos, depth + 1)?;
+                self.array_len_of_ty(&f_ty)
+            }
+            Expr::Call { callee, .. } => {
+                let ret_ty = self.call_ret_ty_of_expr(callee, use_pos, depth + 1)?;
+                self.array_len_of_ty(&ret_ty)
             }
             other => self.array_lit_len(other, depth + 1),
         }
