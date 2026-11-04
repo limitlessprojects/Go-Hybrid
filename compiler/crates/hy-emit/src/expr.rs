@@ -691,6 +691,7 @@ impl Emitter {
                     .map(|(_, t)| t.as_str())?;
                 self.resolve_to_struct_name(fty)
             }
+            Expr::StructLit { ty: Some(t), .. } => super::base_ty_name(t).and_then(|n| self.resolve_to_struct_name(&n)),
             _ => None,
         }
     }
@@ -705,7 +706,7 @@ impl Emitter {
     fn resolve_to_struct_name(&self, start: &str) -> Option<&str> {
         let mut cur = std::borrow::Cow::Borrowed(start);
         for _ in 0..16 {
-            if let Some((k, _)) = self.struct_fields.get_key_value(cur.as_ref()) {
+            if let Some((k, _)) = self.struct_fields.get_key_value(cur.split('[').next().unwrap_or(cur.as_ref())) {
                 return Some(k.as_str());
             }
             match self.n5_aliases.get::<str>(cur.as_ref()) {
@@ -758,13 +759,12 @@ impl Emitter {
                 // var_struct + struct_fields when the field's declared
                 // type is shape-known (18: sync.mutex).
                 if let Some(sn) = self.user_struct_name_of(base.as_ref()) {
-                    if let Some(fields) = self.struct_fields.get(sn) {
-                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                            if let Some((k, _)) =
-                                super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
-                            {
-                                return Some(k);
-                            }
+                    if let Some((_, fty)) = self.struct_fields.get(sn).and_then(|fs| fs.iter().find(|(f, _)| f == name)) {
+                        let mut cur = fty.clone();
+                        for _ in 0..16 {
+                            if let Some((k, _)) = super::shapes::SHAPES.iter().find(|(k, _)| *k == cur) { return Some(k); }
+                            let Some(next) = self.n5_aliases.get(&cur).and_then(super::base_ty_name) else { break };
+                            cur = next;
                         }
                     }
                 }
