@@ -774,18 +774,11 @@ impl<'a> Checker<'a> {
                         });
                     }
                 }
-                if let Some(fields) = self.struct_fields_for_type(&resolved) {
-                    return fields.into_iter().find(|(n, _)| n == name).map(|(_, t)| t);
-                }
-                let sname = Self::base_named_type(&resolved)?;
-                self.structs
-                    .get(&sname)
-                    .and_then(|fs| fs.iter().find(|(n, _)| n == name))
-                    .map(|(_, t)| t.clone())
+                self.struct_fields_for_type(&resolved)?.into_iter().find(|(n, _)| n == name).map(|(_, t)| t)
             }
             Expr::Index { base, .. } => {
                 let base_ty = self.ty_of_expr(st, base)?;
-                match self.resolve_type_alias(&base_ty) {
+                match self.peel_pointer_and_alias(&base_ty) {
                     TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(*elem),
                     TypeExpr::Map { value, .. } => Some(*value),
                     _ => None,
@@ -832,7 +825,12 @@ impl<'a> Checker<'a> {
                 results: results.iter().map(|r| r.ty.clone()).collect(),
                 span: *span,
             }),
-            Expr::Move { operand, .. }
+            Expr::Unary {
+                op: hy_syntax::UnOp::Neg,
+                operand,
+                ..
+            }
+            | Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
             | Expr::Paren { inner: operand, .. } => self.ty_of_expr(st, operand),
             Expr::Call { callee, args, span } => match crate::model::unwrap_parens(callee) {
@@ -860,7 +858,10 @@ impl<'a> Checker<'a> {
                         });
                     }
                     if name == "make" {
-                        return args.first().and_then(|a| self.ty_of_expr(st, &a.value));
+                        return args.first().and_then(|a| match crate::model::unwrap_parens(&a.value) {
+                            Expr::Ident { name, .. } => self.type_aliases.get(name).cloned(),
+                            other => self.ty_of_expr(st, other),
+                        });
                     }
                     if args.len() == 1 {
                         let is_type_name = crate::const_overflow::fixed_width_int_range(name).is_some()
@@ -1017,9 +1018,9 @@ impl<'a> Checker<'a> {
                         base
                     ));
                 }
-                if let Some(fields) = self.structs.get(base) {
+                if let Some(fields) = self.struct_fields_for_sname(name) {
                     for (fname, fty) in fields {
-                        if let Some(inner) = self.no_zero_value_reason(fty, depth + 1) {
+                        if let Some(inner) = self.no_zero_value_reason(&fty, depth + 1) {
                             return Some(format!(
                                 "struct `{}` has no zero value because field `{}` ({})",
                                 base, fname, inner
@@ -1405,7 +1406,7 @@ impl<'a> Checker<'a> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
             if let Expr::Index { base, .. } = v {
-                if let Some(TypeExpr::Map { value: val_ty, .. }) = self.ty_of_expr(st, base) {
+                if let Some(TypeExpr::Map { value: val_ty, .. }) = self.ty_of_expr(st, base).map(|t| self.peel_pointer_and_alias(&t)) {
                     return vec![Some(*val_ty), None];
                 }
             }

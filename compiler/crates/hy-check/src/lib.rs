@@ -480,13 +480,20 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             TypeShape::Chan(e) => *e,
                             _ => TypeShape::Unknown,
                         };
+                        let elem_ty = ck.chan_elem_ty(&st, chan);
                         for (i, n) in names.iter().enumerate() {
-                            let shape = if i == 0 {
-                                elem.clone()
+                            let (shape, ty) = if i == 0 {
+                                (elem.clone(), elem_ty.clone())
                             } else {
-                                TypeShape::Primitive
+                                (
+                                    TypeShape::Primitive,
+                                    Some(hy_syntax::TypeExpr::Named {
+                                        name: "bool".to_string(),
+                                        span: chan.span(),
+                                    }),
+                                )
                             };
-                            ck.define_binding(&mut st, n, shape, None, false, managed, false);
+                            ck.define_binding(&mut st, n, shape, ty, false, managed, false);
                         }
                     }
                     walk::ScopeEvent::MatchBind { name, subject } => {

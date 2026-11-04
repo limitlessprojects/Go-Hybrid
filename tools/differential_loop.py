@@ -218,6 +218,8 @@ def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None):
         )
     except subprocess.TimeoutExpired as exc:
         return False, f"build timed out after {exc.timeout}s"
+    except OSError as exc:
+        return False, f"build could not be run: {exc}"
     if build.returncode != 0:
         return False, "build failed: " + (build.stderr or build.stdout).strip()[-300:]
     binary = os.path.join(workdir, "a.out")
@@ -229,6 +231,8 @@ def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None):
         )
     except subprocess.TimeoutExpired as exc:
         return False, f"run timed out after {exc.timeout}s"
+    except OSError as exc:
+        return False, f"run could not be run: {exc}"
     detail = "exit 0"
     if run.returncode != 0:
         # A Go fatal normally exits 2; GOTRACEBACK=crash aborts on Unix.
@@ -258,8 +262,8 @@ def main():
     # Absolutize once, up front, against the caller's cwd.
     bin_path = os.path.abspath(args.bin)
     corpus_path = os.path.abspath(args.corpus)
-    if not os.path.isfile(bin_path):
-        raise SystemExit(f"differential: hyb binary not found at {bin_path}")
+    if not os.path.isfile(bin_path) or not os.path.isdir(corpus_path):
+        raise SystemExit(2)
 
     files = sorted(
         os.path.join(corpus_path, f)
