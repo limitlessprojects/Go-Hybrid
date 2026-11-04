@@ -72,8 +72,8 @@ pub(crate) enum OpKind {
     /// those four classes through.
     ///
     /// Assigning *to* an `Interface` target stays legal (an interface accepts
-    /// any value), and assigning *from* one stays fail-open because type
-    /// assertions are not modelled.
+    /// any value). Assigning *from* an `Interface` to a concrete type is rejected
+    /// (#2962) because Go requires an explicit type assertion that Hybrid does not have.
     Interface,
     Int,
     Float,
@@ -142,16 +142,10 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Unknown, _) | (_, Unknown) => false,
         // An interface target accepts ANY value (`var a any = 1; a = "str"`
         // builds), so `Interface` on the `want` side is never a conflict.
-        // `Interface` on the `got` side is fail-open too: assigning an `any` to
-        // a concrete type needs a type assertion the kind model does not track,
-        // so it must not be rejected on kind evidence alone.
-        //
-        // Without this arm the U16 assignment check and the U9-U12 interface
-        // classification contradict each other: `a` of type `any` resolves to
-        // `Interface`, and `Interface` vs `Str` falls through to the mismatch
-        // arm below, so every assignment to an `any` target would be rejected.
-        // The accept-side corpus controls caught exactly that.
-        (Interface, _) | (_, Interface) => false,
+        // #2962: Assigning an `any` to a concrete type requires a type assertion
+        // in Go (`need type assertion`), so `(_, Interface)` falls through to
+        // conflict when `want` is a concrete kind.
+        (Interface, _) => false,
         // No value is involved; a count check owns that case.
         (Void, _) | (_, Void) => false,
         // An untyped int constant is assignable to a float target
