@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -45,6 +46,7 @@ PKG_ARCH = "amd64"
 # staticlib_candidates) plus PATH, so the test can see what the smoke leaked.
 FAKE_HYB = r"""#!/bin/sh
 # BUILD_MARK
+src="$2"
 log="${HYB_TEST_LOG:?}"
 printf '{"runtime": "%s", "cargo_bin": "%s", "target_dir": "%s", "exe": "%s", "path": "%s"}\n' \
     "${HYB_RUNTIME_DIR-<unset>}" "${HYB_CARGO_BIN-<unset>}" \
@@ -54,7 +56,10 @@ while [ $# -gt 0 ]; do
     if [ "$1" = "-o" ]; then out="$2"; shift; fi
     shift
 done
-printf '#!/bin/sh\necho "hello, Hybrid!"\n' > "$out"
+case "$src" in
+    */05-json-transform/program.hy) cp "$HYB_TEST_BRIDGE" "$out" ;;
+    *) cp "$HYB_TEST_HELLO" "$out" ;;
+esac
 chmod +x "$out"
 """
 
@@ -105,6 +110,15 @@ class PackageReleaseIsolationTests(unittest.TestCase):
         (self.repo / "compiler").mkdir()
         (self.repo / "examples" / "01-hello").mkdir(parents=True)
         (self.repo / "examples" / "01-hello" / "program.hy").write_text("fn main() {}\n")
+        for example in ("01-hello", "05-json-transform"):
+            example_dir = self.repo / "examples" / example
+            example_dir.mkdir(parents=True, exist_ok=True)
+            (example_dir / "program.hy").write_text("fn main() {}\n")
+            shutil.copy(ROOT / "examples" / example / "expected.txt", example_dir)
+        self.hello_program = self.root / "hello-program"
+        self.bridge_program = self.root / "bridge-program"
+        self.write_program(self.hello_program, self.expected("01-hello"))
+        self.write_program(self.bridge_program, self.expected("05-json-transform"))
 
         # Old artifacts sit at the crate-local paths the script copies from.
         (hyrt / "target" / "release").mkdir(parents=True)
@@ -145,18 +159,84 @@ class PackageReleaseIsolationTests(unittest.TestCase):
             "TMPDIR": str(self.root),
             "HYB_TEST_LOG": str(self.log),
             "HYB_TEST_FAKE_HYB": str(fake_hyb),
+            "HYB_TEST_HELLO": str(self.hello_program),
+            "HYB_TEST_BRIDGE": str(self.bridge_program),
             "HYB_PKG_OS": PKG_OS,
             "HYB_PKG_ARCH": PKG_ARCH,
         }
 
-    def package(self, **extra):
+    def expected(self, example):
+        return (self.repo / "examples" / example / "expected.txt").read_text()
+
+    def write_program(self, path, stdout, stderr="", exit_code=0):
+        path.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s' {shlex.quote(stdout)}\n"
+            f"printf '%s' {shlex.quote(stderr)} >&2\n"
+            f"exit {exit_code}\n"
+        )
+        path.chmod(0o755)
+
+    def package(self, expect_success=True, **extra):
         result = subprocess.run(
             ["sh", str(self.repo / "tools" / "package_release.sh"), VERSION],
             env={**self.env, **extra}, cwd=self.root,
             capture_output=True, text=True, timeout=60, check=False,
         )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        if expect_success:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        else:
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("==> done:", result.stdout)
         return result
+
+    def smoke_cases(self):
+        # Darwin enables the bridge leg without a cross-architecture runner.
+        # Both binaries are shell fixtures; no native build is performed.
+        cases = [
+            ("01-hello", self.hello_program, "hello, Hybrid!\n", PKG_OS),
+            ("05-json-transform", self.bridge_program, '"ada"\n', "darwin"),
+        ]
+        for case in cases:
+            self.write_program(self.hello_program, self.expected("01-hello"))
+            self.write_program(self.bridge_program, self.expected("05-json-transform"))
+            yield case
+
+    def test_smoke_rejects_incomplete_output_containing_old_match(self):
+        for example, program, partial, pkg_os in self.smoke_cases():
+            with self.subTest(example=example):
+                self.write_program(program, partial)
+                self.package(expect_success=False, HYB_PKG_OS=pkg_os)
+                self.write_program(program, self.expected(example))
+
+    def test_smoke_rejects_expected_output_only_on_stderr(self):
+        for example, program, _, pkg_os in self.smoke_cases():
+            with self.subTest(example=example):
+                self.write_program(program, "", self.expected(example))
+                self.package(expect_success=False, HYB_PKG_OS=pkg_os)
+                self.write_program(program, self.expected(example))
+
+    def test_smoke_rejects_extra_stdout(self):
+        for example, program, _, pkg_os in self.smoke_cases():
+            with self.subTest(example=example):
+                self.write_program(program, self.expected(example) + "unexpected\n")
+                self.package(expect_success=False, HYB_PKG_OS=pkg_os)
+                self.write_program(program, self.expected(example))
+
+    def test_smoke_accepts_exact_stdout_with_separate_diagnostics(self):
+        for example, program, _, pkg_os in self.smoke_cases():
+            with self.subTest(example=example):
+                self.write_program(program, self.expected(example), "diagnostic only\n")
+                self.package(HYB_PKG_OS=pkg_os)
+                self.write_program(program, self.expected(example))
+
+    def test_smoke_rejects_nonzero_exit_even_with_expected_stdout(self):
+        for example, program, _, pkg_os in self.smoke_cases():
+            with self.subTest(example=example):
+                self.write_program(program, self.expected(example), "runtime failed\n", 7)
+                result = self.package(expect_success=False, HYB_PKG_OS=pkg_os)
+                self.assertIn("runtime failed", result.stderr)
+                self.write_program(program, self.expected(example))
 
     def tarball(self):
         return self.repo / "dist" / self.dist_name
