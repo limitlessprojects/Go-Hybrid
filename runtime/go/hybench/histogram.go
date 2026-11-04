@@ -18,7 +18,10 @@
 //   - slow ops (µs and up): record every call directly.
 package hybench
 
-import "fmt"
+import (
+	"fmt"
+	"math/bits"
+)
 
 // SubHalf is the sub-bucket half-count: 2^10 linear sub-buckets per
 // exponent bucket ⇒ ~0.1% resolution (HDR's default).
@@ -26,13 +29,16 @@ const SubHalf = 1024
 
 // Histogram is an HDR-style fixed-memory latency histogram (ns units).
 type Histogram struct {
-	counts   [64 * SubHalf]int64 // [exponent][sub-bucket]
-	subMask  int64
-	loShift  [64]int // per-exponent right-shift keeping the top sub-bucket bit
-	maxVal   int64
-	minVal   int64
-	count    int64
-	total    int64 // sum of recorded values (for the mean)
+	counts  [64 * SubHalf]int64 // [exponent][sub-bucket]
+	subMask int64
+	loShift [64]int // per-exponent right-shift keeping the top sub-bucket bit
+	maxVal  int64
+	minVal  int64
+	count   int64
+	// A count of nonnegative int64 samples can sum beyond uint64. Two
+	// words keep the sum exact without per-record allocation.
+	totalLo  uint64
+	totalHi  uint64
 	overflow int64
 }
 
@@ -65,7 +71,9 @@ func (h *Histogram) Record(ns int64) {
 		return
 	}
 	h.count++
-	h.total += ns
+	var carry uint64
+	h.totalLo, carry = bits.Add64(h.totalLo, uint64(ns), 0)
+	h.totalHi += carry
 	if ns > h.maxVal {
 		h.maxVal = ns
 	}
@@ -93,7 +101,8 @@ func (h *Histogram) Mean() float64 {
 	if h.count == 0 {
 		return 0
 	}
-	return float64(h.total) / float64(h.count)
+	total := float64(h.totalHi)*0x1p64 + float64(h.totalLo)
+	return total / float64(h.count)
 }
 
 // ValueAt returns the ns value the given fraction (0..1) of samples fall
