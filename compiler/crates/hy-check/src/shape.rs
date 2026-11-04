@@ -593,6 +593,14 @@ impl<'a> Checker<'a> {
         cur
     }
 
+    pub(crate) fn peel_pointer_and_alias(&self, ty: &TypeExpr) -> TypeExpr {
+        let mut cur = self.resolve_type_alias(ty);
+        while let TypeExpr::Pointer { to, .. } = cur {
+            cur = self.resolve_type_alias(&to);
+        }
+        cur
+    }
+
     /// The as-written type of an initializer, when directly available
     /// (literals, aliases, local-fn results). `None` = use the shape render.
     pub(crate) fn ty_of_expr(&self, st: &FnState, expr: &Expr) -> Option<TypeExpr> {
@@ -662,7 +670,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Index { base, .. } => {
                 let base_ty = self.ty_of_expr(st, base)?;
-                match self.resolve_type_alias(&base_ty) {
+                match self.peel_pointer_and_alias(&base_ty) {
                     TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(*elem),
                     TypeExpr::Map { value, .. } => Some(*value),
                     _ => None,
@@ -737,7 +745,21 @@ impl<'a> Checker<'a> {
                         });
                     }
                     if name == "make" {
-                        return args.first().and_then(|a| self.ty_of_expr(st, &a.value));
+                        return args.first().and_then(|a| {
+                            self.ty_of_expr(st, &a.value).or_else(|| {
+                                match crate::model::unwrap_parens(&a.value) {
+                                    Expr::Ident { name, span }
+                                        if self.type_aliases.contains_key(name.as_str()) =>
+                                    {
+                                        Some(TypeExpr::Named {
+                                            name: name.clone(),
+                                            span: *span,
+                                        })
+                                    }
+                                    _ => None,
+                                }
+                            })
+                        });
                     }
                     if args.len() == 1 {
                         let is_type_name = crate::const_overflow::fixed_width_int_range(name).is_some()
@@ -1224,8 +1246,12 @@ impl<'a> Checker<'a> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
             if let Expr::Index { base, .. } = v {
-                if let Some(TypeExpr::Map { value: val_ty, .. }) = self.ty_of_expr(st, base) {
-                    return vec![Some(*val_ty), None];
+                if let Some(base_ty) = self.ty_of_expr(st, base) {
+                    if let TypeExpr::Map { value: val_ty, .. } =
+                        self.peel_pointer_and_alias(&base_ty)
+                    {
+                        return vec![Some(*val_ty), None];
+                    }
                 }
             }
         }

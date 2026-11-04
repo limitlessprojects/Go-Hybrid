@@ -2304,13 +2304,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn peel_pointer_and_alias(&self, ty: &hy_syntax::TypeExpr) -> hy_syntax::TypeExpr {
-        let mut cur = self.resolve_type_alias(ty);
-        while let hy_syntax::TypeExpr::Pointer { to, .. } = cur {
-            cur = self.resolve_type_alias(&to);
-        }
-        cur
-    }
 
     fn struct_fields_for_type(
         &self,
