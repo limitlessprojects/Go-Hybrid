@@ -142,18 +142,27 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Unknown, _) | (_, Unknown) => false,
         // An interface target accepts ANY value (`var a any = 1; a = "str"`
         // builds), so `Interface` on the `want` side is never a conflict.
-        // `Interface` on the `got` side is fail-open too: assigning an `any` to
-        // a concrete type needs a type assertion the kind model does not track,
-        // so it must not be rejected on kind evidence alone.
+        // `Interface` on the `got` side is handled below (#2962): Hybrid has
+        // no type assertion, so an `any` value never becomes a concrete type.
         //
         // Without this arm the U16 assignment check and the U9-U12 interface
         // classification contradict each other: `a` of type `any` resolves to
         // `Interface`, and `Interface` vs `Str` falls through to the mismatch
         // arm below, so every assignment to an `any` target would be rejected.
         // The accept-side corpus controls caught exactly that.
-        (Interface, _) | (_, Interface) => false,
+        (Interface, _) => false,
         // No value is involved; a count check owns that case.
         (Void, _) | (_, Void) => false,
+        // #2962: the reverse direction is NOT assignable. A value of type
+        // `any` (an `any` variable, param, result or `recover()`) needs a type
+        // assertion to become a concrete type, and Hybrid has no assertion
+        // syntax, so `var n int = a`, `take_int(a)`, `return a` from an `int`
+        // fn and `[]int{a}` never build (`go build`: need type assertion).
+        // Only `any`/`interface{}` resolve to `Interface` (named interfaces
+        // and type parameters stay `Unknown`), so this claim is exact.
+        // Equality (`a == 1`) stays accepted: equality_kinds_conflict needs
+        // both directions to conflict and (Interface, _) above never does.
+        (_, Interface) => true,
         // An untyped int constant is assignable to a float target
         // (`var f float64 = 1` builds). The kind model cannot tell an untyped
         // constant from an `int` variable, so this direction must stay allowed
