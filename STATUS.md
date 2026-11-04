@@ -1,5 +1,5 @@
 # STATUS (for the human — 15 lines max)
-- Contributor (2026-11-04): exact-output release smoke checks;10 packaging tests, workspace2720, corpus135/135 and differential45+90 pass locally; tooling-wide/hosted CI pending.
+- Contributor (2026-11-04): exact-output release smoke checks;10 packaging tests, workspace2720, corpus135/135 and differential45+90 pass locally; Python tooling507 and native Darwin-arm64 release packaging pass; hosted CI pending.
 
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
 
