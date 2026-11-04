@@ -1157,6 +1157,10 @@ impl<'a> Collector<'a> {
         }
         match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                self.struct_field_type_name(&bk, name)
+            }
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
             _ => None,
         }
@@ -3377,21 +3381,31 @@ impl<'a> Collector<'a> {
             return OpKind::Unknown;
         }
         let s = s.trim();
-        if let Some(rest) = s.strip_prefix('*') {
-            return OpKind::Pointer(Box::new(self.kind_of_type_str(rest, depth + 1)));
-        }
-        if let Some(rest) = s.strip_prefix("[]") {
-            return OpKind::Slice(Box::new(self.kind_of_type_str(rest, depth + 1)));
+        if let Some(fam) = CompFamily::split(s) {
+            return match fam {
+                CompFamily::Pointer { base } => {
+                    OpKind::Pointer(Box::new(self.kind_of_type_str(base, depth + 1)))
+                }
+                CompFamily::Slice { elem } => {
+                    OpKind::Slice(Box::new(self.kind_of_type_str(elem, depth + 1)))
+                }
+                CompFamily::Array { elem, .. } => {
+                    OpKind::Array(Box::new(self.kind_of_type_str(elem, depth + 1)))
+                }
+                CompFamily::Map { key, value } => OpKind::Map(
+                    Box::new(self.kind_of_type_str(key, depth + 1)),
+                    Box::new(self.kind_of_type_str(value, depth + 1)),
+                ),
+                CompFamily::Chan { elem, .. } => {
+                    OpKind::Chan(Box::new(self.kind_of_type_str(elem, depth + 1)))
+                }
+            };
         }
         if let Some(rest) = s.strip_prefix("[...]") {
             return OpKind::Array(Box::new(self.kind_of_type_str(rest, depth + 1)));
         }
-        if let Some(rest) = s
-            .strip_prefix("<-chan ")
-            .or_else(|| s.strip_prefix("chan<- "))
-            .or_else(|| s.strip_prefix("chan "))
-        {
-            return OpKind::Chan(Box::new(self.kind_of_type_str(rest, depth + 1)));
+        if let Some(rest) = s.strip_prefix("option[").and_then(|r| r.strip_suffix(']')) {
+            return OpKind::Option(Box::new(self.kind_of_type_str(rest, depth + 1)));
         }
         self.kind_of_named(s, depth)
     }
@@ -3563,6 +3577,20 @@ impl<'a> Collector<'a> {
                     }
                 }
                 self.scalar_of_ty(value)
+            }
+            TypeExpr::Named { name, .. } => {
+                if let Some(arg) = subst.get(name.as_str()) {
+                    if let Some(fam) = CompFamily::split(arg.trim()) {
+                        return match fam {
+                            CompFamily::Slice { elem } | CompFamily::Array { elem, .. } => {
+                                self.scalar_of_type_name(elem)
+                            }
+                            CompFamily::Map { value, .. } => self.scalar_of_type_name(value),
+                            _ => None,
+                        };
+                    }
+                }
+                None
             }
             _ => None,
         }
@@ -6243,12 +6271,23 @@ impl<'a> Collector<'a> {
     /// gives None and the caller fails open.
     fn map_key_scalar_name(&self, base: Option<&Expr>) -> Option<&'static str> {
         let base = base?;
-        let Expr::Ident { name, .. } = unwrap_parens(base) else {
-            return None;
+        let ty = match unwrap_parens(base) {
+            Expr::Ident { name, .. } => self
+                .type_name_scopes
+                .iter()
+                .rev()
+                .find_map(|l| l.get(name))
+                .cloned()?,
+            Expr::Field { base: s, name, .. } => {
+                let bk = self.kind_of_expr(s);
+                self.struct_field_type_name(&bk, name)?
+            }
+            _ => return None,
         };
-        let ty = self.type_name_scopes.iter().rev().find_map(|l| l.get(name))?;
-        let key = ty.strip_prefix("map[")?.split(']').next()?;
-        canonical_numeric_name(key)
+        if let Some(CompFamily::Map { key, .. }) = CompFamily::split(ty.trim()) {
+            return canonical_numeric_name(key);
+        }
+        None
     }
 
     fn check_index_kind(
