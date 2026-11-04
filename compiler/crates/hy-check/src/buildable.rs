@@ -5138,7 +5138,16 @@ impl<'a> Collector<'a> {
             // into `[]byte`). Go requires the spread operand's element type to match
             // the destination slice element type (issue #2738).
             if extra.spread {
-                let got = self.kind_of_expr(&extra.value);
+                            // #3518: untyped nil resolves to Unknown, fail-open skips it
+            if Checker::is_nil_literal(&extra.value) && is_non_nilable(&elem) {
+                self.emit_e1002(
+                    extra.value.span(),
+                    format!("cannot use nil as element type in append (HYB-E1002)"),
+                    "appended values must match the slice element type",
+                );
+                continue;
+            }
+            let got = self.kind_of_expr(&extra.value);
                 match got {
                     OpKind::Unknown => {}
                     OpKind::Slice(extra_elem) => {
@@ -7789,6 +7798,14 @@ impl<'a> Collector<'a> {
                     OpKind::Unknown => {
                         if let Some(elem) = self.set_elem_of_expr(map_arg) {
                             let want = self.kind_of_named(&elem, 0);
+                            if Checker::is_nil_literal(key_arg) && is_non_nilable(&want) {
+                                self.emit_e2005(
+                                    span,
+                                    "cannot use nil as element type in delete on set (HYB-E2005)".to_string(),
+                                    "the key must match the set element type",
+                                );
+                                return;
+                            }
                             let got = self.kind_of_expr(key_arg);
                             let int_to_float_conflict = want == OpKind::Float
                                 && got == OpKind::Int
@@ -7809,6 +7826,14 @@ impl<'a> Collector<'a> {
                         }
                     }
                     OpKind::Map(k_expected, _) => {
+                        if Checker::is_nil_literal(key_arg) && is_non_nilable(k_expected) {
+                            self.emit_e2005(
+                                span,
+                                "cannot use nil as key type in delete (HYB-E2005)".to_string(),
+                                "the key must match the map key type",
+                            );
+                            return;
+                        }
                         let kk = self.kind_of_expr(key_arg);
                         let is_untyped_int_to_float = **k_expected == OpKind::Float
                             && kk == OpKind::Int
