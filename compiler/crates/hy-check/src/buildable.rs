@@ -968,6 +968,44 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #3208: Extract channel element type name from a channel expression.
+    fn chan_element_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    let trimmed = tname.trim();
+                    if let Some(rest) = trimmed.strip_prefix("chan<-") {
+                        return Some(rest.trim_start().to_string());
+                    } else if let Some(rest) = trimmed.strip_prefix("<-chan") {
+                        return Some(rest.trim_start().to_string());
+                    } else if let Some(rest) = trimmed.strip_prefix("chan") {
+                        return Some(rest.trim_start().to_string());
+                    }
+                }
+                None
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            let fbare = unwrap_parens(&first.value);
+                            if let Expr::StructLit {
+                                ty: Some(TypeExpr::Chan { elem, .. }),
+                                ..
+                            } = fbare
+                            {
+                                return Some(elem.render());
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// #2817 — the exact numeric element type of a channel expression, when
     /// the channel is a plain identifier whose declared element type is a
     /// predeclared numeric type. `var ch chan int64` renders its declared type
@@ -977,7 +1015,8 @@ impl<'a> Collector<'a> {
     /// caller stays fail-open.
     fn chan_element_scalar(&self, e: &Expr) -> Option<&'static str> {
         let Expr::Ident { name, .. } = unwrap_parens(e) else {
-            return None;
+            let tname = self.chan_element_type_name(e)?;
+            return canonical_numeric_name(&tname);
         };
         let tname = self.lookup_type_name(name)?;
         let t = tname.trim();
@@ -985,7 +1024,11 @@ impl<'a> Collector<'a> {
         let t = t.strip_prefix("chan")?;
         let t = t.trim_start();
         let t = t.strip_prefix("<-").unwrap_or(t).trim();
-        canonical_numeric_name(t)
+        if let Some(scalar) = canonical_numeric_name(t) {
+            return Some(scalar);
+        }
+        let tname = self.chan_element_type_name(e)?;
+        canonical_numeric_name(&tname)
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -1226,6 +1269,7 @@ impl<'a> Collector<'a> {
                 self.struct_field_type_name(&bk, name)
             }
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
+            Expr::Move { operand, .. } => self.typed_value_type_name(operand),
             _ => None,
         }
     }
@@ -1549,6 +1593,7 @@ impl<'a> Collector<'a> {
                 operand,
                 ..
             } => self.typed_value_scalar(operand),
+            Expr::Move { operand, .. } => self.typed_value_scalar(operand),
             Expr::Call { callee, args, .. } => match self.call_result_scalars(callee, args) {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
@@ -2208,6 +2253,8 @@ impl<'a> Collector<'a> {
                     self.bind_type_name(name, format!("[]{}", elem));
                 } else if let Some(tp) = self.expr_type_param(val) {
                     self.bind_type_name(name, tp);
+                } else if let Some(chan_elem) = self.chan_element_type_name(val) {
+                    self.bind_type_name(name, format!("chan {}", chan_elem));
                 }
             }
         }
@@ -4381,8 +4428,17 @@ impl<'a> Collector<'a> {
                         inner.len() == 1 && inner.chars().all(|c| c.is_ascii_lowercase())
                     };
                     let container_or_alias_mismatch = match (&got_type_name, &want, &got) {
-                        (Some(gname), OpKind::Chan(_), OpKind::Chan(_))
-                        | (Some(gname), OpKind::Map(_, _), OpKind::Map(_, _))
+                        (Some(gname), OpKind::Chan(_), OpKind::Chan(_)) => {
+                            if field_type_name == gname.as_str() || is_generic_ty(field_type_name) || is_generic_ty(gname) {
+                                false
+                            } else {
+                                match (CompFamily::split(field_type_name), CompFamily::split(gname)) {
+                                    (Some(CompFamily::Chan { elem: we, .. }), Some(CompFamily::Chan { elem: ge, .. })) => we != ge,
+                                    _ => true,
+                                }
+                            }
+                        }
+                        (Some(gname), OpKind::Map(_, _), OpKind::Map(_, _))
                         | (Some(gname), OpKind::Slice(_), OpKind::Slice(_))
                         | (Some(gname), OpKind::Pointer(_), OpKind::Pointer(_))
                         | (Some(gname), OpKind::Array(_), OpKind::Array(_)) => {
@@ -5668,6 +5724,27 @@ impl<'a> Collector<'a> {
         // of a mismatched type still fires; only the hatch is respected).
         if self.managed_depth > 0 {
             return;
+        }
+        if let Some(elem_ty_name) = self.chan_element_type_name(chan) {
+            let val_type_name = self.typed_value_type_name(value);
+            let array_len_mismatch = self.sized_array_names_differ(
+                Some(&elem_ty_name),
+                val_type_name.as_deref(),
+            );
+            if array_len_mismatch {
+                let got_type = val_type_name.unwrap_or_else(|| self.kind_of_expr(value).label().to_string());
+                self.emit_e1002(
+                    value.span(),
+                    format!(
+                        "cannot use `{}` (type `{}`) as `{}` value in send (HYB-E1002)",
+                        value.render(),
+                        got_type,
+                        elem_ty_name
+                    ),
+                    "channel element type is fixed; convert the value explicitly or adjust the channel type",
+                );
+                return;
+            }
         }
         let want = match self.kind_of_expr(chan) {
             OpKind::Chan(e) => *e,
