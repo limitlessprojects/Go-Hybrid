@@ -91,3 +91,12 @@
 - Suites 408 -> 412. Differential 45/45 + 90/90 all four landings; corpus 135 tripwire not fired x4.
 - Worklog: this commit.
 - Next queue: #2934 -> #3362 -> #2937 -> #3558 -> #2661 -> #3366 -> #3611 -> #3355.
+
+## Session 104 — 2026-11-05 07:10 UTC+8 tick
+- approve 10/10 ok (quota reset, 4986 left); scan skipped (burns quota, queue known).
+- Landed PR #2934 -> 0cc82b15 (for-in binders get real TypeExprs via ty_of_expr slice/array/map/chan/set; range counters typed via typed_int_bound + new builtin min/max arm; fixes #2933, gttps). In-merge conflict resolution vs #3703 in typed_int_bound head: kept BOTH pub(crate) and unwrap_parens_and_move; tree-hash asserted identical to verified trial merge f918cfc8. ALL-GREEN 413 suites.
+- Landed PR #3362 -> 86b36c6f (hyfuzz fail-closed: corpus read errors SystemExit with path, subprocess utf-8/replace + None-safe output, --failures-dir pre-validated; fixes #2933-family harness hardening, Shokun123). Battery + PR's own pytest 25/25 + live fuzz smoke (12 cases, invariants held) + negative probe on failures-dir. NOTE: tool transport eats literal "[h" sequences in output — codepoint dump is ground truth (cost: one false syntax-alarm). hyfuzz_cases.json is a NEW file on main via this merge (was absent). ALL-GREEN 413 suites (no rust surface).
+- Landed PR #2937 -> 4b8c1286 (deep-mode builtin args: &mut FnState, Local/Assign binding shape/ty definition + track_deep_rhs, unshadowed() make/new probe; fixes #2936, gttps). Auto-merge coexists with #3670 guard. ALL-GREEN 414 suites.
+- Suites 412 -> 414. Differential 45/45 + 90/90 x3; corpus 135 tripwire not fired x3.
+- Worklog: this commit.
+- Next queue: #3558 -> #2661 -> #3366 -> #3611 -> #3355 -> #3554 -> #3566 -> #3438 -> #3056 -> #2456.
