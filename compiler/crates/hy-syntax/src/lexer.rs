@@ -485,15 +485,27 @@ impl<'a> Lexer<'a> {
             self.bump();
             s.push('0');
             s.push(base);
+            let mut underscore_err = false;
+            let mut last_was_underscore = false;
+            let mut digit_count = 0;
             while let Some(c) = self.at(0) {
-                if c == '_' || c.is_ascii_alphanumeric() {
-                    if c != '_' {
-                        s.push(c);
+                if c == '_' {
+                    if digit_count == 0 || last_was_underscore {
+                        underscore_err = true;
                     }
+                    last_was_underscore = true;
+                    self.bump();
+                } else if c.is_ascii_alphanumeric() {
+                    last_was_underscore = false;
+                    digit_count += 1;
+                    s.push(c);
                     self.bump();
                 } else {
                     break;
                 }
+            }
+            if last_was_underscore {
+                underscore_err = true;
             }
             if (self.at(0) == Some('.') && self.at(1) != Some('.')) || (s.ends_with(['p', 'P']) && matches!(self.at(0), Some('+') | Some('-'))) {
                 // A prefixed base literal (0x, 0b, 0o) cannot have a fractional part
@@ -527,6 +539,14 @@ impl<'a> Lexer<'a> {
                         "malformed 0{base} integer literal: expected at least one digit after `0{base}`"
                     ),
                 );
+            } else if underscore_err {
+                self.escape_diag(
+                    start,
+                    false,
+                    format!(
+                        "malformed 0{base} integer literal: '_' must separate successive digits (SPEC-LANGUAGE.md LX6)"
+                    ),
+                );
             } else if let Some(bad) = digits.chars().find(|&c| match base {
                 'x' => !c.is_ascii_hexdigit(),
                 'o' => !matches!(c, '0'..='7'),
@@ -546,51 +566,82 @@ impl<'a> Lexer<'a> {
 
         // decimal / float
         let mut is_float = false;
+        let mut underscore_err = false;
+        let mut last_was_underscore = false;
+        let mut int_digits = 0;
+
         while let Some(c) = self.at(0) {
-            if c == '_' || c.is_ascii_digit() {
-                if c != '_' {
-                    s.push(c);
+            if c == '_' {
+                if int_digits == 0 || last_was_underscore {
+                    underscore_err = true;
                 }
+                last_was_underscore = true;
+                self.bump();
+            } else if c.is_ascii_digit() {
+                last_was_underscore = false;
+                int_digits += 1;
+                s.push(c);
                 self.bump();
             } else {
                 break;
             }
         }
+        let trailing_int_underscore = last_was_underscore;
+
         // fractional part — SPEC LX6: `1.5`, `2.`, `.5`, `1e9`.
         // A dot after digits is part of a float unless:
         // 1. It is followed by `.` (ranges `0..n`, `1..=8`, ellipsis `...`)
         // 2. It is followed by an identifier/keyword start (e.g. `2.foo`),
-        //    UNLESS that starts an exponent (`2.e3`, `2.e+3`, `2.e-3`).
+        //    UNLESS that starts an exponent (`2.e3`, `2.e+3`, `2.e-3`) or
+        //    starts with an underscore (`1._5` — issue #3553).
+        let mut trailing_frac_underscore = false;
         if self.at(0) == Some('.') {
             let is_range = self.at(1) == Some('.');
             let is_exp = matches!(self.at(1), Some('e') | Some('E'))
                 && matches!(self.at(2), Some('+') | Some('-') | Some('0'..='9'));
-            let is_ident_start = self.at(1).map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false);
+            let is_ident_start = self.at(1).map(|c| c.is_ascii_alphabetic()).unwrap_or(false);
+            let is_underscore_frac = self.at(1) == Some('_');
 
-            if !is_range && (!is_ident_start || is_exp) {
+            if !is_range && (!is_ident_start || is_exp || is_underscore_frac) {
                 is_float = true;
+                if trailing_int_underscore {
+                    underscore_err = true;
+                }
                 s.push('.');
                 self.bump();
+                let mut frac_digits = 0;
+                last_was_underscore = false;
                 while let Some(c) = self.at(0) {
-                    if c == '_' || c.is_ascii_digit() {
-                        if c != '_' {
-                            s.push(c);
+                    if c == '_' {
+                        if frac_digits == 0 || last_was_underscore {
+                            underscore_err = true;
                         }
+                        last_was_underscore = true;
+                        self.bump();
+                    } else if c.is_ascii_digit() {
+                        last_was_underscore = false;
+                        frac_digits += 1;
+                        s.push(c);
                         self.bump();
                     } else {
                         break;
                     }
                 }
+                trailing_frac_underscore = last_was_underscore;
             }
         }
+
         // exponent
         if matches!(self.at(0), Some('e') | Some('E')) {
             let mut k = 1;
             if matches!(self.at(1), Some('+') | Some('-')) {
                 k = 2;
             }
-            if self.at(k).map(|d| d.is_ascii_digit()) == Some(true) {
+            if self.at(k).map(|d| d.is_ascii_digit() || d == '_') == Some(true) {
                 is_float = true;
+                if trailing_int_underscore || trailing_frac_underscore {
+                    underscore_err = true;
+                }
                 // push the exponent marker (and sign) exactly once — the
                 // bumped chars ARE the marker; no extra `e` push.
                 for _ in 0..k {
@@ -598,15 +649,32 @@ impl<'a> Lexer<'a> {
                         s.push(c);
                     }
                 }
+                let mut exp_digits = 0;
+                let mut exp_last_was_underscore = false;
                 while let Some(c) = self.at(0) {
-                    if c == '_' || c.is_ascii_digit() {
-                        if c != '_' {
-                            s.push(c);
+                    if c == '_' {
+                        if exp_digits == 0 || exp_last_was_underscore {
+                            underscore_err = true;
                         }
+                        exp_last_was_underscore = true;
+                        self.bump();
+                    } else if c.is_ascii_digit() {
+                        exp_last_was_underscore = false;
+                        exp_digits += 1;
+                        s.push(c);
                         self.bump();
                     } else {
                         break;
                     }
+                }
+                if exp_last_was_underscore {
+                    underscore_err = true;
+                }
+                if exp_digits == 0 {
+                    while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                        s.push(self.bump().unwrap());
+                    }
+                    self.escape_diag(start, false, "malformed float literal: exponent has no digits (SPEC-LANGUAGE.md LX6)");
                 }
             } else {
                 is_float = true;
@@ -619,7 +687,11 @@ impl<'a> Lexer<'a> {
                 self.escape_diag(start, false, "malformed float literal: exponent has no digits (SPEC-LANGUAGE.md LX6)");
             }
         }
+
         if is_float {
+            if trailing_frac_underscore {
+                underscore_err = true;
+            }
             if self.at(0) == Some('.') && self.at(1) != Some('.') {
                 while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric() || (c == '.' && self.at(1) != Some('.'))) {
                     s.push(self.bump().unwrap());
@@ -630,14 +702,29 @@ impl<'a> Lexer<'a> {
                     s.push(self.bump().unwrap());
                 }
                 self.escape_diag(start, false, "malformed float literal: invalid character in float literal (SPEC-LANGUAGE.md LX6)");
+            } else if underscore_err {
+                self.escape_diag(
+                    start,
+                    false,
+                    "malformed float literal: '_' must separate successive digits (SPEC-LANGUAGE.md LX6)",
+                );
             }
             self.tok(start, Tok::Float(s))
         } else {
+            if trailing_int_underscore {
+                underscore_err = true;
+            }
             if self.at(0).is_some_and(|c| c.is_ascii_alphabetic()) {
                 while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
                     s.push(self.bump().unwrap());
                 }
                 self.escape_diag(start, false, "malformed integer literal: invalid trailing suffix (SPEC-LANGUAGE.md LX6)");
+            } else if underscore_err {
+                self.escape_diag(
+                    start,
+                    false,
+                    "malformed integer literal: '_' must separate successive digits (SPEC-LANGUAGE.md LX6)",
+                );
             } else if s.starts_with('0') && s.len() > 1 {
                 if let Some(bad) = s.chars().find(|&c| !matches!(c, '0'..='7')) {
                     self.escape_diag(
