@@ -4,7 +4,7 @@ fn check(src: &str) -> Vec<hy_diag::Diagnostic> {
 
 #[test]
 fn test_new_generic_accepted() {
-    let src = "struct box[t] {\n    v t\n}\nfn main() {\n    p := new(box[int])\n    _ = p\n}\n";
+    let src = "struct box[t] {\n    v t\n}\nfn main() {\n    p := new(box[int])\n    p.v = 42\n    var x int = p.v\n    _ = x\n}\n";
     let diags = check(src);
     assert!(
         diags.is_empty(),
