@@ -5079,6 +5079,63 @@ impl<'a> Collector<'a> {
         })
     }
 
+    /// `errors.wrap(err, message)` lowers to `fmt.Errorf("%s: %w", message, err)`,
+    /// which Go and `go build` accept for ANY operand types; a non-error first
+    /// argument or a non-string message then prints `%!w(int=5)` /
+    /// `%!s(int=7)` at run time. Reject operands whose resolved kind can never
+    /// be an `error` / a `string` (SPEC-LANGUAGE E2). `Unknown`, `Interface`
+    /// and named struct/pointer kinds stay fail-open (a user type may
+    /// implement `error`).
+    fn check_errors_wrap_operands(&mut self, args: &[CallArg]) {
+        let ek = self.kind_of_expr(&args[0].value);
+        if matches!(
+            ek,
+            OpKind::Int
+                | OpKind::Float
+                | OpKind::Bool
+                | OpKind::Str
+                | OpKind::Slice(_)
+                | OpKind::Array(_)
+                | OpKind::Map(..)
+                | OpKind::Chan(_)
+                | OpKind::Fn(..)
+                | OpKind::Option(_)
+                | OpKind::Void
+        ) {
+            self.emit_e1002(
+                args[0].value.span(),
+                format!(
+                    "`errors.wrap` needs an `error` as its first argument, got `{}` — Go would build it and print `%!w(...)` at run time (HYB-E1002)",
+                    ek.label()
+                ),
+                "write `errors.wrap(err, \"context\")` with an error value first (SPEC-LANGUAGE E2)",
+            );
+        }
+        let mk = self.kind_of_expr(&args[1].value);
+        if matches!(
+            mk,
+            OpKind::Int
+                | OpKind::Float
+                | OpKind::Bool
+                | OpKind::Slice(_)
+                | OpKind::Array(_)
+                | OpKind::Map(..)
+                | OpKind::Chan(_)
+                | OpKind::Fn(..)
+                | OpKind::Option(_)
+                | OpKind::Void
+        ) {
+            self.emit_e1002(
+                args[1].value.span(),
+                format!(
+                    "`errors.wrap` needs a `string` message as its second argument, got `{}` — Go would build it and print `%!s(...)` at run time (HYB-E1002)",
+                    mk.label()
+                ),
+                "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
+            );
+        }
+    }
+
     fn check_append_elements(&mut self, args: &[CallArg]) {
         let Some(first) = args.first() else { return };
         let elem = match self.kind_of_expr(&first.value) {
@@ -7203,6 +7260,13 @@ impl<'a> Collector<'a> {
                             ),
                             "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
                         );
+                    }
+                    if pkg == "errors"
+                        && name == "wrap"
+                        && self.lookup_kind(pkg).is_none()
+                        && args.len() == 2
+                    {
+                        self.check_errors_wrap_operands(args);
                     }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
