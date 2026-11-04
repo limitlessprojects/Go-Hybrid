@@ -690,7 +690,39 @@ impl Emitter {
                 self.resolve_to_struct_name(fty)
             }
             Expr::StructLit { ty: Some(t), .. } => super::base_ty_name(t).and_then(|n| self.resolve_to_struct_name(&n)),
-            Expr::Call { callee, args, .. } if matches!(Self::unwrap_parens(callee), Expr::Ident { name, .. } if name == "new" && self.is_unshadowed_builtin("new")) => args.first().and_then(|a| Self::assoc_index_type_arg(&a.value)).and_then(|n| self.resolve_to_struct_name(&n)),
+            Expr::Call { callee, args, .. } => {
+                let callee_head = match Self::unwrap_parens(callee) {
+                    Expr::Index { base, .. } => Self::unwrap_parens(base),
+                    other => other,
+                };
+                match callee_head {
+                    Expr::Ident { name, .. } => {
+                        if name == "new" && self.is_unshadowed_builtin("new") {
+                            return args.first().and_then(|a| Self::assoc_index_type_arg(&a.value)).and_then(|n| self.resolve_to_struct_name(&n));
+                        }
+                        let (fn_head, _) = split_type_args(name);
+                        if !self.local_vars.contains(fn_head) {
+                            return self.fn_ret_struct.get(fn_head).map(String::as_str);
+                        }
+                        None
+                    }
+                    Expr::Field { base, name, .. } => {
+                        let (head, _) = split_type_args(name);
+                        if let Some(recv_sn) = self.user_struct_name_of(base) {
+                            if let Some(sn) = self.fn_ret_struct.get(&format!("{recv_sn}.{head}")) {
+                                return Some(sn.as_str());
+                            }
+                        }
+                        if let Expr::Ident { name: pkg, .. } = Self::unwrap_parens(base) {
+                            if !self.local_vars.contains(pkg) && !self.bindings.contains_key(pkg) {
+                                return self.fn_ret_struct.get(&format!("{pkg}.{head}")).map(String::as_str);
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -702,7 +734,7 @@ impl Emitter {
     /// aliased hop dropped the chain exactly like a missing recursion did.
     /// A cycle (`type a = b; type b = a`) is not resolvable by Go either;
     /// bounded walk returns None.
-    fn resolve_to_struct_name(&self, start: &str) -> Option<&str> {
+    pub(crate) fn resolve_to_struct_name(&self, start: &str) -> Option<&str> {
         let mut cur = std::borrow::Cow::Borrowed(start);
         for _ in 0..16 {
             if let Some((k, _)) = self.struct_fields.get_key_value(cur.split('[').next().unwrap_or(cur.as_ref())) {
@@ -804,6 +836,10 @@ impl Emitter {
                         None
                     }
                     Expr::Field { base, name, .. } => {
+                        let (head, _) = split_type_args(name);
+                        if let Some(recv_sn) = self.user_struct_name_of(base) {
+                            if let Some((_, _, Some(BindingKind::ForeignTy(t)), _)) = self.fn_shapes.get(&format!("{recv_sn}.{head}")) { return Some(t); }
+                        }
                         if let Expr::Ident { name: pkg, .. } = Self::unwrap_parens(base) {
                             if self.is_unshadowed_pkg_root(pkg) {
                                 return match (pkg.as_str(), name.as_str()) {
@@ -826,7 +862,6 @@ impl Emitter {
                                     _ => None,
                                 };
                             } else if !self.local_vars.contains(pkg) && !self.bindings.contains_key(pkg) {
-                                let (head, _) = split_type_args(name);
                                 if let Some((_, _, Some(BindingKind::ForeignTy(t)), _)) = self.fn_shapes.get(&format!("{pkg}.{head}")) { return Some(t); }
                             }
                         }
@@ -935,7 +970,7 @@ impl Emitter {
             // three-level `o.sub.thing.pop()` look like a builtin pop and
             // rewrite to `hy_pop(&o.sub.thing)` — Go has no such method on
             // a user struct field.
-            Expr::Field { .. } => self.user_struct_name_of(e).is_some(),
+            Expr::Field { .. } | Expr::Call { .. } => self.user_struct_name_of(e).is_some(),
             _ => false,
         }
     }
