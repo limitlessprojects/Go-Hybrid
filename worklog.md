@@ -1677,3 +1677,13 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - #3503 DEFERRED (deliberate, budget): stale-base PR (counts 130->132 vs main's 133) — needs same treatment as #2284: 2 merge conflicts + 5 census fixups + 319-line deep_composite_conflict review. Pre-computed post-merge truth: corpus 135 (ACCEPT 43 · MANAGED 2 · REJECT 90). ALSO: PLAN.md +1 / STATUS.md +1 in diff need scope check.
 - No main movement this tick; main stays aa22a692 (worklog below moves it), suites 378.
 - NEXT TICK QUEUE: #3503 (top priority, pre-computed above) -> DUP CHECK: #2982 vs #2976 vs #2978 -> #1718/#1719/#3441/#3428/#3435/#3160 -> re-scan for fresh PRs (996 open). Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+
+## Session 88 — 2026-11-04 12:10 tick (1 landed: stale-base #3503 with in-merge reconciliation)
+
+- Full recycle; env restored from scratch (rustup foreground + go tarball re-cached to my-project/go-1.26.9.tar.gz). scan fresh, approve 13/13 (35 calls used).
+- LANDED: #3503 (lilyliiphone2026-collab, fixes #3412) -> merge 457e7f22. Stale-base reconciliation: 7 count-surface conflicts (2 content + 5 census faces) resolved to the S87-pre-computed post-merge truth — corpus 135 = ACCEPT 43 / ACCEPT-MANAGED 2 / REJECT 90, census 7/7 green. Four deep_composite_conflict call sites auto-merged; context hand-verified against main's newer literal arms (scalar_mismatch / untyped int->float preserved).
+- In-merge fixups (all credited in the merge message): VERDICTS.md section + 2 rows added (PR missed the README's own contract) + glued-row blemish from a prior in-merge repaired; dead chan_dir_assignable + never-read Chan::dir removed (0 new warnings; _dir rename with E3012-territory note); PLAN/STATUS '(138)' corrected to 135.
+- Battery: build 0 warnings; workspace 379 suites / 2705 passed / 0 failed (composite_lit_inner_types 5/5); corpus 135/135 verdict agreement, tripwire 1.5% not fired; differential FULL 45/45 + 90/90 (44/89 + 1 new fixture each side, as pre-computed).
+- Suite trajectory: 378 -> 379. Main d6507a52 -> 457e7f22 (+ worklog commit), tree clean.
+- DUP CHECK #2982 vs #2976 vs #2978 NOT reached this tick (budget went to the #3503 reconciliation). NOTE: fresh scan shows #3058 (Yumihariii) also 'fixes #2962' — the #2962 family now has THREE claimants (#2982/#3058 + landed?); needs a 3-way empirical dup check next tick.
+- NEXT TICK QUEUE: DUP CHECK 3-way #2982/#3058 vs #2962 evidence -> #1718/#1719/#3441/#3428/#3435/#3160 -> re-scan Pareto top (fresh #3551/#3550/#3547/#3581 score-9 batch). Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
