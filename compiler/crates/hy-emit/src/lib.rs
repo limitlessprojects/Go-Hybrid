@@ -504,7 +504,9 @@ pub(crate) fn special_member(pkg: &str, name: &str) -> Option<MemberSpecial> {
         ("fmt", "eprintln") => Some(MemberSpecial::StderrCall("Fprintln")),
         ("fmt", "eprint") => Some(MemberSpecial::StderrCall("Fprint")),
         ("fmt", "eprintf") => Some(MemberSpecial::StderrCall("Fprintf")),
-        // Duration constructors — conversions, not funcs.
+        // Duration constructors — conversions, not funcs (#3639).
+        ("time", "nanoseconds") => Some(MemberSpecial::Duration("Nanosecond")),
+        ("time", "microseconds") => Some(MemberSpecial::Duration("Microsecond")),
         ("time", "milliseconds") => Some(MemberSpecial::Duration("Millisecond")),
         ("time", "seconds") => Some(MemberSpecial::Duration("Second")),
         ("time", "minutes") => Some(MemberSpecial::Duration("Minute")),
