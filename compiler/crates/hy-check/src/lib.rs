@@ -48,6 +48,7 @@
 mod addr_loan;
 mod addressable;
 mod arith;
+mod auto_schedule;
 mod buildable;
 mod const_overflow;
 mod closures;
@@ -126,6 +127,12 @@ pub fn check_file(file: &File) -> CheckResult {
     // E4 (HYB-E2011): `?` lands only in an error-result fn/closure, `main`,
     // or an E11 handler closure — lexical, like `return`.
     try_context::check_try_contexts(&mut ck, file);
+
+    // C2a (HYB-E3206 / HYB-E3207): `task { … }` is schedulable only where the
+    // emitter collects it — a direct statement of an `auto` body — and the
+    // region's non-task statements stay ahead of its tasks, because that is the
+    // order the emitter writes them in.
+    auto_schedule::check_task_scopes(&mut ck, file);
 
     let fns: Vec<&FnDecl> = file.fns().collect();
     for f in fns {
@@ -904,6 +911,45 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     _ => Vec::new(),
                 };
                 st.deferred_calls.push((call.clone(), arg_borrows));
+            }
+
+            // `task { ... }` — inline task block (issue #1962).
+            // Placement is the whole rule for this position: only a direct
+            // statement of an `auto` body is collected and scheduled, which
+            // auto_schedule::check_task_scopes enforces as HYB-E3206. The
+            // body's own bindings are checked by the flat walk above.
+            Stmt::TaskBlock { .. } => {}
+
+            // `auto { ... }` — automatic fork-join scheduling (issue #1962).
+            // Collects all inline task blocks inside, analyzes their effects,
+            // and schedules them in parallel layers where possible.
+            Stmt::Auto { body, span } => {
+                let layers = auto_schedule::schedule_block_layers(body);
+                let _ = layers;
+
+                // Safety checks: blocking calls, dynamic spawn, escaped references.
+                let violations = auto_schedule::check_auto_safety(body);
+                for v in violations {
+                    let code = match v.kind {
+                        auto_schedule::SafetyViolationKind::BlockingReceive => "HYB-E3201",
+                        auto_schedule::SafetyViolationKind::BlockingSelect => "HYB-E3202",
+                        auto_schedule::SafetyViolationKind::DynamicSpawn => "HYB-E3203",
+                        auto_schedule::SafetyViolationKind::EscapedTaskCall => "HYB-E3204",
+                        auto_schedule::SafetyViolationKind::EscapedReference => "HYB-E3205",
+                    };
+                    ck.diags.push(
+                        Diagnostic::error(
+                            code,
+                            ck.path.clone(),
+                            *span,
+                            &v.message,
+                        )
+                        .with_notes(vec![
+                            "auto scope is closed: all tasks must be direct inline blocks of the `auto` body, with no blocking calls, no dynamic spawn and no references taken inside".to_string(),
+                            "move external calls or blocking operations outside the auto block".to_string(),
+                        ]),
+                    );
+                }
             }
 
             // If-init Locals and blocks: already covered by the flat walk

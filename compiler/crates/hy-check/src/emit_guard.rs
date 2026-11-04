@@ -306,6 +306,15 @@ impl<'a> Checker<'a> {
                     st.scope_pop();
                 }
             }
+            Stmt::TaskBlock { body, .. } | Stmt::Auto { body, .. } => {
+                if deep {
+                    st.scope_push();
+                    for s in &body.stmts {
+                        self.check_stmt_emit_guard_inner(st, s, true);
+                    }
+                    st.scope_pop();
+                }
+            }
             Stmt::Select { arms, .. } => {
                 for arm in arms {
                     if deep {
@@ -1993,7 +2002,10 @@ impl<'a> Checker<'a> {
                     Self::scan_block_for_local_const(body, name, use_pos, found);
                 }
             }
-            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+            Stmt::Managed { body, .. }
+            | Stmt::Block { block: body, .. }
+            | Stmt::TaskBlock { body, .. }
+            | Stmt::Auto { body, .. } => {
                 Self::scan_block_for_local_const(body, name, use_pos, found);
             }
             Stmt::Match { subject, arms, .. } => {
@@ -2165,6 +2177,8 @@ impl<'a> Checker<'a> {
             | Stmt::For { span, .. }
             | Stmt::Return { span, .. }
             | Stmt::Task { span, .. }
+            | Stmt::TaskBlock { span, .. }
+            | Stmt::Auto { span, .. }
             | Stmt::Managed { span, .. }
             | Stmt::Match { span, .. }
             | Stmt::Defer { span, .. }

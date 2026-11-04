@@ -311,6 +311,7 @@ fn walk_stmt(ck: &mut TryWalker<'_, '_>, s: &Stmt, ctx: Ctx<'_>) {
                 ck.pop_scope();
             }
         }
+        Stmt::TaskBlock { body, .. } | Stmt::Auto { body, .. } => walk_block(ck, body, ctx),
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
     }
 }

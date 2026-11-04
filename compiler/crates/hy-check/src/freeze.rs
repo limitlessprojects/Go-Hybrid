@@ -690,7 +690,9 @@ impl<'a> Checker<'a> {
                 Self::expr_mutates_var(callee, var)
                     || args.iter().any(|a| Self::expr_mutates_var(&a.value, var))
             }
-            hy_syntax::Stmt::Managed { body, .. } => {
+            hy_syntax::Stmt::Managed { body, .. }
+            | hy_syntax::Stmt::TaskBlock { body, .. }
+            | hy_syntax::Stmt::Auto { body, .. } => {
                 Self::is_loop_var_mutated(var, &body.stmts)
             }
             hy_syntax::Stmt::Match { subject, arms, .. } => {
@@ -1306,6 +1308,8 @@ impl<'a> Checker<'a> {
                 flow.select_break_reach.unwrap_or(flow.loop_break_reach)
             }
             hy_syntax::Stmt::Block { block, .. }
+            | hy_syntax::Stmt::TaskBlock { body: block, .. }
+            | hy_syntax::Stmt::Auto { body: block, .. }
             | hy_syntax::Stmt::Managed { body: block, .. } => {
                 Self::block_can_reach_backedge(block, after_reach, flow)
             }
@@ -1396,6 +1400,8 @@ impl<'a> Checker<'a> {
                 Some(flow.select_break_reach.unwrap_or(flow.loop_break_reach))
             }
             hy_syntax::Stmt::Block { block, .. }
+            | hy_syntax::Stmt::TaskBlock { body: block, .. }
+            | hy_syntax::Stmt::Auto { body: block, .. }
             | hy_syntax::Stmt::Managed { body: block, .. } => {
                 Self::block_move_can_reach_backedge(block, move_span, after_reach, flow)
             }
