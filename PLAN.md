@@ -1,6 +1,6 @@
 # Hybrid Language: Development Plan
 
-- Contributor validation (2026-11-04): release smoke now requires the complete example stdout (hello and JSON bridge), with stderr kept for diagnostics. On base433d778, the new regressions show6 false-success cases and2 lost-diagnostic cases; after the fix all9 offline package tests pass. Compiler/tooling-wide validation and hosted CI pending; no language semantics changed.
+- Contributor validation (2026-11-04): release smoke now requires the complete example stdout (hello and JSON bridge), with stderr kept for diagnostics. On base433d778, the new regressions show6 false-success cases and2 lost-diagnostic cases; after the fix all10 offline package tests pass, including an autocrlf checkout control. Rust1.99.0/Go1.26.9 Darwin-arm64: workspace2720/0, corpus135/135, differential45/45 accepted +90/90 rejected. Tooling-wide validation and hosted CI pending; no language semantics changed.
 
 ## Contributor validation — Go build constraints (2026-10-31)
 

@@ -238,6 +238,35 @@ class PackageReleaseIsolationTests(unittest.TestCase):
                 self.assertIn("runtime failed", result.stderr)
                 self.write_program(program, self.expected(example))
 
+    def test_reference_checkout_keeps_lf_with_autocrlf_enabled(self):
+        if not shutil.which("git"):
+            self.skipTest("needs git")
+        shutil.copy(ROOT / ".gitattributes", self.repo)
+        references = [
+            "examples/01-hello/expected.txt",
+            "examples/05-json-transform/expected.txt",
+        ]
+        # Use a real index/checkout: Go emits LF even on Windows, whereas
+        # an unpinned text file would be checked out as CRLF with this config.
+        def git(*args):
+            subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+                           capture_output=True, timeout=10)
+
+        git("init", "--quiet")
+        git("config", "core.autocrlf", "true")
+        (self.repo / "control.txt").write_bytes(b"control\n")
+        for reference in references:
+            (self.repo / reference).write_bytes((ROOT / reference).read_bytes())
+        git("add", ".gitattributes", "control.txt", *references)
+        for reference in ["control.txt", *references]:
+            (self.repo / reference).unlink()
+        git("checkout-index", "--all")
+        self.assertEqual((self.repo / "control.txt").read_bytes(), b"control\r\n")
+        for reference in references:
+            data = (self.repo / reference).read_bytes()
+            self.assertNotIn(b"\r", data, reference)
+            self.assertTrue(data.endswith(b"\n"), reference)
+
     def tarball(self):
         return self.repo / "dist" / self.dist_name
 

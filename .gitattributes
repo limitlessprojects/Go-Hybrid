@@ -1,0 +1,3 @@
+# Release smoke tests compare Go stdout byte-for-byte on every platform.
+/examples/01-hello/expected.txt text eol=lf
+/examples/05-json-transform/expected.txt text eol=lf
