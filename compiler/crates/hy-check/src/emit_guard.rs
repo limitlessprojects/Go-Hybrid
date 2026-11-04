@@ -442,8 +442,9 @@ impl<'a> Checker<'a> {
                     self.check_expr_emit_guard(st, hi);
                 }
             }
-            Expr::Call { callee, args, .. } => {
+            Expr::Call { callee, args, span } => {
                 self.check_call_const_overflow(st, callee, args);
+                self.check_untyped_shift_in_non_int_conversion(st, callee, args, *span);
                 self.check_expr_emit_guard(st, callee);
                 for a in args {
                     self.check_expr_emit_guard(st, &a.value);
@@ -2507,6 +2508,114 @@ impl<'a> Checker<'a> {
                 }
             }
             _ => None,
+        }
+    }
+    fn is_non_int_conversion_type(&self, name: &str) -> bool {
+        let base = Self::base_named_type_str(name);
+        match base {
+            "float32" | "float64" | "f32" | "f64" | "string" | "bool" => true,
+            _ => {
+                if let Some(ty) = self.type_aliases.get(base) {
+                    if let TypeExpr::Named { name: target, .. } = self.resolve_type_alias(ty) {
+                        return self.is_non_int_conversion_type(&target);
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    fn check_untyped_shift_in_non_int_conversion(
+        &mut self,
+        st: &FnState,
+        callee: &Expr,
+        args: &[CallArg],
+        _call_span: Span,
+    ) {
+        let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) else {
+            return;
+        };
+        if self.lookup_binding(st, name).is_some() || self.fns.contains_key(name.as_str()) {
+            return;
+        }
+        if !self.is_non_int_conversion_type(name) {
+            return;
+        }
+        if args.len() != 1 || args[0].spread {
+            return;
+        }
+        if let Some((shift_span, lhs_repr)) = self.find_untyped_non_const_shift(st, &args[0].value) {
+            let msg = format!(
+                "invalid operation: shifted operand `{}` (type `{}`) must be integer (HYB-E1002)",
+                lhs_repr, name
+            );
+            self.diags.push(
+                Diagnostic::error("HYB-E1002", self.path.clone(), shift_span, msg).with_notes(vec![
+                    format!(
+                        "why: in Go, a non-constant shift whose left operand is an untyped constant takes the type the surrounding context (`{}`) gives that constant, but shifted operands must be integer (Row 13 BUILDABLE)",
+                        name
+                    ),
+                    format!(
+                        "fix: explicitly convert the left operand to an integer first (e.g. `int({}) << ...`) or use a constant shift count",
+                        lhs_repr
+                    ),
+                ]),
+            );
+        }
+    }
+
+    fn find_untyped_non_const_shift(
+        &self,
+        st: &FnState,
+        e: &Expr,
+    ) -> Option<(Span, String)> {
+        match crate::model::unwrap_parens(e) {
+            Expr::Binary {
+                op: BinOp::Shl | BinOp::Shr,
+                lhs,
+                rhs,
+                span,
+            } => {
+                let is_const = match crate::const_overflow::const_int_fold_with(e, &self.const_values, 0, Some(st)) {
+                    crate::const_overflow::ConstFold::Val(_) | crate::const_overflow::ConstFold::TooBig => true,
+                    crate::const_overflow::ConstFold::NotConst => false,
+                };
+                if !is_const {
+                    if self.is_untyped_int_const_operand(st, lhs) {
+                        return Some((*span, lhs.render()));
+                    }
+                }
+                self.find_untyped_non_const_shift(st, lhs)
+                    .or_else(|| self.find_untyped_non_const_shift(st, rhs))
+            }
+            Expr::Unary { operand, .. } => self.find_untyped_non_const_shift(st, operand),
+            Expr::Binary { lhs, rhs, .. } => self
+                .find_untyped_non_const_shift(st, lhs)
+                .or_else(|| self.find_untyped_non_const_shift(st, rhs)),
+            _ => None,
+        }
+    }
+
+    fn is_untyped_int_const_operand(&self, st: &FnState, e: &Expr) -> bool {
+        match crate::model::unwrap_parens(e) {
+            Expr::Lit { kind: hy_syntax::LitKind::Int(_), .. } => true,
+            Expr::Ident { name, .. } => {
+                if self.lookup_binding(st, name).is_some() {
+                    return false;
+                }
+                if let Some(decl) = self.file.decls.iter().find_map(|d| match d {
+                    hy_syntax::Decl::Const(c) if c.name == *name => Some(c),
+                    _ => None,
+                }) {
+                    return decl.ty.is_none();
+                }
+                false
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_int_const_operand(st, lhs) && self.is_untyped_int_const_operand(st, rhs)
+            }
+            Expr::Unary { operand, .. } => self.is_untyped_int_const_operand(st, operand),
+            _ => false,
         }
     }
 }
