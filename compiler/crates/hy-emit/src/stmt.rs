@@ -1309,6 +1309,17 @@ impl Emitter {
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
         let e = Self::peel_parens(e);
+        if let Expr::Ident { name, .. } = e {
+            return self.bindings.get(name).copied().unwrap_or(BindingKind::Plain);
+        }
+        if let Expr::Field { base, name, .. } = e {
+            return self
+                .user_struct_name_of(base)
+                .and_then(|sn| self.n5_structs.get(sn))
+                .and_then(|fs| fs.iter().find(|f| &f.name == name))
+                .and_then(|f| self.binding_kind_of_ty(&f.ty))
+                .unwrap_or(BindingKind::Plain);
+        }
         if matches!(e, Expr::MapLit { .. }) {
             return BindingKind::Map;
         }
@@ -1381,60 +1392,20 @@ impl Emitter {
     /// make(chan ...), or a function returning a channel). Channel ranges in
     /// Go permit only one iteration variable and bind the received value directly.
     fn is_channel_expr(&self, e: &Expr) -> bool {
-        match e {
-            Expr::Ident { name, .. } => {
-                matches!(self.bindings.get(name), Some(BindingKind::Chan))
-            }
-            Expr::Paren { inner, .. } => self.is_channel_expr(inner),
-            Expr::Call { .. } | Expr::Try { .. } => {
-                self.binding_kind_of(e) == BindingKind::Chan
-            }
-            _ => false,
-        }
+        self.binding_kind_of(e) == BindingKind::Chan
     }
 
     /// Whether an expression evaluates to a map (`map[K]V` local/param,
     /// map literal, `make(map…)` or a call whose result is a map). Single-var
     /// `for k in m` binds the key (SPEC LX13, #2945).
     fn is_map_expr(&self, e: &Expr) -> bool {
-        match Self::peel_parens(e) {
-            Expr::Ident { name, .. } => {
-                matches!(self.bindings.get(name), Some(BindingKind::Map))
-            }
-            e @ (Expr::Call { .. } | Expr::Try { .. } | Expr::StructLit { .. } | Expr::MapLit { .. }) => {
-                self.binding_kind_of(e) == BindingKind::Map
-            }
-            _ => false,
-        }
+        self.binding_kind_of(e) == BindingKind::Map
     }
 
     /// Whether an expression evaluates to a set (`set[T]`). Set ranges in
     /// Go iterate over the underlying map (`s.m`).
     pub(crate) fn is_set_expr(&self, e: &Expr) -> bool {
-        let e = Self::peel_parens(e);
-        match e {
-            Expr::Ident { name, .. } => {
-                matches!(self.bindings.get(name), Some(BindingKind::Set))
-            }
-            Expr::Field { base, name, .. } => {
-                // Recursive since #1553: `o.sub.seen` is a set field of a
-                // nested struct, not just `o.seen`. The single-hop read
-                // made `len(o.sub.seen)` / `delete(o.sub.seen, k)` fall
-                // through to raw Go builtins on the `set[T]` wrapper.
-                if let Some(sn) = self.user_struct_name_of(base.as_ref()) {
-                    if let Some(fields) = self.struct_fields.get(sn) {
-                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                            return fty.starts_with("set[") || fty == "set";
-                        }
-                    }
-                }
-                false
-            }
-            Expr::Call { .. } | Expr::Try { .. } | Expr::StructLit { .. } => {
-                self.binding_kind_of(e) == BindingKind::Set
-            }
-            _ => false,
-        }
+        self.binding_kind_of(e) == BindingKind::Set
     }
 
     // -----------------------------------------------------------------------
