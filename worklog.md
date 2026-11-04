@@ -1659,3 +1659,12 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 375 -> 377 (+2 test files). Final main dd30466a, tree clean, remote asserts green; replies posted per PR; no silent closes.
 - NEXT TICK QUEUE: #937 (magomedta, 14.5d, +449 — big; budget a full tick or split) -> #3499 (NO tests — scrutinize) -> #3503 -> DUP CHECK: #2940 vs landed #3145 (copy widths) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
 - DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 86 — 2026-11-04 10:10 tick (1 landed: #937 salvaged) — 14.5d saga item resolved
+
+- Full recycle; env restored. scan capped (cap-or-skip, S85 queue). approve 10/10.
+- LANDED:
+  99dd2ffa Merge PR #937 (magomedta, fixes #936) — new(T) type-operand validation (HYB-E2005) + new_kind named-type resolution + print/println void-value rejection (HYB-E1002) + legal acceptance pins. GATE FAIL on first battery (8 tests: expected E2005, got E1002): the PR's make-size arm was superseded while queued — 641a5514 (fixes #2693, Dimank92) landed non-integer make sizes under E1002 + classify_make_size E2005 covers negative-const/len>cap; all three verified empirically on pre-merge main; PR's second "make" arm was an unreachable duplicate. SALVAGE FIXUP (credited): dropped unreachable arm + 7 duplicate make tests, kept fresh new/print/println coverage. 378 suites.
+- Suite trajectory: 377 -> 378. Final main 99dd2ffa, tree clean, remote asserts green; reply posted with full supersession evidence; no silent closes.
+- NEXT TICK QUEUE: #3499 (NO tests — scrutinize hard, manual repro mandatory) -> #3503 -> DUP CHECK: #2940 vs landed #3145 (copy widths) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
