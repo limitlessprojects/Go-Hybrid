@@ -5445,9 +5445,20 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// Family A (#425): `if cond` and `for cond` require a boolean condition.
+    /// Family A (#425, #3155): `if cond` and `for cond` require a boolean condition.
     fn check_bool_condition(&mut self, cond: &Expr, construct: &str) {
         self.check_single_value_position(cond, "a boolean condition", false);
+        if matches!(unwrap_parens(cond), Expr::Lit { kind: LitKind::Nil, .. }) {
+            self.emit_e1002(
+                cond.span(),
+                format!(
+                    "non-boolean condition `nil` (untyped nil) in `{}` statement — Go requires a `bool` condition (HYB-E1002)",
+                    construct
+                ),
+                "compare the value explicitly (e.g. `x != nil`) or pass a `bool` expression",
+            );
+            return;
+        }
         let k = self.kind_of_expr(cond);
         if !matches!(k, OpKind::Unknown | OpKind::Bool) {
             self.emit_e1002(
