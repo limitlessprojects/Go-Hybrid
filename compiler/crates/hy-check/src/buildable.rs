@@ -1152,7 +1152,20 @@ impl<'a> Collector<'a> {
     /// are known; everything else (conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
-        if let Some((_, _, array_ty)) = bare.as_array_lit() {
+        if let Some((len_opt, inner_elem, array_ty)) = bare.as_array_lit() {
+            // #3599: For `[...]int{1, 2, 3}`, len_opt is None; compute length from items.len().
+            // For `[N]int{1, 2, 3}` where N is a constant, fold N to its integer length.
+            if let Some(l) = len_opt {
+                if let Some(v) = crate::const_overflow::const_int_value(l)
+                    .or_else(|| self.ck.const_int_value_at(l, l.span().start, 0))
+                {
+                    if v >= 0 {
+                        return Some(format!("[{}]{}", v, inner_elem.render()));
+                    }
+                }
+            } else if let Expr::SliceLit { items, .. } = bare {
+                return Some(format!("[{}]{}", items.len(), inner_elem.render()));
+            }
             return Some(array_ty.render());
         }
         match bare {
