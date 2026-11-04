@@ -1687,3 +1687,13 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 378 -> 379. Main d6507a52 -> 457e7f22 (+ worklog commit), tree clean.
 - DUP CHECK (executed post-merge, in budget): #2982 vs #3058 — CONFIRMED DUPLICATE (same kinds_conflict arm-split, same fixes #2962). Empirical on main 457e7f22: all three #2962 repros still pass 0 diagnostics -> family FRESH, exactly one claimant carries it. Canonical = #2982 (first claimant, 9-test pin); written dup-evidence reply posted on #3058 with revisit-on-differentiation clause. #2976/#2978 dup pair untouched this tick.
 - NEXT TICK QUEUE: #2982 (canonical #2962 fix, verify + land) -> #2976 vs #2978 dup check -> #1718/#1719/#3441/#3428/#3435/#3160 -> re-scan Pareto top (fresh #3551/#3550/#3547/#3581 score-9 batch). Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+
+## Session 90 — 2026-11-04 14:10 tick (1 landed: #2982, the #2962 canonical)
+
+- Full recycle again (repo image rolled back to session-44 snapshot; remote truth intact). env rebuilt, tarball re-cached. scan fresh, approve 11/11.
+- S89 post-mortem: tool outage killed the tick mid-battery; uncommitted trial-merge state lost with the recycle — no remote impact, protocol-safe.
+- LANDED: #2982 (nyxlabs29-cyber, fixes #2962) -> merge dd5d6c8a. Canonical claimant of the #2962 family per S88 dup check (#3058 duplicate, evidence reply posted). kinds_conflict arm-split: (Interface, _) => false stays, (_, Interface) => true after the Void fail-open; equality path untouched (both-directions rule).
+- Repro evidence on merged binary: all three #2962 shapes now error[HYB-E1002] (var-init / recover() arg / return recover()); concrete->any, a == 1, a != nil still 0 diagnostics.
+- Battery: build 0 new warnings; workspace 380 suites / 2714 passed / 0 failed (any_to_concrete_2962 9/9); corpus 135/135, tripwire not fired; census 7/7 (135 unchanged — no fixtures in this PR); differential FULL 45/45 + 90/90.
+- Suite trajectory: 379 -> 380. Main 00796980 -> dd5d6c8a (+ worklog), tree clean.
+- NEXT TICK QUEUE: #2976 vs #2978 dup check (copy/widths family) -> #1718/#1719/#3441/#3428/#3435/#3160 -> Pareto top (fresh #3551/#3550/#3547/#3581 score-9 batch, all 0-behind). Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
