@@ -1,7 +1,8 @@
-use hy_check::Verdict;
+use hy_check::check_file;
+use hy_syntax::parse_file;
 
 fn check(src: &str) -> hy_check::CheckResult {
-    hy_check::check_source("test.hy", src)
+    check_file(&parse_file("test.hy", src).unwrap())
 }
 
 fn error_codes(r: &hy_check::CheckResult) -> Vec<String> {
@@ -21,14 +22,14 @@ fn rejects(src: &str) {
         src,
         cs
     );
-    assert_eq!(r.verdict, Verdict::Reject, "verdict for {:?}", src);
+    assert_eq!(r.verdict, hy_check::Verdict::Reject, "verdict for {:?}", src);
 }
 
 fn accepts(src: &str) {
     let r = check(src);
     let cs = error_codes(&r);
     assert!(cs.is_empty(), "must accept {:?}, got {:?}", src, cs);
-    assert_eq!(r.verdict, Verdict::Accept, "verdict for {:?}", src);
+    assert_eq!(r.verdict, hy_check::Verdict::Accept, "verdict for {:?}", src);
 }
 
 // ---------------------------------------------------------------------------
