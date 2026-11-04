@@ -1298,6 +1298,8 @@ impl Emitter {
             }
             if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first() {
                 self.register_var_ty(&names[0], t);
+            } else if let Some(sn) = self.user_struct_name_of(&values[0]).map(str::to_string) {
+                self.var_struct.insert(names[0].clone(), sn);
             }
         }
         for (name, is_ptr) in names.iter().zip(ptr_flags) {
@@ -1678,8 +1680,11 @@ impl Emitter {
                         return m.result;
                     }
                 }
-                let (_, fty) = self.struct_fields.get(self.user_struct_name_of_place(base)?)?.iter().find(|(f, _)| f == name)?;
-                super::shapes::SHAPES.iter().find(|(k, _)| *k == fty).map(|(k, _)| *k)
+                let f = self.n5_structs.get(self.user_struct_name_of_place(base)?)?.iter().find(|f| &f.name == name)?;
+                match self.binding_kind_of_ty(&f.ty) {
+                    Some(BindingKind::ForeignTy(t)) => Some(t),
+                    _ => None,
+                }
             }
             PlaceKind::AddrOf { base } => self.type_of_place(base),
             PlaceKind::Index { .. } => None,
@@ -1690,7 +1695,11 @@ impl Emitter {
         match &p.kind {
             PlaceKind::Ident(vn) => self.var_struct.get(vn).map(String::as_str),
             PlaceKind::AddrOf { base } => self.user_struct_name_of_place(base),
-            PlaceKind::Field { base, name } => self.struct_fields.get(self.user_struct_name_of_place(base)?)?.iter().find(|(f, _)| f == name).and_then(|(_, fty)| self.struct_fields.contains_key(fty).then_some(fty.as_str())),
+            PlaceKind::Field { base, name } => {
+                let f = self.n5_structs.get(self.user_struct_name_of_place(base)?)?.iter().find(|f| &f.name == name)?;
+                let fty = super::base_ty_name(self.resolve_type_alias(&f.ty))?;
+                self.struct_fields.get_key_value(fty.as_str()).map(|(k, _)| k.as_str())
+            }
             _ => None,
         }
     }
