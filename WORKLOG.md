@@ -48,3 +48,11 @@
 - Landed PR #3389 -> 59bba45d (runtime/go/hybench: minVal=MaxInt64 sentinel, NaN fail-closed, uint64 bucket hi clamp; fixes #3388, Shokun123). ALL-GREEN 398 suites.
 - Suites 396 -> 398. Differential 45/45 + 90/90 all three landings. Worklog: this commit.
 - Next queue: #3362 -> #3366 -> #3611 -> #1811 -> #3438 -> #3570 -> #3441 -> #3586(behind 12) -> #3414 -> #3351 -> #3423(behind 12) -> #3472.
+
+## Session 99 — 2026-11-05 01:10 UTC+8 tick
+- approve 7/7 ok; scan ok.
+- Landed PR #3683 -> ba3e41c6 (hy-emit: binding_kind_of unwraps Move/AddrOf, generic call head strips [T], make/new classification hardened; fixes #3681, aswadi). ALL-GREEN 399 suites.
+- Landed PR #3682 -> b8a83464 (hy-check: call_shape new arm keeps name[T] via type_arg_ty, ty_of_expr new(T) -> Pointer(T), guarded vs user fn new; fixes #3680, aswadi). ALL-GREEN 400 suites.
+- Landed PR #3156 -> f91390bd (hy-check: untyped nil condition in if/for/match guard rejects HYB-E1002 fail-closed; fixes #3155, Dimank92). ALL-GREEN 401 suites.
+- Suites 398 -> 401. Differential 45/45 + 90/90 all three landings. Worklog: this commit.
+- Next queue: #3153 -> #3076 -> #2592 -> #3168 -> #3238 -> #3676 -> #3233 -> #3070 -> #3438 -> #3570 -> #3441.
