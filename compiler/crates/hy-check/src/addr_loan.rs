@@ -43,14 +43,11 @@ fn is_slot_loan_or_alias_expr(
     if allow_addr_root && is_slot_loan_expr(ck, st, e) {
         return true;
     }
-    match unwrap_parens(e) {
-        Expr::Ident { name, .. } => ck.lookup_binding(st, name).is_some_and(|b| b.slot_loan),
-        Expr::Move { operand, .. } => match unwrap_parens(operand) {
-            Expr::Ident { name, .. } => ck.lookup_binding(st, name).is_some_and(|b| b.slot_loan),
-            _ => false,
-        },
-        _ => false,
+    let mut cur = e;
+    while let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = cur {
+        cur = inner;
     }
+    matches!(cur, Expr::Ident { name, .. } if ck.lookup_binding(st, name).is_some_and(|b| b.slot_loan))
 }
 
 impl<'a> Checker<'a> {
@@ -82,8 +79,8 @@ impl<'a> Checker<'a> {
     /// After `process_assign`: `x = &m[k]` or `x = slot` makes `x` a slot loan;
     /// a whole-value update (`x = T{...}`) to an already-active slot loan preserves
     /// `slot_loan` because the emitter keeps the O8 store-back active for `x` until
-    /// its last use or a shadowing declaration. Loan marking only applies when all
-    /// assignment targets are identifiers matching values.
+    /// its last use or a shadowing declaration. Direct `&m[k]` roots require all
+    /// targets to be identifiers; slot-loan aliases propagate to any identifier target.
     pub(crate) fn mark_slot_loans_assign(
         &self,
         st: &mut FnState,
@@ -91,15 +88,13 @@ impl<'a> Checker<'a> {
         op: AssignOp,
         values: &[hy_syntax::Expr],
     ) {
-        if op != AssignOp::Assign
-            || targets.len() != values.len()
-            || !targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)))
-        {
+        if op != AssignOp::Assign || targets.len() != values.len() {
             return;
         }
+        let allow_addr_root = targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)));
         let flags: Vec<bool> = values
             .iter()
-            .map(|v| is_slot_loan_or_alias_expr(self, st, v, true))
+            .map(|v| is_slot_loan_or_alias_expr(self, st, v, allow_addr_root))
             .collect();
         for (t, is_loan) in targets.iter().zip(flags) {
             if let PlaceKind::Ident(name) = &t.kind {
