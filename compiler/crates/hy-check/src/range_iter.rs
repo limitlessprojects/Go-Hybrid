@@ -376,7 +376,7 @@ impl<'a> Checker<'a> {
     /// The bound's INTEGER type when a typed expression fixes it — `None`
     /// for untyped literals and untyped consts, which adapt to the
     /// counter's type in the lowering (and in Go's constant arithmetic).
-    fn typed_int_bound(&self, st: &FnState, e: &Expr) -> Option<String> {
+    pub(crate) fn typed_int_bound(&self, st: &FnState, e: &Expr) -> Option<String> {
         match unwrap_parens_and_move(e) {
             Expr::Lit { .. } => None,
             Expr::Ident { name, .. } => {
@@ -455,6 +455,16 @@ impl<'a> Checker<'a> {
                             }
                         {
                             return Some("int".to_string());
+                        }
+                        if matches!(name.as_str(), "min" | "max")
+                            && !self.type_aliases.contains_key(name.as_str())
+                        {
+                            if let Some(w) = args.iter().find_map(|a| self.typed_int_bound(st, &a.value)) {
+                                return Some(w);
+                            }
+                            if !args.is_empty() && args.iter().all(|a| self.non_integer_bound_kind(st, &a.value).is_none()) {
+                                return Some("int".to_string());
+                            }
                         }
                     }
                 }
