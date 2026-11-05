@@ -39,6 +39,11 @@ pub(crate) enum ConstKeyVal {
 }
 
 impl ConstKeyVal {
+    pub(crate) fn from_f64(f: f64) -> Self {
+        let canonical = if f == 0.0 { 0.0 } else { f };
+        ConstKeyVal::Float(canonical.to_bits())
+    }
+
     pub(crate) fn render(&self) -> String {
         match self {
             ConstKeyVal::Int(v) => format!("{v}"),
@@ -374,7 +379,16 @@ impl<'a> Checker<'a> {
                     (Some(t), TypeShape::Unknown) => self.shape_of_type(t),
                     (_, s) => s,
                 };
-                let ty = l.ty.clone().or_else(|| self.ty_of_expr(&pre_st, val));
+                let ty = l
+                    .ty
+                    .clone()
+                    .or_else(|| self.ty_of_expr(&pre_st, val))
+                    .or_else(|| self.composite_type_expr(&pre_st, val))
+                    .or_else(|| {
+                        (!immutable)
+                            .then(|| self.default_untyped_local_ty(&pre_st, val))
+                            .flatten()
+                    });
                 let rhs_slot_loan = match unwrap_parens(val) {
                     Expr::Ident { name: src, .. } => {
                         self.lookup_binding(&pre_st, src).is_some_and(|b| b.slot_loan)
@@ -520,24 +534,9 @@ impl<'a> Checker<'a> {
                 } else if let Some(elem_ty) = elem {
                     self.check_type_expr_with_state(Some(st), elem_ty);
                     let elem_ty = *elem_ty.clone();
-                    let resolved_elem = self.resolve_type_alias(&elem_ty);
                     for i in items {
                         self.check_const_overflow_init("slice literal element", &elem_ty, i, Some(st));
-                        if let Expr::SliceLit {
-                            elem: None,
-                            items: sub_items,
-                            span: sub_span,
-                        } = unwrap_parens(i)
-                        {
-                            if matches!(resolved_elem, TypeExpr::Array { .. }) {
-                                self.check_array_lit_emit_guard(
-                                    Some(st),
-                                    &resolved_elem,
-                                    sub_items,
-                                    *sub_span,
-                                );
-                            }
-                        }
+                        self.check_elided_slice_slot_emit_guard(Some(st), &elem_ty, i);
                     }
                 }
                 for i in items {
@@ -562,6 +561,8 @@ impl<'a> Checker<'a> {
                 for (k, v) in entries {
                     self.check_const_overflow_init("map literal key", &key_ty, k, Some(st));
                     self.check_const_overflow_init("map literal value", &val_ty, v, Some(st));
+                    self.check_elided_slice_slot_emit_guard(Some(st), &key_ty, k);
+                    self.check_elided_slice_slot_emit_guard(Some(st), &val_ty, v);
                     self.check_expr_emit_guard(st, k);
                     self.check_expr_emit_guard(st, v);
                 }
@@ -1221,32 +1222,38 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        let resolved_inner = self.resolve_type_alias(inner_elem);
         for i in items {
             self.check_const_overflow_init("array literal element", inner_elem, i, st);
-            if let Expr::SliceLit {
-                elem: None,
-                items: sub_items,
-                span: sub_span,
-            } = unwrap_parens(i)
-            {
-                match &resolved_inner {
-                    TypeExpr::Array { .. } => {
-                        self.check_array_lit_emit_guard(st, &resolved_inner, sub_items, *sub_span);
-                    }
-                    TypeExpr::Slice { elem: sub_elem, .. } => {
-                        for sub_i in sub_items {
-                            self.check_const_overflow_init(
-                                "slice literal element",
-                                sub_elem,
-                                sub_i,
-                                st,
-                            );
-                        }
-                    }
-                    _ => {}
+            self.check_elided_slice_slot_emit_guard(st, inner_elem, i);
+        }
+    }
+
+    fn check_elided_slice_slot_emit_guard(
+        &mut self,
+        st: Option<&FnState>,
+        slot_ty: &TypeExpr,
+        item: &Expr,
+    ) {
+        let Expr::SliceLit {
+            elem: None,
+            items: sub_items,
+            span: sub_span,
+        } = unwrap_parens(item)
+        else {
+            return;
+        };
+        let resolved_slot = self.resolve_type_alias(slot_ty);
+        match &resolved_slot {
+            TypeExpr::Array { .. } => {
+                self.check_array_lit_emit_guard(st, &resolved_slot, sub_items, *sub_span);
+            }
+            TypeExpr::Slice { elem: sub_elem, .. } => {
+                for sub_i in sub_items {
+                    self.check_const_overflow_init("slice literal element", sub_elem, sub_i, st);
+                    self.check_elided_slice_slot_emit_guard(st, sub_elem, sub_i);
                 }
             }
+            _ => {}
         }
     }
 
@@ -1774,27 +1781,272 @@ impl<'a> Checker<'a> {
         if let Some(operand) = as_addr_of(bare) {
             return self.const_array_len_at(operand, use_pos, depth + 1);
         }
+        if let Some(ty) = self.expr_array_type_at(bare, use_pos, depth + 1) {
+            if let Some(len) = self.array_len_of_ty(&ty) {
+                return Some(len);
+            }
+        }
+        self.array_lit_len(bare, depth + 1)
+    }
+
+    /// Resolve the static `TypeExpr` of `expr` at `use_pos` so composite array
+    /// operands (`a[i][j]`, `s.arr[i]`, `f()[i]`, `s[0].arr[i]`, `(&a)[i][j]`,
+    /// `m[k][i]`) carry their fixed array length into `const_array_len_at`.
+    fn expr_array_type_at(
+        &self,
+        expr: &Expr,
+        use_pos: hy_diag::Pos,
+        depth: usize,
+    ) -> Option<TypeExpr> {
+        if depth > 32 {
+            return None;
+        }
+        let bare = unwrap_parens(expr);
+        if let Some(operand) = as_addr_of(bare) {
+            let inner = self.expr_array_type_at(operand, use_pos, depth + 1)?;
+            return Some(TypeExpr::Pointer {
+                to: Box::new(inner),
+                span: bare.span(),
+            });
+        }
         match bare {
-            Expr::Ident { name, span: id_span, .. } => {
+            Expr::Move { operand, .. } | Expr::Try { operand, .. } => {
+                self.expr_array_type_at(operand, use_pos, depth + 1)
+            }
+            Expr::Ident {
+                name,
+                span: id_span,
+                ..
+            } => {
                 if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
                     if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
                         if let Some(ty) = sight.ty {
-                            if let Some(len) = self.array_len_of_ty(ty) {
-                                return Some(len);
-                            }
+                            return Some(ty.clone());
                         }
                         if let Some(value) = sight.value {
-                            if let Some(len) = self.const_array_len_at(value, use_pos, depth + 1) {
-                                return Some(len);
-                            }
+                            return self.expr_array_type_at(value, use_pos, depth + 1);
                         }
                     }
                     return None;
                 }
-                self.param_array_len_at(name, id_span.start)
+                if let Some(pty) = self.param_type_at(name, id_span.start) {
+                    return Some(pty);
+                }
+                if let Some(b) = self.consts.get(name.as_str()) {
+                    if let Some(ty) = &b.ty {
+                        return Some(ty.clone());
+                    }
+                    if let Some(val) = self.const_values.get(name.as_str()) {
+                        return self.expr_array_type_at(val, use_pos, depth + 1);
+                    }
+                }
+                None
             }
-            other => self.array_lit_len(other, depth + 1),
+            Expr::SliceLit {
+                elem: Some(elem),
+                items,
+                span,
+            } => {
+                if let Some((len_opt, inner_elem, arr_ty)) = bare.as_array_lit() {
+                    if len_opt.is_some() {
+                        return Some(arr_ty.clone());
+                    }
+                    return Some(TypeExpr::Array {
+                        len: Some(Box::new(Expr::Lit {
+                            kind: hy_syntax::LitKind::Int(items.len().to_string()),
+                            span: *span,
+                        })),
+                        elem: Box::new(inner_elem.clone()),
+                        span: *span,
+                    });
+                }
+                match self.resolve_type_alias(elem) {
+                    TypeExpr::Array {
+                        len: Some(len),
+                        elem: inner_elem,
+                        span: a_span,
+                    } => Some(TypeExpr::Array {
+                        len: Some(len),
+                        elem: inner_elem,
+                        span: a_span,
+                    }),
+                    TypeExpr::Array {
+                        len: None,
+                        elem: inner_elem,
+                        span: a_span,
+                    } => Some(TypeExpr::Array {
+                        len: Some(Box::new(Expr::Lit {
+                            kind: hy_syntax::LitKind::Int(items.len().to_string()),
+                            span: *span,
+                        })),
+                        elem: inner_elem,
+                        span: a_span,
+                    }),
+                    _ => Some(TypeExpr::Slice {
+                        elem: elem.clone(),
+                        span: *span,
+                    }),
+                }
+            }
+            Expr::StructLit { ty, .. } => ty.clone(),
+            Expr::MapLit {
+                key, value, span, ..
+            } => Some(TypeExpr::Map {
+                key: key.clone(),
+                value: value.clone(),
+                span: *span,
+            }),
+            Expr::Index { base, .. } => {
+                let base_ty = self.expr_array_type_at(base, use_pos, depth + 1)?;
+                match self.peel_pointer_and_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(*elem),
+                    TypeExpr::Map { value, .. } => Some(*value),
+                    _ => None,
+                }
+            }
+            Expr::Slice { base, span, .. } => {
+                let base_ty = self.expr_array_type_at(base, use_pos, depth + 1)?;
+                match self.peel_pointer_and_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        Some(TypeExpr::Slice {
+                            elem,
+                            span: *span,
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            Expr::Field { base, name, .. } => {
+                let base_ty = self.expr_array_type_at(base, use_pos, depth + 1)?;
+                let resolved = self.resolve_type_alias(&base_ty);
+                self.struct_fields_for_type(&resolved)?
+                    .into_iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, t)| t)
+            }
+            Expr::Receive { chan, .. } => {
+                let chan_ty = self.expr_array_type_at(chan, use_pos, depth + 1)?;
+                match self.peel_pointer_and_alias(&chan_ty) {
+                    TypeExpr::Chan { elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            Expr::Call { callee, args, span } => match unwrap_parens(callee) {
+                Expr::FnLit { results, .. } => results.first().map(|r| r.ty.clone()),
+                Expr::Ident {
+                    name,
+                    span: id_span,
+                } => {
+                    if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                        if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
+                            if let Some(ty) = sight.ty {
+                                if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(ty) {
+                                    return results.first().cloned();
+                                }
+                            }
+                            if let Some(val) = sight.value {
+                                if let Expr::FnLit { results, .. } = unwrap_parens(val) {
+                                    return results.first().map(|r| r.ty.clone());
+                                }
+                            }
+                        }
+                        return None;
+                    }
+                    if let Some(pty) = self.param_type_at(name, id_span.start) {
+                        if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&pty) {
+                            return results.first().cloned();
+                        }
+                        return None;
+                    }
+                    if name == "make" {
+                        let first = args.first()?;
+                        return match unwrap_parens(&first.value) {
+                            Expr::Ident { name: tname, .. } => {
+                                self.type_aliases.get(tname.as_str()).cloned()
+                            }
+                            other => self.expr_array_type_at(other, use_pos, depth + 1),
+                        };
+                    }
+                    if name == "new" && args.len() == 1 && !self.fns.contains_key("new") {
+                        let first = &args[0].value;
+                        let inner = match unwrap_parens(first) {
+                            Expr::Ident {
+                                name: tname,
+                                span: tspan,
+                            } => Some(TypeExpr::Named {
+                                name: tname.clone(),
+                                span: *tspan,
+                            }),
+                            other => self.expr_array_type_at(other, use_pos, depth + 1),
+                        }?;
+                        return Some(TypeExpr::Pointer {
+                            to: Box::new(inner),
+                            span: *span,
+                        });
+                    }
+                    let head = Self::base_named_type_str(name);
+                    self.fns
+                        .get(name.as_str())
+                        .or_else(|| self.fns.get(head))
+                        .filter(|f| f.results.len() == 1)
+                        .map(|f| f.results[0].ty.clone())
+                }
+                Expr::Field { base, name, .. } => {
+                    let head = Self::base_named_type_str(name);
+                    if let Expr::Ident {
+                        name: root,
+                        span: rspan,
+                    } = unwrap_parens(base)
+                    {
+                        if self.resolve_local_binding_at(root, rspan.start).is_none()
+                            && self.param_type_at(root, rspan.start).is_none()
+                        {
+                            let full = format!("{}.{}", root, head);
+                            if let Some(f) = self.fns.get(full.as_str()) {
+                                if f.results.len() == 1 {
+                                    return Some(f.results[0].ty.clone());
+                                }
+                            }
+                        }
+                    }
+                    let base_ty = self.expr_array_type_at(base, use_pos, depth + 1)?;
+                    let peeled = self.peel_pointer_and_alias(&base_ty);
+                    let sn = Self::base_named_type(&peeled)?;
+                    self.method_decls
+                        .get(&(sn, head.to_string()))
+                        .filter(|m| m.results.len() == 1)
+                        .map(|m| m.results[0].ty.clone())
+                }
+                _ => None,
+            },
+            _ => None,
         }
+    }
+
+    fn param_type_at(&self, name: &str, use_pos: hy_diag::Pos) -> Option<TypeExpr> {
+        for decl in &self.file.decls {
+            if let hy_syntax::Decl::Fn(f) = decl {
+                if span_contains(f.span, use_pos) {
+                    if let Some(recv) = &f.receiver {
+                        if recv.name == name {
+                            return Some(recv.ty.clone());
+                        }
+                    }
+                    for p in &f.params {
+                        if p.name == name {
+                            return Some(p.ty.clone());
+                        }
+                    }
+                    for r in &f.results {
+                        if r.name.as_deref() == Some(name) {
+                            return Some(r.ty.clone());
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        None
     }
 
     /// The length carried by an array type (`[3]int`, `*[3]int`, aliases), or
@@ -1833,24 +2085,6 @@ impl<'a> Checker<'a> {
             TypeExpr::Array { len: None, .. } => Some(items.len() as i128),
             _ => None,
         }
-    }
-
-    /// Declared length of the fixed-size array parameter `name`, when the use
-    /// site sits inside that function.
-    fn param_array_len_at(&self, name: &str, use_pos: hy_diag::Pos) -> Option<i128> {
-        for decl in &self.file.decls {
-            if let hy_syntax::Decl::Fn(f) = decl {
-                if span_contains(f.span, use_pos) {
-                    for p in &f.params {
-                        if p.name == name {
-                            return self.array_len_of_ty(&p.ty);
-                        }
-                    }
-                    return None;
-                }
-            }
-        }
-        None
     }
 
     fn scan_block_for_local_const<'b>(
@@ -2510,7 +2744,7 @@ impl<'a> Checker<'a> {
                 LitKind::Str(s) | LitKind::RawStr(s) => Some(ConstKeyVal::Str(s.clone())),
                 LitKind::Bool(b) => Some(ConstKeyVal::Bool(*b)),
                 LitKind::Float(s) => {
-                    s.replace('_', "").parse::<f64>().ok().map(|f| ConstKeyVal::Float(f.to_bits()))
+                    s.replace('_', "").parse::<f64>().ok().map(ConstKeyVal::from_f64)
                 }
                 LitKind::Nil => Some(ConstKeyVal::Nil),
             },
@@ -2547,7 +2781,7 @@ impl<'a> Checker<'a> {
                         ConstKeyVal::Int(i) => i.checked_neg().map(ConstKeyVal::Int),
                         ConstKeyVal::Float(bits) => {
                             let f = -f64::from_bits(bits);
-                            Some(ConstKeyVal::Float(f.to_bits()))
+                            Some(ConstKeyVal::from_f64(f))
                         }
                         _ => None,
                     },
@@ -2668,14 +2902,74 @@ impl<'a> Checker<'a> {
             }
             Expr::Call { callee, args, .. } => {
                 if args.len() == 1 && !args[0].spread {
-                    if let Expr::Ident { name, .. } = callee.as_ref() {
+                    if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                        if self.fns.contains_key(name.as_str())
+                            || st.is_some_and(|s| s.env_lookup(name).is_some())
+                        {
+                            return None;
+                        }
+                        if name == "len" {
+                            return self
+                                .const_string_len_at(
+                                    &args[0].value,
+                                    args[0].value.span().start,
+                                    depth + 1,
+                                )
+                                .map(ConstKeyVal::Int);
+                        }
                         let arg_val = self.fold_const_key(&args[0].value, st, depth + 1)?;
-                        match name.as_str() {
-                            "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32"
-                            | "i64" | "int64" | "uint" | "u8" | "uint8" | "byte" | "u16"
-                            | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "rune"
-                            | "uintptr" => match arg_val {
-                                ConstKeyVal::Int(_) => Some(arg_val),
+                        let target = self
+                            .type_aliases
+                            .get(name.as_str())
+                            .and_then(|ty| match self.resolve_type_alias(ty) {
+                                TypeExpr::Named { name: resolved, .. } => Some(resolved),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| name.clone());
+                        match target.as_str() {
+                            "int" | "isize" | "i8" | "int8" | "i16" | "int16" | "i32"
+                            | "int32" | "i64" | "int64" | "uint" | "usize" | "u8" | "uint8"
+                            | "byte" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64"
+                            | "rune" | "uintptr" => match arg_val {
+                                ConstKeyVal::Int(v) => {
+                                    Some(ConstKeyVal::Int(wrap_int_conversion(v, &target)))
+                                }
+                                ConstKeyVal::Float(bits) => {
+                                    let f = f64::from_bits(bits);
+                                    if f.is_finite()
+                                        && f.fract() == 0.0
+                                        && f >= (i128::MIN as f64)
+                                        && f <= (i128::MAX as f64)
+                                    {
+                                        Some(ConstKeyVal::Int(wrap_int_conversion(
+                                            f as i128, &target,
+                                        )))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            },
+                            "f32" | "float32" => match arg_val {
+                                ConstKeyVal::Float(bits) => {
+                                    let f = (f64::from_bits(bits) as f32) as f64;
+                                    f.is_finite().then(|| ConstKeyVal::from_f64(f))
+                                }
+                                ConstKeyVal::Int(v) => {
+                                    let f = (v as f32) as f64;
+                                    f.is_finite().then(|| ConstKeyVal::from_f64(f))
+                                }
+                                _ => None,
+                            },
+                            "f64" | "float64" => match arg_val {
+                                ConstKeyVal::Float(bits) => {
+                                    let f = f64::from_bits(bits);
+                                    f.is_finite().then(|| ConstKeyVal::from_f64(f))
+                                }
+                                ConstKeyVal::Int(v) => {
+                                    let f = v as f64;
+                                    f.is_finite().then(|| ConstKeyVal::from_f64(f))
+                                }
                                 _ => None,
                             },
                             "string" => match arg_val {
