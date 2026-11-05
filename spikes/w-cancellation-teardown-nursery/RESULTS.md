@@ -1,6 +1,6 @@
 # W-Spike Results — Nursery-Scoped Teardown Obligations & Drain Invariants
 
-**Proposal:** #TBD | **Author:** `@marhabynova` | **Verifiers:** `python3 spikes/w-cancellation-teardown-nursery/teardown_verifier.py --check --live-go` & `python3 -m unittest discover -s spikes/w-cancellation-teardown-nursery/tests -p "test_*.py" -v`
+**Proposal:** #3773 | **Author:** `@marhabynova` | **Verifiers:** `python3 spikes/w-cancellation-teardown-nursery/teardown_verifier.py --check --live-go` & `python3 -m unittest discover -s spikes/w-cancellation-teardown-nursery/tests -p "test_*.py" -v`
 
 ## 1. Pre-Registered Hypotheses & Declared Falsifiers (`H1`–`H3`, `F1`–`F2`)
 
