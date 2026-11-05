@@ -1152,7 +1152,20 @@ impl<'a> Collector<'a> {
     /// are known; everything else (conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
-        if let Some((_, _, array_ty)) = bare.as_array_lit() {
+        if let Some((len_opt, inner_elem, array_ty)) = bare.as_array_lit() {
+            // #3599: For `[...]int{1, 2, 3}`, len_opt is None; compute length from items.len().
+            // For `[N]int{1, 2, 3}` where N is a constant, fold N to its integer length.
+            if let Some(l) = len_opt {
+                if let Some(v) = crate::const_overflow::const_int_value(l)
+                    .or_else(|| self.ck.const_int_value_at(l, l.span().start, 0))
+                {
+                    if v >= 0 {
+                        return Some(format!("[{}]{}", v, inner_elem.render()));
+                    }
+                }
+            } else if let Expr::SliceLit { items, .. } = bare {
+                return Some(format!("[{}]{}", items.len(), inner_elem.render()));
+            }
             return Some(array_ty.render());
         }
         match bare {
@@ -2056,7 +2069,11 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                // `a := [2]int{..}` / `b := a`: an inferred sized array keeps
+                // its length so `a = [3]int{..}`, `take(a)` etc. are compared.
+                if let Some(tn) = self.typed_value_type_name(val).filter(|t| is_sized_array_spelling(t)) {
+                    self.bind_type_name(name, tn);
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
                 }
             }
@@ -2821,10 +2838,37 @@ impl<'a> Collector<'a> {
                 );
                 if type_first_arg {
                     if let Some(first_arg) = args.first() {
+                        // #3248: the expression walk below skips this argument,
+                        // so the type it carries must still go through the
+                        // declared-position walker (`ty()`) explicitly — that
+                        // is where map-key comparability is enforced. Without
+                        // this, `make(chan map[[]int]int, 1)` slipped an
+                        // unhashable map key past the checker inside a
+                        // chan/slice/array wrapper or type alias.
                         match unwrap_parens(&first_arg.value) {
-                            Expr::Ident { name, span } => self.check_named_type_instantiation(name, *span),
-                            Expr::Index { base, index, span } if matches!(unwrap_parens(base), Expr::Ident { name, .. } if self.lookup_kind(name).is_none() && !self.file_consts.contains_key(name) && !self.ck.fns.contains_key(name)) => self.check_named_type_instantiation(&format!("{}[{}]", base.render(), index.render()), *span),
-                            _ => {}
+                            Expr::Ident { name, span } => {
+                                self.check_named_type_instantiation(name, *span);
+                                if let Some(alias_ty) = self.ck.type_aliases.get(name.as_str()) {
+                                    self.ty(alias_ty);
+                                }
+                            }
+                            Expr::Index { base, index, span } if matches!(unwrap_parens(base), Expr::Ident { name, .. } if self.lookup_kind(name).is_none() && !self.file_consts.contains_key(name) && !self.ck.fns.contains_key(name)) => {
+                                self.check_named_type_instantiation(&format!("{}[{}]", base.render(), index.render()), *span);
+                            }
+                            Expr::StructLit { ty: Some(t), .. } => self.ty(t),
+                            Expr::SliceLit { elem: Some(t), .. } => self.ty(t),
+                            Expr::MapLit {
+                                key, value, span, ..
+                            } => {
+                                self.check_map_key_comparable(key, *span);
+                                self.ty(key);
+                                self.ty(value);
+                            }
+                            other => {
+                                if let Some((_, elem, _)) = other.as_array_lit() {
+                                    self.ty(elem);
+                                }
+                            }
                         }
                     }
                 }
@@ -7288,6 +7332,25 @@ impl<'a> Collector<'a> {
                             "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
                         );
                     }
+                    // #3598: `fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to
+                    // `fmt.Fprint*(os.Stderr, ...)` in `hy-emit`. When `os` is shadowed by
+                    // an in-scope parameter, local binding, loop variable, closure argument,
+                    // type parameter, or package-level declaration, emitted Go fails
+                    // downstream compilation (Row 13 BUILDABLE).
+                    if pkg == "fmt"
+                        && matches!(name.as_str(), "eprint" | "eprintln" | "eprintf")
+                        && self.lookup_kind(pkg).is_none()
+                        && self.is_os_shadowed()
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot call `fmt.{}` because `os` is shadowed by an in-scope declaration (HYB-E1002)",
+                                name
+                            ),
+                            "`fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to `os.Stderr`; rename the shadowing `os` binding so `os.Stderr` is accessible",
+                        );
+                    }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -7409,6 +7472,20 @@ impl<'a> Collector<'a> {
                 }
             }
         }
+    }
+
+    /// #3598: `fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to
+    /// `fmt.Fprint*(os.Stderr, ...)` in `hy-emit`. When `os` is shadowed by
+    /// an in-scope parameter, local binding, loop variable, closure argument,
+    /// type parameter, or package-level declaration, emitted Go resolves `os.Stderr`
+    /// to the shadowing entity, causing downstream compilation to fail (Row 13 BUILDABLE).
+    fn is_os_shadowed(&self) -> bool {
+        self.scopes.iter().any(|s| s.contains_key("os"))
+            || self.fn_type_params.contains("os")
+            || self.lookup_kind("os").is_some()
+            || self.ck.pkg_names.contains_key("os")
+            || self.file_consts.contains_key("os")
+            || self.file_untyped_consts.contains("os")
     }
 
     fn check_fn_type_arg_arity(&mut self, fn_key: &str, raw_callee: &str, span: Span) {
