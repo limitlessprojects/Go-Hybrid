@@ -605,6 +605,553 @@ impl<'a> Checker<'a> {
     /// loop-carried moves active; local definitions (`chunk := ...`, corpus 15)
     /// live in inner scopes and are discarded when `scopes` is truncated to
     /// `outer_depth`.
+    fn is_single_iteration_loop(&self, st: &FnState, od: usize, for_stmt: Option<&hy_syntax::Stmt>) -> bool {
+        let Some(hy_syntax::Stmt::For { kind, body, .. }) = for_stmt else {
+            return false;
+        };
+        if let hy_syntax::ForKind::Range { var, lo, hi, inclusive } = kind {
+            if Self::is_loop_var_mutated(var, &body.stmts) || self.stmts_auto_addr_var(st, od, &body.stmts, var, false, &mut (HashSet::new(), HashSet::new())) {
+                return false;
+            }
+            if let (Some(lo_val), Some(hi_val)) = (Self::as_int_lit(lo), Self::as_int_lit(hi)) {
+                let count = if *inclusive {
+                    if hi_val >= lo_val {
+                        hi_val.checked_sub(lo_val).and_then(|d| d.checked_add(1))
+                    } else {
+                        Some(0)
+                    }
+                } else {
+                    if hi_val > lo_val {
+                        hi_val.checked_sub(lo_val)
+                    } else {
+                        Some(0)
+                    }
+                };
+                if let Some(c) = count {
+                    if c <= 1 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn is_loop_var_mutated(var: &str, stmts: &[hy_syntax::Stmt]) -> bool {
+        stmts.iter().any(|s| Self::stmt_mutates_var(s, var))
+    }
+
+    fn stmt_mutates_var(stmt: &hy_syntax::Stmt, var: &str) -> bool {
+        match stmt {
+            hy_syntax::Stmt::Assign { targets, values, .. } => {
+                if targets.iter().any(|t| t.root() == var) {
+                    return true;
+                }
+                values.iter().any(|v| Self::expr_mutates_var(v, var))
+            }
+            hy_syntax::Stmt::Local(l) => {
+                l.values.iter().any(|v| Self::expr_mutates_var(v, var))
+            }
+            hy_syntax::Stmt::Expr { expr, .. } => Self::expr_mutates_var(expr, var),
+            hy_syntax::Stmt::Send { chan, value, .. } => {
+                Self::expr_mutates_var(chan, var) || Self::expr_mutates_var(value, var)
+            }
+            hy_syntax::Stmt::If { init, cond, then, otherwise, .. } => {
+                init.as_ref().map_or(false, |s| Self::stmt_mutates_var(s, var))
+                    || Self::expr_mutates_var(cond, var)
+                    || Self::is_loop_var_mutated(var, &then.stmts)
+                    || otherwise.as_ref().map_or(false, |s| Self::stmt_mutates_var(s, var))
+            }
+            hy_syntax::Stmt::For { kind, body, .. } => {
+                match kind {
+                    hy_syntax::ForKind::While { cond } => {
+                        if Self::expr_mutates_var(cond, var) {
+                            return true;
+                        }
+                    }
+                    hy_syntax::ForKind::Range { lo, hi, .. } => {
+                        if Self::expr_mutates_var(lo, var) || Self::expr_mutates_var(hi, var) {
+                            return true;
+                        }
+                    }
+                    hy_syntax::ForKind::Iterate { expr, .. } => {
+                        if Self::expr_mutates_var(expr, var) {
+                            return true;
+                        }
+                    }
+                    hy_syntax::ForKind::Infinite => {}
+                }
+                Self::is_loop_var_mutated(var, &body.stmts)
+            }
+            hy_syntax::Stmt::Return { values, .. } => {
+                values.iter().any(|v| Self::expr_mutates_var(v, var))
+            }
+            hy_syntax::Stmt::Task { callee, args, .. } => {
+                Self::expr_mutates_var(callee, var)
+                    || args.iter().any(|a| Self::expr_mutates_var(&a.value, var))
+            }
+            hy_syntax::Stmt::Managed { body, .. } => {
+                Self::is_loop_var_mutated(var, &body.stmts)
+            }
+            hy_syntax::Stmt::Match { subject, arms, .. } => {
+                Self::expr_mutates_var(subject, var)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().map_or(false, |g| Self::expr_mutates_var(g, var))
+                            || Self::is_loop_var_mutated(var, &arm.body.stmts)
+                    })
+            }
+            hy_syntax::Stmt::Defer { call, .. } => Self::expr_mutates_var(call, var),
+            hy_syntax::Stmt::Block { block, .. } => Self::is_loop_var_mutated(var, &block.stmts),
+            hy_syntax::Stmt::Select { arms, .. } => arms.iter().any(|arm| {
+                let kind_mutates = match &arm.kind {
+                    hy_syntax::SelectArmKind::Send { chan, value, .. } => {
+                        Self::expr_mutates_var(chan, var) || Self::expr_mutates_var(value, var)
+                    }
+                    hy_syntax::SelectArmKind::Recv { chan, .. } => {
+                        Self::expr_mutates_var(chan, var)
+                    }
+                    hy_syntax::SelectArmKind::Default => false,
+                };
+                kind_mutates || Self::is_loop_var_mutated(var, &arm.body.stmts)
+            }),
+            hy_syntax::Stmt::Break { .. } | hy_syntax::Stmt::Continue { .. } => false,
+        }
+    }
+
+    fn expr_mutates_var(expr: &hy_syntax::Expr, var: &str) -> bool {
+        match expr {
+            hy_syntax::Expr::Ident { .. } | hy_syntax::Expr::Lit { .. } => false,
+            hy_syntax::Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                hy_syntax::InterpPart::Expr(e) => Self::expr_mutates_var(e, var),
+                hy_syntax::InterpPart::Lit(_) => false,
+            }),
+            hy_syntax::Expr::Binary { lhs, rhs, .. } => {
+                Self::expr_mutates_var(lhs, var) || Self::expr_mutates_var(rhs, var)
+            }
+            hy_syntax::Expr::Unary { op, operand, .. } => {
+                if *op == hy_syntax::UnOp::Addr && Self::expr_is_or_touches_var(operand, var) {
+                    return true;
+                }
+                Self::expr_mutates_var(operand, var)
+            }
+            hy_syntax::Expr::AddrOf { operand, .. } => {
+                if Self::expr_is_or_touches_var(operand, var) {
+                    return true;
+                }
+                Self::expr_mutates_var(operand, var)
+            }
+            hy_syntax::Expr::Move { operand, .. } => {
+                if Self::expr_is_or_touches_var(operand, var) {
+                    return true;
+                }
+                Self::expr_mutates_var(operand, var)
+            }
+            hy_syntax::Expr::Try { operand, .. } => Self::expr_mutates_var(operand, var),
+            hy_syntax::Expr::Receive { chan, .. } => Self::expr_mutates_var(chan, var),
+            hy_syntax::Expr::Index { base, index, .. } => {
+                Self::expr_mutates_var(base, var) || Self::expr_mutates_var(index, var)
+            }
+            hy_syntax::Expr::Slice { base, lo, hi, .. } => {
+                Self::expr_mutates_var(base, var)
+                    || lo.as_ref().map_or(false, |e| Self::expr_mutates_var(e, var))
+                    || hi.as_ref().map_or(false, |e| Self::expr_mutates_var(e, var))
+            }
+            hy_syntax::Expr::Field { base, .. } => Self::expr_mutates_var(base, var),
+            hy_syntax::Expr::Call { callee, args, .. } => {
+                Self::expr_mutates_var(callee, var)
+                    || args.iter().any(|a| Self::expr_mutates_var(&a.value, var))
+            }
+            hy_syntax::Expr::StructLit { fields, .. } => {
+                fields.iter().any(|f| Self::expr_mutates_var(&f.value, var))
+            }
+            hy_syntax::Expr::SliceLit { items, .. } => {
+                items.iter().any(|e| Self::expr_mutates_var(e, var))
+            }
+            hy_syntax::Expr::MapLit { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| Self::expr_mutates_var(k, var) || Self::expr_mutates_var(v, var)),
+            hy_syntax::Expr::FnLit { body, .. } => {
+                Self::is_loop_var_mutated(var, &body.stmts)
+            }
+            hy_syntax::Expr::Paren { inner, .. } => Self::expr_mutates_var(inner, var),
+        }
+    }
+
+    fn expr_is_or_touches_var(expr: &hy_syntax::Expr, var: &str) -> bool {
+        match expr {
+            hy_syntax::Expr::Ident { name, .. } => name == var,
+            hy_syntax::Expr::Field { base, .. } => Self::expr_is_or_touches_var(base, var),
+            hy_syntax::Expr::Index { base, .. } => Self::expr_is_or_touches_var(base, var),
+            hy_syntax::Expr::Paren { inner, .. } => Self::expr_is_or_touches_var(inner, var),
+            _ => false,
+        }
+    }
+
+    fn stmts_auto_addr_var(&self, st: &FnState, od: usize, stmts: &[hy_syntax::Stmt], var: &str, nested: bool, sc: &mut (HashSet<String>, HashSet<String>)) -> bool {
+        stmts.iter().any(|s| self.stmt_auto_addr_var(st, od, s, var, nested, sc))
+    }
+    fn stmt_auto_addr_var(&self, st: &FnState, od: usize, stmt: &hy_syntax::Stmt, var: &str, nested: bool, sc: &mut (HashSet<String>, HashSet<String>)) -> bool {
+        use hy_syntax::{ForKind, MatchPattern, SelectArmKind, Stmt};
+        match stmt {
+            Stmt::Assign { values: es, .. } | Stmt::Return { values: es, .. } => es.iter().any(|e| self.expr_auto_addr_var(st, od, e, var, sc)),
+            Stmt::Local(l) => { let h = l.values.iter().any(|e| self.expr_auto_addr_var(st, od, e, var, sc)); (if nested { &mut sc.1 } else { &mut sc.0 }).extend(l.names.iter().filter(|n| n.as_str() != "_").cloned()); h }
+            Stmt::Expr { expr: e, .. } | Stmt::Defer { call: e, .. } => self.expr_auto_addr_var(st, od, e, var, sc),
+            Stmt::Send { chan: a, value: b, .. } => self.expr_auto_addr_var(st, od, a, var, sc) || self.expr_auto_addr_var(st, od, b, var, sc),
+            Stmt::If { init, cond, then, otherwise, .. } => init.as_ref().is_some_and(|s| self.stmt_auto_addr_var(st, od, s, var, true, sc)) || self.expr_auto_addr_var(st, od, cond, var, sc) || self.stmts_auto_addr_var(st, od, &then.stmts, var, true, sc) || otherwise.as_ref().is_some_and(|s| self.stmt_auto_addr_var(st, od, s, var, true, sc)),
+            Stmt::For { kind, body, .. } => (match kind {
+                ForKind::While { cond: e } => self.expr_auto_addr_var(st, od, e, var, sc),
+                ForKind::Iterate { vars, expr } => { let h = self.expr_auto_addr_var(st, od, expr, var, sc); sc.1.extend(vars.iter().filter(|n| n.as_str() != "_").cloned()); h }
+                ForKind::Range { var: v, lo, hi, .. } => { let h = self.expr_auto_addr_var(st, od, lo, var, sc) || self.expr_auto_addr_var(st, od, hi, var, sc); if v != "_" { sc.1.insert(v.clone()); } h }
+                ForKind::Infinite => false,
+            }) || self.stmts_auto_addr_var(st, od, &body.stmts, var, true, sc),
+            Stmt::Task { callee, args, .. } => self.call_auto_addr_var(st, od, callee, args, var, sc),
+            Stmt::Managed { body: b, .. } | Stmt::Block { block: b, .. } => self.stmts_auto_addr_var(st, od, &b.stmts, var, true, sc),
+            Stmt::Match { subject, arms, .. } => self.expr_auto_addr_var(st, od, subject, var, sc) || arms.iter().any(|a| { if let MatchPattern::Path { binding: Some(b), .. } = &a.pattern { if b != "_" { sc.1.insert(b.clone()); } } a.guard.as_ref().is_some_and(|g| self.expr_auto_addr_var(st, od, g, var, sc)) || self.stmts_auto_addr_var(st, od, &a.body.stmts, var, true, sc) }),
+            Stmt::Select { arms, .. } => arms.iter().any(|a| (match &a.kind {
+                SelectArmKind::Send { chan: x, value: y, .. } => self.expr_auto_addr_var(st, od, x, var, sc) || self.expr_auto_addr_var(st, od, y, var, sc),
+                SelectArmKind::Recv { names, chan, .. } => { let c = self.expr_auto_addr_var(st, od, chan, var, sc); sc.1.extend(names.iter().filter(|n| n.as_str() != "_").cloned()); c }
+                SelectArmKind::Default => false,
+            }) || self.stmts_auto_addr_var(st, od, &a.body.stmts, var, true, sc)),
+            Stmt::Break { .. } | Stmt::Continue { .. } => false,
+        }
+    }
+    fn call_auto_addr_var(&self, st: &FnState, od: usize, callee: &Expr, args: &[hy_syntax::CallArg], var: &str, sc: &mut (HashSet<String>, HashSet<String>)) -> bool {
+        self.expr_auto_addr_var(st, od, callee, var, sc) || args.iter().enumerate().any(|(i, a)| self.expr_auto_addr_var(st, od, &a.value, var, sc) || (Self::expr_is_or_touches_var(&a.value, var) && self.callee_param_may_be_ptr(st, od, callee, i, sc)))
+    }
+    fn expr_auto_addr_var(&self, st: &FnState, od: usize, expr: &Expr, var: &str, sc: &mut (HashSet<String>, HashSet<String>)) -> bool {
+        match expr {
+            Expr::Ident { .. } | Expr::Lit { .. } => false,
+            Expr::Interp { parts, .. } => parts.iter().any(|p| matches!(p, hy_syntax::InterpPart::Expr(e) if self.expr_auto_addr_var(st, od, e, var, sc))),
+            Expr::Binary { lhs: a, rhs: b, .. } | Expr::Index { base: a, index: b, .. } => self.expr_auto_addr_var(st, od, a, var, sc) || self.expr_auto_addr_var(st, od, b, var, sc),
+            Expr::Unary { operand: e, .. } | Expr::AddrOf { operand: e, .. } | Expr::Move { operand: e, .. } | Expr::Try { operand: e, .. } | Expr::Receive { chan: e, .. } | Expr::Field { base: e, .. } | Expr::Paren { inner: e, .. } => self.expr_auto_addr_var(st, od, e, var, sc),
+            Expr::Slice { base, lo, hi, .. } => self.expr_auto_addr_var(st, od, base, var, sc) || lo.as_ref().is_some_and(|e| self.expr_auto_addr_var(st, od, e, var, sc)) || hi.as_ref().is_some_and(|e| self.expr_auto_addr_var(st, od, e, var, sc)),
+            Expr::Call { callee, args, .. } => self.call_auto_addr_var(st, od, callee, args, var, sc),
+            Expr::StructLit { fields, .. } => fields.iter().any(|f| self.expr_auto_addr_var(st, od, &f.value, var, sc)),
+            Expr::SliceLit { items, .. } => items.iter().any(|e| self.expr_auto_addr_var(st, od, e, var, sc)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| self.expr_auto_addr_var(st, od, k, var, sc) || self.expr_auto_addr_var(st, od, v, var, sc)),
+            Expr::FnLit { params, body, .. } => { sc.1.extend(params.iter().map(|p| p.name.clone()).filter(|n| n != "_")); self.stmts_auto_addr_var(st, od, &body.stmts, var, true, sc) }
+        }
+    }
+    fn param_is_ptr(&self, params: &[hy_syntax::Param], idx: usize) -> bool {
+        params.get(idx).is_some_and(|p| matches!(self.resolve_type_alias(&p.ty), hy_syntax::TypeExpr::Pointer { .. }) || matches!(&p.ty, hy_syntax::TypeExpr::Named { name, .. } if name.is_empty()))
+    }
+    fn callee_param_may_be_ptr(&self, st: &FnState, od: usize, callee: &Expr, idx: usize, sc: &(HashSet<String>, HashSet<String>)) -> bool {
+        let mut root = callee;
+        while let Expr::Field { base: b, .. } | Expr::Index { base: b, .. } | Expr::Paren { inner: b, .. } = root { root = b; }
+        if matches!(root, Expr::Ident { name, .. } if sc.1.contains(name) || (!sc.0.contains(name) && st.scopes.get(od..).is_some_and(|ss| ss.iter().any(|s| s.contains_key(name))))) { return true; }
+        let callee = crate::model::unwrap_parens(callee);
+        if let Some(hy_syntax::TypeExpr::Fn { params, .. }) = self.ty_of_expr(st, callee).map(|t| self.resolve_type_alias(&t)) { return self.param_is_ptr(&params, idx); }
+        match callee {
+            Expr::Ident { name, .. } => {
+                if self.lookup_binding(st, name).is_some() { return true; }
+                let head = Self::base_named_type_str(name);
+                if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) { return self.param_is_ptr(&f.params, idx); }
+                !(crate::const_init::is_conversion_type_name(name) || crate::const_overflow::fixed_width_int_range(name).is_some() || self.type_aliases.contains_key(name) || self.structs.contains_key(head) || self.enums.contains_key(head)
+                    || matches!(name.as_str(), "len" | "cap" | "append" | "copy" | "delete" | "close" | "panic" | "print" | "println" | "min" | "max" | "clear" | "some" | "new" | "make"))
+            }
+            Expr::Field { base, name, .. } => {
+                let head = Self::base_named_type_str(name);
+                if let Expr::Ident { name: r, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, r).is_none() {
+                        if let Some(f) = self.fns.get(&format!("{r}.{head}")) { return self.param_is_ptr(&f.params, idx); }
+                        if self.known_package(r) { return false; }
+                    }
+                }
+                let rb = self.ty_of_expr(st, base).map(|t| self.resolve_type_alias(&t)).and_then(|t| Self::base_named_type(&t)).or_else(|| match self.shape_of_expr(st, base) {
+                    crate::model::TypeShape::Struct(Some(s)) => Some(s),
+                    crate::model::TypeShape::Pointer(inner) => if let crate::model::TypeShape::Struct(Some(s)) = *inner { Some(s) } else { None },
+                    _ => None,
+                }.map(|s| Self::base_named_type_str(&s).to_string()));
+                if let Some(f) = rb.and_then(|r| self.method_decls.get(&(r, head.to_string()))) { return self.param_is_ptr(&f.params, idx); }
+                let (mut seen, mut ptr) = (false, false);
+                for ((_, m), f) in &self.method_decls { if m == head { seen = true; ptr |= self.param_is_ptr(&f.params, idx); } }
+                ptr || (!seen && matches!(self.shape_of_expr(st, base), crate::model::TypeShape::Unknown | crate::model::TypeShape::Struct(None)))
+            }
+            Expr::FnLit { params, .. } => self.param_is_ptr(params, idx),
+            Expr::SliceLit { elem: Some(_), items, .. } if items.is_empty() => false,
+            _ => true,
+        }
+    }
+
+    fn as_int_lit(expr: &hy_syntax::Expr) -> Option<i64> {
+        match expr {
+            hy_syntax::Expr::Lit {
+                kind: hy_syntax::LitKind::Int(s),
+                ..
+            } => crate::arith::int_lit_value(s).and_then(|v| i64::try_from(v).ok()),
+            hy_syntax::Expr::Paren { inner, .. } => Self::as_int_lit(inner),
+            hy_syntax::Expr::Unary {
+                op: hy_syntax::UnOp::Neg,
+                operand,
+                ..
+            } => Self::as_int_lit(operand).and_then(|v| v.checked_neg()),
+            _ => None,
+        }
+    }
+
+    fn check_loop_backedge_replay(
+        &mut self,
+        iter_st: &FnState,
+        loop_stmts: &[(&hy_syntax::Stmt, usize)],
+        events: &std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>>,
+        in_managed: &dyn Fn(usize) -> bool,
+    ) {
+        let has_loop_carried_state = iter_st
+            .env
+            .iter()
+            .chain(iter_st.scopes.iter().flat_map(|s| s.iter()))
+            .any(|(name, b)| {
+                b.moved.is_some()
+                    || b.slot_loan
+                    || self.non_owned_origin_of(iter_st, name).is_some()
+                    || iter_st.aliases.contains_key(name)
+                    || !iter_st.share_group(name).is_empty()
+            });
+        if !has_loop_carried_state {
+            return;
+        }
+
+        let mut replay_st = iter_st.clone();
+        let diags_len_before = self.diags.len();
+        let managed_blocks_before = self.managed_blocks;
+        let sites_via_managed_before = self.sites_via_managed;
+        let total_sites_before = self.total_sites;
+        let managed_audit_len_before = self.managed_audit.len();
+
+        for (i, (stmt, stmt_idx)) in loop_stmts.iter().enumerate() {
+            let idx = *stmt_idx;
+            let managed = in_managed(idx);
+
+            if let Some(evs) = events.get(&idx) {
+                for ev in evs {
+                    match ev {
+                        crate::walk::ScopeEvent::Push => replay_st.scope_push(),
+                        crate::walk::ScopeEvent::Pop => replay_st.scope_pop(),
+                        crate::walk::ScopeEvent::SelectRecv { names, chan } => {
+                            let elem = match self.shape_of_expr(&replay_st, chan) {
+                                crate::model::TypeShape::Chan(e) => *e,
+                                _ => crate::model::TypeShape::Unknown,
+                            };
+                            for (j, n) in names.iter().enumerate() {
+                                let shape = if j == 0 {
+                                    elem.clone()
+                                } else {
+                                    crate::model::TypeShape::Primitive
+                                };
+                                self.define_binding(
+                                    &mut replay_st,
+                                    n,
+                                    shape,
+                                    None,
+                                    false,
+                                    managed,
+                                    false,
+                                );
+                            }
+                        }
+                        crate::walk::ScopeEvent::MatchBind { name, subject } => {
+                            self.bind_match_arm(&mut replay_st, name, subject, managed);
+                        }
+                    }
+                }
+            }
+
+            if i == 0 {
+                if let hy_syntax::Stmt::For { kind, .. } = stmt {
+                    match kind {
+                        hy_syntax::ForKind::Iterate { vars, expr, .. } => {
+                            let elem = match self.shape_of_expr(&replay_st, expr) {
+                                crate::model::TypeShape::Slice(e) | crate::model::TypeShape::Array(e) => *e,
+                                crate::model::TypeShape::Chan(e) => *e,
+                                crate::model::TypeShape::Map(k, v) => {
+                                    if vars.len() == 1 {
+                                        *k
+                                    } else {
+                                        *v
+                                    }
+                                },
+                                _ => crate::model::TypeShape::Unknown,
+                            };
+                            for (idx_var, v) in vars.iter().enumerate() {
+                                let shape = if idx_var == 0 && vars.len() > 1 {
+                                    crate::model::TypeShape::Primitive
+                                } else {
+                                    elem.clone()
+                                };
+                                self.define_binding(&mut replay_st, v, shape, None, false, managed, false);
+                            }
+                        }
+                        hy_syntax::ForKind::Range { var, .. } => {
+                            self.define_binding(
+                                &mut replay_st,
+                                var,
+                                crate::model::TypeShape::Primitive,
+                                None,
+                                false,
+                                managed,
+                                false,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+
+            let mut uses = Vec::new();
+            crate::walk::own_uses_with_results(stmt, &replay_st.named_results, &mut uses);
+            self.check_uses(&replay_st, &uses);
+            self.check_addr_of_loan(&replay_st, &uses);
+            self.check_slot_loan_rebind(&replay_st, stmt);
+            self.check_stmt_addr_of_loan_projections(&replay_st, stmt, false);
+
+            match stmt {
+                hy_syntax::Stmt::Local(l) => {
+                    self.process_local(&mut replay_st, l, idx, managed);
+                    self.record_local_borrow_aliases(&mut replay_st, l);
+                    self.mark_slot_loans_local(&mut replay_st, l);
+                }
+                hy_syntax::Stmt::Assign {
+                    targets,
+                    op,
+                    values,
+                    span,
+                } => {
+                    self.process_assign(&mut replay_st, targets, *op, values, *span, idx);
+                    self.record_assign_borrow_aliases(&mut replay_st, targets, *op, values);
+                    self.mark_slot_loans_assign(&mut replay_st, targets, *op, values);
+                }
+                hy_syntax::Stmt::Task { callee, args, span } => {
+                    self.mark_move_in_value(
+                        &mut replay_st,
+                        callee,
+                        format!("the spawn callee `{}`", callee.render()),
+                    );
+                    let desc = format!("the spawn `task {}(...)`", callee.render());
+                    let vals: Vec<&hy_syntax::Expr> = args.iter().map(|a| &a.value).collect();
+                    let targets = self.spawn_param_shapes(&replay_st, callee, args.len());
+                    self.check_site(
+                        &mut replay_st,
+                        *span,
+                        "HYB-E3001",
+                        &vals,
+                        managed,
+                        &desc,
+                        false,
+                        Some(callee),
+                        targets.as_deref(),
+                    );
+                }
+                hy_syntax::Stmt::Send {
+                    chan,
+                    value,
+                    is_move,
+                    span,
+                } => {
+                    self.mark_move_in_value(
+                        &mut replay_st,
+                        chan,
+                        format!("the send target `{}`", chan.render()),
+                    );
+                    if self.check_send_target(&replay_st, chan, *span) {
+                        let desc = if *is_move {
+                            format!(
+                                "the move-send `{} <- move {}`",
+                                chan.render(),
+                                value.render()
+                            )
+                        } else {
+                            format!("the send `{} <- {}`", chan.render(), value.render())
+                        };
+                        self.check_site(
+                            &mut replay_st,
+                            *span,
+                            "HYB-E3002",
+                            &[value],
+                            managed,
+                            &desc,
+                            *is_move,
+                            None,
+                            None,
+                        );
+                    }
+                }
+                hy_syntax::Stmt::Select { arms, .. } => {
+                    for arm in arms {
+                        if let hy_syntax::SelectArmKind::Send {
+                            chan,
+                            value,
+                            is_move,
+                            ..
+                        } = &arm.kind
+                        {
+                            self.mark_move_in_value(
+                                &mut replay_st,
+                                chan,
+                                format!("the select-send target `{}`", chan.render()),
+                            );
+                            let span = chan.span().to(value.span());
+                            if self.check_send_target(&replay_st, chan, span) {
+                                let desc = if *is_move {
+                                    format!(
+                                        "the move-send `{} <- move {}`",
+                                        chan.render(),
+                                        value.render()
+                                    )
+                                } else {
+                                    format!(
+                                        "the select-send `{} <- {}`",
+                                        chan.render(),
+                                        value.render()
+                                    )
+                                };
+                                let vals: Vec<&hy_syntax::Expr> = vec![value];
+                                let targets = self.chan_elem_shape(&replay_st, chan);
+                                self.check_site(
+                                    &mut replay_st,
+                                    span,
+                                    "HYB-E3002",
+                                    &vals,
+                                    managed,
+                                    &desc,
+                                    *is_move,
+                                    None,
+                                    targets.as_ref().map(|v| &**v),
+                                );
+                            }
+                        }
+                    }
+                }
+                hy_syntax::Stmt::Defer { call, .. } => {
+                    self.mark_move_in_value(
+                        &mut replay_st,
+                        call,
+                        format!("the deferred call `defer {}`", call.render()),
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        self.managed_blocks = managed_blocks_before;
+        self.sites_via_managed = sites_via_managed_before;
+        self.total_sites = total_sites_before;
+        self.managed_audit.truncate(managed_audit_len_before);
+
+        let new_diags = self.diags.split_off(diags_len_before);
+        for d in new_diags {
+            if d.code == "HYB-E3003" || d.code == "HYB-E3004" || d.code == "HYB-E3104" {
+                if !self
+                    .diags
+                    .iter()
+                    .any(|existing| existing.code == d.code && existing.span == d.span)
+                {
+                    self.diags.push(d);
+                }
+            }
+        }
+    }
+
     pub(crate) fn check_loop_backedge(
         &mut self,
         st: &FnState,
@@ -614,6 +1161,7 @@ impl<'a> Checker<'a> {
         loop_body: &hy_syntax::Block,
         pre_moved: &HashSet<String>,
         reported_backedge: &mut HashSet<String>,
+        in_managed: &dyn Fn(usize) -> bool,
     ) {
         if matches!(
             loop_body.stmts.last(),
@@ -623,10 +1171,17 @@ impl<'a> Checker<'a> {
             return;
         }
 
+        if self.is_single_iteration_loop(st, outer_depth, loop_stmts.first().map(|(s, _)| *s)) {
+            return;
+        }
+
         let mut iter_st = st.clone();
         while iter_st.scopes.len() > outer_depth {
             iter_st.scope_pop();
         }
+
+        self.check_loop_backedge_replay(&iter_st, loop_stmts, events, in_managed);
+
         let popped_st = iter_st.clone();
         let mut any_loop_carried = false;
         for (name, b) in iter_st
@@ -1074,16 +1629,10 @@ impl<'a> Checker<'a> {
                 self.shape_is_proven_pure_value(inner, depth + 1)
             }
             crate::model::TypeShape::Struct(Some(sname)) => {
-                if self.file.decls.iter().any(|d| {
-                    matches!(
-                        d,
-                        hy_syntax::Decl::Struct(s)
-                            if s.name == *sname && !s.type_params.is_empty()
-                    )
-                }) {
+                if self.struct_has_unresolved_type_param(sname) {
                     return false;
                 }
-                let Some(fields) = self.structs.get(sname.as_str()) else {
+                let Some(fields) = self.struct_fields_for_sname(sname) else {
                     return false;
                 };
                 fields.iter().all(|(_, fty)| {
@@ -1401,5 +1950,3 @@ mod tests {
         assert!(r_iter.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
     }
 }
-
-

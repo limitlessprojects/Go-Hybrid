@@ -286,17 +286,25 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Field { base, .. } => self.check_expr_recv_operands(st, base),
-            Expr::StructLit { fields, .. } => {
+            Expr::StructLit { ty, fields, .. } => {
+                if let Some(ty) = ty {
+                    self.check_type_recv_operands(st, ty);
+                }
                 for f in fields {
                     self.check_expr_recv_operands(st, &f.value);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some(elem) = elem {
+                    self.check_type_recv_operands(st, elem);
+                }
                 for it in items {
                     self.check_expr_recv_operands(st, it);
                 }
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit { key, value, entries, .. } => {
+                self.check_type_recv_operands(st, key);
+                self.check_type_recv_operands(st, value);
                 for (k, v) in entries {
                     self.check_expr_recv_operands(st, k);
                     self.check_expr_recv_operands(st, v);
@@ -309,11 +317,34 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::FnLit { .. } | Expr::Ident { .. } | Expr::Lit { .. } => {}
+            Expr::FnLit { params, results, .. } => {
+                for p in params {
+                    self.check_type_recv_operands(st, &p.ty);
+                }
+                for r in results {
+                    self.check_type_recv_operands(st, &r.ty);
+                }
+            }
+            Expr::Ident { .. } | Expr::Lit { .. } => {}
         }
     }
 
+    /// Project the resolved TypeExpr of an expression the `ty_of_expr` cache
+    /// does not cover — composite channel/slice operands, nested receives,
+    /// `append(...)` results (see `recv_chan_type_expr` for the arm list).
+    /// Reused as the define-binding `ty` fallback in `process_local` so a
+    /// local bound from a composite (`sub := append(chs, ch)`) carries a
+    /// projected type; before this, such a binding had `ty: None`, nothing
+    /// to project at a later `<-sub[0]` in a type position (where the
+    /// E3008 direction walk does not run), and the send-only misuse passed
+    /// with 0 diagnostics — the "known remaining sibling" NOTE in
+    /// `tests/checker-corpus` / `recv_composite_channel_operands.rs`.
+    pub(crate) fn composite_type_expr(&self, st: &FnState, expr: &Expr) -> Option<hy_syntax::TypeExpr> {
+        self.recv_chan_type_expr(st, expr)
+    }
+
     fn recv_chan_type_expr(&self, st: &FnState, expr: &Expr) -> Option<hy_syntax::TypeExpr> {
+        use hy_syntax::TypeExpr;
         if let Some(ty) = self.ty_of_expr(st, expr) {
             return Some(ty);
         }
@@ -324,9 +355,64 @@ impl<'a> Checker<'a> {
             Expr::Receive { chan, .. } => {
                 let outer_ty = self.recv_chan_type_expr(st, chan)?;
                 match self.resolve_type_alias(&outer_ty) {
-                    hy_syntax::TypeExpr::Chan { elem, .. } => Some(*elem),
+                    TypeExpr::Chan { elem, .. } => Some(*elem),
                     _ => None,
                 }
+            }
+            // #1347 part 1: composite channel expressions. The type caches
+            // behind `ty_of_expr` do not project through indexing, slicing or
+            // builtin calls, so `<-append(chs, ch)[0]` and `<-(<-outer)[0]`
+            // resolved to `None` here while `shape_of_expr` still reported
+            // `TypeShape::Chan(_)`. `check_recv_operand` then returned `true`
+            // with no diagnostic in the positions where the E3008 direction
+            // walk does not run (type positions such as array lengths), and
+            // the accepted program emitted Go that fails `go build` with
+            // `invalid operation: cannot receive from send-only channel`.
+            // These arms mirror `sendability::dir_ty_of_expr`'s projections.
+            Expr::Field { base, name, .. } => {
+                let base_ty = self.recv_chan_type_expr(st, base)?;
+                self.struct_fields_for_type(&base_ty)?
+                    .into_iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, t)| t)
+            }
+            Expr::Index { base, .. } => {
+                let base_ty = self.recv_chan_type_expr(st, base)?;
+                match self.peel_pointer_and_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. }
+                    | TypeExpr::Array { elem, .. }
+                    | TypeExpr::Map { value: elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            Expr::Slice { base, span, .. } => {
+                let base_ty = self.recv_chan_type_expr(st, base)?;
+                match self.peel_pointer_and_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        Some(TypeExpr::Slice { elem, span: *span })
+                    }
+                    _ => None,
+                }
+            }
+            // A local whose `ty_of_expr` entry is missing (the initializer was
+            // a call the type cache does not project) still carries the
+            // written type on its binding.
+            Expr::Ident { name, .. } => st.env_lookup(name).and_then(|b| b.ty.clone()),
+            Expr::Call { callee, args, span } => {
+                // `append(s, …)` returns `s`'s own slice/array type; unwrap
+                // parens so `(append(s, v))[0]` resolves too.
+                let mut head = callee.as_ref();
+                while let Expr::Paren { inner, .. } = head {
+                    head = inner.as_ref();
+                }
+                if let Expr::Ident { name, .. } = head {
+                    if name == "append" && !self.fns.contains_key("append") {
+                        let first = args.first()?;
+                        return self.recv_chan_type_expr(st, &first.value);
+                    }
+                }
+                let _ = span;
+                None
             }
             _ => None,
         }

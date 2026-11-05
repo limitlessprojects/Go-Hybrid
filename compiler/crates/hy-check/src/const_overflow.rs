@@ -76,7 +76,7 @@ impl<'a> Checker<'a> {
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.const_int_fold_expr(value, st) {
             ConstFold::NotConst => {}
             ConstFold::TooBig => {
                 let span = value.span();
@@ -229,7 +229,7 @@ impl<'a> Checker<'a> {
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.const_int_fold_expr(value, st) {
             ConstFold::NotConst => {}
             ConstFold::TooBig => {
                 let span = value.span();
@@ -325,8 +325,13 @@ impl<'a> Checker<'a> {
         value: &Expr,
         st: Option<&FnState>,
     ) {
+        if let Some(st) = st {
+            if self.fixed_width_int_ty_of(st, value).is_some() {
+                return;
+            }
+        }
         let (lo, hi) = target_int_range();
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.const_int_fold_expr(value, st) {
             ConstFold::NotConst => return,
             ConstFold::Val(v) if v >= lo && v <= hi => return,
             ConstFold::Val(_) | ConstFold::TooBig => {}
@@ -381,6 +386,110 @@ impl<'a> Checker<'a> {
                     Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
                 );
             }
+        }
+    }
+
+    /// Default `int` (or fixed-width) type that Go assigns to a non-`const`
+    /// local variable declaration (`x := 1`, `var x = 1`, `let x = 1`) when no
+    /// explicit type annotation is written (#3678).
+    pub(crate) fn default_untyped_local_ty(
+        &self,
+        st: &FnState,
+        value: &Expr,
+    ) -> Option<TypeExpr> {
+        if let Some((name, _, _)) = self.fixed_width_int_ty_of(st, value) {
+            return Some(TypeExpr::Named {
+                name,
+                span: value.span(),
+            });
+        }
+        match self.const_int_fold_expr(value, Some(st)) {
+            ConstFold::Val(_) | ConstFold::TooBig => {
+                let name = if is_char_const_expr(value, &self.const_values, 0, Some(st)) {
+                    "rune"
+                } else {
+                    "int"
+                };
+                Some(TypeExpr::Named {
+                    name: name.to_string(),
+                    span: value.span(),
+                })
+            }
+            ConstFold::NotConst => None,
+        }
+    }
+
+    /// Fold a constant integer expression, resolving both function-local `const`
+    /// declarations and file-level `const` declarations.
+    pub(crate) fn const_int_fold_expr(&self, e: &Expr, st: Option<&FnState>) -> ConstFold {
+        self.const_int_fold_at(e, st, 0)
+    }
+
+    pub(crate) fn const_int_fold_at(
+        &self,
+        e: &Expr,
+        st: Option<&FnState>,
+        depth: u32,
+    ) -> ConstFold {
+        if depth >= 16 {
+            return ConstFold::NotConst;
+        }
+        match unwrap_parens(e) {
+            Expr::Ident {
+                name,
+                span: id_span,
+            } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                    let Some(init_expr) = sight.constant_initializer() else {
+                        return ConstFold::NotConst;
+                    };
+                    if sight.ty.as_ref().is_some_and(|ty| self.is_non_int_type(ty)) {
+                        return ConstFold::NotConst;
+                    }
+                    if (sight.pos.line, sight.pos.col) == (id_span.start.line, id_span.start.col) {
+                        return ConstFold::NotConst;
+                    }
+                    return self.const_int_fold_at(init_expr, st, depth + 1);
+                }
+                if st.is_some_and(|s| s.env_lookup(name).is_some()) {
+                    return ConstFold::NotConst;
+                }
+                if let Some(v) = self.const_values.get(name) {
+                    return self.const_int_fold_at(v, None, depth + 1);
+                }
+                ConstFold::NotConst
+            }
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => match self.const_int_fold_at(operand, st, depth + 1) {
+                ConstFold::Val(v) => v
+                    .checked_neg()
+                    .map(ConstFold::Val)
+                    .unwrap_or(ConstFold::TooBig),
+                ConstFold::NotConst => ConstFold::NotConst,
+                ConstFold::TooBig => ConstFold::TooBig,
+            },
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let l = self.const_int_fold_at(lhs, st, depth + 1);
+                let r = self.const_int_fold_at(rhs, st, depth + 1);
+                fold_bin(*op, l, r)
+            }
+            Expr::Call { callee, args, .. } if args.len() == 1 => {
+                let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+                    return ConstFold::NotConst;
+                };
+                let Some((lo, hi)) = fixed_width_int_range(name) else {
+                    return ConstFold::NotConst;
+                };
+                match self.const_int_fold_at(&args[0].value, st, depth + 1) {
+                    ConstFold::Val(v) => ConstFold::Val(wrap_into(v, lo, hi)),
+                    ConstFold::TooBig => ConstFold::TooBig,
+                    ConstFold::NotConst => ConstFold::NotConst,
+                }
+            }
+            other => const_int_fold_with(other, &self.const_values, depth, st),
         }
     }
 
@@ -630,8 +739,14 @@ impl<'a> Checker<'a> {
             ..
         } = callee
         {
-            if items.is_empty() && callee.as_array_lit().is_none() {
-                self.check_slice_conversion(t, arg, span);
+            if items.is_empty() {
+                if let Some((_, _, arr_ty)) = callee.as_array_lit() {
+                    if let Some(c) = conv_const(arg) {
+                        self.emit_conv_kind_error(&arr_ty.render(), &c, arg, span);
+                    }
+                } else {
+                    self.check_slice_conversion(t, arg, span);
+                }
                 return;
             }
         }
@@ -814,7 +929,7 @@ impl<'a> Checker<'a> {
             // exceeds i128's max (1.7e38), so integer/runes always fit.
             // Past-i128 literals carry their f64 reading and still have to
             // respect f32's max (`float32(1e40)` overflows f32 in Go).
-            "f32" | "f64" | "float32" | "float64" => match c {
+            "f32" | "f64" | "float32" | "float64" | "c64" | "c128" | "complex64" | "complex128" => match c {
                 ConvConst::Float(f) | ConvConst::Huge { f, .. } => {
                     let overflows = !f.is_finite()
                         || (is_f32_target(target) && f.abs() > f32::MAX as f64);
@@ -880,6 +995,11 @@ impl<'a> Checker<'a> {
                     self.emit_conv_kind_error(target, c, arg, span)
                 }
             },
+            "bool" => {
+                if !matches!(c, ConvConst::Bool) {
+                    self.emit_conv_kind_error(target, c, arg, span);
+                }
+            }
             _ => {}
         }
     }
@@ -984,7 +1104,13 @@ fn conv_const(e: &Expr) -> Option<ConvConst> {
             ConvConst::Huge { f, lt_512 } => Some(ConvConst::Huge { f: -f, lt_512 }),
             other => Some(other),
         },
-        _ => None,
+        _ => {
+            if let Some(v) = crate::arith::const_eval_int(e) {
+                Some(ConvConst::Int(v))
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -997,9 +1123,14 @@ const TWO_POW_512: &str = "13407807929942597099574024998205846127479365820592393
 
 fn lit_below_2_512(s: &str) -> bool {
     let t = s.replace('_', "");
+    let t = t.strip_prefix('-').unwrap_or(&t);
+    for (p, max, hi) in [("0x", 129, b'1'), ("0X", 129, b'1'), ("0b", 513, b'1'), ("0B", 513, b'1'), ("0o", 171, b'4'), ("0O", 171, b'4')] {
+        if let Some(d) = t.strip_prefix(p).map(|d| d.trim_start_matches('0')) {
+            return (d.len(), d.as_bytes().first().copied().unwrap_or(0)) < (max, hi);
+        }
+    }
     let t = t.trim_start_matches('0');
     let t = if t.is_empty() { "0" } else { t };
-    let t = t.strip_prefix('-').unwrap_or(t);
     match t.len().cmp(&TWO_POW_512.len()) {
         std::cmp::Ordering::Less => true,
         std::cmp::Ordering::Greater => false,
@@ -1022,6 +1153,11 @@ fn huge_int_as_f64(s: &str) -> f64 {
             if let Ok(v) = u128::from_str_radix(rest, radix) {
                 return v as f64;
             }
+            if !rest.is_empty() && rest.chars().all(|c| c.is_digit(radix)) {
+                return rest.chars().fold(0.0_f64, |acc, c| {
+                    acc * (radix as f64) + (c.to_digit(radix).unwrap_or(0) as f64)
+                });
+            }
         }
     }
     f64::INFINITY
@@ -1030,7 +1166,10 @@ fn huge_int_as_f64(s: &str) -> f64 {
 /// True when `name` is a built-in conversion target of `Type(const)` calls.
 fn is_conversion_target(name: &str) -> bool {
     fixed_width_int_range(name).is_some()
-        || matches!(name, "f32" | "f64" | "float32" | "float64" | "string")
+        || matches!(
+            name,
+            "f32" | "f64" | "float32" | "float64" | "c64" | "c128" | "complex64" | "complex128" | "string" | "bool"
+        )
 }
 
 /// Targets the emitter's SPEC X4 fold skips (`bits >= 64`) — constants here
@@ -1043,7 +1182,7 @@ fn is_64bit_int_target(name: &str) -> bool {
 }
 
 fn is_f32_target(name: &str) -> bool {
-    matches!(name, "f32" | "float32")
+    matches!(name, "f32" | "float32" | "c64" | "complex64")
 }
 
 /// The built-in float TYPES as spelled in an ascription: `Some(true)` =
@@ -1104,6 +1243,31 @@ pub(crate) fn fixed_width_int_range(name: &str) -> Option<(i128, i128)> {
         "uint" | "usize" | "uintptr" => target_uint_range(),
         _ => return None,
     })
+}
+
+/// Canonical Go type name for a Hybrid integer spelling (issue #1165).
+///
+/// Only the aliases that Go itself treats as *one type* collapse: `byte` and
+/// `rune` are Go builtins that alias `uint8`/`int32`, and `u8`/`i8`/`u16`/…
+/// are the SPEC-LANGUAGE spellings that `hy_emit::shapes::go_primitive_name`
+/// emits as `uint8`/`int8`/`uint16`/…. Everything else keeps its own identity:
+/// `int`/`uint` stay word-sized (Go gives them their own type — `int` is not
+/// `int64`), and `uintptr` is deliberately not folded into `uint` even though
+/// `fixed_width_int_range` groups their *ranges*, because Go keeps them
+/// distinct. `usize`/`isize` are absent by design (SPEC-LANGUAGE §402: the
+/// language does not define them) and are left untouched here.
+pub(crate) fn canonical_int_type_name(name: &str) -> &str {
+    match name {
+        "u8" | "byte" => "uint8",
+        "i8" => "int8",
+        "u16" => "uint16",
+        "i16" => "int16",
+        "u32" => "uint32",
+        "i32" | "rune" => "int32",
+        "u64" => "uint64",
+        "i64" => "int64",
+        other => other,
+    }
 }
 
 /// Parsed integer literal, retaining the fact that a syntactically valid
@@ -1390,16 +1554,11 @@ pub(crate) fn const_float_fold_with(
         Expr::Lit {
             kind: LitKind::Int(s),
             ..
-        } => {
-            let clean: String = s.chars().filter(|c| *c != '_').collect();
-            if let Some(ConstInt::Value(v)) = parse_int_lit(s) {
-                Some(v as f64)
-            } else if let Ok(f) = clean.parse::<f64>() {
-                Some(f)
-            } else {
-                None
-            }
-        }
+        } => match parse_int_lit(s) {
+            Some(ConstInt::Value(v)) => Some(v as f64),
+            Some(ConstInt::PosOverflow | ConstInt::NegOverflow) => Some(huge_int_as_f64(s)),
+            None => s.replace('_', "").parse::<f64>().ok(),
+        },
         Expr::Lit {
             kind: LitKind::Char(c),
             ..
@@ -1478,6 +1637,45 @@ fn is_float_const_expr(
     }
 }
 
+fn is_char_const_expr(
+    e: &Expr,
+    consts: &HashMap<String, &Expr>,
+    depth: u32,
+    st: Option<&FnState>,
+) -> bool {
+    match unwrap_parens(e) {
+        Expr::Lit {
+            kind: LitKind::Char(_),
+            ..
+        } => true,
+        Expr::Lit { .. } => false,
+        Expr::Ident { name, .. } => {
+            if let Some(st) = st {
+                if st.env_lookup(name).is_some() {
+                    return false;
+                }
+            }
+            if depth < 16 {
+                if let Some(v) = consts.get(name) {
+                    return is_char_const_expr(v, consts, depth + 1, None);
+                }
+            }
+            false
+        }
+        Expr::Unary { operand, .. } => is_char_const_expr(operand, consts, depth + 1, st),
+        Expr::Binary {
+            op: BinOp::Shl | BinOp::Shr,
+            lhs,
+            ..
+        } => is_char_const_expr(lhs, consts, depth + 1, st),
+        Expr::Binary { lhs, rhs, .. } => {
+            is_char_const_expr(lhs, consts, depth + 1, st)
+                || is_char_const_expr(rhs, consts, depth + 1, st)
+        }
+        _ => false,
+    }
+}
+
 /// Render a folded float as the nearest integer literal for the fix-it.
 fn integer_of_float(f: f64) -> String {
     format!("{}", f.trunc() as i128)
@@ -1546,5 +1744,115 @@ mod unit {
         );
         assert_eq!(target_int_range(), (i64::MIN as i128, i64::MAX as i128));
         assert_eq!(target_uint_range(), (0, u64::MAX as i128));
+    }
+}
+
+#[cfg(test)]
+mod map_lit_duplicate_tests {
+    use crate::{check_file, Verdict};
+    use hy_syntax::parse_file;
+
+    fn check(src: &str) -> crate::CheckResult {
+        let ast = parse_file("test.hy", src).expect("test snippet must parse");
+        check_file(&ast)
+    }
+
+    #[test]
+    fn map_lit_duplicate_constant_keys_rejected() {
+        let cases = [
+            "fn main() {\n    m := map[int]string{1: \"a\", 1: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\": 1, \"a\": 2}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\" + \"b\": 1, \"ab\": 2}\n    fmt.println(m)\n}\n",
+            "const k = 1\nfn main() {\n    m := map[int]string{k: \"a\", 1: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[bool]int{true: 1, true: 2}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[int]int{1 + 1: 0, 2: 0}\n    fmt.println(m)\n}\n",
+        ];
+        for src in cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                r.diagnostics.iter().any(|d| d.code == "HYB-E1002" && d.message.contains("duplicate key")),
+                "expected HYB-E1002 duplicate key diagnostic, got {:?} for:\n{src}",
+                r.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn map_lit_distinct_constant_keys_accepted() {
+        let cases = [
+            "fn main() {\n    m := map[int]string{1: \"a\", 2: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\": 1, \"b\": 2}\n    fmt.println(m)\n}\n",
+            "const k = 1\nfn main() {\n    m := map[int]string{k: \"a\", 2: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[bool]int{true: 1, false: 2}\n    fmt.println(m)\n}\n",
+        ];
+        for src in cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Accept, "expected accept for:\n{src}");
+        }
+    }
+
+    #[test]
+    fn map_lit_duplicate_wrapped_int_word_and_float_conversion_keys_rejected() {
+        let cases = [
+            "import \"fmt\"\nfn main() {\n    m := map[u8]int{u8(300): 1, 44: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[i8]int{i8(200): 1, -56: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[u8]int{u8(-1): 1, 255: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[usize]int{usize(1): 1, 1: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[isize]int{isize(1): 1, 1: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[f64]int{f64(1.5): 1, 1.5: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[f64]int{f64(1): 1, 1.0: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[f32]int{f32(1.5): 1, float32(1.5): 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[f64]int{0.0: 1, -0.0: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[int]int{len(\"ab\"): 1, 2: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\ntype key_t = int\nfn main() {\n    m := map[key_t]int{key_t(1): 1, 1: 2}\n    fmt.println(m)\n}\n",
+        ];
+        for src in cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                r.diagnostics
+                    .iter()
+                    .any(|d| d.code == "HYB-E1002" && d.message.contains("duplicate key")),
+                "expected HYB-E1002 duplicate key diagnostic, got {:?} for:\n{src}",
+                r.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn inferred_int_local_rejects_overflowing_constant_operands_3678() {
+        let reject_cases = [
+            "import \"fmt\"\nfn main() {\n    x := 1\n    x += 9223372036854775808\n    fmt.println(x)\n}\n",
+            "import \"fmt\"\nfn main() {\n    var x = 1\n    x ^= 1 << 70\n    fmt.println(x)\n}\n",
+            "import \"fmt\"\nfn main() {\n    x := 1\n    x = 18446744073709551616 % x\n    fmt.println(x)\n}\n",
+            "import \"fmt\"\nfn main() {\n    let x = 1\n    fmt.println(x == 9223372036854775808)\n}\n",
+            "import \"fmt\"\nfn main() {\n    x := 1\n    fmt.println(x + 9223372036854775808)\n}\n",
+            "import \"fmt\"\nfn main() {\n    f := fn() {\n        x := 1\n        x += 9223372036854775808\n        fmt.println(x)\n    }\n    f()\n}\n",
+        ];
+        for src in reject_cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                r.diagnostics.iter().any(|d| d.code == "HYB-E6002"),
+                "expected HYB-E6002 diagnostic, got {:?} for:\n{src}",
+                r.diagnostics
+            );
+        }
+
+        let accept_cases = [
+            "import \"fmt\"\nfn main() {\n    x := 1\n    x += 9223372036854775807\n    fmt.println(x == 42)\n}\n",
+            "import \"fmt\"\nfn main() {\n    const c = 1\n    var u u64 = c + 9223372036854775808\n    fmt.println(u)\n}\n",
+            "import \"fmt\"\nfn main() {\n    x := 1 << ('b' - 'a')\n    x += 1 << 40\n    fmt.println(x)\n}\n",
+        ];
+        for src in accept_cases {
+            let r = check(src);
+            assert_eq!(
+                r.verdict,
+                Verdict::Accept,
+                "expected accept for:\n{src}\ndiagnostics: {:?}",
+                r.diagnostics
+            );
+        }
     }
 }
