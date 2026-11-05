@@ -702,6 +702,8 @@ struct Collector<'a> {
     /// the state outside any body, so `Stmt::Return` can only ever see it
     /// while a body is open. `FnLit` bodies swap it like `fn_decl` does.
     fn_results: Vec<OpKind>,
+    /// #3404: exact TypeExpr for each declared result in enclosing function.
+    fn_result_types: Vec<hy_syntax::TypeExpr>,
     /// Type-parameter names of the function whose body is currently walked
     /// (`fn new[k comparable, v any]` → {k, v}). A composite literal inside a
     /// generic signature may spell those parameters (`map[k]v{}`, zero-value
@@ -768,6 +770,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
+            fn_result_types: Vec::new(),
             fn_type_params: HashSet::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
@@ -871,8 +874,8 @@ impl<'a> Collector<'a> {
         match bare {
             Expr::Ident { name, .. } => {
                 if let Some(tname) = self.lookup_type_name(name) {
-                    if let Some(elem) = tname.strip_prefix("[]") {
-                        return Some(elem.to_string());
+                    if let Some(elem) = self.named_slice_element_name(&tname) {
+                        return Some(elem);
                     }
                     if let Some(elem) = tname.strip_prefix("[") {
                         if let Some(close) = elem.find(']') {
@@ -880,7 +883,7 @@ impl<'a> Collector<'a> {
                         }
                     }
                 }
-                None
+                self.named_slice_element_name(name)
             }
             Expr::SliceLit { elem: Some(t), .. } => {
                 match t.as_ref() {
@@ -1869,8 +1872,11 @@ impl<'a> Collector<'a> {
         }
         let result_scalars: Vec<Option<&'static str>> =
             f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+        let result_types: Vec<hy_syntax::TypeExpr> =
+            f.results.iter().map(|r| r.ty.clone()).collect();
         let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
+        let outer_types = std::mem::replace(&mut self.fn_result_types, result_types);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
         let outer_tp = std::mem::replace(
@@ -1883,6 +1889,7 @@ impl<'a> Collector<'a> {
         self.loop_depth = outer_loop;
         self.select_depth = outer_select;
         self.fn_results = outer;
+        self.fn_result_types = outer_types;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
         self.fn_result_scalars = outer_scalars;
@@ -2989,8 +2996,11 @@ impl<'a> Collector<'a> {
                 );
                 let result_scalars: Vec<Option<&'static str>> =
                     results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+                let result_types: Vec<hy_syntax::TypeExpr> =
+                    results.iter().map(|r| r.ty.clone()).collect();
                 let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
+                let outer_types = std::mem::replace(&mut self.fn_result_types, result_types);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
                 let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
@@ -2999,6 +3009,7 @@ impl<'a> Collector<'a> {
                 self.loop_depth = outer_loop;
                 self.select_depth = outer_select;
                 self.fn_results = outer;
+                self.fn_result_types = outer_types;
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
                 self.fn_result_scalars = outer_scalars;
@@ -4245,7 +4256,11 @@ impl<'a> Collector<'a> {
     /// included), e.g. `my_int64_slice` → `int64`. `None` when the name does
     /// not resolve to a slice type, which fails open.
     fn named_slice_element_name(&self, name: &str) -> Option<String> {
-        let base = Checker::base_named_type_str(name);
+        let trimmed = name.trim();
+        if let Some(stripped) = trimmed.strip_prefix("[]") {
+            return Some(stripped.trim().to_string());
+        }
+        let base = Checker::base_named_type_str(trimmed);
         let ty = self.ck.type_aliases.get(base)?;
         match self.ck.resolve_type_alias(ty) {
             hy_syntax::TypeExpr::Slice { elem, .. } => Some(elem.render()),
@@ -5078,6 +5093,7 @@ impl<'a> Collector<'a> {
                     if !self.report_return_conflict(v, &got, w, v.span()) {
                         let got_s = self.typed_value_scalar(v);
                         self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                        self.report_container_return_mismatch(v, &got, i, v.span());
                     }
                 }
                 return;
@@ -5110,6 +5126,7 @@ impl<'a> Collector<'a> {
             if !self.report_return_conflict(v, &got, w, v.span()) {
                 let got_s = self.typed_value_scalar(v);
                 self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                self.report_container_return_mismatch(v, &got, i, v.span());
             }
         }
     }
@@ -5121,6 +5138,368 @@ impl<'a> Collector<'a> {
     /// Go has no implicit numeric conversion for typed values, so the emitted
     /// `return` fails `go build`. Fires only when both exact types are known
     /// and the kind check has not already reported this value.
+    /// #3404 — compares two type string representations for container element or base incompatibility.
+    fn map_or_chan_type_str_conflict(&self, target_t: &str, arg_t: &str) -> bool {
+        let t_trim = target_t.trim();
+        let a_trim = arg_t.trim();
+        if t_trim == a_trim {
+            return false;
+        }
+        if let (Some(t_num), Some(a_num)) = (
+            canonical_numeric_name(t_trim),
+            canonical_numeric_name(a_trim),
+        ) {
+            return t_num != a_num;
+        }
+        if t_trim.starts_with('[') && a_trim.starts_with('[') {
+            let t_end = t_trim.find(']');
+            let a_end = a_trim.find(']');
+            if let (Some(te), Some(ae)) = (t_end, a_end) {
+                let t_len = &t_trim[1..te];
+                let a_len = &a_trim[1..ae];
+                if t_len != a_len {
+                    return true;
+                }
+                let t_el = &t_trim[te + 1..];
+                let a_el = &a_trim[ae + 1..];
+                return self.map_or_chan_type_str_conflict(t_el, a_el);
+            }
+            return true;
+        }
+        if t_trim != a_trim {
+            return true;
+        }
+        false
+    }
+
+    /// #3404 — base type name of a pointer type alias or direct `*T` spelling.
+    fn named_pointer_base_name(&self, name: &str) -> Option<String> {
+        let trimmed = name.trim();
+        if let Some(rest) = trimmed.strip_prefix('*') {
+            return Some(rest.trim().to_string());
+        }
+        let base = Checker::base_named_type_str(trimmed);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            match self.ck.resolve_type_alias(ty) {
+                hy_syntax::TypeExpr::Pointer { to, .. } => Some(to.render()),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// #3404 — base type of a pointer-typed expression.
+    fn pointer_base_type_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                self.named_pointer_base_name(&tn)
+            }
+            Expr::AddrOf { operand, .. } => {
+                let bare = unwrap_parens(operand);
+                if let Some(scalar) = self.typed_value_scalar(bare) {
+                    return Some(scalar.to_string());
+                }
+                if let Expr::Ident { name, .. } = bare {
+                    if let Some(tn) = self.lookup_type_name(name) {
+                        return Some(tn);
+                    }
+                }
+                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                    return Some(self.ck.resolve_type_alias(arr_ty).render());
+                }
+                None
+            }
+            Expr::Unary { op: hy_syntax::UnOp::Addr, operand, .. } => {
+                let bare = unwrap_parens(operand);
+                if let Some(scalar) = self.typed_value_scalar(bare) {
+                    return Some(scalar.to_string());
+                }
+                if let Expr::Ident { name, .. } = bare {
+                    if let Some(tn) = self.lookup_type_name(name) {
+                        return Some(tn);
+                    }
+                }
+                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                    return Some(self.ck.resolve_type_alias(arr_ty).render());
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// #3404 — element type name of a channel type alias or direct channel spelling.
+    fn named_channel_elem_name(&self, name: &str) -> Option<String> {
+        let trimmed = name.trim();
+        if let Some(rest) = trimmed
+            .strip_prefix("<-chan ")
+            .or_else(|| trimmed.strip_prefix("chan<- "))
+            .or_else(|| trimmed.strip_prefix("chan "))
+        {
+            return Some(rest.trim().to_string());
+        }
+        let base = Checker::base_named_type_str(trimmed);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            match self.ck.resolve_type_alias(ty) {
+                hy_syntax::TypeExpr::Chan { elem, .. } => Some(elem.render()),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// #3404 — element type of a channel-typed expression.
+    fn channel_elem_type_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                if let Some(tn) = self.lookup_type_name(name) {
+                    if let Some(elem) = self.named_channel_elem_name(&tn) {
+                        return Some(elem);
+                    }
+                }
+                self.named_channel_elem_name(name)
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.channel_elem_type_of_expr(&first.value);
+                        }
+                    } else if let Some(elem) = self.named_channel_elem_name(name) {
+                        return Some(elem);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// #3404 — key and value type names of a map type alias or direct `map[K]V` spelling.
+    fn named_map_types(&self, name: &str) -> Option<(String, String)> {
+        let trimmed = name.trim();
+        if let Some(rest) = trimmed.strip_prefix("map[") {
+            let mut depth = 0;
+            let mut split_idx = None;
+            for (idx, ch) in rest.char_indices() {
+                if ch == '[' {
+                    depth += 1;
+                } else if ch == ']' {
+                    if depth == 0 {
+                        split_idx = Some(idx);
+                        break;
+                    }
+                    depth -= 1;
+                }
+            }
+            if let Some(idx) = split_idx {
+                let k_str = rest[..idx].trim().to_string();
+                let v_str = rest[idx + 1..].trim().to_string();
+                if !k_str.is_empty() && !v_str.is_empty() {
+                    return Some((k_str, v_str));
+                }
+            }
+            return None;
+        }
+        let base = Checker::base_named_type_str(trimmed);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            match self.ck.resolve_type_alias(ty) {
+                hy_syntax::TypeExpr::Map { key, value, .. } => {
+                    Some((key.render(), value.render()))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// #3404 — key and value types of a map-typed expression.
+    fn map_types_of_expr(&self, e: &Expr) -> Option<(String, String)> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                if let Some(tn) = self.lookup_type_name(name) {
+                    if let Some(types) = self.named_map_types(&tn) {
+                        return Some(types);
+                    }
+                }
+                self.named_map_types(name)
+            }
+            Expr::MapLit { key, value, .. } => {
+                Some((key.render(), value.render()))
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.map_types_of_expr(&first.value);
+                        }
+                    } else if let Some(types) = self.named_map_types(name) {
+                        return Some(types);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// #3404 — resolved array type of an array-typed expression.
+    fn resolved_array_type_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                let base = Checker::base_named_type_str(&tn);
+                if let Some(ty) = self.ck.type_aliases.get(base) {
+                    let res = self.ck.resolve_type_alias(ty);
+                    if matches!(res, hy_syntax::TypeExpr::Array { .. }) {
+                        return Some(res.render());
+                    }
+                }
+                if is_sized_array_spelling(&tn) {
+                    return Some(tn);
+                }
+                None
+            }
+            _ => {
+                if let Some((_, _, arr_ty)) = unwrap_parens(e).as_array_lit() {
+                    return Some(self.ck.resolve_type_alias(arr_ty).render());
+                }
+                None
+            }
+        }
+    }
+
+    /// #3404 — reports mismatch when a returned container or array value contradicts declared function result type.
+    fn report_container_return_mismatch(
+        &mut self,
+        val: &Expr,
+        got_kind: &OpKind,
+        idx: usize,
+        span: Span,
+    ) -> bool {
+        let Some(declared_ty) = self.fn_result_types.get(idx) else {
+            return false;
+        };
+        let resolved_ty = self.ck.resolve_type_alias(declared_ty);
+
+        match got_kind {
+            OpKind::Chan(_) => {
+                let want_elem = match &resolved_ty {
+                    hy_syntax::TypeExpr::Chan { elem, .. } => elem.render(),
+                    _ => {
+                        let r = resolved_ty.render();
+                        self.named_channel_elem_name(&r).unwrap_or(r)
+                    }
+                };
+                if let Some(val_elem) = self.channel_elem_type_of_expr(val) {
+                    if self.map_or_chan_type_str_conflict(&want_elem, &val_elem) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot return a value of type `chan {}` from a function declaring `chan {}` — Go refuses `cannot use ... as chan {} value in return statement` (HYB-E1002)",
+                                val_elem, want_elem, want_elem
+                            ),
+                            "a returned value must be assignable to its declared result type; write an explicit conversion when a conversion is intended",
+                        );
+                        return true;
+                    }
+                }
+            }
+            OpKind::Map(_, _) => {
+                let (want_k, want_v) = match &resolved_ty {
+                    hy_syntax::TypeExpr::Map { key, value, .. } => (key.render(), value.render()),
+                    _ => {
+                        let r = resolved_ty.render();
+                        self.named_map_types(&r).unwrap_or_else(|| (String::new(), String::new()))
+                    }
+                };
+                if !want_k.is_empty() && !want_v.is_empty() {
+                    if let Some((val_k, val_v)) = self.map_types_of_expr(val) {
+                        if self.map_or_chan_type_str_conflict(&want_k, &val_k)
+                            || self.map_or_chan_type_str_conflict(&want_v, &val_v)
+                        {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot return a value of type `map[{}]{}` from a function declaring `map[{}]{}` — Go refuses `cannot use ... as map[{}]{} value in return statement` (HYB-E1002)",
+                                    val_k, val_v, want_k, want_v, want_k, want_v
+                                ),
+                                "a returned value must be assignable to its declared result type; write an explicit conversion when a conversion is intended",
+                            );
+                            return true;
+                        }
+                    }
+                }
+            }
+            OpKind::Slice(_) => {
+                let want_elem = match &resolved_ty {
+                    hy_syntax::TypeExpr::Slice { elem, .. } => elem.render(),
+                    _ => {
+                        let r = resolved_ty.render();
+                        self.named_slice_element_name(&r).unwrap_or(r)
+                    }
+                };
+                if let Some(val_elem) = self.slice_element_type_name(val) {
+                    if self.map_or_chan_type_str_conflict(&want_elem, &val_elem) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot return a value of type `[]{}` from a function declaring `[]{}` — Go refuses `cannot use ... as []{} value in return statement` (HYB-E1002)",
+                                val_elem, want_elem, want_elem
+                            ),
+                            "a returned value must be assignable to its declared result type; write an explicit conversion when a conversion is intended",
+                        );
+                        return true;
+                    }
+                }
+            }
+            OpKind::Pointer(_) => {
+                let want_base = match &resolved_ty {
+                    hy_syntax::TypeExpr::Pointer { to, .. } => to.render(),
+                    _ => {
+                        let r = resolved_ty.render();
+                        self.named_pointer_base_name(&r).unwrap_or(r)
+                    }
+                };
+                if let Some(val_base) = self.pointer_base_type_of_expr(val) {
+                    if self.map_or_chan_type_str_conflict(&want_base, &val_base) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot return a value of type `*{}` from a function declaring `*{}` — Go refuses `cannot use ... as *{} value in return statement` (HYB-E1002)",
+                                val_base, want_base, want_base
+                            ),
+                            "a returned value must be assignable to its declared result type; write an explicit conversion when a conversion is intended",
+                        );
+                        return true;
+                    }
+                }
+            }
+            OpKind::Array(_) => {
+                let want_arr = resolved_ty.render();
+                if let Some(val_arr) = self.resolved_array_type_of_expr(val) {
+                    if self.map_or_chan_type_str_conflict(&want_arr, &val_arr) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot return a value of type `{}` from a function declaring `{}` — Go refuses `cannot use ... as {} value in return statement` (HYB-E1002)",
+                                val_arr, want_arr, want_arr
+                            ),
+                            "a returned value must be assignable to its declared result type; write an explicit conversion when a conversion is intended",
+                        );
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn report_numeric_return_mismatch(
         &mut self,
         got: Option<&'static str>,
