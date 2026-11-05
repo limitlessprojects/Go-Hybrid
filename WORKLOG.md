@@ -180,3 +180,13 @@
 - Suites 434 -> 437 (+3). Two landings, zero gate failures this tick.
 - Next queue: #3676 (re-verify, force-pushed head) -> #3677 (re-verify, force-pushed) -> #3671 (CI test registration, +281-2) -> wildcard spikes #3688 (W-004) / #3695 (W-024, dup family with #3679; check BOUNTY.md spike policy) -> fresh 11-05 wave #3727..#3742 (families: 3730/3733/3737, 3731/3732, 3736/3738, 3739-3742 — dedupe first, oldest-first).
 - Worklog: this commit.
+
+## Session 114 — 2026-11-06 03:10 UTC+8 tick
+- (carries S113's queue; S113 died on total Bash-tool failure after env restore only)
+- env cold-recycled; rust 1.99.0 + go1.26.9 restored, tarball re-cached, target warm (15s). approve 12/12 (4988 left), scan skipped.
+- Heads re-fetched: #3676/#3677 force-pushed AGAIN before this tick (6cf2cd00 / 3928d52d) — verified the pushed heads as-is.
+- Landed PR #3676 -> 1a5c63e9 (parser report_at non-unwinding diag; LX9 same-line type annotations on let/var/const; SPEC 1.3 missing-initializer HYB-E0002 w/ fixits; fixes declaration-shape gaps, RPMFAN). FF case, tree-asserted 1226b648. ALL-GREEN 438 suites, corpus 135/135, differential 45/45+90/90. Reply 201.
+- Landed PR #3677 -> b3876bed (go_keyword_names.rs: declarations named `default` rejected HYB-E1002 across 15+ sites, uses stay legal incl. select default:; SPEC 8.3 updated; RPMFAN). Battery on committed trial 31f7dc12 (contains same-tick #3676), tree 450aa48f asserted. ALL-GREEN 439 suites, corpus 135/135 (corpus 24 unaffected), differential 45/45+90/90. Reply 201.
+- Suites 437 -> 439 (+2). Two landings, zero gate failures.
+- Next queue: #3671 (CI test registration +281-2, balckwell) -> wildcard spikes #3688 (W-004) / #3695 (W-024, dup family with #3679; check BOUNTY.md spike policy first) -> fresh 11-05 wave #3727..#3742 (families 3730/3733/3737, 3731/3732, 3736/3738, 3739-3742 — dedupe first, oldest-first).
+- Worklog: this commit.
