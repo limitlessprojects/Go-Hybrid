@@ -97,7 +97,7 @@ impl<'a> Checker<'a> {
                 }
                 if self.fns.contains_key(ty_name)
                     || self.structs.contains_key(ty_name)
-                    || self.struct_type_params.contains_key(ty_name)
+                    || self.is_shadowed_by_type_param(ty_name)
                     || self.enums.contains_key(ty_name)
                     || self.consts.contains_key(ty_name)
                 {
@@ -150,7 +150,7 @@ impl<'a> Checker<'a> {
             let resolved = self.resolve_type_alias(ty);
             if let hy_syntax::TypeExpr::Named { name: target, .. } = resolved {
                 return !self.structs.contains_key(target.as_str())
-                    && !self.struct_type_params.contains_key(target.as_str())
+                    && !self.is_shadowed_by_type_param(target.as_str())
                     && !self.enums.contains_key(target.as_str())
                     && is_conversion_type_name(&target);
             }
@@ -163,7 +163,7 @@ impl<'a> Checker<'a> {
         if st.is_some_and(|s| s.env_lookup(name).is_some())
             || self.fns.contains_key(name)
             || self.structs.contains_key(name)
-            || self.struct_type_params.contains_key(name)
+            || self.is_shadowed_by_type_param(name)
             || self.enums.contains_key(name)
             || self.consts.contains_key(name)
         {
@@ -176,7 +176,7 @@ impl<'a> Checker<'a> {
                 hy_syntax::TypeExpr::Named { name: target, .. }
                     if target == "string"
                         && !self.structs.contains_key("string")
-                        && !self.struct_type_params.contains_key("string")
+                        && !self.is_shadowed_by_type_param("string")
                         && !self.enums.contains_key("string")
             );
         }
@@ -250,6 +250,13 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// Check if a type name is shadowed by any struct's type parameter.
+    fn is_shadowed_by_type_param(&self, name: &str) -> bool {
+        self.struct_type_params
+            .values()
+            .any(|params| params.iter().any(|p| p.name.as_str() == name))
+    }
+
     fn is_const_allowed_ty(&self, ty: &hy_syntax::TypeExpr) -> bool {
         let resolved = self.resolve_type_alias(ty);
         if matches!(resolved, hy_syntax::TypeExpr::Option { .. }) {
@@ -260,7 +267,7 @@ impl<'a> Checker<'a> {
         if let hy_syntax::TypeExpr::Named { ref name, .. } = resolved {
             let name_str = name.as_str();
             if self.structs.contains_key(name_str)
-                || self.struct_type_params.contains_key(name_str)
+                || self.is_shadowed_by_type_param(name_str)
                 || self.enums.contains_key(name_str)
             {
                 return false;
@@ -274,7 +281,7 @@ impl<'a> Checker<'a> {
             resolved,
             hy_syntax::TypeExpr::Named { ref name, .. }
                 if !self.structs.contains_key(name.as_str())
-                    && !self.struct_type_params.contains_key(name.as_str())
+                    && !self.is_shadowed_by_type_param(name.as_str())
                     && !self.enums.contains_key(name.as_str())
                     && is_conversion_type_name(name)
         )
