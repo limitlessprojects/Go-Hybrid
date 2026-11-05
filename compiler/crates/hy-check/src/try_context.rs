@@ -13,7 +13,7 @@
 //! kept running after the error (E3b: never a silent swallow).
 
 use crate::model::{unwrap_parens, Checker};
-use hy_diag::Diagnostic;
+use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
     Block, Decl, Expr, File, FnResult, ForKind, InterpPart, LocalKind, MatchPattern, Param,
     PlaceKind, SelectArmKind, Stmt, TypeExpr,
@@ -24,22 +24,27 @@ use hy_syntax::{
 /// Log entry" — keep in sync with hy-emit's `CONVERSIONS[..].propagate`.
 const E11_PROPAGATING_TARGETS: &[&str] = &["http.handler"];
 
-fn is_builtin_error_type(ck: &Checker<'_>, ty: &TypeExpr) -> bool {
-    let resolved = ck.resolve_type_alias(ty);
-    if !matches!(&resolved, TypeExpr::Named { name, .. } if name == "error")
-        || ck.structs.contains_key("error")
-        || ck.struct_type_params.contains_key("error")
-        || ck.enums.contains_key("error")
-    {
-        return false;
+fn collect_receiver_type_params(ck: &Checker<'_>, mut ty: &TypeExpr, out: &mut Vec<String>) {
+    while let TypeExpr::Pointer { to, .. } = ty {
+        ty = to;
     }
-    ck.type_aliases.get("error").is_none_or(|alias_ty| {
-        matches!(ck.resolve_type_alias(alias_ty), TypeExpr::Named { name, .. } if name == "error")
-    })
-}
-
-fn results_end_in_error(ck: &Checker<'_>, results: &[FnResult]) -> bool {
-    results.last().is_some_and(|r| is_builtin_error_type(ck, &r.ty))
+    if let TypeExpr::Named { name, .. } = ty {
+        if let Some(open) = name.find('[') {
+            let base = &name[..open];
+            if ck.struct_type_params.contains_key(base) {
+                if let Some(inner) = name[open + 1..].strip_suffix(']') {
+                    for part in inner.split(',') {
+                        let ident = part.trim();
+                        if !ident.is_empty()
+                            && ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        {
+                            out.push(ident.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn is_e11_result_type(ck: &Checker<'_>, results: &[FnResult], http_unshadowed: bool) -> bool {
@@ -55,7 +60,14 @@ fn is_e11_result_type(ck: &Checker<'_>, results: &[FnResult], http_unshadowed: b
 }
 
 fn fnlit_has_valid_e11_signature(ck: &Checker<'_>, params: &[Param], results: &[FnResult]) -> bool {
-    if !results.is_empty() || params.len() != 2 || params[0].name == "_" {
+    if !results.is_empty()
+        || params.len() != 2
+        || params[0].name == "_"
+        || params[0].name.is_empty()
+        || params[0].name == params[1].name
+        || params[0].name == "http"
+        || params[1].name == "http"
+    {
         return false;
     }
     let w_ok = matches!(&params[0].ty, TypeExpr::Named { name, .. } if name.is_empty())
@@ -71,8 +83,15 @@ fn fnlit_has_valid_e11_signature(ck: &Checker<'_>, params: &[Param], results: &[
 /// What the enclosing function or closure offers a `?`.
 #[derive(Clone, Copy)]
 enum Ctx<'a> {
-    /// `main`, an error-result fn/closure, or an E11 handler closure.
+    /// An error-result fn or closure.
     Ok,
+    /// `main` (E6 exit contract wrapper `hyErr := func() (hyErr error) { ... }()`).
+    Main { base_scope_depth: usize },
+    /// An E11 `http.handler` closure whose `?` lowers to `http.Error(<writer>, ...)`.
+    E11Handler {
+        writer: &'a str,
+        param_scope_depth: usize,
+    },
     /// No landing spot; the &str names the enclosing callable for the message.
     NoErrorResult(&'a str),
 }
@@ -80,6 +99,7 @@ enum Ctx<'a> {
 struct TryWalker<'a, 'b> {
     ck: &'b mut Checker<'a>,
     scopes: Vec<Vec<String>>,
+    type_params: Vec<String>,
     return_e11: bool,
 }
 
@@ -104,8 +124,51 @@ impl<'a, 'b> TryWalker<'a, 'b> {
             || self.ck.enums.contains_key(pkg)
             || self.ck.consts.contains_key(pkg)
             || self.ck.type_aliases.contains_key(pkg)
-            || self.ck.file.decls.iter().any(|d| matches!(d, Decl::Const(c) if c.name == pkg))
+            || self
+                .ck
+                .file
+                .decls
+                .iter()
+                .any(|d| matches!(d, Decl::Const(c) if c.name == pkg))
+            || self.type_params.iter().any(|tp| tp == pkg)
             || self.scopes.iter().any(|s| s.iter().any(|n| n == pkg)))
+    }
+    fn is_name_shadowed_for_type(&self, name: &str, check_scopes: bool) -> bool {
+        self.ck.fns.contains_key(name)
+            || self.ck.structs.contains_key(name)
+            || self.ck.struct_type_params.contains_key(name)
+            || self.ck.enums.contains_key(name)
+            || self.ck.consts.contains_key(name)
+            || self
+                .ck
+                .file
+                .decls
+                .iter()
+                .any(|d| matches!(d, Decl::Const(c) if c.name == name))
+            || self.type_params.iter().any(|tp| tp == name)
+            || (check_scopes && self.scopes.iter().any(|s| s.iter().any(|n| n == name)))
+    }
+    fn is_builtin_error_type(&self, ty: &TypeExpr, check_scopes: bool) -> bool {
+        let mut cur = ty;
+        for _ in 0..8 {
+            let TypeExpr::Named { name, .. } = cur else {
+                return false;
+            };
+            if self.is_name_shadowed_for_type(name, check_scopes) {
+                return false;
+            }
+            if let Some(target) = self.ck.type_aliases.get(name.as_str()) {
+                cur = target;
+                continue;
+            }
+            return name == "error";
+        }
+        false
+    }
+    fn results_end_in_error(&self, results: &[FnResult], check_scopes: bool) -> bool {
+        results
+            .last()
+            .is_some_and(|r| self.is_builtin_error_type(&r.ty, check_scopes))
     }
     fn is_e11_conversion_call(&self, callee: &Expr) -> bool {
         if let Expr::Field { base, name, .. } = callee {
@@ -117,10 +180,74 @@ impl<'a, 'b> TryWalker<'a, 'b> {
         }
         false
     }
+    fn effective_no_error_owner(&self, ctx: Ctx<'a>) -> Option<&'a str> {
+        match ctx {
+            Ctx::Ok => None,
+            Ctx::NoErrorResult(owner) => Some(owner),
+            Ctx::Main { base_scope_depth } => {
+                let hy_err_shadowed = self.type_params.iter().any(|tp| tp == "hyErr")
+                    || self
+                        .scopes
+                        .get(base_scope_depth..)
+                        .is_some_and(|layers| layers.iter().any(|s| s.iter().any(|n| n == "hyErr")));
+                if hy_err_shadowed {
+                    Some("main")
+                } else {
+                    None
+                }
+            }
+            Ctx::E11Handler {
+                writer,
+                param_scope_depth,
+            } => {
+                let writer_shadowed = self.type_params.iter().any(|tp| tp == writer)
+                    || self
+                        .scopes
+                        .get(param_scope_depth..)
+                        .is_some_and(|layers| layers.iter().any(|s| s.iter().any(|n| n == writer)));
+                if !self.is_unshadowed_pkg_root("http") || writer_shadowed {
+                    Some("closure")
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+fn check_try_site<'a>(ck: &mut TryWalker<'a, '_>, span: Span, ctx: Ctx<'a>) {
+    if let Some(owner) = ck.effective_no_error_owner(ctx) {
+        let owner_text = if owner == "closure" {
+            "this closure".to_string()
+        } else {
+            format!("`{}`", owner)
+        };
+        ck.ck.diags.push(
+            Diagnostic::error(
+                "HYB-E2011",
+                ck.ck.path.clone(),
+                span,
+                format!(
+                    "`?` needs an `error` result to return through, but {} has none (E4, HYB-E2011)",
+                    owner_text
+                ),
+            )
+            .with_notes(vec![
+                "E4: `?` may appear only in a function or closure whose results end in `error`, in `main` (E6 exit contract), or in an `http.handler` closure (E11)".to_string(),
+                "a closure's `?` binds to the closure's own results, never the enclosing function's (lexical, like `return`)".to_string(),
+                "fix: add `error` as the last result and return it, or handle the error in place: `v, err := f()` then `if err != nil { … }`".to_string(),
+            ]),
+        );
+    }
 }
 
 pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
-    let mut w = TryWalker { ck, scopes: Vec::new(), return_e11: false };
+    let mut w = TryWalker {
+        ck,
+        scopes: Vec::new(),
+        type_params: Vec::new(),
+        return_e11: false,
+    };
     for d in &file.decls {
         match d {
             Decl::Const(c) => {
@@ -130,25 +257,52 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
                 }
                 walk_expr(&mut w, &c.value, ctx);
             }
-            Decl::Struct(s) => s.fields.iter().for_each(|f| walk_type(&mut w, &f.ty, Ctx::NoErrorResult(s.name.as_str()))),
+            Decl::Struct(s) => s
+                .fields
+                .iter()
+                .for_each(|f| walk_type(&mut w, &f.ty, Ctx::NoErrorResult(s.name.as_str()))),
             Decl::TypeAlias(a) => walk_type(&mut w, &a.ty, Ctx::NoErrorResult(a.name.as_str())),
-            Decl::Enum(e) => e.variants.iter().filter_map(|v| v.payload.as_ref()).for_each(|p| walk_type(&mut w, p, Ctx::NoErrorResult(e.name.as_str()))),
+            Decl::Enum(e) => e
+                .variants
+                .iter()
+                .filter_map(|v| v.payload.as_ref())
+                .for_each(|p| walk_type(&mut w, p, Ctx::NoErrorResult(e.name.as_str()))),
             Decl::Fn(f) => {
+                w.type_params.clear();
+                if let Some(r) = &f.receiver {
+                    collect_receiver_type_params(w.ck, &r.ty, &mut w.type_params);
+                }
+                for tp in &f.type_params {
+                    w.type_params.push(tp.name.clone());
+                }
                 let sig_ctx = Ctx::NoErrorResult(f.name.as_str());
                 if let Some(r) = &f.receiver {
                     walk_type(&mut w, &r.ty, sig_ctx);
                 }
                 f.params.iter().for_each(|p| walk_type(&mut w, &p.ty, sig_ctx));
                 f.results.iter().for_each(|r| walk_type(&mut w, &r.ty, sig_ctx));
-                let Some(body) = &f.body else { continue };
+                let Some(body) = &f.body else {
+                    w.type_params.clear();
+                    continue;
+                };
+                let base_scope_depth = w.scopes.len();
                 w.push_scope();
                 if let Some(r) = &f.receiver {
                     w.bind_name(&r.name);
                 }
                 f.params.iter().for_each(|p| w.bind_name(&p.name));
-                f.results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| w.bind_name(n));
+                f.results
+                    .iter()
+                    .filter_map(|r| r.name.as_deref())
+                    .for_each(|n| w.bind_name(n));
                 let is_main = f.name == "main" && f.receiver.is_none();
-                let ctx = if is_main || results_end_in_error(w.ck, &f.results) {
+                let builtin_err_ty = TypeExpr::Named {
+                    name: "error".to_string(),
+                    span: f.span,
+                };
+                let ctx = if is_main && w.is_builtin_error_type(&builtin_err_ty, false) {
+                    Ctx::Main { base_scope_depth }
+                } else if !is_main && w.results_end_in_error(&f.results, false) {
                     Ctx::Ok
                 } else {
                     Ctx::NoErrorResult(f.name.as_str())
@@ -158,13 +312,14 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
                 walk_block(&mut w, body, ctx);
                 w.return_e11 = false;
                 w.pop_scope();
+                w.type_params.clear();
             }
             Decl::Import { .. } => {}
         }
     }
 }
 
-fn walk_type(ck: &mut TryWalker<'_, '_>, ty: &TypeExpr, ctx: Ctx<'_>) {
+fn walk_type<'a>(ck: &mut TryWalker<'a, '_>, ty: &'a TypeExpr, ctx: Ctx<'a>) {
     match ty {
         TypeExpr::Named { .. } => {}
         TypeExpr::Pointer { to, .. }
@@ -174,8 +329,10 @@ fn walk_type(ck: &mut TryWalker<'_, '_>, ty: &TypeExpr, ctx: Ctx<'_>) {
         TypeExpr::Array { len, elem, .. } => {
             if let Some(l) = len {
                 let len_ctx = match ctx {
-                    Ctx::Ok => Ctx::NoErrorResult("array length"),
-                    no_err => no_err,
+                    Ctx::Ok | Ctx::Main { .. } | Ctx::E11Handler { .. } => {
+                        Ctx::NoErrorResult("array length")
+                    }
+                    Ctx::NoErrorResult(owner) => Ctx::NoErrorResult(owner),
                 };
                 walk_expr(ck, l, len_ctx);
             }
@@ -192,7 +349,7 @@ fn walk_type(ck: &mut TryWalker<'_, '_>, ty: &TypeExpr, ctx: Ctx<'_>) {
     }
 }
 
-fn walk_block(ck: &mut TryWalker<'_, '_>, b: &Block, ctx: Ctx<'_>) {
+fn walk_block<'a>(ck: &mut TryWalker<'a, '_>, b: &'a Block, ctx: Ctx<'a>) {
     ck.push_scope();
     for s in &b.stmts {
         walk_stmt(ck, s, ctx);
@@ -200,7 +357,7 @@ fn walk_block(ck: &mut TryWalker<'_, '_>, b: &Block, ctx: Ctx<'_>) {
     ck.pop_scope();
 }
 
-fn walk_stmt(ck: &mut TryWalker<'_, '_>, s: &Stmt, ctx: Ctx<'_>) {
+fn walk_stmt<'a>(ck: &mut TryWalker<'a, '_>, s: &'a Stmt, ctx: Ctx<'a>) {
     match s {
         Stmt::Local(l) => {
             let val_ctx = if l.kind == LocalKind::Const {
@@ -211,8 +368,19 @@ fn walk_stmt(ck: &mut TryWalker<'_, '_>, s: &Stmt, ctx: Ctx<'_>) {
             if let Some(ty) = &l.ty {
                 walk_type(ck, ty, val_ctx);
             }
-            l.values.iter().for_each(|v| walk_expr(ck, v, val_ctx));
-            l.names.iter().for_each(|n| ck.bind_name(n));
+            let bind_before_try_define = l.kind != LocalKind::Const
+                && l.values.len() == 1
+                && matches!(unwrap_parens(&l.values[0]), Expr::Try { .. });
+            if bind_before_try_define {
+                if let Expr::Try { operand, span } = unwrap_parens(&l.values[0]) {
+                    walk_expr(ck, operand, val_ctx);
+                    l.names.iter().for_each(|n| ck.bind_name(n));
+                    check_try_site(ck, *span, val_ctx);
+                }
+            } else {
+                l.values.iter().for_each(|v| walk_expr(ck, v, val_ctx));
+                l.names.iter().for_each(|n| ck.bind_name(n));
+            }
         }
         Stmt::Assign {
             targets, values, ..
@@ -283,7 +451,10 @@ fn walk_stmt(ck: &mut TryWalker<'_, '_>, s: &Stmt, ctx: Ctx<'_>) {
             walk_expr(ck, subject, ctx);
             for a in arms {
                 ck.push_scope();
-                if let MatchPattern::Path { binding: Some(b), .. } = &a.pattern {
+                if let MatchPattern::Path {
+                    binding: Some(b), ..
+                } = &a.pattern
+                {
                     ck.bind_name(b);
                 }
                 if let Some(g) = &a.guard {
@@ -315,7 +486,7 @@ fn walk_stmt(ck: &mut TryWalker<'_, '_>, s: &Stmt, ctx: Ctx<'_>) {
     }
 }
 
-fn walk_place(ck: &mut TryWalker<'_, '_>, p: &PlaceKind, ctx: Ctx<'_>) {
+fn walk_place<'a>(ck: &mut TryWalker<'a, '_>, p: &'a PlaceKind, ctx: Ctx<'a>) {
     match p {
         PlaceKind::Ident(_) => {}
         PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
@@ -328,7 +499,7 @@ fn walk_place(ck: &mut TryWalker<'_, '_>, p: &PlaceKind, ctx: Ctx<'_>) {
     }
 }
 
-fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_>) {
+fn walk_fnlit<'a>(ck: &mut TryWalker<'a, '_>, e: &'a Expr, e11: bool, outer_ctx: Ctx<'a>) {
     if let Expr::FnLit {
         params,
         results,
@@ -339,20 +510,26 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
         params.iter().for_each(|p| walk_type(ck, &p.ty, outer_ctx));
         results.iter().for_each(|r| walk_type(ck, &r.ty, outer_ctx));
         // E4: lexical, like `return` — the closure's OWN results decide.
-        let ok = if e11 {
-            fnlit_has_valid_e11_signature(ck.ck, params, results)
-        } else {
-            results_end_in_error(ck.ck, results)
-        };
-        let ctx = if ok {
+        let valid_e11 = e11 && fnlit_has_valid_e11_signature(ck.ck, params, results);
+        let valid_err = !e11 && ck.results_end_in_error(results, true);
+        let saved_return_e11 = std::mem::replace(&mut ck.return_e11, false);
+        ck.push_scope();
+        params.iter().for_each(|p| ck.bind_name(&p.name));
+        results
+            .iter()
+            .filter_map(|r| r.name.as_deref())
+            .for_each(|n| ck.bind_name(n));
+        let param_scope_depth = ck.scopes.len();
+        let ctx = if valid_e11 {
+            Ctx::E11Handler {
+                writer: params[0].name.as_str(),
+                param_scope_depth,
+            }
+        } else if valid_err {
             Ctx::Ok
         } else {
             Ctx::NoErrorResult("closure")
         };
-        let saved_return_e11 = std::mem::replace(&mut ck.return_e11, false);
-        ck.push_scope();
-        params.iter().for_each(|p| ck.bind_name(&p.name));
-        results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| ck.bind_name(n));
         let http_ok = ck.is_unshadowed_pkg_root("http");
         ck.return_e11 = is_e11_result_type(ck.ck, results, http_ok);
         walk_block(ck, body, ctx);
@@ -361,32 +538,10 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
     }
 }
 
-fn walk_expr(ck: &mut TryWalker<'_, '_>, e: &Expr, ctx: Ctx<'_>) {
+fn walk_expr<'a>(ck: &mut TryWalker<'a, '_>, e: &'a Expr, ctx: Ctx<'a>) {
     match e {
         Expr::Try { operand, span } => {
-            if let Ctx::NoErrorResult(owner) = ctx {
-                let owner_text = if owner == "closure" {
-                    "this closure".to_string()
-                } else {
-                    format!("`{}`", owner)
-                };
-                ck.ck.diags.push(
-                    Diagnostic::error(
-                        "HYB-E2011",
-                        ck.ck.path.clone(),
-                        *span,
-                        format!(
-                            "`?` needs an `error` result to return through, but {} has none (E4, HYB-E2011)",
-                            owner_text
-                        ),
-                    )
-                    .with_notes(vec![
-                        "E4: `?` may appear only in a function or closure whose results end in `error`, in `main` (E6 exit contract), or in an `http.handler` closure (E11)".to_string(),
-                        "a closure's `?` binds to the closure's own results, never the enclosing function's (lexical, like `return`)".to_string(),
-                        "fix: add `error` as the last result and return it, or handle the error in place: `v, err := f()` then `if err != nil { … }`".to_string(),
-                    ]),
-                );
-            }
+            check_try_site(ck, *span, ctx);
             walk_expr(ck, operand, ctx);
         }
         Expr::FnLit { .. } => walk_fnlit(ck, e, false, ctx),
@@ -448,7 +603,12 @@ fn walk_expr(ck: &mut TryWalker<'_, '_>, e: &Expr, ctx: Ctx<'_>) {
             }
             items.iter().for_each(|i| walk_expr(ck, i, ctx));
         }
-        Expr::MapLit { key, value, entries, .. } => {
+        Expr::MapLit {
+            key,
+            value,
+            entries,
+            ..
+        } => {
             walk_type(ck, key, ctx);
             walk_type(ck, value, ctx);
             for (k, v) in entries {
