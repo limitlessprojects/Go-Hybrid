@@ -2856,8 +2856,6 @@ impl<'a> Collector<'a> {
                         // (declared-position walks: alias ty, StructLit/SliceLit/array
                         // elem ty, MapLit key comparability) — each shape walks once.
                         self.check_type_arg_instantiation(&first_arg.value);
-                        }
-                        self.check_type_arg_instantiation(&first_arg.value);
                     }
                 }
                 for (i, a) in args.iter().enumerate() {
@@ -3214,36 +3212,6 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #3561: validate the type expression in `new(T)` or `make(T, ...)`
-    fn check_type_arg_instantiation(&mut self, e: &Expr) {
-        match unwrap_parens(e) {
-            Expr::Ident { name, span } => {
-                self.check_named_type_instantiation(name, *span);
-            }
-            Expr::Index { base, index, .. } => {
-                self.check_type_arg_instantiation(base);
-                self.check_type_arg_instantiation(index);
-            }
-            Expr::SliceLit {
-                elem: Some(t),
-                items,
-                ..
-            } if items.is_empty() => {
-                self.ty(t);
-            }
-            Expr::MapLit {
-                key,
-                value,
-                entries,
-                ..
-            } if entries.is_empty() => {
-                self.ty(key);
-                self.ty(value);
-            }
-            _ => {}
-        }
-    }
-
     /// #3561: validate the type expression in `new(T)` or `make(T, ...)`.
     /// Union resolution with #3355: #3561's recursive instantiation walker plus
     /// #3355's declared-position walks (alias ty, StructLit/SliceLit/array elem
@@ -3256,8 +3224,11 @@ impl<'a> Collector<'a> {
                     self.ty(alias_ty);
                 }
             }
-            Expr::Index { base, index, .. } => {
-                self.check_type_arg_instantiation(base);
+            // The composite `head[args]` is instantiated by the caller-side match
+            // arm; recursing into `base` alone would re-check a bare generic head
+            // and false-positive arity/shadow diagnostics (#3684 accept pins).
+            // Walk the type arguments only.
+            Expr::Index { index, .. } => {
                 self.check_type_arg_instantiation(index);
             }
             Expr::StructLit { ty: Some(t), .. } => self.ty(t),
