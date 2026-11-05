@@ -255,18 +255,31 @@ impl<'a> Checker<'a> {
         if matches!(resolved, hy_syntax::TypeExpr::Option { .. }) {
             return false;
         }
+        
+        // First check: shape must be Primitive or Str
+        if !matches!(self.shape_of_type(ty), TypeShape::Primitive | TypeShape::Str) {
+            return false;
+        }
+        
+        // Second check: resolved type name must be a conversion type and not shadowed
         let name_str = match resolved {
             hy_syntax::TypeExpr::Named { ref name, .. } => name.as_str(),
             _ => return false,
         };
+        
+        if !is_conversion_type_name(name_str) {
+            return false;
+        }
+        
+        // Third check: the resolved name must not be shadowed by enum/struct/type-param
         if self.structs.contains_key(name_str)
             || self.struct_type_params.contains_key(name_str)
             || self.enums.contains_key(name_str)
         {
             return false;
         }
-        matches!(self.shape_of_type(ty), TypeShape::Primitive | TypeShape::Str)
-            && is_conversion_type_name(name_str)
+        
+        true
     }
 
     fn ident_is_constant(
