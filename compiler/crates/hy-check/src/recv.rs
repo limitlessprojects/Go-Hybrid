@@ -341,7 +341,7 @@ impl<'a> Checker<'a> {
             // These arms mirror `sendability::dir_ty_of_expr`'s projections.
             Expr::Index { base, .. } => {
                 let base_ty = self.recv_chan_type_expr(st, base)?;
-                match self.resolve_type_alias(&base_ty) {
+                match self.peel_pointer_and_alias(&base_ty) {
                     TypeExpr::Slice { elem, .. }
                     | TypeExpr::Array { elem, .. }
                     | TypeExpr::Map { value: elem, .. } => Some(*elem),
@@ -350,12 +350,21 @@ impl<'a> Checker<'a> {
             }
             Expr::Slice { base, span, .. } => {
                 let base_ty = self.recv_chan_type_expr(st, base)?;
-                match self.resolve_type_alias(&base_ty) {
+                match self.peel_pointer_and_alias(&base_ty) {
                     TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
                         Some(TypeExpr::Slice { elem, span: *span })
                     }
                     _ => None,
                 }
+            }
+            Expr::Field { base, name, .. } => {
+                let base_ty = self.recv_chan_type_expr(st, base)?;
+                let fty = self
+                    .struct_fields_for_type(&base_ty)?
+                    .into_iter()
+                    .find(|(n, _)| n == name)?
+                    .1;
+                Some(self.resolve_type_alias(&fty))
             }
             // A local whose `ty_of_expr` entry is missing (the initializer was
             // a call the type cache does not project) still carries the
@@ -458,5 +467,9 @@ impl<'a> Checker<'a> {
                 false
             }
         }
+    }
+
+    pub(crate) fn projected_expr_ty(&self, st: &FnState, expr: &Expr) -> Option<hy_syntax::TypeExpr> {
+        self.recv_chan_type_expr(st, expr)
     }
 }
