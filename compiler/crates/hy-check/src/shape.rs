@@ -12,7 +12,7 @@
 
 use crate::foreign;
 use crate::model::{Checker, FnState, TypeShape};
-use hy_syntax::{BinOp, CallArg, Expr, TypeExpr};
+use hy_syntax::{BinOp, CallArg, Expr, LitKind, TypeExpr};
 
 impl<'a> Checker<'a> {
     const MAX_TYPE_RESOLUTION_DEPTH: usize = 8;
@@ -370,7 +370,7 @@ impl<'a> Checker<'a> {
                     // classified as shared mutable state and rejected at every
                     // check-site. The pointee is inferred when the type argument
                     // resolves; otherwise Unknown — still a non-sendable pointer.
-                    "new" => {
+                    "new" if !self.fns.contains_key("new") => {
                         let pointee = match args
                             .first()
                             .map(|a| crate::model::unwrap_parens(&a.value))
@@ -388,10 +388,10 @@ impl<'a> Checker<'a> {
                                     TypeShape::Unknown
                                 }
                             }
-                            Some(Expr::Index { base, .. }) => {
+                            Some(Expr::Index { base, index, .. }) => {
                                 if let Expr::Ident { name, .. } = crate::model::unwrap_parens(base)
                                 {
-                                    self.named_shape(name)
+                                    self.type_arg_ty(st, index).map(|t| self.named_shape(&format!("{name}[{}]", t.render()))).unwrap_or_else(|| self.named_shape(name))
                                 } else {
                                     TypeShape::Unknown
                                 }
@@ -863,6 +863,7 @@ impl<'a> Checker<'a> {
                             other => self.ty_of_expr(st, other),
                         });
                     }
+                    if name == "new" && args.len() == 1 && !self.fns.contains_key("new") { return Some(TypeExpr::Pointer { to: Box::new(self.type_arg_ty(st, &args[0].value)?), span: *span }); }
                     if args.len() == 1 {
                         let is_type_name = crate::const_overflow::fixed_width_int_range(name).is_some()
                             || crate::const_init::is_conversion_type_name(name)
@@ -1004,6 +1005,14 @@ impl<'a> Checker<'a> {
     /// N3 (`HYB-E4002`): returns `Some(reason)` when `ty` has no zero value
     /// (an `enum` whose first variant carries a payload, or a `struct`/`[N]T`
     /// containing such a field/element transitively).
+    fn type_arg_ty(&self, st: &FnState, expr: &Expr) -> Option<TypeExpr> {
+        match crate::model::unwrap_parens(expr) {
+            Expr::Ident { name, span } => Some(TypeExpr::Named { name: name.clone(), span: *span }),
+            Expr::Field { base, name, span } => if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) { Some(TypeExpr::Named { name: format!("{pkg}.{name}"), span: *span }) } else { None },
+            Expr::Index { base, index, span } => if let Expr::Ident { name, .. } = crate::model::unwrap_parens(base) { Some(TypeExpr::Named { name: format!("{name}[{}]", self.type_arg_ty(st, index)?.render()), span: *span }) } else { None },
+            other => self.ty_of_expr(st, other),
+        }
+    }
     pub(crate) fn no_zero_value_reason(&self, ty: &TypeExpr, depth: usize) -> Option<String> {
         if depth > 16 {
             return None;
@@ -1054,6 +1063,28 @@ impl<'a> Checker<'a> {
                         ),
                     ]),
             );
+        }
+    }
+
+    /// Static type name of a literal `match` subject (`ty_of_expr` does not
+    /// type literals). `None` for non-literals and `nil`.
+    fn lit_type_name(expr: &Expr) -> Option<&'static str> {
+        let bare = crate::model::unwrap_parens(expr);
+        match bare {
+            Expr::Lit { kind, .. } => match kind {
+                LitKind::Int(_) => Some("int"),
+                LitKind::Float(_) => Some("float64"),
+                LitKind::Bool(_) => Some("bool"),
+                LitKind::Str(_) | LitKind::RawStr(_) => Some("string"),
+                LitKind::Char(_) => Some("rune"),
+                LitKind::Nil => None,
+            },
+            Expr::Unary {
+                op: hy_syntax::UnOp::Neg,
+                operand,
+                ..
+            } => Self::lit_type_name(operand),
+            _ => None,
         }
     }
 
@@ -1123,6 +1154,9 @@ impl<'a> Checker<'a> {
         enum MatchTarget {
             Option,
             Enum(String, Vec<String>),
+            /// Statically-known non-`option[T]` subject type (rendered name).
+            /// `some`/`none` constructor patterns must be rejected here (T13/T20).
+            NonOption(String),
             Unknown,
         }
 
@@ -1135,9 +1169,24 @@ impl<'a> Checker<'a> {
                     let base = Self::base_named_type_str(name);
                     if let Some(vs) = self.enums.get(base) {
                         target = MatchTarget::Enum(base.to_string(), vs.clone());
+                    } else {
+                        target = MatchTarget::NonOption(base.to_string());
                     }
                 }
-                _ => {}
+                _ => target = MatchTarget::NonOption(resolved.render()),
+            }
+        } else {
+            // ty_of_expr cannot type this subject (untyped literal init,
+            // slice/map/struct literal without element ascription, ...).
+            // Classify by shape so a concrete non-option subject can never
+            // slip `some`/`none` through as `option[T]` (T13/T20).
+            if let Some(lit_name) = Self::lit_type_name(subject) {
+                target = MatchTarget::NonOption(lit_name.to_string());
+            } else {
+                let shape = self.shape_of_expr(st, subject);
+                if !matches!(shape, TypeShape::Unknown) {
+                    target = MatchTarget::NonOption(shape.render());
+                }
             }
         }
         if matches!(target, MatchTarget::Unknown) {
@@ -1259,6 +1308,53 @@ impl<'a> Checker<'a> {
                                 ]),
                         );
                     }
+                }
+            }
+            MatchTarget::NonOption(type_name) => {
+                // T13/T20: `some`/`none` are `option[T]` constructor patterns.
+                // A statically non-`option[T]` subject can never be `some`/`none`,
+                // so accepting them is unsound — reject fail-closed.
+                for arm in arms {
+                    if let MatchPattern::Path { segments, .. } = &arm.pattern {
+                        if segments.as_slice() == ["some"] || segments.as_slice() == ["none"] {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    "HYB-E5001",
+                                    self.path.clone(),
+                                    span,
+                                    format!(
+                                        "`some`/`none` option patterns are not allowed on non-`option` match subject of type `{type_name}` (HYB-E5001)"
+                                    ),
+                                )
+                                .with_notes(vec![
+                                    format!(
+                                        "why: the `match` subject has static non-`option` type `{type_name}`, so `some`/`none` constructor patterns are unsound (T13/T20)",
+                                    ),
+                                    "fix: match on the concrete type's own variants/literals, or unwrap the `option[T]` value first before matching it.".to_string(),
+                                ]),
+                            );
+                            return;
+                        }
+                    }
+                }
+                // No `some`/`none` arms: treat like a non-enumerated subject
+                // and require exhaustive coverage or a trailing `_` arm.
+                let has_trailing_wildcard = arms.last().is_some_and(|a| {
+                    matches!(a.pattern, MatchPattern::Wildcard) && a.guard.is_none()
+                });
+                if !has_trailing_wildcard {
+                    self.diags.push(
+                        Diagnostic::error(
+                            "HYB-E5001",
+                            self.path.clone(),
+                            span,
+                            "non-exhaustive match: missing trailing `_` arm for non-enumerated subject (HYB-E5001)",
+                        )
+                        .with_notes(vec![
+                            "why: `match` requires exhaustive variant coverage or a final `_` arm (T13/T14/T15)".to_string(),
+                            "fix: add a trailing `_:` arm, or match on an `option[T]` or declared `enum` covering all variants".to_string(),
+                        ]),
+                    );
                 }
             }
             MatchTarget::Unknown => {

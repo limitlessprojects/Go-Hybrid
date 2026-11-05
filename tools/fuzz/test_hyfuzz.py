@@ -272,6 +272,54 @@ class FuzzInputValidationTests(unittest.TestCase):
                 # Returns cleanly without exiting with error
                 hyfuzz.main()
 
+    def test_whitespace_only_or_subdirectory_corpus_entries_do_not_pass_as_valid_corpus(self):
+        with tempfile.TemporaryDirectory() as corpus:
+            Path(corpus, "subdir.hy").mkdir()
+            Path(corpus, "empty.hy").write_text("   \n\t\n", encoding="utf-8")
+            with patch.object(sys, "argv", [
+                "hyfuzz.py", "--hyb", sys.executable, "--corpus", corpus, "--cases", "1",
+            ]), self.assertRaises(SystemExit) as failure:
+                hyfuzz.main()
+            self.assertIn("no corpus programs found", str(failure.exception))
+
+    def test_invalid_utf8_corpus_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as corpus:
+            Path(corpus, "corrupt.hy").write_bytes(b"\xff\xfe\x00")
+            with patch.object(sys, "argv", [
+                "hyfuzz.py", "--hyb", sys.executable, "--corpus", corpus, "--cases", "1",
+            ]), self.assertRaises(SystemExit) as failure:
+                hyfuzz.main()
+            self.assertIn("cannot read corpus file", str(failure.exception))
+
+    def test_invalid_failures_dir_fails_closed_even_when_all_cases_pass(self):
+        with tempfile.TemporaryDirectory() as corpus, tempfile.NamedTemporaryFile() as existing_file:
+            Path(corpus, "case.hy").write_text("fn main() {}", encoding="utf-8")
+            for bad_dir in ("   ", existing_file.name):
+                with self.subTest(bad_dir=bad_dir), patch.object(sys, "argv", [
+                    "hyfuzz.py", "--hyb", sys.executable, "--corpus", corpus,
+                    "--cases", "1", "--failures-dir", bad_dir,
+                ]), patch.object(hyfuzz, "check_one", return_value=(None, True)), \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(SystemExit) as failure:
+                        hyfuzz.main()
+                    self.assertEqual(failure.exception.code, 2)
+                    self.assertIn("cannot save failure artifact", err.getvalue())
+
+    def test_check_one_requests_utf8_replacement_decoding(self):
+        with tempfile.TemporaryDirectory() as workdir:
+            captured = {}
+
+            def fake_run(cmd, **kwargs):
+                captured.update(kwargs)
+                return subprocess.CompletedProcess(cmd, 1, "diagnostic \ufffd", "")
+
+            with patch.object(hyfuzz.subprocess, "run", side_effect=fake_run):
+                bad, accepted = hyfuzz.check_one("hyb", "fn main() {}", workdir, 1)
+            self.assertIsNone(bad)
+            self.assertFalse(accepted)
+            self.assertEqual(captured.get("encoding"), "utf-8")
+            self.assertEqual(captured.get("errors"), "replace")
+
 
 class GoToolchainOracleTests(unittest.TestCase):
     def test_oracle_one_accepts_clean_build_and_flags_build_failures(self):
