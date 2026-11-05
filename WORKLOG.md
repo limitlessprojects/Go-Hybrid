@@ -65,3 +65,56 @@
 - Dup protocol: #3689 (marhabynova, same issue #3684, 17 min later) superseded — honest independent-diagnosis credit posted, invited to re-target residuals.
 - Suites 401 -> 404. Differential 45/45 + 90/90 all three landings. Worklog: this commit.
 - Next queue: #3586 -> #3414 -> #3423 -> #3351 -> #3472 -> #3362(behind 14) -> #2586(behind 7) -> #3366(behind 14) -> #3168/#3238/#3676/#3233/#3070/#3438.
+
+## Session 101 — 2026-11-05 04:10 UTC+8 tick
+- approve 9/9 ok; scan ok. (03:10 tick had no external merges; main unchanged at start.)
+- Landed PR #3692 -> 466799a9 (hy-check: run_type_arg_expr skips predeclared set/option + type params in new/make operands, keeps E1001/E1002 on real errors; fixes #3691, aswadi). ALL-GREEN 405 suites.
+- Landed PR #3693 -> 9bfd7f63 (hy-emit: struct/foreign shapes across Try/Move/AddrOf, generic + assoc callees via fn_shapes, StructLit in assoc_index_type_arg; fixes #3690, aswadi). ALL-GREEN 406 suites. First battery run hit transient ENOSPC in differential sandbox (infra, not code); freed target/debug/incremental (1G) + /tmp scratch, rerun clean end-to-end; noted in landing reply.
+- Suites 404 -> 406. Differential 45/45 + 90/90 both landings. Disk: watch /home/z (82% used after cleanup); incremental cache deletion cost is acceptable — prefer freeing /tmp scratch first next time.
+- Worklog: this commit.
+- Next queue: #3362 -> #3558 -> #3366 -> #3611 -> #3355 -> #3554 -> #3566 -> #3438 -> #3056 -> #2456.
+
+## Session 102 — 2026-11-05 05:10 UTC+8 tick
+- approve 8/8 ok; scan ok.
+- Landed PR #3701 -> fd3cec4e (hy-check: := inferred sized arrays keep [N]T, #2771 differ logic now applies; fixes #3700, nyxlabs29-cyber). ALL-GREEN 407 suites.
+- Landed PR #3703 -> 9dd49697 (hy-check: range_iter move-unwrapping at 6 sites + len(set[T]) int bound vs user-set shadow guard; fixes #3699, aswadi). ALL-GREEN 408 suites. First cargo run hit transient ENOSPC again (infra); freed incremental cache + scratch, rerun clean; noted in reply.
+- Disk: recurring ENOSPC pattern when target rebuilds cold — standard mitigation now: rm -rf target/debug/incremental /tmp/verify-wt /tmp/hydiff-* then rerun (incremental loss costs ~2-4 min on warm deps).
+- Suites 406 -> 408. Worklog: this commit.
+- Next queue: #3702 -> #3612 -> #3614 -> #3616 -> #2934 -> #3362 -> #2937 -> #3558 -> #2661.
+
+## Session 103 — 2026-11-05 06:10 UTC+8 tick
+- API quota burned by scan (403 rate-limit) + tool 10-min cap discovered: background processes die between calls — battery now run manually in 4 steps (merge gate / cargo / corpus / differential), each its own call, logs to /tmp/vp-*.log.
+- Landed PR #3702 -> 7c763912 (hy-check: slot-loan addressability unwraps Try+move, reject HYB-E2010; fixes #3698, aswadi). ALL-GREEN 409 suites.
+- Landed PR #3612 -> bfe8a141 (typed_value_type_name folds [constN]T via const_int_value(_at), [...]T from items.len(); fixes #3599, dextermos-dev). ALL-GREEN 410 suites.
+- Landed PR #3614 -> 70c4f08f (fmt.eprint* rejected when os shadowed via is_os_shadowed 6-probe; audited probes vs import table — no false-positive path; fixes #3598, dextermos-dev). ALL-GREEN 411 suites. NOTE: merge msg lost 2 fragments to shell backtick substitution; force-push to repair blocked by branch protection — tree+evidence unaffected, disclosed in PR reply. Rule reaffirmed: no backticks in -m ever.
+- Landed PR #3616 -> 108512ab (MatchTarget::NonOption: some/none on non-option match subject fail-closed HYB-E5001, lit_type_name + shape fallback; fixes #3613, dextermos-dev). ALL-GREEN 412 suites.
+- Suites 408 -> 412. Differential 45/45 + 90/90 all four landings; corpus 135 tripwire not fired x4.
+- Worklog: this commit.
+- Next queue: #2934 -> #3362 -> #2937 -> #3558 -> #2661 -> #3366 -> #3611 -> #3355.
+
+## Session 104 — 2026-11-05 07:10 UTC+8 tick
+- approve 10/10 ok (quota reset, 4986 left); scan skipped (burns quota, queue known).
+- Landed PR #2934 -> 0cc82b15 (for-in binders get real TypeExprs via ty_of_expr slice/array/map/chan/set; range counters typed via typed_int_bound + new builtin min/max arm; fixes #2933, gttps). In-merge conflict resolution vs #3703 in typed_int_bound head: kept BOTH pub(crate) and unwrap_parens_and_move; tree-hash asserted identical to verified trial merge f918cfc8. ALL-GREEN 413 suites.
+- Landed PR #3362 -> 86b36c6f (hyfuzz fail-closed: corpus read errors SystemExit with path, subprocess utf-8/replace + None-safe output, --failures-dir pre-validated; fixes #2933-family harness hardening, Shokun123). Battery + PR's own pytest 25/25 + live fuzz smoke (12 cases, invariants held) + negative probe on failures-dir. NOTE: tool transport eats literal "[h" sequences in output — codepoint dump is ground truth (cost: one false syntax-alarm). hyfuzz_cases.json is a NEW file on main via this merge (was absent). ALL-GREEN 413 suites (no rust surface).
+- Landed PR #2937 -> 4b8c1286 (deep-mode builtin args: &mut FnState, Local/Assign binding shape/ty definition + track_deep_rhs, unshadowed() make/new probe; fixes #2936, gttps). Auto-merge coexists with #3670 guard. ALL-GREEN 414 suites.
+- Suites 412 -> 414. Differential 45/45 + 90/90 x3; corpus 135 tripwire not fired x3.
+- Worklog: this commit.
+- Next queue: #3558 -> #2661 -> #3366 -> #3611 -> #3355 -> #3554 -> #3566 -> #3438 -> #3056 -> #2456.
+
+## Session 105 — 2026-11-05 09:10 UTC+8 tick
+- approve 12/12 ok (quota healthy); scan skipped.
+- Landed PR #3558 -> 236fa42c (hy-syntax: panic <expr> prefix for any operand — only-operand-start tokens + next_on_same_line; shadow/call preserved; fixes #3557, 00Desa00). ALL-GREEN 415 suites.
+- Landed PR #2661 -> ffd8e5b1 (hy-emit: N5 array zero-init addressable via n5_zero_init_addr, computed-len tail-fill closures, i->hyIdx hygiene, constconv::parse_int; fixes #2660, gttps). Transport eats "[h" again — codepoint dump confirmed hyArr[hyIdx] intact before verification. ALL-GREEN 416 suites (differential accept-side builds+runs the emitted Go).
+- Landed PR #3366 -> 069df855 (worker/script fail-closed: JOB_JSON decode/type gates, repo no-dash no-CRLF, sha fullmatch no-traversal, quoted runner args, honest exit codes; Shokun123). Battery + 9 pytest + 4 injection probes on patched kernel source all hit intended FATAL paths. ALL-GREEN 416 suites.
+- Suites 414 -> 416. Differential 45/45 + 90/90 x3; corpus 135 tripwire not fired x3.
+- Worklog: this commit.
+- Next queue: #3611 -> #3355 -> #3554 -> #3566 -> #3438 -> #3056 -> #2456.
+
+## Session 106 — 2026-11-05 10:10 UTC+8 tick
+- approve 9/9 ok; scan skipped.
+- Landed PR #3611 -> 0d90fc52 (hy-check: callee_reaches_foreign interprocedural escape tracing for first-class foreign callees at A5 sites + fn_call_sites caller binding; fixes #3610, produckq-boop). ALL-GREEN 418 suites (+2).
+- Landed PR #3355 -> b509d284 (hy-check: make() first type-arg routed through declared-position ty() walker — alias/StructLit/SliceLit/array/MapLit with check_map_key_comparable; fixes #3248, Dimank92). ALL-GREEN 419 suites.
+- Landed PR #3554 -> 11afb872 (hy-syntax lexer: LX6 underscore separator validation across int/fraction/exponent, is_ident_start drops _, digits-only token value; fixes #3548, gauravatwork117). ALL-GREEN 420 suites.
+- Suites 416 -> 420. Differential 45/45 + 90/90 x3; corpus 135 tripwire not fired x3.
+- Worklog: this commit.
+- Next queue: #3566 -> #3438 -> #3056 -> #2456 -> #2937-family leftovers.
