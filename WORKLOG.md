@@ -127,3 +127,11 @@
 - Suites 420 -> 422 (net, incl. repair re-verification).
 - Worklog: this commit.
 - Next queue: #3056 -> #2456 -> reap scan for new arrivals.
+
+## Session 108 — 2026-11-05 14:10 UTC+8 tick
+- env cold-recycled: rust 1.99.0 + go1.26.9 re-restored from cache script/tarball (tarball re-cached). approve 7/7 ok (4993 left); scan skipped.
+- Rejected PR #3056 (fixes #3055, Dimank92): superseded duplicate + regression. #3055's case list fully enforced since 2026-10-20 by check_new_type_operand (206723b7, fixes #936, E2005 shape-aware); static proof: PR's catch-all has no Index arm -> spurious E1002 on new(box[t])/new(set[int])/new(box[int])/new(box[<-chan int]) breaking 4 accept pins (3691/3684/defer/sendability). Author verified only own test file on base that already contained the fix. Genuine unpinned delta noted: main literal-ident list lacks "none" — offered as 2-line follow-up on existing E2005 machinery. Evidence reply posted (comment 6651323910).
+- Landed PR #2456 -> bc8f3193 (OpKind::Fn carries param kinds; kinds_conflict result+param signature comparison Unknown-tolerant, name-insensitive; method-expr receiver as first param; richer Fn labels; fixes #1599, Dimank92). multi_value_tuple rebind control adapted to signature-compatible swap (old cross-signature rebind WAS the bug). Four gates on committed trial merge ecfcddc3, tree 0deed7dc asserted identical pre-commit (S107 rule applied end-to-end). ALL-GREEN 423 suites (+1), corpus 135/135 tripwire quiet, differential 45/45+90/90.
+- Suites 422 -> 423. Worklog: this commit.
+- Follow-up claims: copy_element_kinds_conflict permissive Fn/Fn arm (copy fn elements) — unclaimed; new(none) literal-ident gap in check_new_type_operand — offered to #3056 author.
+- Next queue: reap scan for new arrivals (drained: #3056 rejected, #2456 landed).
