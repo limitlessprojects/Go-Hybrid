@@ -94,6 +94,21 @@ pub(crate) enum OpKind {
     /// fail-open in every operand guard, so `op + 1`, `takes_int(op)` and
     /// `var s string = op.unwrap()` all passed and failed `go build`.
     Option(Box<OpKind>),
+    /// A declared curated foreign named type (`os.file`, `bufio.reader`,
+    /// `net.conn`, `serde_json.value`, ...) — the names
+    /// `foreign::foreign_named_type` classifies as opaque, own-handle or
+    /// borrow-handle at the A5/move boundaries (#3521).
+    ///
+    /// Deliberately NOT `Unknown`: a named Go type is never assignable to or
+    /// from the builtin scalar family, yet every kind check using these
+    /// bindings fell through the `(Unknown, _)` fail-open arm, so
+    /// `var f os.file` + `var n int = f` passed `hyb check` and died in
+    /// `go build`.
+    ///
+    /// Cross-foreign pairs stay fail-open inside `kinds_conflict`: the kind
+    /// model does not track interface satisfaction, and a concrete foreign
+    /// value may legally target a foreign interface name (`io.reader`).
+    Foreign(String),
     Void,
 }
 
@@ -119,6 +134,7 @@ impl OpKind {
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
             OpKind::Fn(..) => "fn".to_string(),
             OpKind::Option(e) => format!("option[{}]", e.label()),
+            OpKind::Foreign(n) => n.clone(),
             OpKind::Void => "void".to_string(),
         }
     }
@@ -142,18 +158,27 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Unknown, _) | (_, Unknown) => false,
         // An interface target accepts ANY value (`var a any = 1; a = "str"`
         // builds), so `Interface` on the `want` side is never a conflict.
-        // `Interface` on the `got` side is fail-open too: assigning an `any` to
-        // a concrete type needs a type assertion the kind model does not track,
-        // so it must not be rejected on kind evidence alone.
+        // `Interface` on the `got` side is handled below (#2962): Hybrid has
+        // no type assertion, so an `any` value never becomes a concrete type.
         //
         // Without this arm the U16 assignment check and the U9-U12 interface
         // classification contradict each other: `a` of type `any` resolves to
         // `Interface`, and `Interface` vs `Str` falls through to the mismatch
         // arm below, so every assignment to an `any` target would be rejected.
         // The accept-side corpus controls caught exactly that.
-        (Interface, _) | (_, Interface) => false,
+        (Interface, _) => false,
         // No value is involved; a count check owns that case.
         (Void, _) | (_, Void) => false,
+        // #2962: the reverse direction is NOT assignable. A value of type
+        // `any` (an `any` variable, param, result or `recover()`) needs a type
+        // assertion to become a concrete type, and Hybrid has no assertion
+        // syntax, so `var n int = a`, `take_int(a)`, `return a` from an `int`
+        // fn and `[]int{a}` never build (`go build`: need type assertion).
+        // Only `any`/`interface{}` resolve to `Interface` (named interfaces
+        // and type parameters stay `Unknown`), so this claim is exact.
+        // Equality (`a == 1`) stays accepted: equality_kinds_conflict needs
+        // both directions to conflict and (Interface, _) above never does.
+        (_, Interface) => true,
         // An untyped int constant is assignable to a float target
         // (`var f float64 = 1` builds). The kind model cannot tell an untyped
         // constant from an `int` variable, so this direction must stay allowed
@@ -165,6 +190,17 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Float, Int) => false,
         // A struct whose name did not resolve is not evidence of a mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
+        // A declared curated foreign named type (`os.file`, `bufio.reader`,
+        // ...) is a named Go type: it is never assignable to or from the
+        // builtin scalar family, in either direction (`go build`: cannot use
+        // f (variable of type os.File) as int value). Every OTHER pairing
+        // with a foreign side stays fail-open — interface satisfaction is not
+        // modelled here, so a closure may target `http.handler`, a reader may
+        // target `io.reader`, and foreign values inside containers keep their
+        // current permissive behavior; this arm claims exactly the scalar
+        // interop that is provable.
+        (Foreign(_), Int | Float | Bool | Str) | (Int | Float | Bool | Str, Foreign(_)) => true,
+        (Foreign(_), _) | (_, Foreign(_)) => false,
         (a, b) if a == b => false,
         // Same container shape: recurse into the element kinds.
         (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
@@ -181,6 +217,114 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Fn(..), Fn(..)) => false,
         // Everything else is a shape or scalar-family mismatch Go refuses.
         _ => true,
+    }
+}
+
+/// The composite container family of a rendered `TypeExpr` spelling, with the
+/// parts split out (#3412). `None` = not a composite container (a bare name —
+/// alias/type-parameter/named type — a `fn(...)`, an `option[...]`, …), where
+/// the string model has no assignability claim and must fail open.
+enum CompFamily<'a> {
+    Chan {
+        /// Direction is not compared here: direction mismatches are the
+        /// E3012 coercion layer's single-diagnostic territory (#3412).
+        _dir: &'a str,
+        elem: &'a str,
+    },
+    Slice {
+        elem: &'a str,
+    },
+    Array {
+        len: Option<&'a str>,
+        elem: &'a str,
+    },
+    Map {
+        key: &'a str,
+        value: &'a str,
+    },
+    Pointer {
+        base: &'a str,
+    },
+}
+
+/// Split a rendered composite spelling at its first balanced `]` from `from`.
+fn split_balanced_bracket(s: &str, from: usize) -> Option<(usize, usize)> {
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut start = None;
+    for (i, b) in bytes[from..].iter().enumerate() {
+        let i = from + i;
+        match b {
+            b'[' => {
+                if start.is_none() {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((start?, i));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+impl<'a> CompFamily<'a> {
+    /// Classify a rendered type spelling. Spellings come from
+    /// `TypeExpr::render` (both sides of every comparison), so the forms
+    /// below are exhaustive for composite containers.
+    fn split(s: &'a str) -> Option<CompFamily<'a>> {
+        if let Some(rest) = s.strip_prefix("<-chan ") {
+            return Some(CompFamily::Chan {
+                _dir: "recv",
+                elem: rest,
+            });
+        }
+        if let Some(rest) = s.strip_prefix("chan<- ") {
+            return Some(CompFamily::Chan {
+                _dir: "send",
+                elem: rest,
+            });
+        }
+        if let Some(rest) = s.strip_prefix("chan ") {
+            return Some(CompFamily::Chan {
+                _dir: "both",
+                elem: rest,
+            });
+        }
+        if let Some(rest) = s.strip_prefix("[]") {
+            return Some(CompFamily::Slice { elem: rest });
+        }
+        if s.starts_with('[') {
+            let (open, close) = split_balanced_bracket(s, 0)?;
+            let len_txt = &s[open + 1..close];
+            let len = if !len_txt.is_empty() && len_txt.bytes().all(|b| b.is_ascii_digit()) {
+                Some(len_txt)
+            } else {
+                // An expression length (`[N]T`) has no textual truth here —
+                // fail open on the length, the element still compares.
+                None
+            };
+            return Some(CompFamily::Array {
+                len,
+                elem: &s[close + 1..],
+            });
+        }
+        if let Some(_rest) = s.strip_prefix("map[") {
+            let (open, close) = split_balanced_bracket(s, 3)?;
+            return Some(CompFamily::Map {
+                key: &s[open + 1..close],
+                value: &s[close + 1..],
+            });
+        }
+        if let Some(base) = s.strip_prefix('*') {
+            return Some(CompFamily::Pointer { base });
+        }
+        None
     }
 }
 
@@ -468,6 +612,12 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // `option[T]` is a separate concern (#1671), and this pass only needs
         // the payload kind for operand/argument/initializer checks.
         OpKind::Option(_) => false,
+        // Foreign members live on the Go side: the kind model carries the
+        // type NAME (for assignability) but no member table, so a member
+        // lookup on `os.file` cannot claim absence (`f.read(...)` must keep
+        // passing — unknown-FIELD/METHOD naming on foreign values is #2203's
+        // territory, with its own surface tables).
+        OpKind::Foreign(_) => false,
     }
 }
 
@@ -1002,7 +1152,20 @@ impl<'a> Collector<'a> {
     /// are known; everything else (conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
-        if let Some((_, _, array_ty)) = bare.as_array_lit() {
+        if let Some((len_opt, inner_elem, array_ty)) = bare.as_array_lit() {
+            // #3599: For `[...]int{1, 2, 3}`, len_opt is None; compute length from items.len().
+            // For `[N]int{1, 2, 3}` where N is a constant, fold N to its integer length.
+            if let Some(l) = len_opt {
+                if let Some(v) = crate::const_overflow::const_int_value(l)
+                    .or_else(|| self.ck.const_int_value_at(l, l.span().start, 0))
+                {
+                    if v >= 0 {
+                        return Some(format!("[{}]{}", v, inner_elem.render()));
+                    }
+                }
+            } else if let Expr::SliceLit { items, .. } = bare {
+                return Some(format!("[{}]{}", items.len(), inner_elem.render()));
+            }
             return Some(array_ty.render());
         }
         match bare {
@@ -1046,6 +1209,99 @@ impl<'a> Collector<'a> {
     fn sized_array_names_differ(&self, a: Option<&str>, b: Option<&str>) -> bool {
         matches!((a, b), (Some(x), Some(y))
             if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
+    }
+
+    /// #3412 — deep composite-element conflict: the kind model collapses
+    /// container inners (`OpKind::Chan(OpKind::Int)` fits `chan int64` as
+    /// well as `chan int32`), so a typed composite element whose INNER type
+    /// differs passed the `ik == expected` arm and failed `go build`
+    /// (`cannot use bad (variable of type chan int64) as chan int32 value in
+    /// slice literal`). Compare the resolved spellings part by part.
+    ///
+    /// Fail-open everywhere the string model cannot see Go assignability: a
+    /// bare-word (alias / named / type-parameter) spelling on either side, a
+    /// family mismatch (the kind layer already owns those), any type
+    /// parameter appearing in either spelling, and non-numeric array
+    /// lengths. Only a provable textual part mismatch conflicts.
+    fn deep_composite_conflict(&self, want: &TypeExpr, got: Option<&str>) -> Option<&'static str> {
+        let got = got?;
+        if got.is_empty() {
+            return None;
+        }
+        let want_resolved = self.ck.resolve_type_alias(want);
+        let want_s = want_resolved.render();
+        if want_s == got {
+            return None;
+        }
+        if self
+            .fn_type_params
+            .iter()
+            .any(|p| want_s.contains(p.as_str()) || got.contains(p.as_str()))
+        {
+            return None;
+        }
+        match (CompFamily::split(&want_s), CompFamily::split(got)) {
+            (
+                Some(CompFamily::Chan {
+                    elem: we,
+                    ..
+                }),
+                Some(CompFamily::Chan {
+                    elem: ge,
+                    ..
+                }),
+            ) => {
+                // Direction mismatches here are the E3012 coercion layer's
+                // territory (its slice/map-literal arms already reject
+                // them); a second E1002 on the same span is a double
+                // report. Only an ELEMENT type difference is ours.
+                (we != ge).then_some("channel element types differ")
+            }
+            (Some(CompFamily::Slice { elem: we }), Some(CompFamily::Slice { elem: ge })) => {
+                (we != ge).then_some("slice element types differ")
+            }
+            (
+                Some(CompFamily::Array {
+                    len: wl,
+                    elem: we,
+                }),
+                Some(CompFamily::Array {
+                    len: gl,
+                    elem: ge,
+                }),
+            ) => {
+                if let (Some(a), Some(b)) = (wl, gl) {
+                    if a != b {
+                        return Some("array lengths differ");
+                    }
+                }
+                (we != ge).then_some("array element types differ")
+            }
+            (
+                Some(CompFamily::Map {
+                    key: wk,
+                    value: wv,
+                }),
+                Some(CompFamily::Map {
+                    key: gk,
+                    value: gv,
+                }),
+            ) => {
+                if wk != gk {
+                    Some("map key types differ")
+                } else if wv != gv {
+                    Some("map value types differ")
+                } else {
+                    None
+                }
+            }
+            (Some(CompFamily::Pointer { base: wb }), Some(CompFamily::Pointer { base: gb })) => {
+                (wb != gb).then_some("pointer base types differ")
+            }
+            // Family mismatch or a non-composite side: the kind layer owns
+            // the former and the latter has no string-level claim.
+            _ => None,
+        }
     }
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
@@ -1813,7 +2069,11 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                // `a := [2]int{..}` / `b := a`: an inferred sized array keeps
+                // its length so `a = [3]int{..}`, `take(a)` etc. are compared.
+                if let Some(tn) = self.typed_value_type_name(val).filter(|t| is_sized_array_spelling(t)) {
+                    self.bind_type_name(name, tn);
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
                 }
             }
@@ -2578,8 +2838,10 @@ impl<'a> Collector<'a> {
                 );
                 if type_first_arg {
                     if let Some(first_arg) = args.first() {
-                        if let Expr::Ident { name, span } = unwrap_parens(&first_arg.value) {
-                            self.check_named_type_instantiation(name, *span);
+                        match unwrap_parens(&first_arg.value) {
+                            Expr::Ident { name, span } => self.check_named_type_instantiation(name, *span),
+                            Expr::Index { base, index, span } if matches!(unwrap_parens(base), Expr::Ident { name, .. } if self.lookup_kind(name).is_none() && !self.file_consts.contains_key(name) && !self.ck.fns.contains_key(name)) => self.check_named_type_instantiation(&format!("{}[{}]", base.render(), index.render()), *span),
+                            _ => {}
                         }
                     }
                 }
@@ -3108,7 +3370,22 @@ impl<'a> Collector<'a> {
             "int" | "uint" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
             | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
-            _ => OpKind::Unknown,
+            // A curated foreign named type (`os.file`, `bufio.reader`,
+            // `net.conn`, `serde_json.value`, ...) is resolved, not
+            // unresolved: the same table #3521 uses at move boundaries. It
+            // keeps its own kind so `kinds_conflict` can refuse scalar
+            // interop; every non-scalar pairing stays fail-open there.
+            // Handles are NOT exempt: `serde_json.value` lowers to the
+            // `jsonbinding.Value` struct, so `var n int = v` dies in
+            // `go build` exactly like `os.file` does.
+            _ => match crate::foreign::foreign_named_type(name) {
+                Some(
+                    crate::model::TypeShape::ForeignOpaque(n)
+                    | crate::model::TypeShape::OwnHandle(n)
+                    | crate::model::TypeShape::BorrowHandle(n),
+                ) => OpKind::Foreign(n),
+                _ => OpKind::Unknown,
+            },
         }
     }
 
@@ -3656,11 +3933,17 @@ impl<'a> Collector<'a> {
                     }
                 }
             }
+            Expr::Index { base, index, .. } => {
+                self.kind_of_named(&format!("{}[{}]", base.render(), index.render()), 0)
+            }
             Expr::SliceLit {
                 elem: Some(t),
                 items,
                 ..
-            } if items.is_empty() => OpKind::Slice(Box::new(self.kind_of_ty(t, 0))),
+            } if items.is_empty() => match bare.as_array_lit() {
+                Some((_, ie, _)) => OpKind::Array(Box::new(self.kind_of_ty(ie, 0))),
+                None => OpKind::Slice(Box::new(self.kind_of_ty(t, 0))),
+            },
             Expr::MapLit {
                 key,
                 value,
@@ -4958,6 +5241,23 @@ impl<'a> Collector<'a> {
                 continue;
             }
             let got = self.kind_of_expr(&extra.value);
+            let dst_elem_ty = self.slice_element_type_name(&first.value);
+            // #3518: reject untyped nil passed to non-nilable slice element types
+            if Checker::is_nil_literal(&extra.value) && is_non_nilable(&elem) {
+                let elem_label = match dst_elem_ty.as_deref() {
+                    Some(d) => d.to_string(),
+                    None => elem.label().to_string(),
+                };
+                self.emit_e1002(
+                    extra.value.span(),
+                    format!(
+                        "cannot use nil as `{}` value in argument to append (HYB-E1002)",
+                        elem_label
+                    ),
+                    "the appended values must be assignable to the slice's element type",
+                );
+                continue;
+            }
             let int_to_float_conflict = elem == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&extra.value);
@@ -5187,9 +5487,20 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// Family A (#425): `if cond` and `for cond` require a boolean condition.
+    /// Family A (#425, #3155): `if cond` and `for cond` require a boolean condition.
     fn check_bool_condition(&mut self, cond: &Expr, construct: &str) {
         self.check_single_value_position(cond, "a boolean condition", false);
+        if matches!(unwrap_parens(cond), Expr::Lit { kind: LitKind::Nil, .. }) {
+            self.emit_e1002(
+                cond.span(),
+                format!(
+                    "non-boolean condition `nil` (untyped nil) in `{}` statement — Go requires a `bool` condition (HYB-E1002)",
+                    construct
+                ),
+                "compare the value explicitly (e.g. `x != nil`) or pass a `bool` expression",
+            );
+            return;
+        }
         let k = self.kind_of_expr(cond);
         if !matches!(k, OpKind::Unknown | OpKind::Bool) {
             self.emit_e1002(
@@ -6418,10 +6729,20 @@ impl<'a> Collector<'a> {
             // or slice literal`).
             let scalar_mismatch = self
                 .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            // #3412: the kind model also collapses container inners
+            // (`chan int64` and `chan int32` are both `Chan(Int)`), so a
+            // typed element whose composite inner differs passed the equal
+            // kind arm and failed `go build`. Deep-compare the spellings;
+            // aliases and type parameters fail open.
+            let deep_conflict = if ik == expected && expected != OpKind::Interface {
+                self.deep_composite_conflict(&resolved_ty, self.typed_value_type_name(item).as_deref())
+            } else {
+                None
+            };
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch {
+            if ik == expected && !scalar_mismatch && deep_conflict.is_none() {
                 continue;
             }
             let is_untyped_int_to_float = expected == OpKind::Float
@@ -6429,17 +6750,27 @@ impl<'a> Collector<'a> {
                 && self.is_untyped_int_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
-                || scalar_mismatch;
+                || scalar_mismatch
+                || deep_conflict.is_some();
             if !conflict {
                 continue;
             }
+            let got_ty = if deep_conflict.is_some() {
+                self.typed_value_type_name(item).unwrap_or_else(|| ik.label().to_string())
+            } else {
+                ik.label().to_string()
+            };
+            let detail = deep_conflict
+                .map(|r| format!(" — {}", r))
+                .unwrap_or_default();
             self.emit_e1002(
                 item.span(),
                 format!(
-                    "cannot use `{}` (type `{}`) as `{}` value in array literal (HYB-E1002)",
+                    "cannot use `{}` (type `{}`) as `{}` value in array literal{} (HYB-E1002)",
                     item.render(),
-                    ik.label(),
-                    elem_ty.render()
+                    got_ty,
+                    elem_ty.render(),
+                    detail
                 ),
                 "every element of an array composite literal `[N]T{...}` / `[...]T{...}` must be assignable to the element type `T`",
             );
@@ -6500,13 +6831,22 @@ impl<'a> Collector<'a> {
                 continue;
             }
             let ik = self.kind_of_expr(item);
-            // #2788: same width-collapse escape as the array arm above.
+            // #2788: a typed element of another concrete numeric width.
             let scalar_mismatch = self
                 .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            // #3412: the kind model collapses container inners, so a typed
+            // element whose composite inner differs passed the equal kind
+            // arm. Deep-compare the spellings; aliases and type parameters
+            // fail open.
+            let deep_conflict = if ik == expected && expected != OpKind::Interface {
+                self.deep_composite_conflict(&resolved_ty, self.typed_value_type_name(item).as_deref())
+            } else {
+                None
+            };
             if ik == OpKind::Unknown || expected == OpKind::Interface {
                 continue;
             }
-            if ik == expected && !scalar_mismatch {
+            if ik == expected && !scalar_mismatch && deep_conflict.is_none() {
                 continue;
             }
             if expected == OpKind::Float
@@ -6520,17 +6860,27 @@ impl<'a> Collector<'a> {
                 && self.is_untyped_int_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
                 || kinds_conflict(&expected, &ik)
-                || scalar_mismatch;
+                || scalar_mismatch
+                || deep_conflict.is_some();
             if !conflict {
                 continue;
             }
+            let got_ty = if deep_conflict.is_some() {
+                self.typed_value_type_name(item).unwrap_or_else(|| ik.label().to_string())
+            } else {
+                ik.label().to_string()
+            };
+            let detail = deep_conflict
+                .map(|r| format!(" — {}", r))
+                .unwrap_or_default();
             self.emit_e1002(
                 item.span(),
                 format!(
-                    "cannot use `{}` (type `{}`) as `{}` value in slice literal (HYB-E1002)",
+                    "cannot use `{}` (type `{}`) as `{}` value in slice literal{} (HYB-E1002)",
                     item.render(),
-                    ik.label(),
-                    elem_ty.render()
+                    got_ty,
+                    elem_ty.render(),
+                    detail
                 ),
                 "every element of a slice composite literal `[]T{...}` must be assignable to the element type `T`",
             );
@@ -6674,20 +7024,38 @@ impl<'a> Collector<'a> {
                 // #2788: a typed key of another concrete numeric width.
                 let scalar_mismatch = self
                     .scalar_names_conflict(self.scalar_of_ty(&resolved_key), self.typed_value_scalar(k));
+                // #3412: the kind model collapses container inners, so a
+                // typed key whose composite inner differs passed the equal
+                // kind arm (`map[chan int64]string{...}` into `map[chan int32]string`).
+                let deep_conflict = if kk == exp_key && exp_key != OpKind::Interface {
+                self.deep_composite_conflict(&resolved_key, self.typed_value_type_name(k).as_deref())
+            } else {
+                None
+            };
                 let is_untyped_int_to_float = exp_key == OpKind::Float
                     && kk == OpKind::Int
                     && self.is_untyped_int_const(k);
                 let conflict = (exp_key == OpKind::Float && kk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_key, &kk)
-                    || scalar_mismatch;
+                    || scalar_mismatch
+                    || deep_conflict.is_some();
                 if kk != OpKind::Unknown && conflict {
+                    let got_ty = if deep_conflict.is_some() {
+                        self.typed_value_type_name(k).unwrap_or_else(|| kk.label().to_string())
+                    } else {
+                        kk.label().to_string()
+                    };
+                    let detail = deep_conflict
+                        .map(|r| format!(" — {}", r))
+                        .unwrap_or_default();
                     self.emit_e1002(
                         k.span(),
                         format!(
-                            "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
+                            "cannot use `{}` (type `{}`) as `{}` value in map key{} (HYB-E1002)",
                             k.render(),
-                            kk.label(),
-                            key_ty.render()
+                            got_ty,
+                            key_ty.render(),
+                            detail
                         ),
                         "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
                     );
@@ -6731,20 +7099,38 @@ impl<'a> Collector<'a> {
                 // #2788: a typed value of another concrete numeric width.
                 let scalar_mismatch = self
                     .scalar_names_conflict(self.scalar_of_ty(&resolved_val), self.typed_value_scalar(v));
+                // #3412: the kind model collapses container inners, so a
+                // typed value whose composite inner differs passed the equal
+                // kind arm (`map[string]chan int64` into `map[string]chan int32`).
+                let deep_conflict = if vk == exp_val && exp_val != OpKind::Interface {
+                self.deep_composite_conflict(&resolved_val, self.typed_value_type_name(v).as_deref())
+            } else {
+                None
+            };
                 let is_untyped_int_to_float = exp_val == OpKind::Float
                     && vk == OpKind::Int
                     && self.is_untyped_int_const(v);
                 let conflict = (exp_val == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_val, &vk)
-                    || scalar_mismatch;
+                    || scalar_mismatch
+                    || deep_conflict.is_some();
                 if vk != OpKind::Unknown && conflict {
+                    let got_ty = if deep_conflict.is_some() {
+                        self.typed_value_type_name(v).unwrap_or_else(|| vk.label().to_string())
+                    } else {
+                        vk.label().to_string()
+                    };
+                    let detail = deep_conflict
+                        .map(|r| format!(" — {}", r))
+                        .unwrap_or_default();
                     self.emit_e1002(
                         v.span(),
                         format!(
-                            "cannot use `{}` (type `{}`) as `{}` value in map value (HYB-E1002)",
+                            "cannot use `{}` (type `{}`) as `{}` value in map value{} (HYB-E1002)",
                             v.render(),
-                            vk.label(),
-                            val_ty.render()
+                            got_ty,
+                            val_ty.render(),
+                            detail
                         ),
                         "every value of a map composite literal `map[K]V{...}` must be assignable to the value type `V`",
                     );
@@ -6919,6 +7305,25 @@ impl<'a> Collector<'a> {
                             "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
                         );
                     }
+                    // #3598: `fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to
+                    // `fmt.Fprint*(os.Stderr, ...)` in `hy-emit`. When `os` is shadowed by
+                    // an in-scope parameter, local binding, loop variable, closure argument,
+                    // type parameter, or package-level declaration, emitted Go fails
+                    // downstream compilation (Row 13 BUILDABLE).
+                    if pkg == "fmt"
+                        && matches!(name.as_str(), "eprint" | "eprintln" | "eprintf")
+                        && self.lookup_kind(pkg).is_none()
+                        && self.is_os_shadowed()
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot call `fmt.{}` because `os` is shadowed by an in-scope declaration (HYB-E1002)",
+                                name
+                            ),
+                            "`fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to `os.Stderr`; rename the shadowing `os` binding so `os.Stderr` is accessible",
+                        );
+                    }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -7040,6 +7445,20 @@ impl<'a> Collector<'a> {
                 }
             }
         }
+    }
+
+    /// #3598: `fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to
+    /// `fmt.Fprint*(os.Stderr, ...)` in `hy-emit`. When `os` is shadowed by
+    /// an in-scope parameter, local binding, loop variable, closure argument,
+    /// type parameter, or package-level declaration, emitted Go resolves `os.Stderr`
+    /// to the shadowing entity, causing downstream compilation to fail (Row 13 BUILDABLE).
+    fn is_os_shadowed(&self) -> bool {
+        self.scopes.iter().any(|s| s.contains_key("os"))
+            || self.fn_type_params.contains("os")
+            || self.lookup_kind("os").is_some()
+            || self.ck.pkg_names.contains_key("os")
+            || self.file_consts.contains_key("os")
+            || self.file_untyped_consts.contains("os")
     }
 
     fn check_fn_type_arg_arity(&mut self, fn_key: &str, raw_callee: &str, span: Span) {
@@ -7445,6 +7864,19 @@ impl<'a> Collector<'a> {
                     OpKind::Unknown => {
                         if let Some(elem) = self.set_elem_of_expr(map_arg) {
                             let want = self.kind_of_named(&elem, 0);
+                            // #3518: reject untyped nil passed to non-nilable set element types
+                            if Checker::is_nil_literal(key_arg) && is_non_nilable(&want) {
+                                self.emit_e2005(
+                                    span,
+                                    format!(
+                                        "cannot use `nil` as element type `{}` in `delete` on `set[{}]` (HYB-E2005)",
+                                        want.label(),
+                                        elem
+                                    ),
+                                    "the second argument to `delete(s, v)` must match the set's element type",
+                                );
+                                return;
+                            }
                             let got = self.kind_of_expr(key_arg);
                             let int_to_float_conflict = want == OpKind::Float
                                 && got == OpKind::Int
@@ -7478,6 +7910,21 @@ impl<'a> Collector<'a> {
                             (del_key_scalar, del_arg_scalar),
                             (Some(a), Some(b)) if a != b
                         );
+                        // #3518: reject untyped nil passed to non-nilable map key types
+                        if Checker::is_nil_literal(key_arg) && is_non_nilable(k_expected) {
+                            let k_label = del_key_scalar
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| k_expected.label());
+                            self.emit_e2005(
+                                span,
+                                format!(
+                                    "cannot use `nil` as key type `{}` in `delete` (HYB-E2005)",
+                                    k_label
+                                ),
+                                "the second argument to `delete(m, k)` must match the map's key type",
+                            );
+                            return;
+                        }
                         if (**k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
                             && kk != **k_expected
@@ -7768,6 +8215,8 @@ impl<'a> Collector<'a> {
                 ..
             } if items.is_empty() => {}
             Expr::MapLit { entries, .. } if entries.is_empty() => {}
+            Expr::Index { base, .. }
+                if matches!(unwrap_parens(base), Expr::Ident { name, .. } if self.lookup_kind(name).is_none() && !self.file_consts.contains_key(name) && !self.ck.fns.contains_key(name)) => {}
             Expr::StructLit {
                 ty: Some(TypeExpr::Chan { .. }),
                 fields,
