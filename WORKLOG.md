@@ -190,3 +190,10 @@
 - Suites 437 -> 439 (+2). Two landings, zero gate failures.
 - Next queue: #3671 (CI test registration +281-2, balckwell) -> wildcard spikes #3688 (W-004) / #3695 (W-024, dup family with #3679; check BOUNTY.md spike policy first) -> fresh 11-05 wave #3727..#3742 (families 3730/3733/3737, 3731/3732, 3736/3738, 3739-3742 — dedupe first, oldest-first).
 - Worklog: this commit.
+
+## Session 115 — 2026-11-06 04:10 UTC+8 tick
+- env cold-recycled; rust 1.99.0 + go1.99.0-go1.26.9 restored, tarball re-cached, target warm (15s). approve 13/13 (4970 left), scan skipped.
+- Landed PR #3671 -> ac9b90a3 (tools/check_test_registration.py: step > job > workflow working-directory precedence, bounded YAML block reader, fail-closed merge keys; fixes #3658, balckwell). Battery on committed trial 9e9e37bd tree 4fa9a352: cargo 439 suites 0 failed, PR pytest 51+39 subtests, live tool OK (38 files/35 patterns), corpus 135/135 tripwire clean, differential 45/45+90/90. Reply 201.
+- Wildcard policy resolved (BOUNTY.md Track 3 + MOONSHOT.md): spike PRs do NOT merge to main; lifecycle = ledger + discussion #365 M1 window (opened 2026-11-01). W-004 already ledgered accepted (slot 4, area523ufo, #174; prior spike PR #507 cited). W-024 NOT in ledger yet; #3695 duplicates #3679 family. Routing replies posted on #3688 and #3695 (201 x2) — no battery, no merge; PRs stay open as artifacts.
+- Next queue: fresh 11-05 wave #3727..#3742 oldest-first with family dedupe (3730/3733/3737 same title; 3731/3732; 3736/3738; 3739-3742) — first check which families are true resubmissions vs independent fixes via diff-against-each-other, then battery the oldest of each family. Wave is BUILDABLE-style hy-check fixes; #3727 (shadowed lowering packages) may collide with landed curated-import work (#3721/#3726) — dup-check against main first.
+- Worklog: this commit.
