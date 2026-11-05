@@ -2846,30 +2846,18 @@ impl<'a> Collector<'a> {
                         // unhashable map key past the checker inside a
                         // chan/slice/array wrapper or type alias.
                         match unwrap_parens(&first_arg.value) {
-                            Expr::Ident { name, span } => {
-                                self.check_named_type_instantiation(name, *span);
-                                if let Some(alias_ty) = self.ck.type_aliases.get(name.as_str()) {
-                                    self.ty(alias_ty);
-                                }
-                            }
                             Expr::Index { base, index, span } if matches!(unwrap_parens(base), Expr::Ident { name, .. } if self.lookup_kind(name).is_none() && !self.file_consts.contains_key(name) && !self.ck.fns.contains_key(name)) => {
                                 self.check_named_type_instantiation(&format!("{}[{}]", base.render(), index.render()), *span);
                             }
-                            Expr::StructLit { ty: Some(t), .. } => self.ty(t),
-                            Expr::SliceLit { elem: Some(t), .. } => self.ty(t),
-                            Expr::MapLit {
-                                key, value, span, ..
-                            } => {
-                                self.check_map_key_comparable(key, *span);
-                                self.ty(key);
-                                self.ty(value);
-                            }
-                            other => {
-                                if let Some((_, elem, _)) = other.as_array_lit() {
-                                    self.ty(elem);
-                                }
-                            }
+                            _ => {}
                         }
+                        // #3561: validate the type expression in new(T)/make(T, ...).
+                        // Union of #3561 (recursive instantiation walker) with #3355
+                        // (declared-position walks: alias ty, StructLit/SliceLit/array
+                        // elem ty, MapLit key comparability) — each shape walks once.
+                        self.check_type_arg_instantiation(&first_arg.value);
+                        }
+                        self.check_type_arg_instantiation(&first_arg.value);
                     }
                 }
                 for (i, a) in args.iter().enumerate() {
@@ -3226,6 +3214,69 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #3561: validate the type expression in `new(T)` or `make(T, ...)`
+    fn check_type_arg_instantiation(&mut self, e: &Expr) {
+        match unwrap_parens(e) {
+            Expr::Ident { name, span } => {
+                self.check_named_type_instantiation(name, *span);
+            }
+            Expr::Index { base, index, .. } => {
+                self.check_type_arg_instantiation(base);
+                self.check_type_arg_instantiation(index);
+            }
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                ..
+            } if items.is_empty() => {
+                self.ty(t);
+            }
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } if entries.is_empty() => {
+                self.ty(key);
+                self.ty(value);
+            }
+            _ => {}
+        }
+    }
+
+    /// #3561: validate the type expression in `new(T)` or `make(T, ...)`.
+    /// Union resolution with #3355: #3561's recursive instantiation walker plus
+    /// #3355's declared-position walks (alias ty, StructLit/SliceLit/array elem
+    /// ty, MapLit key comparability) — each shape walks exactly once.
+    fn check_type_arg_instantiation(&mut self, e: &Expr) {
+        match unwrap_parens(e) {
+            Expr::Ident { name, span } => {
+                self.check_named_type_instantiation(name, *span);
+                if let Some(alias_ty) = self.ck.type_aliases.get(name.as_str()) {
+                    self.ty(alias_ty);
+                }
+            }
+            Expr::Index { base, index, .. } => {
+                self.check_type_arg_instantiation(base);
+                self.check_type_arg_instantiation(index);
+            }
+            Expr::StructLit { ty: Some(t), .. } => self.ty(t),
+            Expr::SliceLit { elem: Some(t), .. } => self.ty(t),
+            Expr::MapLit {
+                key, value, span, ..
+            } => {
+                self.check_map_key_comparable(key, *span);
+                self.ty(key);
+                self.ty(value);
+            }
+            other => {
+                if let Some((_, elem, _)) = other.as_array_lit() {
+                    self.ty(elem);
+                }
+            }
+        }
+    }
+
     fn check_named_type_instantiation(&mut self, name: &str, span: Span) {
         let name = name.trim();
         if let Some(rest) = name
@@ -3274,6 +3325,27 @@ impl<'a> Collector<'a> {
         if let Some(inner) = inner_opt {
             for arg in split_top_level_type_args(inner) {
                 self.check_named_type_instantiation(arg, span);
+            }
+        }
+        // #3561: if `head` is shadowed by a value binding in any enclosing scope,
+        // using it in a type position causes Go to resolve it to the shadowing
+        // variable, failing compilation with `<ident> is not a type` (Row 13 BUILDABLE).
+        if self.scopes.iter().rev().any(|layer| layer.contains_key(head)) {
+            let is_type = self.ck.structs.contains_key(head)
+                || self.ck.struct_type_params.contains_key(head)
+                || self.ck.enums.contains_key(head)
+                || self.ck.type_aliases.contains_key(head)
+                || crate::const_init::is_conversion_type_name(head);
+            if is_type {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` is shadowed by a local variable — Go refuses `{} is not a type` (HYB-E1002)",
+                        head, head
+                    ),
+                    "a type name cannot be used where it is shadowed by a local variable or parameter",
+                );
+                return;
             }
         }
         if head == "set" {
