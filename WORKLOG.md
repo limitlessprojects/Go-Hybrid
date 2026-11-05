@@ -118,3 +118,33 @@
 - Suites 416 -> 420. Differential 45/45 + 90/90 x3; corpus 135 tripwire not fired x3.
 - Worklog: this commit.
 - Next queue: #3566 -> #3438 -> #3056 -> #2456 -> #2937-family leftovers.
+
+## Session 107 — 2026-11-05 11:10 UTC+8 tick
+- approve 8/8 ok; scan skipped.
+- Landed PR #3566 -> aa1549c2 (value-shadowed type args in new/make reject HYB-E1002; fixes #3561, Dimank92). In-merge conflict vs #3355: unioned both into one check_type_arg_instantiation walker; Index arm recurses type args only (bare generic head would false-positive E1002 — caught by #3684 accept pin).
+- INCIDENT + REPAIR: aa1549c2 shipped the PRE-FIX resolution text — the three in-merge fixes were applied to the worktree working tree and verified there (421/421 + corpus + diff green) but never committed before the tree-hash assertion, making the assertion vacuous and main non-compiling. Root cause: verified state != committed state. Repair 60950594 (fixup commit, no force-push) brought main to the exact verified state; re-verified ON THE PUSHED HEAD: cargo 421/421, corpus 135 tripwire not fired, differential 45/45+90/90 FULL AGREEMENT. Disclosure posted on #3566 (201). NEW RULE: for any in-merge resolution, commit the resolution FIRST, then verify the committed SHA, then tree-assert against THAT commit.
+- Landed PR #3438 -> 6b398a23 (emit-guard bounds/overflow on elided slice literals in map + nested slots; fixes #3437, Shokun123). Battery on trial merge cf83d248; tree asserted identical post-push. ALL-GREEN 422 suites.
+- Suites 420 -> 422 (net, incl. repair re-verification).
+- Worklog: this commit.
+- Next queue: #3056 -> #2456 -> reap scan for new arrivals.
+
+## Session 108 — 2026-11-05 14:10 UTC+8 tick
+- env cold-recycled: rust 1.99.0 + go1.26.9 re-restored from cache script/tarball (tarball re-cached). approve 7/7 ok (4993 left); scan skipped.
+- Rejected PR #3056 (fixes #3055, Dimank92): superseded duplicate + regression. #3055's case list fully enforced since 2026-10-20 by check_new_type_operand (206723b7, fixes #936, E2005 shape-aware); static proof: PR's catch-all has no Index arm -> spurious E1002 on new(box[t])/new(set[int])/new(box[int])/new(box[<-chan int]) breaking 4 accept pins (3691/3684/defer/sendability). Author verified only own test file on base that already contained the fix. Genuine unpinned delta noted: main literal-ident list lacks "none" — offered as 2-line follow-up on existing E2005 machinery. Evidence reply posted (comment 6651323910).
+- Landed PR #2456 -> bc8f3193 (OpKind::Fn carries param kinds; kinds_conflict result+param signature comparison Unknown-tolerant, name-insensitive; method-expr receiver as first param; richer Fn labels; fixes #1599, Dimank92). multi_value_tuple rebind control adapted to signature-compatible swap (old cross-signature rebind WAS the bug). Four gates on committed trial merge ecfcddc3, tree 0deed7dc asserted identical pre-commit (S107 rule applied end-to-end). ALL-GREEN 423 suites (+1), corpus 135/135 tripwire quiet, differential 45/45+90/90.
+- Suites 422 -> 423. Worklog: this commit.
+- Follow-up claims: copy_element_kinds_conflict permissive Fn/Fn arm (copy fn elements) — unclaimed; new(none) literal-ident gap in check_new_type_operand — offered to #3056 author.
+- Next queue: reap scan for new arrivals (drained: #3056 rejected, #2456 landed).
+
+## Session 109 — 2026-11-05 15:10 UTC+8 tick
+- env cold-recycled again (new sandbox): rust 1.99.0 + go1.26.9 restored, tarball re-cached, target rebuilt cold (~4 min at -j2, fine).
+- approve 9/9 (4982 left); scan skipped. Reap scan via cheap API listing (1 call pattern): 1028 open PRs total, mostly stale Oct spikes; fresh unworked wave = 11-04T15:00 -> 11-05 (#3671..#3726). Worked newest-first this tick, oldest-of-wave next.
+- Landed PR #3723 -> ad9a844b (tuple.rs resolve_fn_callee_ty via composite_type_expr + Index fallback w/ peel_pointer_and_alias + Field projection arm; fixes #3722, aswadi). Head contained main (ff case). ALL-GREEN 424 suites.
+- Landed PR #3725 -> 68488bff (loans.rs record_place_store_from_snapshot + record_parallel_assign_fanout; Ident arm -> record_storage_from_snapshot superset [record_alias preserved inside, verified at loans.rs:2450]; a3-loan "_" gate; fixes #3707, Burapa-J). ALL-GREEN 425 suites.
+- Landed PR #3726 -> be321a9c (corpus census finditer + line numbers, fixes #3724, ThanhWinter; PR pytest 21/21 + live census 7 surfaces OK). ALL-GREEN 425 suites.
+- Landed PR #3704 -> d012da3c (expr_array_type_at recursive static TypeExpr resolver feeding const_array_len_at; Unknown-kind bases consult eval_const_array_len_at; fixes #3694, dextermos-dev). ALL-GREEN 426 suites.
+- Landed PR #3719 -> 8ebb16e8 (place_type_name map-value extraction + fn_result_type_names stack + report_array_return_mismatch; fixes #3718, marhabynova). ALL-GREEN 427 suites.
+- Landed PR #3715 -> 2a95a127 (expr_type_param + len/cap/close/delete reject unconstrained type params E2005; fixes #3714, marhabynova). ALL-GREEN 428 suites.
+- Suites 423 -> 428 (+5). Six landings, zero gate failures; every merge tree-asserted against its committed trial SHA pre-commit; all six landing replies posted.
+- Next queue (wave continues, oldest-first): #3706 -> #3709 -> #3711 -> #3712 -> #3713 -> #3717 -> #3721 -> #3688/#3689/#3695/#3697 -> #3671..#3677.
+- Worklog: this commit.
