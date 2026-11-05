@@ -12,7 +12,7 @@
 
 use crate::foreign;
 use crate::model::{Checker, FnState, TypeShape};
-use hy_syntax::{BinOp, CallArg, Expr, TypeExpr};
+use hy_syntax::{BinOp, CallArg, Expr, LitKind, TypeExpr};
 
 impl<'a> Checker<'a> {
     const MAX_TYPE_RESOLUTION_DEPTH: usize = 8;
@@ -1066,6 +1066,28 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Static type name of a literal `match` subject (`ty_of_expr` does not
+    /// type literals). `None` for non-literals and `nil`.
+    fn lit_type_name(expr: &Expr) -> Option<&'static str> {
+        let bare = crate::model::unwrap_parens(expr);
+        match bare {
+            Expr::Lit { kind, .. } => match kind {
+                LitKind::Int(_) => Some("int"),
+                LitKind::Float(_) => Some("float64"),
+                LitKind::Bool(_) => Some("bool"),
+                LitKind::Str(_) | LitKind::RawStr(_) => Some("string"),
+                LitKind::Char(_) => Some("rune"),
+                LitKind::Nil => None,
+            },
+            Expr::Unary {
+                op: hy_syntax::UnOp::Neg,
+                operand,
+                ..
+            } => Self::lit_type_name(operand),
+            _ => None,
+        }
+    }
+
     /// T13/T14/T15 (`HYB-E5001`): check `match` exhaustiveness and `_` arm placement.
     pub(crate) fn check_match(
         &mut self,
@@ -1132,6 +1154,9 @@ impl<'a> Checker<'a> {
         enum MatchTarget {
             Option,
             Enum(String, Vec<String>),
+            /// Statically-known non-`option[T]` subject type (rendered name).
+            /// `some`/`none` constructor patterns must be rejected here (T13/T20).
+            NonOption(String),
             Unknown,
         }
 
@@ -1144,9 +1169,24 @@ impl<'a> Checker<'a> {
                     let base = Self::base_named_type_str(name);
                     if let Some(vs) = self.enums.get(base) {
                         target = MatchTarget::Enum(base.to_string(), vs.clone());
+                    } else {
+                        target = MatchTarget::NonOption(base.to_string());
                     }
                 }
-                _ => {}
+                _ => target = MatchTarget::NonOption(resolved.render()),
+            }
+        } else {
+            // ty_of_expr cannot type this subject (untyped literal init,
+            // slice/map/struct literal without element ascription, ...).
+            // Classify by shape so a concrete non-option subject can never
+            // slip `some`/`none` through as `option[T]` (T13/T20).
+            if let Some(lit_name) = Self::lit_type_name(subject) {
+                target = MatchTarget::NonOption(lit_name.to_string());
+            } else {
+                let shape = self.shape_of_expr(st, subject);
+                if !matches!(shape, TypeShape::Unknown) {
+                    target = MatchTarget::NonOption(shape.render());
+                }
             }
         }
         if matches!(target, MatchTarget::Unknown) {
@@ -1268,6 +1308,53 @@ impl<'a> Checker<'a> {
                                 ]),
                         );
                     }
+                }
+            }
+            MatchTarget::NonOption(type_name) => {
+                // T13/T20: `some`/`none` are `option[T]` constructor patterns.
+                // A statically non-`option[T]` subject can never be `some`/`none`,
+                // so accepting them is unsound — reject fail-closed.
+                for arm in arms {
+                    if let MatchPattern::Path { segments, .. } = &arm.pattern {
+                        if segments.as_slice() == ["some"] || segments.as_slice() == ["none"] {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    "HYB-E5001",
+                                    self.path.clone(),
+                                    span,
+                                    format!(
+                                        "`some`/`none` option patterns are not allowed on non-`option` match subject of type `{type_name}` (HYB-E5001)"
+                                    ),
+                                )
+                                .with_notes(vec![
+                                    format!(
+                                        "why: the `match` subject has static non-`option` type `{type_name}`, so `some`/`none` constructor patterns are unsound (T13/T20)",
+                                    ),
+                                    "fix: match on the concrete type's own variants/literals, or unwrap the `option[T]` value first before matching it.".to_string(),
+                                ]),
+                            );
+                            return;
+                        }
+                    }
+                }
+                // No `some`/`none` arms: treat like a non-enumerated subject
+                // and require exhaustive coverage or a trailing `_` arm.
+                let has_trailing_wildcard = arms.last().is_some_and(|a| {
+                    matches!(a.pattern, MatchPattern::Wildcard) && a.guard.is_none()
+                });
+                if !has_trailing_wildcard {
+                    self.diags.push(
+                        Diagnostic::error(
+                            "HYB-E5001",
+                            self.path.clone(),
+                            span,
+                            "non-exhaustive match: missing trailing `_` arm for non-enumerated subject (HYB-E5001)",
+                        )
+                        .with_notes(vec![
+                            "why: `match` requires exhaustive variant coverage or a final `_` arm (T13/T14/T15)".to_string(),
+                            "fix: add a trailing `_:` arm, or match on an `option[T]` or declared `enum` covering all variants".to_string(),
+                        ]),
+                    );
                 }
             }
             MatchTarget::Unknown => {

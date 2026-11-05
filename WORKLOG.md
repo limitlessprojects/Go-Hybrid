@@ -73,3 +73,30 @@
 - Suites 404 -> 406. Differential 45/45 + 90/90 both landings. Disk: watch /home/z (82% used after cleanup); incremental cache deletion cost is acceptable — prefer freeing /tmp scratch first next time.
 - Worklog: this commit.
 - Next queue: #3362 -> #3558 -> #3366 -> #3611 -> #3355 -> #3554 -> #3566 -> #3438 -> #3056 -> #2456.
+
+## Session 102 — 2026-11-05 05:10 UTC+8 tick
+- approve 8/8 ok; scan ok.
+- Landed PR #3701 -> fd3cec4e (hy-check: := inferred sized arrays keep [N]T, #2771 differ logic now applies; fixes #3700, nyxlabs29-cyber). ALL-GREEN 407 suites.
+- Landed PR #3703 -> 9dd49697 (hy-check: range_iter move-unwrapping at 6 sites + len(set[T]) int bound vs user-set shadow guard; fixes #3699, aswadi). ALL-GREEN 408 suites. First cargo run hit transient ENOSPC again (infra); freed incremental cache + scratch, rerun clean; noted in reply.
+- Disk: recurring ENOSPC pattern when target rebuilds cold — standard mitigation now: rm -rf target/debug/incremental /tmp/verify-wt /tmp/hydiff-* then rerun (incremental loss costs ~2-4 min on warm deps).
+- Suites 406 -> 408. Worklog: this commit.
+- Next queue: #3702 -> #3612 -> #3614 -> #3616 -> #2934 -> #3362 -> #2937 -> #3558 -> #2661.
+
+## Session 103 — 2026-11-05 06:10 UTC+8 tick
+- API quota burned by scan (403 rate-limit) + tool 10-min cap discovered: background processes die between calls — battery now run manually in 4 steps (merge gate / cargo / corpus / differential), each its own call, logs to /tmp/vp-*.log.
+- Landed PR #3702 -> 7c763912 (hy-check: slot-loan addressability unwraps Try+move, reject HYB-E2010; fixes #3698, aswadi). ALL-GREEN 409 suites.
+- Landed PR #3612 -> bfe8a141 (typed_value_type_name folds [constN]T via const_int_value(_at), [...]T from items.len(); fixes #3599, dextermos-dev). ALL-GREEN 410 suites.
+- Landed PR #3614 -> 70c4f08f (fmt.eprint* rejected when os shadowed via is_os_shadowed 6-probe; audited probes vs import table — no false-positive path; fixes #3598, dextermos-dev). ALL-GREEN 411 suites. NOTE: merge msg lost 2 fragments to shell backtick substitution; force-push to repair blocked by branch protection — tree+evidence unaffected, disclosed in PR reply. Rule reaffirmed: no backticks in -m ever.
+- Landed PR #3616 -> 108512ab (MatchTarget::NonOption: some/none on non-option match subject fail-closed HYB-E5001, lit_type_name + shape fallback; fixes #3613, dextermos-dev). ALL-GREEN 412 suites.
+- Suites 408 -> 412. Differential 45/45 + 90/90 all four landings; corpus 135 tripwire not fired x4.
+- Worklog: this commit.
+- Next queue: #2934 -> #3362 -> #2937 -> #3558 -> #2661 -> #3366 -> #3611 -> #3355.
+
+## Session 104 — 2026-11-05 07:10 UTC+8 tick
+- approve 10/10 ok (quota reset, 4986 left); scan skipped (burns quota, queue known).
+- Landed PR #2934 -> 0cc82b15 (for-in binders get real TypeExprs via ty_of_expr slice/array/map/chan/set; range counters typed via typed_int_bound + new builtin min/max arm; fixes #2933, gttps). In-merge conflict resolution vs #3703 in typed_int_bound head: kept BOTH pub(crate) and unwrap_parens_and_move; tree-hash asserted identical to verified trial merge f918cfc8. ALL-GREEN 413 suites.
+- Landed PR #3362 -> 86b36c6f (hyfuzz fail-closed: corpus read errors SystemExit with path, subprocess utf-8/replace + None-safe output, --failures-dir pre-validated; fixes #2933-family harness hardening, Shokun123). Battery + PR's own pytest 25/25 + live fuzz smoke (12 cases, invariants held) + negative probe on failures-dir. NOTE: tool transport eats literal "[h" sequences in output — codepoint dump is ground truth (cost: one false syntax-alarm). hyfuzz_cases.json is a NEW file on main via this merge (was absent). ALL-GREEN 413 suites (no rust surface).
+- Landed PR #2937 -> 4b8c1286 (deep-mode builtin args: &mut FnState, Local/Assign binding shape/ty definition + track_deep_rhs, unshadowed() make/new probe; fixes #2936, gttps). Auto-merge coexists with #3670 guard. ALL-GREEN 414 suites.
+- Suites 412 -> 414. Differential 45/45 + 90/90 x3; corpus 135 tripwire not fired x3.
+- Worklog: this commit.
+- Next queue: #3558 -> #2661 -> #3366 -> #3611 -> #3355 -> #3554 -> #3566 -> #3438 -> #3056 -> #2456.
