@@ -478,8 +478,10 @@ pub(crate) fn is_package_root(name: &str) -> bool {
             | "errors"
             | "sync"
             | "bufio"
+            | "net"
             | "http"
             | "httptest"
+            | "url"
             | "json"
             | "atomic"
             | "filepath"
@@ -958,7 +960,8 @@ impl Emitter {
                     // import set ("net/http" → root "http"; the body says
                     // `http.X`, and import_path_of maps the line back).
                     let root = path.split('/').next_back().unwrap_or(path);
-                    self.explicit_imports.insert(root.to_string(), path.clone());
+                    let resolved = import_path_of(path);
+                    self.explicit_imports.insert(root.to_string(), resolved);
                     self.imports.insert(root.to_string());
                 }
                 Decl::Const(c) => self.emit_file_const(c)?,
@@ -1003,7 +1006,7 @@ impl Emitter {
             // root spelling — Go's package name for those imports.
             for root in active_imports {
                 let path = if let Some(p) = self.explicit_imports.get(root) {
-                    p.clone()
+                    import_path_of(p)
                 } else if shapes::RUST_CRATES
                     .iter()
                     .any(|c| c.binding_root == root.as_str())
