@@ -91,6 +91,166 @@ impl<'a> Scan<'a> {
         self.local_decls.insert(name.to_string());
     }
 
+    fn validate_len_expr(&mut self, len_expr: &str, span: Span) {
+        let mut chars = len_expr.char_indices().peekable();
+        while let Some(&(i, c)) = chars.peek() {
+            if c.is_ascii_alphabetic() || c == '_' {
+                let start = i;
+                while let Some(&(j, next_c)) = chars.peek() {
+                    let _ = j;
+                    if next_c.is_ascii_alphanumeric() || next_c == '_' {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                let end = chars.peek().map(|&(idx, _)| idx).unwrap_or(len_expr.len());
+                let word = &len_expr[start..end];
+                if word != "true" && word != "false" && word != "iota" {
+                    if !self.allowed.contains(word) {
+                        self.ident(word, span);
+                    }
+                }
+            } else {
+                chars.next();
+            }
+        }
+    }
+
+    fn scan_type_str_array_lens(&mut self, s: &str, span: Span) {
+        let s = s.trim();
+        if s.is_empty() {
+            return;
+        }
+        if let Some(rest) = s.strip_prefix('*') {
+            self.scan_type_str_array_lens(rest, span);
+            return;
+        }
+        if let Some(rest) = s.strip_prefix("[]") {
+            self.scan_type_str_array_lens(rest, span);
+            return;
+        }
+        if s.starts_with('[') {
+            if let Some(close) = find_matching_bracket(s, 0) {
+                let len_expr = s[1..close].trim();
+                if len_expr != "..." && !len_expr.is_empty() {
+                    self.validate_len_expr(len_expr, span);
+                }
+                self.scan_type_str_array_lens(&s[close + 1..], span);
+                return;
+            }
+        }
+        if let Some(open) = s.find('[') {
+            if let Some(close) = find_matching_bracket(s, open) {
+                let inside = &s[open + 1..close];
+                for arg in split_type_args(inside) {
+                    self.scan_type_str_array_lens(arg.trim(), span);
+                }
+                self.scan_type_str_array_lens(&s[close + 1..], span);
+            }
+        }
+    }
+
+    fn validate_type_name(&mut self, s: &str, span: Span) {
+        let s = s.trim();
+        if s.is_empty() {
+            return;
+        }
+        if s.chars().all(|c| c.is_ascii_digit()) {
+            return;
+        }
+        if let Some((root, _member)) = s.split_once('.') {
+            if self.local_decls.contains(root) {
+                return;
+            }
+            if self.uncurated_imports.contains(root)
+                || crate::foreign::is_uncurated_go_stdlib_root(root)
+            {
+                self.diags.push(
+                    hy_diag::Diagnostic::error(
+                        "HYB-E1001",
+                        self.path.to_string(),
+                        span,
+                        format!(
+                            "`{}` cannot be resolved — package `{}` is outside the M5 curated allowlist (allowlist: {}) (HYB-E1001)",
+                            s,
+                            root,
+                            crate::foreign::CURATED_ALLOWLIST_DISPLAY
+                        ),
+                    )
+                    .with_notes(vec![
+                        "SPEC M5: only packages on the curated allowlist have normalized bindings"
+                            .to_string(),
+                    ]),
+                );
+                return;
+            } else if self.packages.contains(root)
+                || crate::foreign::BUILTIN_PACKAGES.contains(&root)
+            {
+                return;
+            } else {
+                self.ident(root, span);
+                return;
+            }
+        }
+        if self.allowed.contains(s) || self.type_params.contains(s) {
+            return;
+        }
+        self.ident(s, span);
+    }
+
+    fn validate_type_arg(&mut self, s: &str, span: Span) {
+        let s = s.trim();
+        if s.is_empty() {
+            return;
+        }
+        if let Some(rest) = s.strip_prefix('*') {
+            self.validate_type_arg(rest, span);
+            return;
+        }
+        if let Some(rest) = s.strip_prefix("[]") {
+            self.validate_type_arg(rest, span);
+            return;
+        }
+        if s.starts_with('[') {
+            if let Some(close) = find_matching_bracket(s, 0) {
+                let len_expr = s[1..close].trim();
+                if len_expr != "..." && !len_expr.is_empty() {
+                    self.validate_len_expr(len_expr, span);
+                }
+                self.validate_type_arg(&s[close + 1..], span);
+                return;
+            }
+        }
+        if let Some(rest) = s.strip_prefix("<-chan ") {
+            self.validate_type_arg(rest, span);
+            return;
+        }
+        if let Some(rest) = s.strip_prefix("chan<- ") {
+            self.validate_type_arg(rest, span);
+            return;
+        }
+        if let Some(rest) = s.strip_prefix("chan ") {
+            self.validate_type_arg(rest, span);
+            return;
+        }
+        if let Some(open) = s.find('[') {
+            let head = s[..open].trim();
+            if let Some(close) = find_matching_bracket(s, open) {
+                let inside = &s[open + 1..close];
+                if head != "set" && head != "option" && head != "map" && head != "chan" {
+                    self.validate_type_name(head, span);
+                }
+                for arg in split_type_args(inside) {
+                    self.validate_type_arg(arg.trim(), span);
+                }
+                self.validate_type_arg(&s[close + 1..], span);
+                return;
+            }
+        }
+        self.validate_type_name(s, span);
+    }
+
     fn ident(&mut self, name: &str, span: Span) {
         if self.allowed.contains(name) {
             return;
@@ -101,17 +261,10 @@ impl<'a> Scan<'a> {
         if let Some((head, rest)) = name.split_once('[') {
             let head_ok = self.allowed.contains(head);
             if head_ok {
-                if !self.file_decls.contains(head) {
-                    if let Some(inside) = rest.strip_suffix(']') {
-                        let trimmed = inside.trim();
-                        if !trimmed.is_empty()
-                            && trimmed
-                                .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                            && !trimmed.chars().next().unwrap().is_ascii_digit()
-                        {
-                            self.ident(trimmed, span);
-                        }
+                if let Some(close) = rest.rfind(']') {
+                    let inside = &rest[..close];
+                    for arg in split_type_args(inside) {
+                        self.validate_type_arg(arg, span);
                     }
                 }
                 return;
@@ -389,6 +542,14 @@ impl<'a> Scan<'a> {
                 }
             }
             Expr::Field { base, name, span } => {
+                if let Some((_member_head, rest)) = name.split_once('[') {
+                    if let Some(close) = rest.rfind(']') {
+                        let inside = &rest[..close];
+                        for arg in split_type_args(inside) {
+                            self.validate_type_arg(arg, *span);
+                        }
+                    }
+                }
                 let unwrapped = crate::model::unwrap_parens(base);
                 if let Expr::Ident { name: root, .. } = unwrapped {
                     if !self.local_decls.contains(root) {
@@ -534,9 +695,17 @@ impl<'a> Scan<'a> {
     /// undefined name).
     fn run_type_arg_expr(&mut self, e: &Expr) {
         match crate::model::unwrap_parens(e) {
-            Expr::Ident { name, .. } => {
+            Expr::Ident { name, span } => {
                 let head = name.split_once('[').map(|(h, _)| h).unwrap_or(name.as_str());
                 if (head == "set" || head == "option" || self.type_params.contains(head)) && !self.local_decls.contains(head) {
+                    if let Some((_, rest)) = name.split_once('[') {
+                        if let Some(close) = rest.rfind(']') {
+                            let inside = &rest[..close];
+                            for arg in split_type_args(inside) {
+                                self.validate_type_arg(arg, *span);
+                            }
+                        }
+                    }
                     return;
                 }
                 self.run_expr(e);
@@ -551,7 +720,9 @@ impl<'a> Scan<'a> {
 
     fn run_type(&mut self, t: &TypeExpr) {
         match t {
-            TypeExpr::Named { .. } => {}
+            TypeExpr::Named { name, span } => {
+                self.scan_type_str_array_lens(name, *span);
+            }
             TypeExpr::Pointer { to, .. } => self.run_type(to),
             TypeExpr::Slice { elem, .. } => self.run_type(elem),
             TypeExpr::Array { len, elem, .. } => {
@@ -575,6 +746,50 @@ impl<'a> Scan<'a> {
             }
         }
     }
+}
+
+fn find_matching_bracket(s: &str, open_pos: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if bytes.get(open_pos) != Some(&b'[') {
+        return None;
+    }
+    let mut depth = 0;
+    for (i, &b) in bytes.iter().enumerate().skip(open_pos) {
+        if b == b'[' {
+            depth += 1;
+        } else if b == b']' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+fn split_type_args(s: &str) -> Vec<&str> {
+    let mut args = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '[' | '(' => depth += 1,
+            ']' | ')' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            ',' if depth == 0 => {
+                args.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < s.len() {
+        args.push(&s[start..]);
+    }
+    args
 }
 
 /// Top-level declaration names (functions, structs, enums, variants, type
