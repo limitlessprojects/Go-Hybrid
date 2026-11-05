@@ -550,7 +550,7 @@ impl<'a> Checker<'a> {
     }
 
     fn resolve_fn_callee_ty(&self, st: &FnState, expr: &Expr) -> Option<TypeExpr> {
-        if let Some(ty) = self.ty_of_expr(st, expr) {
+        if let Some(ty) = self.composite_type_expr(st, expr) {
             let resolved = self.resolve_type_alias(&ty);
             if matches!(resolved, TypeExpr::Fn { .. }) {
                 return Some(resolved);
@@ -627,14 +627,19 @@ impl<'a> Checker<'a> {
                                     })
                             })
                     }
-                    _ => self.ty_of_expr(st, base),
+                    _ => self.composite_type_expr(st, base),
                 }?;
-                match self.resolve_type_alias(&base_ty) {
+                match self.peel_pointer_and_alias(&base_ty) {
                     TypeExpr::Slice { elem, .. }
                     | TypeExpr::Array { elem, .. }
                     | TypeExpr::Map { value: elem, .. } => Some(self.resolve_type_alias(&elem)),
                     _ => None,
                 }
+            }
+            Expr::Field { base, name, .. } => {
+                let base_ty = self.composite_type_expr(st, base)?;
+                let fty = self.struct_fields_for_type(&base_ty)?.into_iter().find(|(n, _)| n == name)?.1;
+                Some(self.resolve_type_alias(&fty))
             }
             Expr::Call { callee, .. } => {
                 if let Some(TypeExpr::Fn { results, .. }) = self.resolve_fn_callee_ty(st, callee) {
@@ -909,4 +914,3 @@ impl<'a> Checker<'a> {
         }
     }
 }
-
