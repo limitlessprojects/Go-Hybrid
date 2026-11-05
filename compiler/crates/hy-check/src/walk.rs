@@ -528,6 +528,30 @@ pub(crate) struct CallRef<'a> {
     pub span: Span,
 }
 
+fn place_calls<'a>(place: &'a Place, out: &mut Vec<CallRef<'a>>) {
+    match &place.kind {
+        PlaceKind::Ident(_) => {}
+        PlaceKind::Index { base, index } => {
+            place_calls(base, out);
+            expr_calls(index, out);
+        }
+        PlaceKind::Field { base, .. } => place_calls(base, out),
+        PlaceKind::AddrOf { base } => place_calls(base, out),
+    }
+}
+
+fn place_fnlits<'a>(place: &'a Place, out: &mut Vec<&'a Expr>) {
+    match &place.kind {
+        PlaceKind::Ident(_) => {}
+        PlaceKind::Index { base, index } => {
+            place_fnlits(base, out);
+            expr_fnlits(index, out);
+        }
+        PlaceKind::Field { base, .. } => place_fnlits(base, out),
+        PlaceKind::AddrOf { base } => place_fnlits(base, out),
+    }
+}
+
 /// Collect the calls of THIS statement only. For-statement ITERATE
 /// expressions are excluded here: their borrow calls get loop-extent loans
 /// and are processed by the For handler (loans.rs / lib.rs dispatch).
@@ -543,9 +567,7 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
             targets, values, ..
         } => {
             for t in targets {
-                if let PlaceKind::Index { index, .. } = &t.kind {
-                    expr_calls(index, out);
-                }
+                place_calls(t, out);
             }
             for v in values {
                 expr_calls(v, out);
@@ -615,7 +637,12 @@ pub(crate) fn own_fnlits<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Expr>) {
                 expr_fnlits(v, out);
             }
         }
-        Stmt::Assign { values, .. } => {
+        Stmt::Assign {
+            targets, values, ..
+        } => {
+            for t in targets {
+                place_fnlits(t, out);
+            }
             for v in values {
                 expr_fnlits(v, out);
             }
