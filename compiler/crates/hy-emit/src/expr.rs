@@ -468,10 +468,7 @@ impl Emitter {
                 // and let main keep running), not the outer fn's zero-value
                 // return list (the wrong arity for this literal).
                 let saved_main_closure = std::mem::replace(&mut self.in_main_closure, false);
-                let closure_err_returns = if matches!(
-                    results.last().map(|r| &r.ty),
-                    Some(TypeExpr::Named { name, .. }) if name == "error"
-                ) {
+                let closure_err_returns = if self.result_shape(results).1 {
                     let mut texts: Vec<String> = results[..results.len() - 1]
                         .iter()
                         .map(|r| self.zero_value(&r.ty))

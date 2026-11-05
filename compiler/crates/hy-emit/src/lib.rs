@@ -432,20 +432,6 @@ pub(crate) fn to_go_name(name: &str) -> String {
 /// The base NAMED type of a TypeExpr, if any (`*atomic.int64` →
 /// "atomic.int64", `env` → "env", `map[string]int` → None). Batch I's
 /// receiver tables key on this.
-/// (Go value-result count, ends in `error`) for a declared result list: a
-/// trailing `error` is the error slot, not a value (#726).
-pub(crate) fn result_shape(results: &[FnResult]) -> (usize, bool) {
-    let err = matches!(
-        results.last(),
-        Some(FnResult {
-            ty: TypeExpr::Named { name, .. },
-            ..
-        }) if name == "error"
-    );
-    let n = if err { results.len() - 1 } else { results.len() };
-    (n, err)
-}
-
 pub(crate) fn base_ty_name(t: &TypeExpr) -> Option<String> {
     match t {
         TypeExpr::Named { name, .. } => Some(match name.as_str() {
@@ -766,6 +752,21 @@ impl Emitter {
         ty
     }
 
+    /// (Go value-result count, ends in `error`) for a declared result list.
+    /// T25 aliases have the same error slot as their target, including chains.
+    /// Share this shape between declarations, closure calls and E4 propagation.
+    pub(crate) fn result_shape(&self, results: &[FnResult]) -> (usize, bool) {
+        let err = results.last().is_some_and(|r| {
+            matches!(self.resolve_type_alias(&r.ty), TypeExpr::Named { name, .. } if name == "error")
+        });
+        let n = if err {
+            results.len() - 1
+        } else {
+            results.len()
+        };
+        (n, err)
+    }
+
     pub(crate) fn is_pointer_ty(&self, ty: &TypeExpr) -> bool {
         matches!(self.resolve_type_alias(ty), TypeExpr::Pointer { .. })
     }
@@ -853,13 +854,7 @@ impl Emitter {
         self.fn_shapes = file
             .fns()
             .map(|f| {
-                let err = matches!(
-                    f.results.last(),
-                    Some(FnResult {
-                        ty: TypeExpr::Named { name, .. },
-                        ..
-                    }) if name == "error"
-                );
+                let (value_count, err) = self.result_shape(&f.results);
                 let kind = f
                     .results
                     .first()
@@ -876,7 +871,6 @@ impl Emitter {
                 // `fn step() error` has ONE Go result; counting it as a value
                 // made the ? hoister emit `hyT0, hyErr1 := step()` against a
                 // `func ... error` (assignment mismatch, accepted-then-fails-go-build).
-                let value_count = if err { f.results.len() - 1 } else { f.results.len() };
                 (f.name.clone(), (value_count, err, kind, ptr_params))
             })
             .collect();
@@ -1432,10 +1426,7 @@ impl Emitter {
         }
         self.cur_fn_has_named_results = f.results.iter().any(|r| r.name.is_some());
         if !is_main && !f.results.is_empty() && !main_needs_wrapper {
-            let last_is_err = matches!(
-                &f.results.last().unwrap().ty,
-                TypeExpr::Named { name, .. } if name == "error"
-            );
+            let last_is_err = self.result_shape(&f.results).1;
             if last_is_err {
                 let mut texts = Vec::new();
                 for (i, r) in f.results.iter().enumerate() {

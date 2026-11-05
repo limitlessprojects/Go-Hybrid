@@ -1,5 +1,7 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor #3323 emitter follow-up (refreshed 2026-11-03): T25 error aliases preserve E4 propagation and function/closure arity on upstream31e8806. Pinned workspace2529/2529, corpus130/130, differential42/42+88/88 and ten examples pass. Original-head compiler/quick CI passed; refreshed-head CI/review/award pending. See PLAN.md and spikes/error-alias-emission-3323/RESULTS.md.
+
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
 
 - Contributor #1165: range bounds spelled as different names of one Go integer type no longer raise a false HYB-E2009 (shared canonicaliser in `hy-check` + regression pin); workspace/corpus/differential/CI remain delivery gates.
