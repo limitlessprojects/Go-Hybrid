@@ -135,3 +135,16 @@
 - Suites 422 -> 423. Worklog: this commit.
 - Follow-up claims: copy_element_kinds_conflict permissive Fn/Fn arm (copy fn elements) — unclaimed; new(none) literal-ident gap in check_new_type_operand — offered to #3056 author.
 - Next queue: reap scan for new arrivals (drained: #3056 rejected, #2456 landed).
+
+## Session 109 — 2026-11-05 15:10 UTC+8 tick
+- env cold-recycled again (new sandbox): rust 1.99.0 + go1.26.9 restored, tarball re-cached, target rebuilt cold (~4 min at -j2, fine).
+- approve 9/9 (4982 left); scan skipped. Reap scan via cheap API listing (1 call pattern): 1028 open PRs total, mostly stale Oct spikes; fresh unworked wave = 11-04T15:00 -> 11-05 (#3671..#3726). Worked newest-first this tick, oldest-of-wave next.
+- Landed PR #3723 -> ad9a844b (tuple.rs resolve_fn_callee_ty via composite_type_expr + Index fallback w/ peel_pointer_and_alias + Field projection arm; fixes #3722, aswadi). Head contained main (ff case). ALL-GREEN 424 suites.
+- Landed PR #3725 -> 68488bff (loans.rs record_place_store_from_snapshot + record_parallel_assign_fanout; Ident arm -> record_storage_from_snapshot superset [record_alias preserved inside, verified at loans.rs:2450]; a3-loan "_" gate; fixes #3707, Burapa-J). ALL-GREEN 425 suites.
+- Landed PR #3726 -> be321a9c (corpus census finditer + line numbers, fixes #3724, ThanhWinter; PR pytest 21/21 + live census 7 surfaces OK). ALL-GREEN 425 suites.
+- Landed PR #3704 -> d012da3c (expr_array_type_at recursive static TypeExpr resolver feeding const_array_len_at; Unknown-kind bases consult eval_const_array_len_at; fixes #3694, dextermos-dev). ALL-GREEN 426 suites.
+- Landed PR #3719 -> 8ebb16e8 (place_type_name map-value extraction + fn_result_type_names stack + report_array_return_mismatch; fixes #3718, marhabynova). ALL-GREEN 427 suites.
+- Landed PR #3715 -> 2a95a127 (expr_type_param + len/cap/close/delete reject unconstrained type params E2005; fixes #3714, marhabynova). ALL-GREEN 428 suites.
+- Suites 423 -> 428 (+5). Six landings, zero gate failures; every merge tree-asserted against its committed trial SHA pre-commit; all six landing replies posted.
+- Next queue (wave continues, oldest-first): #3706 -> #3709 -> #3711 -> #3712 -> #3713 -> #3717 -> #3721 -> #3688/#3689/#3695/#3697 -> #3671..#3677.
+- Worklog: this commit.
