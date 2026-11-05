@@ -520,24 +520,9 @@ impl<'a> Checker<'a> {
                 } else if let Some(elem_ty) = elem {
                     self.check_type_expr_with_state(Some(st), elem_ty);
                     let elem_ty = *elem_ty.clone();
-                    let resolved_elem = self.resolve_type_alias(&elem_ty);
                     for i in items {
                         self.check_const_overflow_init("slice literal element", &elem_ty, i, Some(st));
-                        if let Expr::SliceLit {
-                            elem: None,
-                            items: sub_items,
-                            span: sub_span,
-                        } = unwrap_parens(i)
-                        {
-                            if matches!(resolved_elem, TypeExpr::Array { .. }) {
-                                self.check_array_lit_emit_guard(
-                                    Some(st),
-                                    &resolved_elem,
-                                    sub_items,
-                                    *sub_span,
-                                );
-                            }
-                        }
+                        self.check_elided_slice_slot_emit_guard(Some(st), &elem_ty, i);
                     }
                 }
                 for i in items {
@@ -562,6 +547,8 @@ impl<'a> Checker<'a> {
                 for (k, v) in entries {
                     self.check_const_overflow_init("map literal key", &key_ty, k, Some(st));
                     self.check_const_overflow_init("map literal value", &val_ty, v, Some(st));
+                    self.check_elided_slice_slot_emit_guard(Some(st), &key_ty, k);
+                    self.check_elided_slice_slot_emit_guard(Some(st), &val_ty, v);
                     self.check_expr_emit_guard(st, k);
                     self.check_expr_emit_guard(st, v);
                 }
@@ -1221,32 +1208,38 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        let resolved_inner = self.resolve_type_alias(inner_elem);
         for i in items {
             self.check_const_overflow_init("array literal element", inner_elem, i, st);
-            if let Expr::SliceLit {
-                elem: None,
-                items: sub_items,
-                span: sub_span,
-            } = unwrap_parens(i)
-            {
-                match &resolved_inner {
-                    TypeExpr::Array { .. } => {
-                        self.check_array_lit_emit_guard(st, &resolved_inner, sub_items, *sub_span);
-                    }
-                    TypeExpr::Slice { elem: sub_elem, .. } => {
-                        for sub_i in sub_items {
-                            self.check_const_overflow_init(
-                                "slice literal element",
-                                sub_elem,
-                                sub_i,
-                                st,
-                            );
-                        }
-                    }
-                    _ => {}
+            self.check_elided_slice_slot_emit_guard(st, inner_elem, i);
+        }
+    }
+
+    fn check_elided_slice_slot_emit_guard(
+        &mut self,
+        st: Option<&FnState>,
+        slot_ty: &TypeExpr,
+        item: &Expr,
+    ) {
+        let Expr::SliceLit {
+            elem: None,
+            items: sub_items,
+            span: sub_span,
+        } = unwrap_parens(item)
+        else {
+            return;
+        };
+        let resolved_slot = self.resolve_type_alias(slot_ty);
+        match &resolved_slot {
+            TypeExpr::Array { .. } => {
+                self.check_array_lit_emit_guard(st, &resolved_slot, sub_items, *sub_span);
+            }
+            TypeExpr::Slice { elem: sub_elem, .. } => {
+                for sub_i in sub_items {
+                    self.check_const_overflow_init("slice literal element", sub_elem, sub_i, st);
+                    self.check_elided_slice_slot_emit_guard(st, sub_elem, sub_i);
                 }
             }
+            _ => {}
         }
     }
 
