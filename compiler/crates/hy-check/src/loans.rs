@@ -1828,7 +1828,12 @@ impl<'a> Checker<'a> {
                             // projected type so later `<-sub[0]` receives
                             // resolve their direction (the "known remaining
                             // sibling" in recv_composite_channel_operands.rs).
-                            .or_else(|| self.composite_type_expr(&pre_st, value)),
+                            .or_else(|| self.composite_type_expr(&pre_st, value))
+                            .or_else(|| {
+                                (!immutable)
+                                    .then(|| self.default_untyped_local_ty(&pre_st, value))
+                                    .flatten()
+                            }),
                     ),
                 };
                 let is_fresh_copy = self.call_returns_fresh_copy(&pre_st, value);
@@ -2520,6 +2525,137 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(links) = pre_st.shadow_links.get(&peer) {
                     st.shadow_links.entry(name.to_string()).or_default().extend(links.iter().cloned());
+                }
+            }
+        }
+    }
+
+    pub(crate) fn record_place_store_from_snapshot(
+        &self,
+        st: &mut FnState,
+        pre_st: &FnState,
+        root: &str,
+        value: &Expr,
+        overwritten: &[String],
+    ) {
+        if root.is_empty()
+            || root == "_"
+            || !self.binding_may_share(st, root)
+            || self.call_returns_fresh_copy(pre_st, value)
+        {
+            return;
+        }
+        let reads_overwritten = move_operand_ident(value).is_none()
+            && overwritten.iter().any(|prev| {
+                prev != "_" && self.value_reads_storage_of(pre_st, value, prev)
+            });
+        if !reads_overwritten {
+            self.record_may_share(st, root, value);
+            return;
+        }
+        let mut rhs = pre_st.clone();
+        rhs.aliases.remove(root);
+        rhs.share_clear(root);
+        if let Some(binding) = rhs.env_lookup_mut(root) {
+            binding.non_owned_origin = None;
+        }
+        self.record_may_share(&mut rhs, root, value);
+        let mut sources = rhs.may_share.get(root).cloned().unwrap_or_default();
+        if let Some(source) = rhs.aliases.get(root) {
+            sources.insert(source.clone());
+        }
+        let mut peer_origin = self
+            .lookup_binding(&rhs, root)
+            .and_then(|b| b.non_owned_origin.clone());
+        for source in sources {
+            if peer_origin.is_none() {
+                peer_origin = self
+                    .non_owned_origin_of(pre_st, &source)
+                    .map(|(orig, _)| {
+                        if orig.starts_with("a may-share peer of ") {
+                            orig
+                        } else {
+                            format!("a may-share peer of {}", orig)
+                        }
+                    })
+                    .or_else(|| {
+                        self.binding_const_root(pre_st, &source)
+                            .map(|c| format!("a may-share peer of `const {}`", c))
+                    });
+            }
+            let mut peers = self.storage_peers(pre_st, &source);
+            peers.insert(0, source);
+            for peer in peers {
+                if !overwritten.contains(&peer) && peer != root {
+                    st.share_edge(root, &peer);
+                }
+                if let Some(links) = pre_st.shadow_links.get(&peer) {
+                    st.shadow_links
+                        .entry(root.to_string())
+                        .or_default()
+                        .extend(links.iter().cloned());
+                }
+            }
+        }
+        if let Some(origin) = peer_origin {
+            if let Some(binding) = st.env_lookup_mut(root) {
+                if binding.non_owned_origin.is_none() {
+                    binding.non_owned_origin = Some(origin);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn record_parallel_assign_fanout(
+        &self,
+        st: &mut FnState,
+        pre_st: &FnState,
+        targets: &[Place],
+        values: &[Expr],
+        is_const_write: &[bool],
+    ) {
+        if targets.len() <= 1 {
+            return;
+        }
+        let mut target_pre_sources: Vec<(String, HashSet<String>)> = Vec::new();
+        for (i, (t, v)) in targets.iter().zip(values.iter()).enumerate() {
+            if is_const_write.get(i).copied().unwrap_or(false)
+                || move_operand_ident(v).is_some()
+                || self.call_returns_fresh_copy(pre_st, v)
+            {
+                continue;
+            }
+            let root = t.root();
+            if root.is_empty() || root == "_" || !self.binding_may_share(st, root) {
+                continue;
+            }
+            if targets[(i + 1)..]
+                .iter()
+                .any(|later| matches!(&later.kind, PlaceKind::Ident(n) if n == root))
+            {
+                continue;
+            }
+            let mut probe = pre_st.clone();
+            probe.aliases.remove(root);
+            probe.share_clear(root);
+            self.record_may_share(&mut probe, root, v);
+            let mut group: HashSet<String> = HashSet::new();
+            for s in probe.may_share.get(root).into_iter().flatten() {
+                group.insert(s.clone());
+                for p in self.storage_peers(pre_st, s) {
+                    group.insert(p);
+                }
+            }
+            if !group.is_empty() {
+                target_pre_sources.push((root.to_string(), group));
+            }
+        }
+        for a in 0..target_pre_sources.len() {
+            for b in (a + 1)..target_pre_sources.len() {
+                let (ref root_a, ref group_a) = target_pre_sources[a];
+                let (ref root_b, ref group_b) = target_pre_sources[b];
+                if root_a != root_b && !group_a.is_disjoint(group_b) {
+                    st.share_edge(root_a, root_b);
                 }
             }
         }
@@ -3234,7 +3370,14 @@ impl<'a> Checker<'a> {
                     decl.params.iter().map(|p| p.name.clone()).collect();
                 bound.extend(decl.results.iter().filter_map(|r| r.name.clone()));
                 for (i, p) in decl.params.iter().enumerate() {
-                    if let Some(arg) = cr.args.get(i) {
+                    let arg_opt = cr.args.get(i).or_else(|| {
+                        if cr.args.len() == 1 && decl.params.len() > 1 {
+                            cr.args.first()
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(arg) = arg_opt {
                         slots.push((
                             p.name.clone(),
                             self.shape_of_type(&p.ty),
@@ -6780,11 +6923,15 @@ impl<'a> Checker<'a> {
                     self.record_closure_mutations(st, name, v);
                 } else {
                     let root = t.root();
-                    if !root.is_empty() && self.binding_may_share(st, root) {
-                        self.record_may_share(st, root, v);
+                    if !info.is_fresh_copy {
+                        self.record_place_store_from_snapshot(st, &pre_st, root, v, &overwritten);
+                    }
+                    if !root.is_empty() && root != "_" && self.binding_may_share(st, root) {
+                        self.record_move_const_and_a3_loans(st, root, v, idx);
                     }
                 }
             }
+            self.record_parallel_assign_fanout(st, &pre_st, targets, values, &is_const_write);
         } else if values.len() == 1 && targets.len() > 1 {
             let moved_non_owned = self.moved_non_owned_origin_in_expr(st, &values[0]);
             let shapes = self.multi_value_shapes(st, &values[0], targets.len());
@@ -7301,6 +7448,8 @@ impl<'a> Checker<'a> {
                         .collect();
 
                     if *op == AssignOp::Assign && targets.len() == values.len() {
+                        let pre_cst = cst.clone();
+                        let mut overwritten = Vec::new();
                         let rhs_info: Vec<(TypeShape, Option<hy_syntax::TypeExpr>)> = values
                             .iter()
                             .map(|v| (self.shape_of_expr(&cst, v), self.ty_of_expr(&cst, v)))
@@ -7318,6 +7467,7 @@ impl<'a> Checker<'a> {
                                 if name == "_" {
                                     continue;
                                 }
+                                overwritten.push(name.clone());
                                 if !self.value_reads_storage_of(&cst, v, name) {
                                     self.preserve_peers_before_sever(&mut cst, name, false);
                                 }
@@ -7331,20 +7481,41 @@ impl<'a> Checker<'a> {
                                 }
                                 cst.aliases.remove(name);
                                 cst.share_clear(name);
-                                self.record_may_share(&mut cst, name, v);
+                                self.record_storage_from_snapshot(
+                                    &mut cst,
+                                    &pre_cst,
+                                    name,
+                                    v,
+                                    &overwritten,
+                                    false,
+                                    false,
+                                );
                                 self.record_move_const_and_a3_loans(&mut cst, name, v, 0);
-                                self.record_alias(&mut cst, name, v);
                                 cst.closure_mutates.remove(name);
                                 cst.closure_defs.remove(name);
                                 cst.closure_fnlits.remove(name);
                                 self.record_closure_mutations(&mut cst, name, v);
                             } else {
                                 let root = t.root();
-                                if !root.is_empty() && self.binding_may_share(&cst, root) {
-                                    self.record_may_share(&mut cst, root, v);
+                                self.record_place_store_from_snapshot(
+                                    &mut cst,
+                                    &pre_cst,
+                                    root,
+                                    v,
+                                    &overwritten,
+                                );
+                                if !root.is_empty() && root != "_" && self.binding_may_share(&cst, root) {
+                                    self.record_move_const_and_a3_loans(&mut cst, root, v, 0);
                                 }
                             }
                         }
+                        self.record_parallel_assign_fanout(
+                            &mut cst,
+                            &pre_cst,
+                            targets,
+                            values,
+                            &is_const_write,
+                        );
                         self.record_assign_borrow_aliases(&mut cst, targets, *op, values);
                     } else if *op == AssignOp::Assign && values.len() == 1 && targets.len() > 1 {
                         let shapes = self.multi_value_shapes(&cst, &values[0], targets.len());
@@ -7700,6 +7871,23 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn expr_or_multi_call_may_share(&self, st: &FnState, expr: &Expr) -> bool {
+        let inner = crate::model::unwrap_parens(expr);
+        let sh = self.shape_of_expr(st, inner);
+        if self.shape_may_share(&sh) || matches!(sh, TypeShape::Unknown) {
+            return true;
+        }
+        if let Expr::Call { callee, .. } = inner {
+            if let Some(results) = self.call_result_tys(st, callee) {
+                return results.iter().any(|ty| {
+                    let s = self.shape_of_type(ty);
+                    self.shape_may_share(&s) || matches!(s, TypeShape::Unknown)
+                });
+            }
+        }
+        false
+    }
+
     /// Resolve a call argument expression to a `const` root when the argument
     /// passes mutable reference storage (map, slice, pointer, `&const_val`, or
     /// a struct/array carrying reference fields) backed by that `const` (#188).
@@ -7732,8 +7920,7 @@ impl<'a> Checker<'a> {
             }
             return None;
         }
-        let arg_shape = self.shape_of_expr(st, inner);
-        if !(self.shape_may_share(&arg_shape) || matches!(arg_shape, TypeShape::Unknown)) {
+        if !self.expr_or_multi_call_may_share(st, inner) {
             return None;
         }
         let mut roots = Vec::new();
@@ -7921,13 +8108,27 @@ impl<'a> Checker<'a> {
                     if declared.contains(name) {
                         (false, true)
                     } else if let Some(decl) = self.fns.get(name) {
-                        match decl.params.get(i) {
-                            Some(p) => {
-                                let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
-                                    || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
-                                (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
+                        if cr.args.len() == 1 && decl.params.len() > 1 {
+                            let is_ptr = decl.params.iter().any(|p| {
+                                matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                    || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
+                            });
+                            let mutates = decl.params.iter().any(|p| {
+                                let ps = self.shape_of_type(&p.ty);
+                                (self.shape_may_share(&ps)
+                                    || matches!(ps, TypeShape::Unknown | TypeShape::Pointer(_)))
+                                    && self.fn_mutates_const_param(decl, &p.name, 0)
+                            });
+                            (is_ptr, mutates)
+                        } else {
+                            match decl.params.get(i) {
+                                Some(p) => {
+                                    let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                        || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
+                                    (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
+                                }
+                                None => (false, true),
                             }
-                            None => (false, true),
                         }
                     } else if self.lookup_binding(st, name).is_some() {
                         indirect_callee_effect(callee)
@@ -8695,60 +8896,15 @@ impl<'a> Checker<'a> {
     /// HYB-E6002 constant overflow checks on assignment targets).
     // ponytail: resolves direct ident, index, and struct field targets via package struct definitions.
     pub(crate) fn place_target_ty(&self, st: &FnState, p: &Place) -> Option<hy_syntax::TypeExpr> {
-        enum Step<'a> {
-            Index,
-            Field(&'a str),
-        }
-        let mut steps = Vec::new();
-        let mut walker = p;
-        loop {
-            match &walker.kind {
-                PlaceKind::Index { base, .. } => {
-                    steps.push(Step::Index);
-                    walker = base;
-                }
-                PlaceKind::Field { base, name } => {
-                    steps.push(Step::Field(name.as_str()));
-                    walker = base;
-                }
-                PlaceKind::AddrOf { base } => {
-                    walker = base;
-                }
-                PlaceKind::Ident(name) => {
-                    let b = self.lookup_binding(st, name)?;
-                    let mut cur = b.ty.as_ref()?;
-                    steps.reverse();
-                    for step in steps {
-                        while let hy_syntax::TypeExpr::Pointer { to, .. } = cur {
-                            cur = to.as_ref();
-                        }
-                        match step {
-                            Step::Index => match cur {
-                                hy_syntax::TypeExpr::Array { elem, .. }
-                                | hy_syntax::TypeExpr::Slice { elem, .. } => {
-                                    cur = elem.as_ref();
-                                }
-                                hy_syntax::TypeExpr::Map { value, .. } => {
-                                    cur = value.as_ref();
-                                }
-                                _ => return None,
-                            },
-                            Step::Field(field_name) => match cur {
-                                hy_syntax::TypeExpr::Named {
-                                    name: struct_name, ..
-                                } => {
-                                    let fields = self.structs.get(struct_name)?;
-                                    let (_, field_ty) =
-                                        fields.iter().find(|(f, _)| f == field_name)?;
-                                    cur = field_ty;
-                                }
-                                _ => return None,
-                            },
-                        }
-                    }
-                    return Some(cur.clone());
-                }
-            }
+        match &p.kind {
+            PlaceKind::Ident(name) => self.lookup_binding(st, name)?.ty.clone(),
+            PlaceKind::AddrOf { base } => self.place_target_ty(st, base),
+            PlaceKind::Index { base, .. } => match self.peel_pointer_and_alias(&self.place_target_ty(st, base)?) {
+                hy_syntax::TypeExpr::Array { elem, .. } | hy_syntax::TypeExpr::Slice { elem, .. } => Some(*elem),
+                hy_syntax::TypeExpr::Map { value, .. } => Some(*value),
+                _ => None,
+            },
+            PlaceKind::Field { base, name } => self.struct_fields_for_type(&self.place_target_ty(st, base)?)?.into_iter().find(|(f, _)| f == name).map(|(_, ty)| ty),
         }
     }
 
