@@ -716,8 +716,9 @@ impl<'a> Checker<'a> {
         let site_sa = self.enclosing_fn(span).map(|f| self.state_at(f, Some(span)));
         let eff_sa;
         let sa = match &site_sa { Some(s) => s, None => { eff_sa = StateAt::new(st.clone()); &eff_sa } };
-        if !self.is_foreign_escape_callee(&sa.st, callee) { return; }
-        let Some(name) = args.iter().find_map(|a| self.arg_closure_captured_write(st, &a.value).or_else(|| (!self.closure_bound.is_empty()).then(|| self.arg_closure_captured_write(&sa.st, &a.value)).flatten()).or_else(|| self.expr_escape_root(sa, Some(span), &a.value, 0))) else { return; };
+        let direct = self.callee_reaches_foreign(sa, Some(span), callee, &[], &[], 0, &mut HashSet::new());
+        let name = direct.then(|| args.iter().find_map(|a| self.arg_closure_captured_write(st, &a.value).or_else(|| (!self.closure_bound.is_empty()).then(|| self.arg_closure_captured_write(&sa.st, &a.value)).flatten()).or_else(|| self.expr_escape_root(sa, Some(span), &a.value, 0)))).flatten().or_else(|| self.paired_caller_escape_root(sa, span, callee, args));
+        let Some(name) = name else { return; };
         self.diags.push(
             Diagnostic::error(
                 "HYB-E3013",
@@ -757,6 +758,100 @@ impl<'a> Checker<'a> {
             return self.packages.contains(ty.split('.').next().unwrap_or(""));
         }
         false
+    }
+
+    fn collect_block_calls<'b>(b: &'b hy_syntax::Block, out: &mut Vec<crate::walk::CallRef<'b>>) {
+        for (s, _) in crate::walk::flatten(b).stmts {
+            crate::walk::own_calls(s, out); if let Stmt::For { kind: ForKind::Iterate { expr, .. }, .. } = s { crate::walk::expr_calls(expr, out); }
+            let mut fls = Vec::new(); crate::walk::own_fnlits(s, &mut fls); for fl in fls { if let Expr::FnLit { body, .. } = fl { Self::collect_block_calls(body, out); } }
+        }
+    }
+    fn fn_call_sites(&self, tf: &hy_syntax::FnDecl) -> Vec<(StateAt, Span, Vec<(String, Expr)>)> {
+        let mut sites = Vec::new();
+        for cf in self.file.fns() {
+            let Some(cb) = &cf.body else { continue }; let mut calls = Vec::new(); Self::collect_block_calls(cb, &mut calls);
+            for cr in calls.into_iter().filter(|cr| !self.in_managed_at(cr.span)) { match (tf.receiver.as_ref(), unwrap_parens_and_move(cr.callee)) {
+                (None, Expr::Ident { name, .. }) if name == &tf.name || Self::base_named_type_str(name) == tf.name => {
+                    let cs_sa = self.state_at(cf, Some(cr.span)); if self.lookup_binding(&cs_sa.st, name).is_none() { sites.push((cs_sa, cr.span, tf.params.iter().enumerate().filter_map(|(i, p)| cr.args.get(i).map(|a| (p.name.clone(), a.value.clone()))).collect())); }
+                }
+                (Some(r), Expr::Field { base, name, .. }) => {
+                    let (cs_sa, b) = (self.state_at(cf, Some(cr.span)), unwrap_parens_and_move(base));
+                    if self.resolve_method_decl(&cs_sa.st, b, name).is_some_and(|(d, _, _)| d.span == tf.span) {
+                        let mut bnd: Vec<_> = tf.params.iter().enumerate().filter_map(|(i, p)| cr.args.get(i).map(|a| (p.name.clone(), a.value.clone()))).collect();
+                        bnd.push((r.name.clone(), b.clone())); sites.push((cs_sa, cr.span, bnd));
+                    }
+                }
+                _ => {}
+            } }
+        }
+        sites
+    }
+    fn paired_caller_escape_root(&self, sa: &StateAt, span: Span, callee: &Expr, args: &[hy_syntax::CallArg]) -> Option<String> {
+        if self.is_foreign_escape_callee(&sa.st, callee) { return None; }
+        let ef = self.enclosing_fn(span)?; let mut phits = Vec::new();
+        for a in args { self.expr_method_escape(sa, Some(span), &a.value, &[], 0, None, &mut HashSet::new(), &mut phits); }
+        if !phits.iter().any(|h| matches!(h, EscapeHit::Param(..))) { return None; }
+        for (cs_sa, cs_sp, bound) in self.fn_call_sites(ef) {
+            let b_refs: Vec<_> = bound.iter().map(|(n, e)| (n.as_str(), &cs_sa, Some(cs_sp), e)).collect();
+            if self.callee_reaches_foreign(sa, Some(span), callee, &[], &b_refs, 0, &mut HashSet::new()) {
+                for h in &phits { if let EscapeHit::Param(pn, rem) = h { if let Some((_, ae)) = bound.iter().find(|(k, _)| k == pn) { if let Some((r, _)) = self.resolve_esc_hits(&cs_sa, Some(cs_sp), ae, rem, 1, None, &[], false, &[]) { return Some(r); } } } }
+            }
+        }
+        None
+    }
+    fn callee_reaches_foreign(&self, sa: &StateAt, cspan: Option<Span>, expr: &Expr, proj: &[Proj], bound: &[(&str, &StateAt, Option<Span>, &Expr)], dep: usize, seen: &mut EscapeSeen) -> bool {
+        if dep > 16 { return false; }
+        let e = unwrap_parens_and_move(expr); if proj.is_empty() && self.is_foreign_escape_callee(&sa.st, e) { return true; }
+        match e {
+            Expr::AddrOf { operand: o, .. } | Expr::Unary { op: UnOp::Addr, operand: o, .. } => self.callee_reaches_foreign(sa, cspan, o, proj, bound, dep + 1, seen),
+            Expr::Ident { name, .. } => {
+                if let Some(cv) = self.const_values.get(name.as_str()) { return self.callee_reaches_foreign(sa, cspan, cv, proj, bound, dep + 1, seen); }
+                let Some((sp, ef)) = cspan.and_then(|sp| self.enclosing_fn(sp).map(|f| (sp, f))) else { return false; };
+                if !seen.insert((sp.start.line, sp.start.col, name.clone(), proj.to_vec())) { return false; }
+                let Some(b) = &ef.body else { return false; }; let mut defs = Vec::new(); let (killed, fl) = Self::collect_reaching(&b.stmts, Some(sp), name, proj, 0, &mut defs);
+                for (rv, rsp, rp) in defs { let mut d_sa = self.state_at(ef, Some(rsp)); if let Some(fsp) = Self::innermost_fnlit(b, rsp) { d_sa.merge_decls(sa, Some(fsp)); } if self.callee_reaches_foreign(&d_sa, Some(rsp), rv, &rp, bound, dep + 1, seen) { return true; } }
+                if killed { return false; }
+                if let Some((_, b_sa, b_sp, b_ex)) = bound.iter().find(|(n, ..)| *n == name) { return self.callee_reaches_foreign(b_sa, *b_sp, b_ex, proj, &[], dep + 1, seen); }
+                if fl == 2 {
+                    let (mut calls, mut fls) = (Vec::new(), Vec::new()); Self::collect_block_calls(b, &mut calls); for (s, _) in crate::walk::flatten(b).stmts { crate::walk::own_fnlits(s, &mut fls); }
+                    let Some((fsp, p_idx)) = fls.into_iter().filter_map(|fl| match fl { Expr::FnLit { params, results, body, .. } if span_contains(body.span, sp) => params.iter().position(|p| p.name == *name).map(|i| (fn_span(params, results, body), i)), _ => None }).last() else { return false; };
+                    return calls.into_iter().filter(|cr| !self.in_managed_at(cr.span)).any(|cr| (match unwrap_parens_and_move(cr.callee) { Expr::FnLit { params, results, body, .. } => fn_span(params, results, body) == fsp, Expr::Ident { name: cn, .. } => { let mut ds = Vec::new(); let _ = Self::collect_reaching(&b.stmts, Some(cr.span), cn, &[], 0, &mut ds); ds.into_iter().any(|(rv, _, _)| matches!(unwrap_parens_and_move(rv), Expr::FnLit { params, results, body, .. } if fn_span(params, results, body) == fsp)) } _ => false }) && cr.args.get(p_idx).is_some_and(|a| self.callee_reaches_foreign(&self.state_at(ef, Some(cr.span)), Some(cr.span), &a.value, proj, bound, dep + 1, seen)));
+                }
+                bound.is_empty() && (ef.params.iter().any(|p| p.name == *name) || ef.receiver.as_ref().is_some_and(|r| r.name == *name)) && self.fn_call_sites(ef).into_iter().any(|(cs_sa, cs_sp, cbnd)| cbnd.into_iter().find(|(k, _)| k == name).is_some_and(|(_, ae)| self.callee_reaches_foreign(&cs_sa, Some(cs_sp), &ae, proj, &[], dep + 1, seen)))
+            }
+            Expr::StructLit { fields, .. } => match proj.first() { None => fields.iter().any(|f| self.callee_reaches_foreign(sa, cspan, &f.value, &[], bound, dep + 1, seen)), Some(Proj::Field(k)) => fields.iter().filter(|f| f.name == *k).any(|f| self.callee_reaches_foreign(sa, cspan, &f.value, &proj[1..], bound, dep + 1, seen)), _ => false },
+            Expr::SliceLit { items, .. } => match proj.first() { None => items.iter().any(|it| self.callee_reaches_foreign(sa, cspan, it, &[], bound, dep + 1, seen)), Some(Proj::Index(Some(k))) if k.parse::<usize>().is_ok() => k.parse::<usize>().ok().and_then(|i| items.get(i)).is_some_and(|it| self.callee_reaches_foreign(sa, cspan, it, &proj[1..], bound, dep + 1, seen)), Some(Proj::Index(_)) => items.iter().any(|it| self.callee_reaches_foreign(sa, cspan, it, &proj[1..], bound, dep + 1, seen)), _ => false },
+            Expr::MapLit { entries, .. } => match proj.first() { None => entries.iter().any(|(_, v)| self.callee_reaches_foreign(sa, cspan, v, &[], bound, dep + 1, seen)), Some(Proj::Index(pk)) => entries.iter().filter(|(k, _)| pk.as_deref().map_or(true, |pk| const_idx(k).map_or(true, |ck| ck == pk))).any(|(_, v)| self.callee_reaches_foreign(sa, cspan, v, &proj[1..], bound, dep + 1, seen)), _ => false },
+            Expr::Field { base, name, .. } => self.callee_reaches_foreign(sa, cspan, base, &prepend_proj(Proj::Field(name.clone()), proj), bound, dep + 1, seen),
+            Expr::Index { base, index, .. } => self.callee_reaches_foreign(sa, cspan, base, &prepend_proj(Proj::Index(const_idx(index)), proj), bound, dep + 1, seen),
+            Expr::Call { callee: inner_c, args: inner_args, .. } => {
+                let c = unwrap_parens_and_move(inner_c);
+                if let Expr::Ident { name, .. } = c { if self.lookup_binding(&sa.st, name).is_none() && !self.fns.contains_key(name.as_str()) {
+                    if name == "some" || (inner_args.len() == 1 && self.type_aliases.contains_key(Self::base_named_type_str(name))) { return inner_args.first().is_some_and(|a| self.callee_reaches_foreign(sa, cspan, &a.value, proj, bound, dep + 1, seen)); }
+                    if name == "append" { return match proj.first() { Some(Proj::Index(_)) => inner_args.first().is_some_and(|a| self.callee_reaches_foreign(sa, cspan, &a.value, &prepend_proj(Proj::Index(None), &proj[1..]), bound, dep + 1, seen)) || inner_args.iter().skip(1).any(|a| self.callee_reaches_foreign(sa, cspan, &a.value, &proj[1..], bound, dep + 1, seen)), None => inner_args.iter().any(|a| self.callee_reaches_foreign(sa, cspan, &a.value, &[], bound, dep + 1, seen)), _ => false }; }
+                } }
+                let ((t_idx, sub_proj), mut targets) = (match proj.first() { Some(Proj::Tuple(k)) => (*k, &proj[1..]), _ => (0, proj) }, Vec::<(&hy_syntax::FnDecl, &[hy_syntax::Param], &[hy_syntax::FnResult], &hy_syntax::Block, Option<(&hy_syntax::Receiver, &Expr)>, bool)>::new());
+                match c {
+                    Expr::FnLit { params, results, body, .. } => if let Some(ef) = cspan.and_then(|sp| self.enclosing_fn(sp)) { targets.push((ef, params, results, body, None, false)); },
+                    Expr::Ident { name, .. } if self.lookup_binding(&sa.st, name).is_some() => if let Some((sp, ef)) = cspan.and_then(|sp| self.enclosing_fn(sp).map(|f| (sp, f))) { if let Some(eb) = &ef.body { let mut ds = Vec::new(); let _ = Self::collect_reaching(&eb.stmts, Some(sp), name, &[], 0, &mut ds); for (rv, _, _) in ds { if let Expr::FnLit { params, results, body, .. } = unwrap_parens_and_move(rv) { targets.push((ef, params, results, body, None, false)); } } } },
+                    Expr::Ident { name, .. } => if let Some(&d) = self.fns.get(name.as_str()).or_else(|| self.fns.get(Self::base_named_type_str(name))) { if let Some(b) = &d.body { targets.push((d, &d.params, &d.results, b, None, true)); } },
+                    Expr::Field { base, name, .. } => { let b = unwrap_parens_and_move(base); if let Some((d, _, _)) = self.resolve_method_decl(&sa.st, b, name) { if let Some(bd) = &d.body { targets.push((d, &d.params, &d.results, bd, d.receiver.as_ref().map(|r| (r, b)), true)); } } }
+                    _ => {}
+                }
+                for (ef, params, results, body, recv_b, is_decl) in targets {
+                    let (cfn_sp, mut c_bnd) = (fn_span(params, results, body), params.iter().enumerate().filter_map(|(i, p)| inner_args.get(i).map(|a| (p.name.as_str(), sa, cspan, &a.value))).collect::<Vec<_>>());
+                    if let Some((r, rb)) = recv_b { c_bnd.push((r.name.as_str(), sa, cspan, rb)); }
+                    if !is_decl { for &(bn, bsa, bsp, bex) in bound { if !c_bnd.iter().any(|(n, ..)| *n == bn) { c_bnd.push((bn, bsa, bsp, bex)); } } }
+                    for (s, _) in crate::walk::flatten(body).stmts {
+                        let Stmt::Return { values, span: rspan } = s else { continue }; let mut r_sa = self.state_at(ef, Some(*rspan)); if !is_decl { r_sa.merge_decls(sa, Some(cfn_sp)); }
+                        if !values.is_empty() { let (rv, rp) = if values.len() == 1 && results.len() > 1 && matches!(proj.first(), Some(Proj::Tuple(_))) { (&values[0], proj) } else { let Some(v) = values.get(t_idx) else { continue }; (v, sub_proj) }; if self.callee_reaches_foreign(&r_sa, Some(*rspan), rv, rp, &c_bnd, dep + 1, &mut HashSet::new()) { return true; } }
+                        else if let Some(rn) = results.get(t_idx).and_then(|r| r.name.as_deref()) { if self.callee_reaches_foreign(&r_sa, Some(*rspan), &Expr::Ident { name: rn.to_string(), span: *rspan }, sub_proj, &c_bnd, dep + 1, &mut HashSet::new()) { return true; } }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
     }
 
     fn arg_closure_captured_write(&self, st: &FnState, arg: &Expr) -> Option<String> {
