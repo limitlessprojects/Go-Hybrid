@@ -123,6 +123,7 @@ pub fn check_file(file: &File) -> CheckResult {
     // bindings (incl. `_ := 5`), unused imports, and repeated names on the
     // left of one `:=` are rejected fail-closed as HYB-E1002.
     buildable::check_buildable(&mut ck);
+    ck.check_addr_loan_targets_and_loops();
 
     let mut diags = ck.diags;
     diags.sort_by(|a, b| {
@@ -5219,3 +5220,4 @@ mod tests {
     }
 }
 
+mod addr_loan_targets;
