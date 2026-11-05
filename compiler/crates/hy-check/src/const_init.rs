@@ -165,6 +165,7 @@ impl<'a> Checker<'a> {
             || self.structs.contains_key(name)
             || self.struct_type_params.contains_key(name)
             || self.enums.contains_key(name)
+            || self.consts.contains_key(name)
         {
             return false;
         }
@@ -236,6 +237,7 @@ impl<'a> Checker<'a> {
                 self.is_const_string_conversion_target(ty_name, st)
                     && args.len() == 1
                     && !args[0].spread
+                    && self.expr_is_constant_inner(&args[0].value, st, &mut Vec::new(), ref_depth)
             }
             _ => false,
         }
@@ -253,17 +255,18 @@ impl<'a> Checker<'a> {
         if matches!(resolved, hy_syntax::TypeExpr::Option { .. }) {
             return false;
         }
-        if matches!(self.shape_of_type(ty), TypeShape::Primitive | TypeShape::Str) {
-            return true;
+        let name_str = match resolved {
+            hy_syntax::TypeExpr::Named { ref name, .. } => name.as_str(),
+            _ => return false,
+        };
+        if self.structs.contains_key(name_str)
+            || self.struct_type_params.contains_key(name_str)
+            || self.enums.contains_key(name_str)
+        {
+            return false;
         }
-        matches!(
-            resolved,
-            hy_syntax::TypeExpr::Named { ref name, .. }
-                if !self.structs.contains_key(name.as_str())
-                    && !self.struct_type_params.contains_key(name.as_str())
-                    && !self.enums.contains_key(name.as_str())
-                    && is_conversion_type_name(name)
-        )
+        matches!(self.shape_of_type(ty), TypeShape::Primitive | TypeShape::Str)
+            && is_conversion_type_name(name_str)
     }
 
     fn ident_is_constant(
