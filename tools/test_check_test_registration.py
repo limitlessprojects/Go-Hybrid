@@ -12,6 +12,8 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -64,6 +66,51 @@ class PatternExtractionTests(unittest.TestCase):
     def test_echoed_discovery_is_not_a_registration(self):
         self.assertEqual(guard.registered_patterns(
             "  echo 'python3 -m unittest discover -s tools -p test_disabled.py'\n"), [])
+
+    def test_heredoc_payload_does_not_register_discovery_or_direct_tests(self):
+        for opener in ("cat <<EOF", "cat <<'EOF'", 'cat <<"EOF"',
+                       "cat <<\\EOF", "cat <<-EOF"):
+            with self.subTest(opener=opener):
+                workflow = (opener + "\n"
+                            "python3 -m unittest discover -s tools -p test_disabled.py\n"
+                            "python3 tests/test_disabled.py\n"
+                            "EOF\n")
+                self.assertEqual(guard.registered_patterns(workflow), [])
+                self.assertFalse(guard.is_registered_direct(
+                    "tests/test_disabled.py", workflow))
+
+    def test_real_test_after_heredoc_is_still_registered(self):
+        workflow = ("      - run: |\n"
+                    "          cat <<'EOF'\n"
+                    "          python3 tests/test_disabled.py\n"
+                    "          EOF\n"
+                    "          python3 tests/test_live.py\n")
+        self.assertFalse(guard.is_registered_direct("tests/test_disabled.py", workflow))
+        self.assertTrue(guard.is_registered_direct("tests/test_live.py", workflow))
+
+    def test_quoted_redirect_text_does_not_open_a_heredoc(self):
+        workflow = ('echo "<<" EOF\n'
+                    "python3 -m unittest discover -s tools -p test_live.py\n")
+        self.assertEqual(guard.registered_patterns(workflow), ["test_live.py"])
+
+    def test_multiple_heredocs_and_tab_stripped_terminator(self):
+        workflow = ("cat <<FIRST <<-SECOND\n"
+                    "python3 tests/test_first.py\nFIRST\n"
+                    "python3 tests/test_second.py\n\tSECOND\n"
+                    "python3 tests/test_live.py\n")
+        self.assertFalse(guard.is_registered_direct("tests/test_first.py", workflow))
+        self.assertFalse(guard.is_registered_direct("tests/test_second.py", workflow))
+        self.assertTrue(guard.is_registered_direct("tests/test_live.py", workflow))
+
+    def test_heredoc_terminator_with_trailing_space_does_not_end_payload(self):
+        workflow = ("cat <<EOF\nEOF \npython3 tests/test_disabled.py\nEOF\n")
+        self.assertFalse(guard.is_registered_direct("tests/test_disabled.py", workflow))
+
+    def test_shell_indentation_is_not_removed_from_heredoc_terminator(self):
+        workflow = ("  cat <<EOF\n  EOF\npython3 tests/test_disabled.py\nEOF\n"
+                    "python3 tests/test_live.py\n")
+        self.assertFalse(guard.is_registered_direct("tests/test_disabled.py", workflow))
+        self.assertTrue(guard.is_registered_direct("tests/test_live.py", workflow))
 
     def test_direct_script_mentions_do_not_register_execution(self):
         for workflow in (
@@ -142,6 +189,42 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(guard.find_test_files(root, "tools"), [
             "tools/test_job_artifacts.py", "tools/test_job_cli.py", "tools/test_job_payload.py"])
         self.assertEqual(guard.unregistered(root, text), [])
+
+    def test_real_shell_prints_heredoc_but_never_runs_its_failing_tests(self):
+        shell = shutil.which("sh")
+        if os.name == "nt":
+            candidate = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe"
+            shell = str(candidate) if candidate.exists() else None
+        if not shell:
+            self.skipTest("requires a POSIX shell (Git Bash works on Windows)")
+        commands = (
+            "cat > commands.txt <<'TEST_COMMANDS'\n"
+            "python3 -m unittest discover -s tools -p test_disabled.py\n"
+            "python3 tests/test_disabled.py\n"
+            "TEST_COMMANDS\n"
+            "python3 -m unittest discover -s tools -p test_live.py\n"
+        )
+        root, text = self.build(commands, ["tools/test_disabled.py",
+                                           "tests/test_disabled.py", "tools/test_live.py"])
+        for rel in ("tools/test_disabled.py", "tests/test_disabled.py"):
+            (root / rel).write_text("raise AssertionError('disabled test really ran')\n",
+                                    encoding="utf-8")
+        (root / "tools/test_live.py").write_text(
+            "import unittest\nclass Control(unittest.TestCase):\n"
+            "    def test_pass(self): pass\n", encoding="utf-8")
+        prologue = "python3() { " + shlex.quote(Path(sys.executable).as_posix()) + ' "$@"; }\n'
+        result = subprocess.run([shell, "-e", "-c", prologue + commands], cwd=root,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Ran 1 test", result.stderr)
+        self.assertIn("python3 tests/test_disabled.py", (root / "commands.txt").read_text())
+        for rel in ("tools/test_disabled.py", "tests/test_disabled.py"):
+            actual = subprocess.run([sys.executable, str(root / rel)], cwd=root,
+                                    capture_output=True, text=True, timeout=15)
+            self.assertNotEqual(actual.returncode, 0)
+            self.assertIn("disabled test really ran", actual.stderr)
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/test_disabled.py", "tests/test_disabled.py"])
 
     def test_unregistered_suite_is_detected(self):
         workflow = "          python3 -m unittest discover -s tools -p test_job_cli.py -v\n"
