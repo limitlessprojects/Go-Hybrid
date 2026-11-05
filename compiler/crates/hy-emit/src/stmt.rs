@@ -8,6 +8,20 @@ use super::expr::ATOM;
 use super::shapes::lookup_conversion;
 use std::collections::BTreeSet;
 
+/// True when the arm body's TOP-LEVEL statements contain a local define that
+/// redeclares the arm's pattern binding. hy-check treats a match arm body as a
+/// nested scope, so `some(v): { v := v + 1 ... }` is a legal arm-local shadow
+/// there; but the emitter injects `v := temp.val` into the same Go block as
+/// the (inlined) arm body, and Go rejects `v := v + 1` after it with
+/// "no new variables on left side of :=". Only top-level statements count:
+/// nested `Stmt::Block`/`if` bodies already emit their own braces and shadow
+/// legally without any wrapping.
+fn arm_body_redefines_binding(body: &Block, binding: &str) -> bool {
+    body.stmts.iter().any(|s| {
+        matches!(s, Stmt::Local(l) if l.names.iter().any(|n| n == binding))
+    })
+}
+
 impl Emitter {
     pub fn emit_stmt(&mut self, s: &Stmt) -> Result<(), EmitError> {
         match s {
@@ -1052,7 +1066,7 @@ impl Emitter {
     /// convention (1, true). None = unknown → callers keep today's shape.
     fn call_results(&self, e: &Expr) -> Option<(usize, bool)> {
         let callee = match e {
-            Expr::Try { operand, .. } => match operand.as_ref() {
+            Expr::Try { operand, .. } => match Self::peel_parens(operand) {
                 Expr::Call { callee, .. } => callee.as_ref(),
                 _ => return None,
             },
@@ -1284,6 +1298,8 @@ impl Emitter {
             }
             if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first() {
                 self.register_var_ty(&names[0], t);
+            } else if let Some(sn) = self.user_struct_name_of(&values[0]).map(str::to_string) {
+                self.var_struct.insert(names[0].clone(), sn);
             }
         }
         for (name, is_ptr) in names.iter().zip(ptr_flags) {
@@ -1295,6 +1311,18 @@ impl Emitter {
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
         let e = Self::peel_parens(e);
+        if let Expr::Move { operand, .. } | Expr::AddrOf { operand, .. } | Expr::Unary { op: UnOp::Addr, operand, .. } = e { return self.binding_kind_of(operand); }
+        if let Expr::Ident { name, .. } = e {
+            return self.bindings.get(name).copied().unwrap_or(BindingKind::Plain);
+        }
+        if let Expr::Field { base, name, .. } = e {
+            return self
+                .user_struct_name_of(base)
+                .and_then(|sn| self.n5_structs.get(sn))
+                .and_then(|fs| fs.iter().find(|f| &f.name == name))
+                .and_then(|f| self.binding_kind_of_ty(&f.ty))
+                .unwrap_or(BindingKind::Plain);
+        }
         if matches!(e, Expr::MapLit { .. }) {
             return BindingKind::Map;
         }
@@ -1304,7 +1332,7 @@ impl Emitter {
             }
         }
         let (call, args) = match e {
-            Expr::Try { operand, .. } => match operand.as_ref() {
+            Expr::Try { operand, .. } => match Self::peel_parens(operand) {
                 Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
                 _ => return BindingKind::Plain,
             },
@@ -1340,36 +1368,45 @@ impl Emitter {
         // binding resolves through the shape table (Batch I, corpus 13:
         // `s := summary(doc)?` — s.set normalizes like any rust-call
         // result).
-        if let Expr::Ident { name, .. } = call {
-            if let Some((_, _, Some(kind), _)) = self.fn_shapes.get(name.as_str()) {
-                return *kind;
+        let callee_base = match Self::peel_parens(call) {
+            Expr::Index { base, .. } => Self::peel_parens(base),
+            other => other,
+        };
+        let fn_name = match callee_base {
+            Expr::Ident { name, .. } => Some(name.split('[').next().unwrap_or(name).to_string()),
+            Expr::Field { base, name, .. } => {
+                let head = name.split('[').next().unwrap_or(name);
+                if let Some(recv_sn) = self.user_struct_name_of(base) {
+                    Some(format!("{recv_sn}.{head}"))
+                } else if matches!(Self::peel_parens(base), Expr::Ident { .. }) && !self.local_vars.contains(&Self::peel_parens(base).render()) {
+                    Some(format!("{}.{head}", Self::peel_parens(base).render()))
+                } else {
+                    None
+                }
             }
+            _ => None,
+        };
+        if let Some(fn_head) = fn_name.as_deref().filter(|h| !self.local_vars.contains(*h)) {
+            if let Some((_, _, Some(kind), _)) = self.fn_shapes.get(fn_head) { return *kind; }
         }
         // make(chan …) → Chan (single-var range emits the value directly).
         // Only classify as Chan if the first argument is a channel type.
         // make([]T, n) (SliceLit) and make(map[K]V) (MapLit) must remain Plain
         // so single-var range binds elements/keys rather than channel values.
-        if matches!(call, Expr::Ident { name, .. } if name == "make") {
-            if let Some(first) = args.first() {
-                if let Expr::StructLit {
-                    ty: Some(TypeExpr::Chan { .. }),
-                    ..
-                } = &first.value
-                {
-                    return BindingKind::Chan;
-                }
-                if matches!(
-                    &first.value,
-                    Expr::MapLit { .. }
-                        | Expr::StructLit {
-                            ty: Some(TypeExpr::Map { .. }),
-                            ..
-                        }
-                ) {
-                    return BindingKind::Map;
-                }
-            }
-            return BindingKind::Plain;
+        if matches!(Self::peel_parens(call), Expr::Ident { name, .. } if (name == "make" || name == "new") && !self.local_vars.contains(name.as_str()) && !self.fn_shapes.contains_key(name.as_str())) {
+            return match args.first().map(|a| Self::peel_parens(&a.value)) {
+                Some(Expr::Ident { name, span }) => self
+                    .binding_kind_of_ty(&TypeExpr::Named { name: name.clone(), span: *span })
+                    .unwrap_or(BindingKind::Plain),
+                Some(Expr::Field { base, name, span }) if matches!(Self::peel_parens(base), Expr::Ident { .. }) => self
+                    .binding_kind_of_ty(&TypeExpr::Named { name: format!("{}.{name}", base.render()), span: *span })
+                    .unwrap_or(BindingKind::Plain),
+                Some(Expr::Index { base, index, span }) => self
+                    .binding_kind_of_ty(&TypeExpr::Named { name: format!("{}[{}]", base.render(), index.render()), span: *span })
+                    .unwrap_or(BindingKind::Plain),
+                Some(v) => self.binding_kind_of(v),
+                None => BindingKind::Plain,
+            };
         }
         BindingKind::Plain
     }
@@ -1378,64 +1415,20 @@ impl Emitter {
     /// make(chan ...), or a function returning a channel). Channel ranges in
     /// Go permit only one iteration variable and bind the received value directly.
     fn is_channel_expr(&self, e: &Expr) -> bool {
-        match e {
-            Expr::Ident { name, .. } => {
-                matches!(self.bindings.get(name), Some(BindingKind::Chan))
-            }
-            Expr::Paren { inner, .. } => self.is_channel_expr(inner),
-            Expr::Call { .. } | Expr::Try { .. } => {
-                self.binding_kind_of(e) == BindingKind::Chan
-            }
-            _ => false,
-        }
+        self.binding_kind_of(e) == BindingKind::Chan
     }
 
     /// Whether an expression evaluates to a map (`map[K]V` local/param,
     /// map literal, `make(map…)` or a call whose result is a map). Single-var
     /// `for k in m` binds the key (SPEC LX13, #2945).
     fn is_map_expr(&self, e: &Expr) -> bool {
-        match Self::peel_parens(e) {
-            Expr::Ident { name, .. } => {
-                matches!(self.bindings.get(name), Some(BindingKind::Map))
-            }
-            e @ (Expr::Call { .. } | Expr::Try { .. } | Expr::StructLit { .. } | Expr::MapLit { .. }) => {
-                self.binding_kind_of(e) == BindingKind::Map
-            }
-            _ => false,
-        }
+        self.binding_kind_of(e) == BindingKind::Map
     }
 
     /// Whether an expression evaluates to a set (`set[T]`). Set ranges in
     /// Go iterate over the underlying map (`s.m`).
     pub(crate) fn is_set_expr(&self, e: &Expr) -> bool {
-        let e = Self::peel_parens(e);
-        match e {
-            Expr::Ident { name, .. } => {
-                matches!(self.bindings.get(name), Some(BindingKind::Set))
-            }
-            Expr::StructLit { ty: Some(t), .. } => match t {
-                TypeExpr::Named { name, .. } => name.starts_with("set[") || name == "set",
-                _ => false,
-            },
-            Expr::Field { base, name, .. } => {
-                // Recursive since #1553: `o.sub.seen` is a set field of a
-                // nested struct, not just `o.seen`. The single-hop read
-                // made `len(o.sub.seen)` / `delete(o.sub.seen, k)` fall
-                // through to raw Go builtins on the `set[T]` wrapper.
-                if let Some(sn) = self.user_struct_name_of(base.as_ref()) {
-                    if let Some(fields) = self.struct_fields.get(sn) {
-                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                            return fty.starts_with("set[") || fty == "set";
-                        }
-                    }
-                }
-                false
-            }
-            Expr::Call { .. } | Expr::Try { .. } => {
-                self.binding_kind_of(e) == BindingKind::Set
-            }
-            _ => false,
-        }
+        self.binding_kind_of(e) == BindingKind::Set
     }
 
     // -----------------------------------------------------------------------
@@ -1708,8 +1701,11 @@ impl Emitter {
                         return m.result;
                     }
                 }
-                let (_, fty) = self.struct_fields.get(self.user_struct_name_of_place(base)?)?.iter().find(|(f, _)| f == name)?;
-                super::shapes::SHAPES.iter().find(|(k, _)| *k == fty).map(|(k, _)| *k)
+                let f = self.n5_structs.get(self.user_struct_name_of_place(base)?)?.iter().find(|f| &f.name == name)?;
+                match self.binding_kind_of_ty(&f.ty) {
+                    Some(BindingKind::ForeignTy(t)) => Some(t),
+                    _ => None,
+                }
             }
             PlaceKind::AddrOf { base } => self.type_of_place(base),
             PlaceKind::Index { .. } => None,
@@ -1720,7 +1716,11 @@ impl Emitter {
         match &p.kind {
             PlaceKind::Ident(vn) => self.var_struct.get(vn).map(String::as_str),
             PlaceKind::AddrOf { base } => self.user_struct_name_of_place(base),
-            PlaceKind::Field { base, name } => self.struct_fields.get(self.user_struct_name_of_place(base)?)?.iter().find(|(f, _)| f == name).and_then(|(_, fty)| self.struct_fields.contains_key(fty).then_some(fty.as_str())),
+            PlaceKind::Field { base, name } => {
+                let f = self.n5_structs.get(self.user_struct_name_of_place(base)?)?.iter().find(|f| &f.name == name)?;
+                let fty = super::base_ty_name(self.resolve_type_alias(&f.ty))?;
+                self.resolve_to_struct_name(&fty)
+            }
             _ => None,
         }
     }
@@ -2459,16 +2459,20 @@ impl Emitter {
         // with their zero texts (13: `return v` in a (value, error) fn →
         // `return v, nil`) — Go demands the full arity. An EMPTY slot is
         // the error result (propagate_error fills it at propagation time);
-        // a short explicit return means nil.
-        if let Some(zeros) = &self.cur_fn_error_returns {
-            while vs.len() < zeros.len() {
-                let i = vs.len();
-                let z = &zeros[i];
-                vs.push(if z.is_empty() {
-                    "nil".to_string()
-                } else {
-                    z.clone()
-                });
+        // a short explicit return means nil. When the fn has named results,
+        // bare `return` (`values.is_empty()`) must stay naked so Go returns
+        // the live named result variables instead of clobbering them to zero.
+        if !(values.is_empty() && self.cur_fn_has_named_results) {
+            if let Some(zeros) = &self.cur_fn_error_returns {
+                while vs.len() < zeros.len() {
+                    let i = vs.len();
+                    let z = &zeros[i];
+                    vs.push(if z.is_empty() {
+                        "nil".to_string()
+                    } else {
+                        z.clone()
+                    });
+                }
             }
         }
         if vs.is_empty() {
@@ -2725,12 +2729,36 @@ impl Emitter {
                                 self.indent += 1;
                             }
                             let prebound = prebound_guard_var.as_deref() == Some(binding.as_str());
-                            if *binding != "_" && !prebound && crate::rangebind::body_reads(&arm.body, binding) {
+                            // When the arm body's top level redefines the
+                            // pattern binding (`some(v): { v := v + 1 ... }` is
+                            // a legal nested shadow in hy-check), an inlined
+                            // body would collide with the injected
+                            // `binding := temp.val` in the same Go block ("no
+                            // new variables on left side of :="). Keep the
+                            // injection in the arm's Go scope and wrap ONLY the
+                            // body in a nested block; `crate::rangebind::
+                            // body_reads` is shadow-aware, so the injection
+                            // happens only when the body genuinely reads the
+                            // pre-shadow binding. Arms that do not redefine the
+                            // binding keep byte-identical output.
+                            let injects = *binding != "_" && !prebound
+                                && crate::rangebind::body_reads(&arm.body, binding);
+                            let wraps_body =
+                                injects && arm_body_redefines_binding(&arm.body, binding);
+                            if injects {
                                 self.push(&format!("{} := {}.val", binding, temp));
                             } else if !prebound {
                                 self.local_vars.remove(*binding);
                             }
+                            if wraps_body {
+                                self.push("{");
+                                self.indent += 1;
+                            }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                            if wraps_body {
+                                self.indent -= 1;
+                                self.push("}");
+                            }
                             if chain_opened {
                                 self.indent -= 1;
                                 self.push("}");
@@ -2804,12 +2832,31 @@ impl Emitter {
                             self.push("}");
                         }
                         None => {
-                            if *binding != "_" && crate::rangebind::body_reads(&arm.body, binding) {
+                            let injects =
+                                *binding != "_" && crate::rangebind::body_reads(&arm.body, binding);
+                            // Same treatment as the simple chain: keep the
+                            // injected binding in the per-arm Go scope and wrap
+                            // ONLY a redefining arm body in a nested block.
+                            // `body_reads` is shadow-aware (reads after a
+                            // top-level redeclare of the binding do not count),
+                            // so the injection survives only when genuinely
+                            // used.
+                            let wraps_body =
+                                injects && arm_body_redefines_binding(&arm.body, binding);
+                            if injects {
                                 self.push(&format!("{} := {}.val", binding, temp));
                             } else {
                                 self.local_vars.remove(*binding);
                             }
+                            if wraps_body {
+                                self.push("{");
+                                self.indent += 1;
+                            }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                            if wraps_body {
+                                self.indent -= 1;
+                                self.push("}");
+                            }
                         }
                     }
                     Ok(())
