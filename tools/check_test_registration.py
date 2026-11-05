@@ -50,9 +50,53 @@ def shell_words(line):
     return list(lexer)
 
 
+def excluded_static_steps(workflow_text):
+    """Find lines in explicitly disabled or non-fatal literal YAML steps.
+
+    This narrowly recognizes ordinary block-style steps; it is not a YAML
+    parser or an evaluator for dynamic GitHub Actions expressions.
+    """
+    lines = workflow_text.splitlines()
+    excluded = set()
+    i = 0
+    while i < len(lines):
+        match = re.match(
+            r'^( *)-([ ]+)(name|id|if|run|uses|working-directory|shell|'
+            r'env|with|timeout-minutes|continue-on-error):\s*(.*)$', lines[i])
+        if not match:
+            i += 1
+            continue
+        indent = len(match.group(1))
+        end = i + 1
+        while end < len(lines):
+            line = lines[end]
+            if line.strip() and not line.lstrip().startswith('#'):
+                line_indent = len(line) - len(line.lstrip(' '))
+                if line_indent <= indent:
+                    break
+            end += 1
+        field_indent = indent + 1 + len(match.group(2))
+        fields = [(match.group(3), match.group(4))]
+        for line in lines[i + 1:end]:
+            field = re.match(r'^ {' + str(field_indent) + r'}(if|continue-on-error):\s*(.*?)\s*$', line)
+            if field:
+                fields.append((field.group(1), field.group(2)))
+        for key, raw_value in fields:
+            value = raw_value.split('#', 1)[0].strip().strip("'\"").strip()
+            value = re.sub(r'^\$\{\{\s*(.*?)\s*\}\}$', r'\1', value).lower()
+            if (key, value) in (("if", "false"), ("continue-on-error", "true")):
+                excluded.update(range(i, end))
+                break
+        i = end
+    return excluded
+
+
 def python_commands(workflow_text):
     """Yield arguments of explicit, single-line Python invocations."""
-    for line in workflow_text.splitlines():
+    excluded = excluded_static_steps(workflow_text)
+    for lineno, line in enumerate(workflow_text.splitlines()):
+        if lineno in excluded:
+            continue
         line = line.strip()
         inline_run = re.match(r"(?:-\s+)?run:\s*(.*)", line)
         if inline_run:

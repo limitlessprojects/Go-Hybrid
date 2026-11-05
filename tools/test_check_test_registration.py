@@ -24,6 +24,44 @@ SPEC.loader.exec_module(guard)
 
 
 class PatternExtractionTests(unittest.TestCase):
+    def test_disabled_step_with_wide_sequence_spacing(self):
+        workflow = ("steps:\n  -   name: skipped\n      if: false\n"
+                    "      run: python3 tests/test_skipped.py\n")
+        self.assertFalse(guard.is_registered_direct("tests/test_skipped.py", workflow))
+
+    def test_disabled_steps_with_other_first_keys(self):
+        for first in ("shell: bash", "working-directory: .", "timeout-minutes: 5", "env:"):
+            for guard_line in ("if: false", "continue-on-error: true"):
+                workflow = ("steps:\n  - " + first + "\n    " + guard_line
+                            + "\n    run: python3 tests/test_skipped.py\n")
+                with self.subTest(first=first, guard=guard_line):
+                    self.assertFalse(guard.is_registered_direct("tests/test_skipped.py", workflow))
+
+    def test_disabled_or_nonfatal_step_cannot_register_tests(self):
+        for guard_line in ("if: false", "if: ${{ false }}", "continue-on-error: true", "continue-on-error: ${{ true }}"):
+            for before_run in (True, False):
+                lines = ["    " + guard_line, "    run: python3 tests/test_skipped.py"]
+                if not before_run:
+                    lines.reverse()
+                workflow = "steps:\n  - name: skipped\n" + "\n".join(lines) + "\n"
+                with self.subTest(guard=guard_line, before_run=before_run):
+                    self.assertFalse(guard.is_registered_direct("tests/test_skipped.py", workflow))
+
+    def test_live_neighbor_of_disabled_step_is_still_registered(self):
+        workflow = ("steps:\n  - name: disabled\n    if: false\n"
+                    "    run: python3 tests/test_skipped.py\n"
+                    "  - name: live\n    if: true\n    continue-on-error: false\n"
+                    "    run: python3 tests/test_live.py\n")
+        self.assertFalse(guard.is_registered_direct("tests/test_skipped.py", workflow))
+        self.assertTrue(guard.is_registered_direct("tests/test_live.py", workflow))
+
+    def test_disabled_multiline_discovery_is_not_a_registration(self):
+        workflow = ("steps:\n  - run: |\n"
+                    "      python3 -m unittest discover -s tools -p test_skip.py\n"
+                    "    continue-on-error: true\n"
+                    "  - run: python3 -m unittest discover -s tools -p test_live.py\n")
+        self.assertEqual(guard.registered_patterns(workflow), ["test_live.py"])
+
     def test_quoted_and_bare_patterns_are_both_read(self):
         workflow = (
             "          python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz.py'\n"
