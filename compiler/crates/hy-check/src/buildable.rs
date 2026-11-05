@@ -7597,16 +7597,19 @@ impl<'a> Collector<'a> {
                     if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
-                        && args.len() != 2
                     {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "`errors.wrap` takes 2 arguments `(err, message)`, got {} (HYB-E1002)",
-                                args.len()
-                            ),
-                            "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
-                        );
+                        if args.len() != 2 {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`errors.wrap` takes 2 arguments `(err, message)`, got {} (HYB-E1002)",
+                                    args.len()
+                                ),
+                                "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
+                            );
+                        } else {
+                            self.check_errors_wrap_operands(args);
+                        }
                     }
                     // #3598: `fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to
                     // `fmt.Fprint*(os.Stderr, ...)` in `hy-emit`. When `os` is shadowed by
@@ -8068,6 +8071,60 @@ impl<'a> Collector<'a> {
             _ => {}
         }
     }
+
+    /// #3572: `errors.wrap(err, message)` lowers to `fmt.Errorf("%s: %w", message, err)`.
+    /// Reject operands whose resolved kind can never be an `error` (argument 0) or
+    /// a `string` (argument 1) with HYB-E1002 (SPEC-LANGUAGE E2).
+    fn check_errors_wrap_operands(&mut self, args: &[CallArg]) {
+        let ek = self.kind_of_expr(&args[0].value);
+        if matches!(
+            ek,
+            OpKind::Int
+                | OpKind::Float
+                | OpKind::Bool
+                | OpKind::Str
+                | OpKind::Slice(_)
+                | OpKind::Array(_)
+                | OpKind::Map(..)
+                | OpKind::Chan(_)
+                | OpKind::Fn(..)
+                | OpKind::Option(_)
+                | OpKind::Void
+        ) {
+            self.emit_e1002(
+                args[0].value.span(),
+                format!(
+                    "`errors.wrap` needs an `error` as its first argument, got `{}` (HYB-E1002)",
+                    ek.label()
+                ),
+                "write `errors.wrap(err, \"context\")` with an error value first (SPEC-LANGUAGE E2)",
+            );
+        }
+        let mk = self.kind_of_expr(&args[1].value);
+        if matches!(
+            mk,
+            OpKind::Int
+                | OpKind::Float
+                | OpKind::Bool
+                | OpKind::Slice(_)
+                | OpKind::Array(_)
+                | OpKind::Map(..)
+                | OpKind::Chan(_)
+                | OpKind::Fn(..)
+                | OpKind::Option(_)
+                | OpKind::Void
+        ) {
+            self.emit_e1002(
+                args[1].value.span(),
+                format!(
+                    "`errors.wrap` needs a `string` message as its second argument, got `{}` (HYB-E1002)",
+                    mk.label()
+                ),
+                "write `errors.wrap(err, \"context\")` with a string context message (SPEC-LANGUAGE E2)",
+            );
+        }
+    }
+
     /// Family E1–E5 (#425): extend `HYB-E2005` (`BUILTIN-ARGS`) from literals
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
