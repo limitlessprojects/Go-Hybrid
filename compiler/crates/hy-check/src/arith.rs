@@ -715,6 +715,7 @@ fn stmt_defined_names(stmt: &Stmt, out: &mut std::collections::HashSet<String>) 
 fn const_len_str_value(
     e: &Expr,
     consts: &std::collections::HashMap<String, &Expr>,
+    st: &crate::model::FnState,
     defined: &std::collections::HashSet<String>,
     depth: u32,
 ) -> Option<i128> {
@@ -723,14 +724,14 @@ fn const_len_str_value(
     }
     if let Expr::Call { callee, args, .. } = unwrap_parens(e) {
         if let Expr::Ident { name, .. } = unwrap_parens(callee) {
-            if name == "len" && args.len() == 1 && !args[0].spread {
+            if name == "len" && st.env_lookup("len").is_none() && !defined.contains("len") && args.len() == 1 && !args[0].spread {
                 let a = unwrap_parens(&args[0].value);
                 let s: Option<&String> = match a {
                     Expr::Lit {
                         kind: LitKind::Str(s) | LitKind::RawStr(s),
                         ..
                     } => Some(s),
-                    Expr::Ident { name: n, .. } if !defined.contains(n) => {
+                    Expr::Ident { name: n, .. } if st.env_lookup(n).is_none() && !defined.contains(n) => {
                         consts.get(n.as_str()).and_then(|v| match unwrap_parens(v) {
                             Expr::Lit {
                                 kind: LitKind::Str(s) | LitKind::RawStr(s),
@@ -767,7 +768,7 @@ fn divisor_int_fold(
         return ConstFold::NotConst;
     }
     let bare = unwrap_parens(e);
-    if let Some(n) = const_len_str_value(bare, consts, defined, depth) {
+    if let Some(n) = const_len_str_value(bare, consts, st, defined, depth) {
         return ConstFold::Val(n);
     }
     match bare {
@@ -780,6 +781,10 @@ fn divisor_int_fold(
             }
             ConstFold::NotConst
         }
+        Expr::Unary { op: UnOp::Neg, operand, .. } => match divisor_int_fold(operand, consts, st, defined, depth + 1) {
+            ConstFold::Val(v) => v.checked_neg().map(ConstFold::Val).unwrap_or(ConstFold::TooBig),
+            other => other,
+        },
         Expr::Binary { op, lhs, rhs, .. } => {
             let l = divisor_int_fold(lhs, consts, st, defined, depth + 1);
             let r = divisor_int_fold(rhs, consts, st, defined, depth + 1);
@@ -843,6 +848,7 @@ fn divisor_float_fold_is_zero(
     if divisor_float_conv_zero(e, consts, st, defined, 0) {
         return true;
     }
+    let consts = &consts.iter().filter(|(k, _)| !defined.contains(*k)).map(|(k, &v)| (k.clone(), v)).collect();
     matches!(
         crate::const_overflow::const_float_fold_with(e, consts, 0, Some(st)),
         Some(f) if f == 0.0
