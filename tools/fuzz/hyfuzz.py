@@ -70,8 +70,16 @@ def load_corpus(corpus_dir):
     progs = []
     for f in sorted(os.listdir(corpus_dir)):
         if f.endswith(".hy"):
-            with open(os.path.join(corpus_dir, f), encoding="utf-8") as fh:
-                progs.append(fh.read())
+            full = os.path.join(corpus_dir, f)
+            if not os.path.isfile(full):
+                continue
+            try:
+                with open(full, encoding="utf-8") as fh:
+                    src = fh.read()
+            except (OSError, UnicodeDecodeError) as exc:
+                raise SystemExit(f"hyfuzz: cannot read corpus file {full}: {exc}") from exc
+            if src.strip():
+                progs.append(src)
     return progs
 
 
@@ -117,7 +125,7 @@ def check_one(hyb, src, workdir, timeout):
     try:
         r = subprocess.run(
             [hyb, "check", path], cwd=workdir, capture_output=True,
-            text=True, timeout=timeout,
+            text=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return "HANG", False
@@ -125,9 +133,11 @@ def check_one(hyb, src, workdir, timeout):
         return f"EXEC_ERROR: {err}", False
     if r.returncode not in (0, 1):
         return f"UNEXPECTED exit={r.returncode}", False
-    blob = (r.stdout + r.stderr).lower()
+    stdout = r.stdout or ""
+    stderr = r.stderr or ""
+    blob = (stdout + stderr).lower()
     if any(b in blob for b in BAD_TEXT):
-        return f"ICE: {(r.stdout + r.stderr)[:120]}", False
+        return f"ICE: {(stdout + stderr)[:120]}", False
     return None, r.returncode == 0
 
 
@@ -179,6 +189,15 @@ def main():
         raise SystemExit("hyfuzz: --cases must be positive")
     if not (math.isfinite(args.timeout) and args.timeout > 0):
         raise SystemExit("hyfuzz: --timeout must be positive")
+    if args.failures_dir is not None:
+        if not args.failures_dir.strip() or (
+            os.path.exists(args.failures_dir) and not os.path.isdir(args.failures_dir)
+        ):
+            print(
+                f"hyfuzz: cannot save failure artifact: invalid --failures-dir {args.failures_dir!r}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
     corpus = load_corpus(args.corpus)
     if not corpus:
         raise SystemExit("fuzz: no corpus programs found")

@@ -453,12 +453,8 @@ impl<'a> Scan<'a> {
                 );
                 for (i, a) in args.iter().enumerate() {
                     if type_first_arg && i == 0 {
-                        if let Expr::Ident { name, .. } = crate::model::unwrap_parens(&a.value) {
-                            let head = name.split_once('[').map(|(h, _)| h).unwrap_or(name.as_str());
-                            if self.type_params.contains(head) && !self.local_decls.contains(head) {
-                                continue;
-                            }
-                        }
+                        self.run_type_arg_expr(&a.value);
+                        continue;
                     }
                     self.run_expr(&a.value);
                 }
@@ -536,6 +532,23 @@ impl<'a> Scan<'a> {
     /// a type: the `[N]T` array length, which is a real value-position use
     /// (`[undefined_const]int` fails `go build` exactly like any other
     /// undefined name).
+    fn run_type_arg_expr(&mut self, e: &Expr) {
+        match crate::model::unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let head = name.split_once('[').map(|(h, _)| h).unwrap_or(name.as_str());
+                if (head == "set" || head == "option" || self.type_params.contains(head)) && !self.local_decls.contains(head) {
+                    return;
+                }
+                self.run_expr(e);
+            }
+            Expr::Index { base, index, .. } => {
+                self.run_type_arg_expr(base);
+                self.run_type_arg_expr(index);
+            }
+            _ => self.run_expr(e),
+        }
+    }
+
     fn run_type(&mut self, t: &TypeExpr) {
         match t {
             TypeExpr::Named { .. } => {}
