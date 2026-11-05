@@ -39,6 +39,11 @@ pub(crate) enum ConstKeyVal {
 }
 
 impl ConstKeyVal {
+    pub(crate) fn from_f64(f: f64) -> Self {
+        let canonical = if f == 0.0 { 0.0 } else { f };
+        ConstKeyVal::Float(canonical.to_bits())
+    }
+
     pub(crate) fn render(&self) -> String {
         match self {
             ConstKeyVal::Int(v) => format!("{v}"),
@@ -374,7 +379,16 @@ impl<'a> Checker<'a> {
                     (Some(t), TypeShape::Unknown) => self.shape_of_type(t),
                     (_, s) => s,
                 };
-                let ty = l.ty.clone().or_else(|| self.ty_of_expr(&pre_st, val));
+                let ty = l
+                    .ty
+                    .clone()
+                    .or_else(|| self.ty_of_expr(&pre_st, val))
+                    .or_else(|| self.composite_type_expr(&pre_st, val))
+                    .or_else(|| {
+                        (!immutable)
+                            .then(|| self.default_untyped_local_ty(&pre_st, val))
+                            .flatten()
+                    });
                 let rhs_slot_loan = match unwrap_parens(val) {
                     Expr::Ident { name: src, .. } => {
                         self.lookup_binding(&pre_st, src).is_some_and(|b| b.slot_loan)
@@ -2730,7 +2744,7 @@ impl<'a> Checker<'a> {
                 LitKind::Str(s) | LitKind::RawStr(s) => Some(ConstKeyVal::Str(s.clone())),
                 LitKind::Bool(b) => Some(ConstKeyVal::Bool(*b)),
                 LitKind::Float(s) => {
-                    s.replace('_', "").parse::<f64>().ok().map(|f| ConstKeyVal::Float(f.to_bits()))
+                    s.replace('_', "").parse::<f64>().ok().map(ConstKeyVal::from_f64)
                 }
                 LitKind::Nil => Some(ConstKeyVal::Nil),
             },
@@ -2767,7 +2781,7 @@ impl<'a> Checker<'a> {
                         ConstKeyVal::Int(i) => i.checked_neg().map(ConstKeyVal::Int),
                         ConstKeyVal::Float(bits) => {
                             let f = -f64::from_bits(bits);
-                            Some(ConstKeyVal::Float(f.to_bits()))
+                            Some(ConstKeyVal::from_f64(f))
                         }
                         _ => None,
                     },
@@ -2888,14 +2902,74 @@ impl<'a> Checker<'a> {
             }
             Expr::Call { callee, args, .. } => {
                 if args.len() == 1 && !args[0].spread {
-                    if let Expr::Ident { name, .. } = callee.as_ref() {
+                    if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                        if self.fns.contains_key(name.as_str())
+                            || st.is_some_and(|s| s.env_lookup(name).is_some())
+                        {
+                            return None;
+                        }
+                        if name == "len" {
+                            return self
+                                .const_string_len_at(
+                                    &args[0].value,
+                                    args[0].value.span().start,
+                                    depth + 1,
+                                )
+                                .map(ConstKeyVal::Int);
+                        }
                         let arg_val = self.fold_const_key(&args[0].value, st, depth + 1)?;
-                        match name.as_str() {
-                            "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32"
-                            | "i64" | "int64" | "uint" | "u8" | "uint8" | "byte" | "u16"
-                            | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "rune"
-                            | "uintptr" => match arg_val {
-                                ConstKeyVal::Int(_) => Some(arg_val),
+                        let target = self
+                            .type_aliases
+                            .get(name.as_str())
+                            .and_then(|ty| match self.resolve_type_alias(ty) {
+                                TypeExpr::Named { name: resolved, .. } => Some(resolved),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| name.clone());
+                        match target.as_str() {
+                            "int" | "isize" | "i8" | "int8" | "i16" | "int16" | "i32"
+                            | "int32" | "i64" | "int64" | "uint" | "usize" | "u8" | "uint8"
+                            | "byte" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64"
+                            | "rune" | "uintptr" => match arg_val {
+                                ConstKeyVal::Int(v) => {
+                                    Some(ConstKeyVal::Int(wrap_int_conversion(v, &target)))
+                                }
+                                ConstKeyVal::Float(bits) => {
+                                    let f = f64::from_bits(bits);
+                                    if f.is_finite()
+                                        && f.fract() == 0.0
+                                        && f >= (i128::MIN as f64)
+                                        && f <= (i128::MAX as f64)
+                                    {
+                                        Some(ConstKeyVal::Int(wrap_int_conversion(
+                                            f as i128, &target,
+                                        )))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            },
+                            "f32" | "float32" => match arg_val {
+                                ConstKeyVal::Float(bits) => {
+                                    let f = (f64::from_bits(bits) as f32) as f64;
+                                    f.is_finite().then(|| ConstKeyVal::from_f64(f))
+                                }
+                                ConstKeyVal::Int(v) => {
+                                    let f = (v as f32) as f64;
+                                    f.is_finite().then(|| ConstKeyVal::from_f64(f))
+                                }
+                                _ => None,
+                            },
+                            "f64" | "float64" => match arg_val {
+                                ConstKeyVal::Float(bits) => {
+                                    let f = f64::from_bits(bits);
+                                    f.is_finite().then(|| ConstKeyVal::from_f64(f))
+                                }
+                                ConstKeyVal::Int(v) => {
+                                    let f = v as f64;
+                                    f.is_finite().then(|| ConstKeyVal::from_f64(f))
+                                }
                                 _ => None,
                             },
                             "string" => match arg_val {
