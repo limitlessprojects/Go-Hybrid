@@ -274,7 +274,7 @@ impl<'a> Checker<'a> {
             }
         }
         
-        if matches!(self.shape_of_type(ty), TypeShape::Primitive | TypeShape::Str) {
+        if matches!(self.shape_of_type(&resolved), TypeShape::Primitive | TypeShape::Str) {
             return true;
         }
         matches!(
