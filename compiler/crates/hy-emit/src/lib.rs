@@ -402,6 +402,7 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "utf32" => "UTF32",
         "uuid" => "UUID",
         "vm" => "VM",
+        "waitgroup" => "WaitGroup",
         "xml" => "XML",
         "xmpp" => "XMPP",
         "xsrf" => "XSRF",
@@ -447,7 +448,13 @@ pub(crate) fn result_shape(results: &[FnResult]) -> (usize, bool) {
 
 pub(crate) fn base_ty_name(t: &TypeExpr) -> Option<String> {
     match t {
-        TypeExpr::Named { name, .. } => Some(name.clone()),
+        TypeExpr::Named { name, .. } => Some(match name.as_str() {
+            "sync.waitgroup" | "sync.WaitGroup" => "sync.wait_group".into(),
+            "sync.Mutex" => "sync.mutex".into(),
+            "sync.RWMutex" => "sync.rwmutex".into(),
+            "sync.Once" => "sync.once".into(),
+            _ => name.clone(),
+        }),
         TypeExpr::Pointer { to, .. } => base_ty_name(to),
         _ => None,
     }
@@ -471,8 +478,10 @@ pub(crate) fn is_package_root(name: &str) -> bool {
             | "errors"
             | "sync"
             | "bufio"
+            | "net"
             | "http"
             | "httptest"
+            | "url"
             | "json"
             | "atomic"
             | "filepath"
@@ -617,6 +626,9 @@ pub struct Emitter {
     /// a call can run such a closure inside an O8 slot-loan window, so any
     /// slot loan keyed by one of these names snapshots its key into `hyKeyN`.
     closure_written: BTreeSet<String>,
+    /// True when the current fn declares any named result item (so Go's
+    /// result signature is fully named and bare `return` returns live slots).
+    cur_fn_has_named_results: bool,
     /// Per-fn result shapes, collected eagerly (Batch I): name →
     /// (n_results, ends_in_error, first_result's binding kind, per-param
     /// pointer-base types). Drives the `?` hoist arity (13:
@@ -646,6 +658,10 @@ pub struct Emitter {
     local_vars: BTreeSet<String>,
     /// Functions whose first result is a pointer type.
     ptr_returning_fns: BTreeSet<String>,
+    /// Functions, associated functions, and user methods whose first value
+    /// result resolves to a user struct (`make_stats` / `box.make_stats` /
+    /// `box.get_stats` → `"pool_stats"`).
+    pub(crate) fn_ret_struct: BTreeMap<String, String>,
     /// N5 (zeroinit.rs): non-generic user struct → its declared fields,
     /// and user type alias → its target, for zero values that allocate.
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
@@ -687,6 +703,7 @@ impl Emitter {
             export_pub: false,
             cur_fn_error_returns: None,
             closure_written: BTreeSet::new(),
+            cur_fn_has_named_results: false,
             fn_shapes: BTreeMap::new(),
             closure_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
@@ -696,6 +713,7 @@ impl Emitter {
             loan_aliases: BTreeMap::new(),
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
+            fn_ret_struct: BTreeMap::new(),
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
@@ -839,6 +857,29 @@ impl Emitter {
             .filter(|f| f.results.first().is_some_and(|r| self.is_pointer_ty(&r.ty)))
             .map(|f| f.name.clone())
             .collect();
+        self.fn_ret_struct = file
+            .fns()
+            .filter_map(|f| {
+                if result_shape(&f.results).0 == 0 {
+                    return None;
+                }
+                let ret_sn = f
+                    .results
+                    .first()
+                    .and_then(|r| base_ty_name(&r.ty))
+                    .and_then(|n| self.resolve_to_struct_name(&n))
+                    .map(str::to_string)?;
+                let key = match &f.receiver {
+                    None => f.name.clone(),
+                    Some(recv) => {
+                        let recv_sn = base_ty_name(&recv.ty)
+                            .and_then(|n| self.resolve_to_struct_name(&n))?;
+                        format!("{recv_sn}.{}", f.name)
+                    }
+                };
+                Some((key, ret_sn))
+            })
+            .collect();
         self.fn_shapes = file
             .fns()
             .map(|f| {
@@ -866,7 +907,14 @@ impl Emitter {
                 // made the ? hoister emit `hyT0, hyErr1 := step()` against a
                 // `func ... error` (assignment mismatch, accepted-then-fails-go-build).
                 let value_count = if err { f.results.len() - 1 } else { f.results.len() };
-                (f.name.clone(), (value_count, err, kind, ptr_params))
+                let key = match &f.receiver {
+                    Some(recv) => base_ty_name(&recv.ty)
+                        .and_then(|n| self.resolve_to_struct_name(&n))
+                        .map(|sn| format!("{sn}.{}", f.name))
+                        .unwrap_or_else(|| f.name.clone()),
+                    None => f.name.clone(),
+                };
+                (key, (value_count, err, kind, ptr_params))
             })
             .collect();
 
@@ -912,7 +960,8 @@ impl Emitter {
                     // import set ("net/http" → root "http"; the body says
                     // `http.X`, and import_path_of maps the line back).
                     let root = path.split('/').next_back().unwrap_or(path);
-                    self.explicit_imports.insert(root.to_string(), path.clone());
+                    let resolved = import_path_of(path);
+                    self.explicit_imports.insert(root.to_string(), resolved);
                     self.imports.insert(root.to_string());
                 }
                 Decl::Const(c) => self.emit_file_const(c)?,
@@ -957,7 +1006,7 @@ impl Emitter {
             // root spelling — Go's package name for those imports.
             for root in active_imports {
                 let path = if let Some(p) = self.explicit_imports.get(root) {
-                    p.clone()
+                    import_path_of(p)
                 } else if shapes::RUST_CRATES
                     .iter()
                     .any(|c| c.binding_root == root.as_str())
@@ -1419,6 +1468,7 @@ impl Emitter {
         if let Some(body) = &f.body {
             Self::collect_closure_writes_block(body, false, &mut self.closure_written);
         }
+        self.cur_fn_has_named_results = f.results.iter().any(|r| r.name.is_some());
         if !is_main && !f.results.is_empty() && !main_needs_wrapper {
             let last_is_err = matches!(
                 &f.results.last().unwrap().ty,
@@ -1718,17 +1768,18 @@ impl Emitter {
     /// table knows gives ForeignTy(key) — members resolve field-vs-method;
     /// any other dotted type stays generic Foreign.
     fn binding_kind_of_ty(&self, t: &TypeExpr) -> Option<BindingKind> {
+        let t = match self.resolve_type_alias(t) {
+            TypeExpr::Pointer { to, .. } => self.resolve_type_alias(to),
+            other => other,
+        };
         if matches!(t, TypeExpr::Chan { .. }) {
             return Some(BindingKind::Chan);
         }
         if matches!(t, TypeExpr::Map { .. }) {
             return Some(BindingKind::Map);
         }
-        let name = match t {
-            TypeExpr::Named { name, .. } => name.as_str(),
-            TypeExpr::Pointer { to, .. } => return self.binding_kind_of_ty(to),
-            _ => return None,
-        };
+        let Some(base) = base_ty_name(t) else { return None };
+        let name = base.as_str();
         if name.starts_with("set[") || name == "set" {
             return Some(BindingKind::Set);
         }
