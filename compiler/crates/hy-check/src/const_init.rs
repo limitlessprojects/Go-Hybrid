@@ -256,26 +256,28 @@ impl<'a> Checker<'a> {
             return false;
         }
         
-        // First check: shape must be Primitive or Str
-        if !matches!(self.shape_of_type(ty), TypeShape::Primitive | TypeShape::Str) {
-            return false;
+        // Check if resolved type name is shadowed by enum/struct/type-param
+        if let hy_syntax::TypeExpr::Named { ref name, .. } = resolved {
+            let name_str = name.as_str();
+            if self.structs.contains_key(name_str)
+                || self.struct_type_params.contains_key(name_str)
+                || self.enums.contains_key(name_str)
+            {
+                return false;
+            }
         }
         
-        // Second check: resolved type name must not be shadowed by enum/struct/type-param
-        let name_str = match resolved {
-            hy_syntax::TypeExpr::Named { ref name, .. } => name.as_str(),
-            _ => return false,
-        };
-        
-        // Reject if shadowed by enum, struct, or type-param
-        if self.structs.contains_key(name_str)
-            || self.struct_type_params.contains_key(name_str)
-            || self.enums.contains_key(name_str)
-        {
-            return false;
+        if matches!(self.shape_of_type(ty), TypeShape::Primitive | TypeShape::Str) {
+            return true;
         }
-        
-        true
+        matches!(
+            resolved,
+            hy_syntax::TypeExpr::Named { ref name, .. }
+                if !self.structs.contains_key(name.as_str())
+                    && !self.struct_type_params.contains_key(name.as_str())
+                    && !self.enums.contains_key(name.as_str())
+                    && is_conversion_type_name(name)
+        )
     }
 
     fn ident_is_constant(
