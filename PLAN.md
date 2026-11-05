@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — array lengths (#2771, 2026-11-01)
+- Refreshed onto main `8b3efb2`: adapt the two new upstream array-addressability patterns to the length-carrying operand kind. Fresh pinned validation on `c251974`: focused 20/20, workspace 2412/2412, corpus 130/130, differential FULL AGREEMENT (42/42 accept + 88/88 reject); registration, census, conflict and diff guards pass. No dependency or lockfile changes. Hosted CI/review pending.
+- Preserve known constant array lengths in operand kinds; reject incompatible comparisons, assignment/declarations, arguments, returns, conversions and copy elements while keeping unresolved lengths permissive. Baseline initial suite: 10 failures/3 controls pass; final focused suite 20/20, pinned workspace 2383/2383, corpus 130/130; direct invalid CLI examples reject and valid control builds/runs. Final differential FULL AGREEMENT: 42/42 accept + 88/88 reject after fetching runtime dependencies; all commands rerun against `fec085c`. Details: `spikes/array-length-2771/RESULTS.md`; tested code/lockfiles unchanged by this documentation update; hosted CI and review pending.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.
