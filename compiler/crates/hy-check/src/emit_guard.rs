@@ -2853,7 +2853,7 @@ fn is_int_primitive_type_name(name: &str) -> bool {
 /// Go's receiver rule: the base type must be a defined type — not a
 /// predeclared primitive (int/string/…) and not an interface (`error`).
 /// `byte`/`rune` are aliases of primitives, so they reject too.
-fn is_primitive_receiver(name: &str) -> bool {
+pub(crate) fn is_primitive_receiver(name: &str) -> bool {
     matches!(
         name,
         "bool"

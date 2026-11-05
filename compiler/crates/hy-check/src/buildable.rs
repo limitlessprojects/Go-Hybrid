@@ -1769,6 +1769,76 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// Issue #3580: method receiver type arguments are type-parameter declarations
+    /// in Go (`func (b box[T]) m()`), not concrete instantiations.
+    /// Reject concrete types or duplicate type-parameter names in receiver slots.
+    fn check_receiver_type_args(&mut self, f: &FnDecl, r: &hy_syntax::Receiver) {
+        let mut target_ty = &r.ty;
+        while let TypeExpr::Pointer { to, .. } = target_ty {
+            target_ty = to;
+        }
+        if let TypeExpr::Named { name, span } = target_ty {
+            if let Some(i) = name.find('[') {
+                if name.ends_with(']') {
+                    let base = &name[..i];
+                    let inside = &name[i + 1..name.len() - 1];
+                    let recv_full = if r.is_pointer {
+                        format!("*{}", r.ty.render())
+                    } else {
+                        r.ty.render()
+                    };
+                    let mut seen_tps = HashSet::new();
+                    for arg in split_top_level_type_args(inside) {
+                        let arg = arg.trim();
+                        if arg.is_empty() || arg == "_" {
+                            continue;
+                        }
+                        if !seen_tps.insert(arg) {
+                            let msg = format!(
+                                "duplicate type parameter `{}` in receiver `{}` (HYB-E1003)",
+                                arg, recv_full
+                            );
+                            self.diags.push(
+                                Diagnostic::error("HYB-E1003", self.path.clone(), *span, msg).with_notes(vec![
+                                    format!("why: Go requires distinct type-parameter names in receiver `{}`", recv_full),
+                                    "fix: rename one of the repeated type parameters or use `_`".to_string(),
+                                ]),
+                            );
+                            break;
+                        }
+                        let is_concrete = crate::emit_guard::is_primitive_receiver(arg)
+                            || self.ck.structs.contains_key(arg)
+                            || self.ck.type_aliases.contains_key(arg)
+                            || self.ck.enums.contains_key(arg)
+                            || self.ck.struct_type_params.contains_key(arg)
+                            || arg.contains('.')
+                            || arg.contains('[')
+                            || arg.starts_with('*');
+                        if is_concrete {
+                            let msg = format!(
+                                "method `{}` has invalid receiver type `{}` — receiver type argument `{}` is a concrete type, but Go requires fresh type-parameter names (HYB-E1002)",
+                                f.name, recv_full, arg
+                            );
+                            self.diags.push(
+                                Diagnostic::error("HYB-E1002", self.path.clone(), *span, msg).with_notes(vec![
+                                    format!(
+                                        "why: Go rejects methods on concrete type instantiations; in `func (b {}) {}`, `{}` would declare a type parameter shadowing `{}`",
+                                        recv_full, f.name, arg, arg
+                                    ),
+                                    format!(
+                                        "fix: declare the method on the generic struct with fresh type-parameter names (e.g. `fn (b {}[t]) {}(...)`) or use `_`",
+                                        base, f.name
+                                    ),
+                                ]),
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // -- declarations --------------------------------------------------------
 
     fn fn_decl(&mut self, f: &FnDecl) {
@@ -1809,6 +1879,7 @@ impl<'a> Collector<'a> {
         );
 
         if let Some(r) = &f.receiver {
+            self.check_receiver_type_args(f, r);
             self.ty(&r.ty);
         }
         for p in &f.params {
@@ -1873,10 +1944,27 @@ impl<'a> Collector<'a> {
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
-        let outer_tp = std::mem::replace(
-            &mut self.fn_type_params,
-            f.type_params.iter().map(|p| p.name.clone()).collect(),
-        );
+        let mut cur_tp: HashSet<String> = f.type_params.iter().map(|p| p.name.clone()).collect();
+        if let Some(r) = &f.receiver {
+            let mut target_ty = &r.ty;
+            while let TypeExpr::Pointer { to, .. } = target_ty {
+                target_ty = to;
+            }
+            if let TypeExpr::Named { name, .. } = target_ty {
+                if let Some(i) = name.find('[') {
+                    if name.ends_with(']') {
+                        let inside = &name[i + 1..name.len() - 1];
+                        for arg in split_top_level_type_args(inside) {
+                            let arg = arg.trim();
+                            if !arg.is_empty() && arg != "_" {
+                                cur_tp.insert(arg.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let outer_tp = std::mem::replace(&mut self.fn_type_params, cur_tp);
         let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
         let outer_select = std::mem::replace(&mut self.select_depth, 0);
         self.block_stmts(body);
@@ -8824,6 +8912,59 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+
+    #[test]
+    fn rejects_concrete_receiver_type_args_3580() {
+        // Issue #3580: method receiver type arguments are type-parameter declarations
+        // in Go (`func (b box[T]) m()`), not concrete instantiations.
+        // Predeclared primitives, user structs, and composite types in receiver
+        // slots must be rejected with HYB-E1002.
+        for src in [
+            "struct box[t] { v t }\nfn (b box[int]) other() int { return 1 }\nfn main() {}\n",
+            "struct box[t] { v t }\nfn (b *box[int]) other() int { return 1 }\nfn main() {}\n",
+            "struct point { x int }\nstruct box[t] { v t }\nfn (b box[point]) other() int { return 1 }\nfn main() {}\n",
+            "struct box[t] { v t }\nfn (b box[[]int]) other() int { return 1 }\nfn main() {}\n",
+            "struct box[t] { v t }\nfn (b box[*int]) other() int { return 1 }\nfn main() {}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+
+        // Duplicate type-parameter identifiers in receiver slots -> HYB-E1003.
+        for src in [
+            "struct pair[a, b] {\n    x a\n    y b\n}\nfn (p pair[t, t]) m() int { return 1 }\nfn main() {}\n",
+            "struct pair[a, b] {\n    x a\n    y b\n}\nfn (p *pair[t, t]) m() int { return 1 }\nfn main() {}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1003".to_string()),
+                "expected HYB-E1003, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+
+        // Valid generic receivers: fresh type-parameter names, pointer receivers, blank `_`.
+        for src in [
+            "struct box[t] { v t }\nfn (b box[t]) get() t { return b.v }\nfn main() {}\n",
+            "struct box[t] { v t }\nfn (b *box[u]) get() u { return b.v }\nfn main() {}\n",
+            "struct pair[a, b] {\n    x a\n    y b\n}\nfn (p pair[_, b]) get_b() b { return p.y }\nfn main() {}\n",
+            "struct pair[a, b] {\n    x a\n    y b\n}\nfn (p pair[_, _]) noop() {}\nfn main() {}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(
+                r.verdict,
+                Verdict::Accept,
+                "unexpected diagnostics for:\n{src}\n{:?}",
+                r.diagnostics
+            );
+        }
     }
 }
 
