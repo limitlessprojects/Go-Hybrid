@@ -6486,8 +6486,15 @@ impl<'a> Collector<'a> {
             || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
         // A fixed-size array carries its length in the type, so a constant index
         // past that length is a compile-time error in Go ([3] on [2]int).
-        let is_array = matches!(bk, OpKind::Array(_))
+        let is_array_kind = matches!(bk, OpKind::Array(_))
             || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
+        let const_arr_len = if is_array_kind || matches!(bk, OpKind::Unknown) {
+            base_expr.and_then(|b| self.eval_const_array_len_at(b, span.start))
+        } else {
+            None
+        };
+        let is_array = is_array_kind || const_arr_len.is_some();
+        let needs_int_idx = needs_int_idx || is_array;
         if needs_int_idx && !matches!(ik, OpKind::Unknown | OpKind::Int | OpKind::Void) {
             self.emit_e1002(
                 index.span(),
@@ -6530,9 +6537,7 @@ impl<'a> Collector<'a> {
                         }
                     }
                 } else if is_array {
-                    if let Some(arr_len) =
-                        base_expr.and_then(|b| self.eval_const_array_len_at(b, span.start))
-                    {
+                    if let Some(arr_len) = const_arr_len {
                         if v >= arr_len {
                             self.emit_e1002(
                                 index.span(),
@@ -6622,7 +6627,7 @@ impl<'a> Collector<'a> {
         };
         let is_array = matches!(bk, OpKind::Array(_))
             || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
-        let const_arr_len = if is_array {
+        let const_arr_len = if is_array || matches!(bk, OpKind::Unknown) {
             self.eval_const_array_len_at(base, span.start)
         } else {
             None
@@ -8884,6 +8889,55 @@ fn main() {
 }
 ";
         let r = check(src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Accept,
+            "unexpected diagnostics: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn rejects_composite_array_out_of_bounds_index_and_slice_3694() {
+        for src in [
+            "import \"fmt\"\nfn main() {\n    var a [2][3]int\n    fmt.println(a[1][3])\n}\n",
+            "import \"fmt\"\nfn main() {\n    var a [2][3][4]int\n    fmt.println(a[1][2][4])\n}\n",
+            "fn main() {\n    var a [2][3]int\n    a[1][3] = 1\n    _ = a\n}\n",
+            "fn main() {\n    var a [2][3]int\n    a[1][3] += 1\n    _ = a\n}\n",
+            "import \"fmt\"\nstruct s_t { a [3]int }\nfn main() {\n    var s s_t\n    fmt.println(s.a[3])\n}\n",
+            "import \"fmt\"\nstruct s_t { a [3]int }\nfn main() {\n    var s [2]s_t\n    fmt.println(s[0].a[3])\n}\n",
+            "import \"fmt\"\nfn f() [3]int {\n    return [3]int{1, 2, 3}\n}\nfn main() {\n    fmt.println(f()[3])\n}\n",
+            "import \"fmt\"\nfn main() {\n    var s [][3]int = make([][3]int, 2)\n    fmt.println(s[0][3])\n}\n",
+            "import \"fmt\"\nfn main() {\n    var a [2][3]int\n    p := &a\n    fmt.println(p[1][3])\n}\n",
+            "import \"fmt\"\nfn main() {\n    var a [2][3]int\n    fmt.println(a[1][1:5])\n}\n",
+            "import \"fmt\"\nfn main() {\n    var m map[string][3]int\n    fmt.println(m[\"x\"][3])\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+
+        // Valid in-bounds controls must pass cleanly.
+        let ok = "\
+import \"fmt\"
+struct s_t { a [3]int }
+fn f() [3]int { return [3]int{1, 2, 3} }
+fn main() {
+    var a [2][3]int
+    a[1][2] = 9
+    p := &a
+    var s s_t
+    var sa [2]s_t
+    var sl [][3]int = make([][3]int, 2)
+    var m map[string][3]int = map[string][3]int{\"x\": [3]int{1, 2, 3}}
+    fmt.println(a[1][2], p[1][2], a[1][1:3], s.a[2], sa[0].a[2], f()[2], sl[0][2], m[\"x\"][2])
+}
+";
+        let r = check(ok);
         assert_eq!(
             r.verdict,
             Verdict::Accept,
