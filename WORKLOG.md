@@ -162,3 +162,12 @@
 - Suites 428 -> 433 (+5). 5 landed, 3 dup rejections, 8 written replies total this tick; every merge tree-asserted pre-commit.
 - Next queue (wave remainder): #3688 -> #3695 -> #3697 -> #3671 -> #3673 -> #3675 -> #3676 -> #3677 -> reap scan.
 - Worklog: this commit.
+
+## Session 111 — 2026-11-05 18:10 UTC+8 tick
+- (runs the 17:10 tick's queue; that tick died on sandbox-start failure before any action)
+- env cold-recycled; rust 1.99.0 + go1.26.9 restored, tarball re-cached; target turned out warm (15s). approve 4/4 (4996 left), scan skipped (cheap API listing).
+- NOTE for future ticks: Bash tool calls do NOT share exported PATH (shell recycles between calls) — differential must run with PATH export in the SAME call or hyb's go-pin guard fails all accept cases (saw a false 0/45, root-caused, re-run clean).
+- Landed PR #3697 -> 38388f2d (fold_const_key: -0.0 canonicalization, shadow defense, len() folding, alias resolution, wrap_int_conversion for wrapped/float conversion keys; default_untyped_local_ty pins inferred-int locals for #3678; fixes #3696 + #3678, Burapa-J). ALL-GREEN 434 suites, corpus 135/135 tripwire clean, differential 45/45+90/90. Tree-asserted 48926ed4 pre-commit; remote asserted. Written reply 201 posted.
+- Merge-gate triage for wave remainder: #3688 #3695 #3671 #3673 #3675 #3676 #3677 all auto-merge clean (merge-tree).
+- Next queue: #3673 (+9-3) -> #3675 -> #3676 -> #3677 -> #3671 -> wildcard spikes #3688 (W-004) / #3695 (W-024, dup family with #3679 — check BOUNTY.md spike policy before battery) -> fresh 11-05 wave #3727 #3730 (families: 3730/3733/3737, 3731/3732, 3736/3738, 3739-3742 — dedupe first).
+- Suites 433 -> 434 (+1). Worklog: this commit.
