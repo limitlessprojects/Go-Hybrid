@@ -158,3 +158,155 @@ fn main() {
         "expected 0 diagnostics for valid multi-value forwarding, got: {c:?}"
     );
 }
+
+#[test]
+fn try_unwrapped_calls_check_result_arity_issue_1835() {
+    let src_2val_to_1name = r#"
+fn pair_or_err() (int, int, error) {
+    return 1, 2, nil
+}
+
+fn run() (int, error) {
+    p := pair_or_err()?
+    return p, nil
+}
+"#;
+    let c = codes(src_2val_to_1name);
+    assert!(
+        c.contains(&"HYB-E2002".to_string()),
+        "expected HYB-E2002 for binding 1 name to 2-value try unwrap, got: {c:?}"
+    );
+
+    let src_2val_in_binary = r#"
+fn pair_or_err() (int, int, error) {
+    return 1, 2, nil
+}
+
+fn run() (int, error) {
+    y := pair_or_err()? + 1
+    return y, nil
+}
+"#;
+    let c = codes(src_2val_in_binary);
+    assert!(
+        c.contains(&"HYB-E2002".to_string()),
+        "expected HYB-E2002 for 2-value try unwrap in binary expression, got: {c:?}"
+    );
+
+    let src_1val_to_2names = r#"
+fn one_or_err() (int, error) {
+    return 7, nil
+}
+
+fn run() (int, error) {
+    u, v := one_or_err()?
+    return u + v, nil
+}
+"#;
+    let c = codes(src_1val_to_2names);
+    assert!(
+        c.contains(&"HYB-E1002".to_string()),
+        "expected HYB-E1002 for binding 2 names to 1-value try unwrap, got: {c:?}"
+    );
+
+    let src_valid = r#"
+fn pair_or_err() (int, int, error) {
+    return 1, 2, nil
+}
+
+fn one_or_err() (int, error) {
+    return 7, nil
+}
+
+fn run() (int, error) {
+    a, b := pair_or_err()?
+    x := one_or_err()?
+    return a + b + x, nil
+}
+"#;
+    let c = codes(src_valid);
+    assert!(
+        c.is_empty(),
+        "expected 0 diagnostics for valid try-unwrapped bindings, got: {c:?}"
+    );
+}
+
+#[test]
+fn unshadowed_one_value_builtins_reject_multiple_target_binding_issue_1835() {
+    let src_len = r#"
+fn run() {
+    xs := [1, 2, 3]
+    m, n := len(xs)
+    _ = m + n
+}
+"#;
+    let c = codes(src_len);
+    assert!(
+        c.contains(&"HYB-E1002".to_string()),
+        "expected HYB-E1002 for `m, n := len(xs)`, got: {c:?}"
+    );
+
+    let src_some = r#"
+fn run() {
+    a, b := some(42)
+    _ = a
+    _ = b
+}
+"#;
+    let c = codes(src_some);
+    assert!(
+        c.contains(&"HYB-E1002".to_string()),
+        "expected HYB-E1002 for `a, b := some(42)`, got: {c:?}"
+    );
+
+    let src_conv = r#"
+fn run() {
+    x := 10
+    a, b := int64(x)
+    _ = a + b
+}
+"#;
+    let c = codes(src_conv);
+    assert!(
+        c.contains(&"HYB-E1002".to_string()),
+        "expected HYB-E1002 for `a, b := int64(x)`, got: {c:?}"
+    );
+}
+
+#[test]
+fn aliased_pointer_receiver_methods_and_multipointer_indexing_issue_1835() {
+    let src_method = r#"
+struct pair_box {
+    a int
+    b int
+}
+
+type box_alias = pair_box
+
+fn (p *pair_box) unpack() (int, int) {
+    return p.a, p.b
+}
+
+fn run(b *box_alias) int {
+    q := b.unpack()
+    return q
+}
+"#;
+    let c = codes(src_method);
+    assert!(
+        c.contains(&"HYB-E2002".to_string()),
+        "expected HYB-E2002 for `q := b.unpack()` on aliased pointer receiver, got: {c:?}"
+    );
+
+    let src_multipointer = r#"
+fn run(pp **[2]int) int {
+    a, b, c := pp[0]
+    return a + b + c
+}
+"#;
+    let c = codes(src_multipointer);
+    assert!(
+        c.contains(&"HYB-E2002".to_string()),
+        "expected HYB-E2002 for `a, b, c := pp[0]`, got: {c:?}"
+    );
+}

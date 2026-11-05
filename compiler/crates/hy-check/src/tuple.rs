@@ -379,20 +379,20 @@ impl<'a> Checker<'a> {
     fn static_bind_source_bound(&self, st: &FnState, expr: &Expr) -> Option<BindSourceBound> {
         match unwrap_parens_and_move(expr) {
             Expr::Receive { .. } => Some(BindSourceBound::AtMost(2)),
-            Expr::Index { base, .. } => match self.shape_of_expr(st, base) {
-                TypeShape::Map(..) => Some(BindSourceBound::AtMost(2)),
-                TypeShape::Slice(..) | TypeShape::Array(..) | TypeShape::Str => {
-                    Some(BindSourceBound::Exact(1))
+            Expr::Index { base, .. } => {
+                let shape = self.shape_of_expr(st, base);
+                let mut cur = &shape;
+                while let TypeShape::Pointer(inner) = cur {
+                    cur = inner.as_ref();
                 }
-                // a pointer to an array auto-derefs on indexing in Go —
-                // still exactly one value; every other pointer/base stays
-                // fail-open.
-                TypeShape::Pointer(inner) => match inner.as_ref() {
-                    TypeShape::Array(..) => Some(BindSourceBound::Exact(1)),
+                match cur {
+                    TypeShape::Map(..) => Some(BindSourceBound::AtMost(2)),
+                    TypeShape::Slice(..) | TypeShape::Array(..) | TypeShape::Str => {
+                        Some(BindSourceBound::Exact(1))
+                    }
                     _ => None,
-                },
-                _ => None,
-            },
+                }
+            }
             _ => None,
         }
     }
@@ -467,9 +467,14 @@ impl<'a> Checker<'a> {
     }
 
     /// `Some((callee, result count))` when `expr` is a direct or indirect call
-    /// with a statically known result count (excluding `?`-unwrapped calls).
+    /// or `?`-unwrapped call with a statically known result count.
     fn static_result_count(&self, st: &FnState, expr: &Expr) -> Option<(String, usize)> {
-        let Expr::Call { callee, .. } = unwrap_parens_and_move(expr) else {
+        let unwrapped = unwrap_parens_and_move(expr);
+        if let Expr::Try { operand, .. } = unwrapped {
+            let (name, count) = self.static_result_count(st, operand)?;
+            return Some((format!("{name}?"), count.saturating_sub(1)));
+        }
+        let Expr::Call { callee, .. } = unwrapped else {
             return None;
         };
         match unwrap_parens_and_move(callee) {
@@ -485,8 +490,34 @@ impl<'a> Checker<'a> {
                 }
                 // 2. Direct call to a file-local top-level function
                 let head = Self::base_named_type_str(name);
-                let decl = self.fns.get(name.as_str()).or_else(|| self.fns.get(head))?;
-                Some((name.clone(), decl.results.len()))
+                if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                    return Some((name.clone(), decl.results.len()));
+                }
+                // 3. Unshadowed 1-value builtins, prelude constructors, or type conversions
+                match name.as_str() {
+                    "len" | "cap" | "make" | "new" | "append" | "copy" | "min" | "max"
+                    | "real" | "imag" | "complex" | "recover" | "some" | "ok" | "err" => {
+                        return Some((name.clone(), 1));
+                    }
+                    "close" | "delete" | "panic" | "print" | "println" => {
+                        return Some((name.clone(), 0));
+                    }
+                    _ => {}
+                }
+                if self.structs.contains_key(name.as_str())
+                    || self.type_aliases.contains_key(name.as_str())
+                    || self.enums.contains_key(name.as_str())
+                    || matches!(
+                        name.as_str(),
+                        "bool" | "byte" | "rune" | "string" | "uintptr"
+                            | "int" | "int8" | "int16" | "int32" | "int64"
+                            | "uint" | "uint8" | "uint16" | "uint32" | "uint64"
+                            | "float32" | "float64"
+                    )
+                {
+                    return Some((name.clone(), 1));
+                }
+                None
             }
             Expr::FnLit { results, .. } => Some(("fn".to_string(), results.len())),
             Expr::Field {
@@ -507,21 +538,32 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // 2. User-defined struct method (`b.pair()`)
+                // 2. User-defined struct method (`b.pair()`), peeling pointer & type-alias layers
                 let recv_base = self
                     .ty_of_expr(st, base)
-                    .map(|t| self.resolve_type_alias(&t))
-                    .and_then(|t| Self::base_named_type(&t))
+                    .and_then(|t| {
+                        let mut cur = self.resolve_type_alias(&t);
+                        while let TypeExpr::Pointer { to, .. } = &cur {
+                            cur = self.resolve_type_alias(to);
+                        }
+                        Self::base_named_type(&cur)
+                    })
                     .or_else(|| match self.shape_of_expr(st, base) {
                         TypeShape::Struct(Some(s)) => {
                             Some(Self::base_named_type_str(&s).to_string())
                         }
-                        TypeShape::Pointer(inner) => match *inner {
-                            TypeShape::Struct(Some(s)) => {
-                                Some(Self::base_named_type_str(&s).to_string())
+                        TypeShape::Pointer(inner) => {
+                            let mut cur = inner.as_ref();
+                            while let TypeShape::Pointer(next) = cur {
+                                cur = next.as_ref();
                             }
-                            _ => None,
-                        },
+                            match cur {
+                                TypeShape::Struct(Some(s)) => {
+                                    Some(Self::base_named_type_str(s).to_string())
+                                }
+                                _ => None,
+                            }
+                        }
                         _ => None,
                     });
                 if let Some(rb) = recv_base {
