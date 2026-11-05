@@ -100,3 +100,12 @@
 - Suites 412 -> 414. Differential 45/45 + 90/90 x3; corpus 135 tripwire not fired x3.
 - Worklog: this commit.
 - Next queue: #3558 -> #2661 -> #3366 -> #3611 -> #3355 -> #3554 -> #3566 -> #3438 -> #3056 -> #2456.
+
+## Session 105 — 2026-11-05 09:10 UTC+8 tick
+- approve 12/12 ok (quota healthy); scan skipped.
+- Landed PR #3558 -> 236fa42c (hy-syntax: panic <expr> prefix for any operand — only-operand-start tokens + next_on_same_line; shadow/call preserved; fixes #3557, 00Desa00). ALL-GREEN 415 suites.
+- Landed PR #2661 -> ffd8e5b1 (hy-emit: N5 array zero-init addressable via n5_zero_init_addr, computed-len tail-fill closures, i->hyIdx hygiene, constconv::parse_int; fixes #2660, gttps). Transport eats "[h" again — codepoint dump confirmed hyArr[hyIdx] intact before verification. ALL-GREEN 416 suites (differential accept-side builds+runs the emitted Go).
+- Landed PR #3366 -> 069df855 (worker/script fail-closed: JOB_JSON decode/type gates, repo no-dash no-CRLF, sha fullmatch no-traversal, quoted runner args, honest exit codes; Shokun123). Battery + 9 pytest + 4 injection probes on patched kernel source all hit intended FATAL paths. ALL-GREEN 416 suites.
+- Suites 414 -> 416. Differential 45/45 + 90/90 x3; corpus 135 tripwire not fired x3.
+- Worklog: this commit.
+- Next queue: #3611 -> #3355 -> #3554 -> #3566 -> #3438 -> #3056 -> #2456.

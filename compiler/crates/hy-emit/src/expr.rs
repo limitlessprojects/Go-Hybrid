@@ -78,6 +78,11 @@ impl Emitter {
                     ty: None, fields, ..
                 } => {
                     if let TypeExpr::Pointer { to, .. } = &resolved {
+                        if fields.is_empty() && matches!(self.n5_resolve_alias(to), TypeExpr::Array { .. }) {
+                            if let Some(init) = self.n5_zero_init_addr(to) {
+                                return Ok(init);
+                            }
+                        }
                         let body = self.struct_lit_body(to, fields)?;
                         let s = format!("&{}{{{}}}", self.type_text(to), body);
                         return Ok(if min_prec > 50 { format!("({})", s) } else { s });
@@ -186,6 +191,29 @@ impl Emitter {
             }
 
             Expr::AddrOf { operand, .. } => {
+                let inner = Self::unwrap_parens(operand);
+                if let Expr::SliceLit { items, .. } = inner {
+                    if items.is_empty() {
+                        if let Some((_, _, arr_ty)) = inner.as_array_lit() {
+                            if let Some(init) = self.n5_zero_init_addr(arr_ty) {
+                                return Ok(init);
+                            }
+                        }
+                    } else if let Some((Some(len_expr), inner_elem, arr_ty)) = inner.as_array_lit() {
+                        if !matches!(Self::unwrap_parens(len_expr), Expr::Lit { kind: LitKind::Int(_), .. })
+                            && self.n5_zero_init(inner_elem).is_some()
+                        {
+                            let (val, head) = (self.emit_expr(inner, 0)?, self.type_text(arr_ty));
+                            return Ok(format!("func() *{head} {{ hyArr := {val}; return &hyArr }}()"));
+                        }
+                    }
+                } else if let Expr::StructLit { ty: Some(t), fields, .. } = inner {
+                    if fields.is_empty() && matches!(self.n5_resolve_alias(t), TypeExpr::Array { .. }) {
+                        if let Some(init) = self.n5_zero_init_addr(t) {
+                            return Ok(init);
+                        }
+                    }
+                }
                 let o = self.emit_expr(operand, ATOM)?;
                 Ok(format!("&{}", o))
             }
@@ -281,8 +309,18 @@ impl Emitter {
                     for i in items {
                         parts.push(self.emit_expr_exp(i, 0, Some(inner_elem))?);
                     }
-                    if let (Some(Expr::Lit { kind: LitKind::Int(n), .. }), Some(init)) = (len, self.n5_zero_init(inner_elem)) {
-                        parts.resize(n.replace('_', "").parse().unwrap_or(0).max(parts.len()), init);
+                    if let (Some(len_expr), Some(init)) = (len, self.n5_zero_init(inner_elem)) {
+                        if let Expr::Lit { kind: LitKind::Int(s), .. } = Self::unwrap_parens(len_expr) {
+                            if let Some(n) = super::constconv::parse_int(s).and_then(|v| usize::try_from(v).ok()) {
+                                parts.resize(n.max(parts.len()), init);
+                            }
+                        } else {
+                            let skip = parts.len();
+                            return Ok(format!(
+                                "func() (hyArr {head}) {{ hyArr = {head}{{{}}}; for hyIdx := {skip}; hyIdx < len(hyArr); hyIdx++ {{ hyArr[hyIdx] = {init} }}; return hyArr }}()",
+                                parts.join(", ")
+                            ));
+                        }
                     }
                     return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                 }
