@@ -261,17 +261,13 @@ impl<'a> Checker<'a> {
             return false;
         }
         
-        // Second check: resolved type name must be a conversion type and not shadowed
+        // Second check: resolved type name must not be shadowed by enum/struct/type-param
         let name_str = match resolved {
             hy_syntax::TypeExpr::Named { ref name, .. } => name.as_str(),
             _ => return false,
         };
         
-        if !is_conversion_type_name(name_str) {
-            return false;
-        }
-        
-        // Third check: the resolved name must not be shadowed by enum/struct/type-param
+        // Reject if shadowed by enum, struct, or type-param
         if self.structs.contains_key(name_str)
             || self.struct_type_params.contains_key(name_str)
             || self.enums.contains_key(name_str)
