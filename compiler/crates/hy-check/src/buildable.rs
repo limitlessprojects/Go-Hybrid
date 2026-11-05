@@ -5581,38 +5581,10 @@ impl<'a> Collector<'a> {
                 }
                 continue;
             }
-            // #1681 — a bare `nil` element is only assignable when the
-            // destination slice's element type is itself nil-able (pointer,
-            // slice, array, map, chan, func, interface). Go refuses
-            // `append(xs, nil)` on a scalar slice with
-            // `cannot use nil as int value in argument to append`, so catch
-            // it before the kind model, which maps nil to `OpKind::Unknown`
-            // (fail-open). Unresolved destinations stay silent.
-            if Self::nil_is_expr(&extra.value) {
-                let elem_nilable = matches!(
-                    &elem,
-                    OpKind::Slice(_)
-                        | OpKind::Array(_)
-                        | OpKind::Map(_, _)
-                        | OpKind::Chan(_)
-                        | OpKind::Fn(_, _)
-                        | OpKind::Pointer(_)
-                        | OpKind::Interface
-                        | OpKind::Unknown
-                );
-                if !elem_nilable {
-                    self.emit_e1002(
-                        extra.value.span(),
-                        format!(
-                            "cannot use `nil` as `{}` value in argument to append — Go rejects `cannot use nil as {} value in argument to append` (HYB-E1002)",
-                            elem.label(),
-                            elem.label()
-                        ),
-                        "untyped `nil` is only assignable to nil-able types (pointer, slice, map, chan, func, interface)",
-                    );
-                }
-                continue;
-            }
+            // #1681 append-element nil handling is upstream's #3518 arm below
+            // (`is_non_nilable` covers every scalar AND array element kind,
+            // including `[][3]int32` which my earlier hand-rolled list wrongly
+            // treated as nil-able and accepted).
             let got = self.kind_of_expr(&extra.value);
             let dst_elem_ty = self.slice_element_type_name(&first.value);
             // #3518: reject untyped nil passed to non-nilable slice element types
