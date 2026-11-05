@@ -109,3 +109,65 @@
 - Suites 414 -> 416. Differential 45/45 + 90/90 x3; corpus 135 tripwire not fired x3.
 - Worklog: this commit.
 - Next queue: #3611 -> #3355 -> #3554 -> #3566 -> #3438 -> #3056 -> #2456.
+
+## Session 106 — 2026-11-05 10:10 UTC+8 tick
+- approve 9/9 ok; scan skipped.
+- Landed PR #3611 -> 0d90fc52 (hy-check: callee_reaches_foreign interprocedural escape tracing for first-class foreign callees at A5 sites + fn_call_sites caller binding; fixes #3610, produckq-boop). ALL-GREEN 418 suites (+2).
+- Landed PR #3355 -> b509d284 (hy-check: make() first type-arg routed through declared-position ty() walker — alias/StructLit/SliceLit/array/MapLit with check_map_key_comparable; fixes #3248, Dimank92). ALL-GREEN 419 suites.
+- Landed PR #3554 -> 11afb872 (hy-syntax lexer: LX6 underscore separator validation across int/fraction/exponent, is_ident_start drops _, digits-only token value; fixes #3548, gauravatwork117). ALL-GREEN 420 suites.
+- Suites 416 -> 420. Differential 45/45 + 90/90 x3; corpus 135 tripwire not fired x3.
+- Worklog: this commit.
+- Next queue: #3566 -> #3438 -> #3056 -> #2456 -> #2937-family leftovers.
+
+## Session 107 — 2026-11-05 11:10 UTC+8 tick
+- approve 8/8 ok; scan skipped.
+- Landed PR #3566 -> aa1549c2 (value-shadowed type args in new/make reject HYB-E1002; fixes #3561, Dimank92). In-merge conflict vs #3355: unioned both into one check_type_arg_instantiation walker; Index arm recurses type args only (bare generic head would false-positive E1002 — caught by #3684 accept pin).
+- INCIDENT + REPAIR: aa1549c2 shipped the PRE-FIX resolution text — the three in-merge fixes were applied to the worktree working tree and verified there (421/421 + corpus + diff green) but never committed before the tree-hash assertion, making the assertion vacuous and main non-compiling. Root cause: verified state != committed state. Repair 60950594 (fixup commit, no force-push) brought main to the exact verified state; re-verified ON THE PUSHED HEAD: cargo 421/421, corpus 135 tripwire not fired, differential 45/45+90/90 FULL AGREEMENT. Disclosure posted on #3566 (201). NEW RULE: for any in-merge resolution, commit the resolution FIRST, then verify the committed SHA, then tree-assert against THAT commit.
+- Landed PR #3438 -> 6b398a23 (emit-guard bounds/overflow on elided slice literals in map + nested slots; fixes #3437, Shokun123). Battery on trial merge cf83d248; tree asserted identical post-push. ALL-GREEN 422 suites.
+- Suites 420 -> 422 (net, incl. repair re-verification).
+- Worklog: this commit.
+- Next queue: #3056 -> #2456 -> reap scan for new arrivals.
+
+## Session 108 — 2026-11-05 14:10 UTC+8 tick
+- env cold-recycled: rust 1.99.0 + go1.26.9 re-restored from cache script/tarball (tarball re-cached). approve 7/7 ok (4993 left); scan skipped.
+- Rejected PR #3056 (fixes #3055, Dimank92): superseded duplicate + regression. #3055's case list fully enforced since 2026-10-20 by check_new_type_operand (206723b7, fixes #936, E2005 shape-aware); static proof: PR's catch-all has no Index arm -> spurious E1002 on new(box[t])/new(set[int])/new(box[int])/new(box[<-chan int]) breaking 4 accept pins (3691/3684/defer/sendability). Author verified only own test file on base that already contained the fix. Genuine unpinned delta noted: main literal-ident list lacks "none" — offered as 2-line follow-up on existing E2005 machinery. Evidence reply posted (comment 6651323910).
+- Landed PR #2456 -> bc8f3193 (OpKind::Fn carries param kinds; kinds_conflict result+param signature comparison Unknown-tolerant, name-insensitive; method-expr receiver as first param; richer Fn labels; fixes #1599, Dimank92). multi_value_tuple rebind control adapted to signature-compatible swap (old cross-signature rebind WAS the bug). Four gates on committed trial merge ecfcddc3, tree 0deed7dc asserted identical pre-commit (S107 rule applied end-to-end). ALL-GREEN 423 suites (+1), corpus 135/135 tripwire quiet, differential 45/45+90/90.
+- Suites 422 -> 423. Worklog: this commit.
+- Follow-up claims: copy_element_kinds_conflict permissive Fn/Fn arm (copy fn elements) — unclaimed; new(none) literal-ident gap in check_new_type_operand — offered to #3056 author.
+- Next queue: reap scan for new arrivals (drained: #3056 rejected, #2456 landed).
+
+## Session 109 — 2026-11-05 15:10 UTC+8 tick
+- env cold-recycled again (new sandbox): rust 1.99.0 + go1.26.9 restored, tarball re-cached, target rebuilt cold (~4 min at -j2, fine).
+- approve 9/9 (4982 left); scan skipped. Reap scan via cheap API listing (1 call pattern): 1028 open PRs total, mostly stale Oct spikes; fresh unworked wave = 11-04T15:00 -> 11-05 (#3671..#3726). Worked newest-first this tick, oldest-of-wave next.
+- Landed PR #3723 -> ad9a844b (tuple.rs resolve_fn_callee_ty via composite_type_expr + Index fallback w/ peel_pointer_and_alias + Field projection arm; fixes #3722, aswadi). Head contained main (ff case). ALL-GREEN 424 suites.
+- Landed PR #3725 -> 68488bff (loans.rs record_place_store_from_snapshot + record_parallel_assign_fanout; Ident arm -> record_storage_from_snapshot superset [record_alias preserved inside, verified at loans.rs:2450]; a3-loan "_" gate; fixes #3707, Burapa-J). ALL-GREEN 425 suites.
+- Landed PR #3726 -> be321a9c (corpus census finditer + line numbers, fixes #3724, ThanhWinter; PR pytest 21/21 + live census 7 surfaces OK). ALL-GREEN 425 suites.
+- Landed PR #3704 -> d012da3c (expr_array_type_at recursive static TypeExpr resolver feeding const_array_len_at; Unknown-kind bases consult eval_const_array_len_at; fixes #3694, dextermos-dev). ALL-GREEN 426 suites.
+- Landed PR #3719 -> 8ebb16e8 (place_type_name map-value extraction + fn_result_type_names stack + report_array_return_mismatch; fixes #3718, marhabynova). ALL-GREEN 427 suites.
+- Landed PR #3715 -> 2a95a127 (expr_type_param + len/cap/close/delete reject unconstrained type params E2005; fixes #3714, marhabynova). ALL-GREEN 428 suites.
+- Suites 423 -> 428 (+5). Six landings, zero gate failures; every merge tree-asserted against its committed trial SHA pre-commit; all six landing replies posted.
+- Next queue (wave continues, oldest-first): #3706 -> #3709 -> #3711 -> #3712 -> #3713 -> #3717 -> #3721 -> #3688/#3689/#3695/#3697 -> #3671..#3677.
+- Worklog: this commit.
+
+## Session 110 — 2026-11-05 16:10 UTC+8 tick
+- env cold-recycled again; rust 1.99.0 + go1.26.9 restored, target cold-rebuilt. approve 5/5 (4989 left).
+- Landed PR #3706 -> 9b6b54a5 (kind_of_type_str via CompFamily::split adds Array/Map/option[] parses; type-param composite scalar subst; Field bases in type-name lookup + map_key_scalar_name; fixes #3705, dextermos-dev). ALL-GREEN 429 suites.
+- Landed PR #3709 -> b840d3b4 (divisor_int_fold: FnState shadow checks on len/operand consts, Unary-Neg arm w/ checked_neg; float fold consts filtered by defined; fixes #3708, aswadi). ALL-GREEN 430 suites.
+- Landed PR #3711 -> 7fe6c90e (hy-emit fn_ret_struct map + call/receiver/assoc struct shapes + ForeignTy receiver methods + Expr::Call as shape-bearing operand; fixes #3710, dextermos-dev). ALL-GREEN 431 suites.
+- Rejected PR #3712 (dup of landed #3704/d012da3c, same issue #3694, parallel ty_of_expr_at_pos resolver; hall of fame credit; offered call_ret_ty_of_expr delta as fresh follow-up). Evidence reply posted.
+- Rejected PR #3713 (dup of #3694, third claimant; hall of fame credit). Evidence reply posted.
+- Landed PR #3717 -> e128e49e (recv_chan_type_expr Field arm + peel_pointer_and_alias in Index/Slice arms; fixes #3716, aswadi). ALL-GREEN 432 suites.
+- Landed PR #3721 -> afe0420a (explicit curated imports normalized via import_path_of at insert+lookup; net/url added to package roots; fixes #3720, marhabynova). ALL-GREEN 433 suites.
+- Rejected PR #3689 (dup of landed d25a5ab7 for #3684; stale base predates #3355/#3566 rework; hall of fame credit). Evidence reply posted.
+- Suites 428 -> 433 (+5). 5 landed, 3 dup rejections, 8 written replies total this tick; every merge tree-asserted pre-commit.
+- Next queue (wave remainder): #3688 -> #3695 -> #3697 -> #3671 -> #3673 -> #3675 -> #3676 -> #3677 -> reap scan.
+- Worklog: this commit.
+
+## Session 111 — 2026-11-05 18:10 UTC+8 tick
+- (runs the 17:10 tick's queue; that tick died on sandbox-start failure before any action)
+- env cold-recycled; rust 1.99.0 + go1.26.9 restored, tarball re-cached; target turned out warm (15s). approve 4/4 (4996 left), scan skipped (cheap API listing).
+- NOTE for future ticks: Bash tool calls do NOT share exported PATH (shell recycles between calls) — differential must run with PATH export in the SAME call or hyb's go-pin guard fails all accept cases (saw a false 0/45, root-caused, re-run clean).
+- Landed PR #3697 -> 38388f2d (fold_const_key: -0.0 canonicalization, shadow defense, len() folding, alias resolution, wrap_int_conversion for wrapped/float conversion keys; default_untyped_local_ty pins inferred-int locals for #3678; fixes #3696 + #3678, Burapa-J). ALL-GREEN 434 suites, corpus 135/135 tripwire clean, differential 45/45+90/90. Tree-asserted 48926ed4 pre-commit; remote asserted. Written reply 201 posted.
+- Merge-gate triage for wave remainder: #3688 #3695 #3671 #3673 #3675 #3676 #3677 all auto-merge clean (merge-tree).
+- Next queue: #3673 (+9-3) -> #3675 -> #3676 -> #3677 -> #3671 -> wildcard spikes #3688 (W-004) / #3695 (W-024, dup family with #3679 — check BOUNTY.md spike policy before battery) -> fresh 11-05 wave #3727 #3730 (families: 3730/3733/3737, 3731/3732, 3736/3738, 3739-3742 — dedupe first).
+- Suites 433 -> 434 (+1). Worklog: this commit.

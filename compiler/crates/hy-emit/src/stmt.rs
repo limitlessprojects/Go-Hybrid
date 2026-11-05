@@ -1374,7 +1374,16 @@ impl Emitter {
         };
         let fn_name = match callee_base {
             Expr::Ident { name, .. } => Some(name.split('[').next().unwrap_or(name).to_string()),
-            Expr::Field { base, name, .. } if matches!(Self::peel_parens(base), Expr::Ident { .. }) && !self.local_vars.contains(&Self::peel_parens(base).render()) => Some(format!("{}.{}", Self::peel_parens(base).render(), name.split('[').next().unwrap_or(name))),
+            Expr::Field { base, name, .. } => {
+                let head = name.split('[').next().unwrap_or(name);
+                if let Some(recv_sn) = self.user_struct_name_of(base) {
+                    Some(format!("{recv_sn}.{head}"))
+                } else if matches!(Self::peel_parens(base), Expr::Ident { .. }) && !self.local_vars.contains(&Self::peel_parens(base).render()) {
+                    Some(format!("{}.{head}", Self::peel_parens(base).render()))
+                } else {
+                    None
+                }
+            }
             _ => None,
         };
         if let Some(fn_head) = fn_name.as_deref().filter(|h| !self.local_vars.contains(*h)) {
