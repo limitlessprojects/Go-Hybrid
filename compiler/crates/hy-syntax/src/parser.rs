@@ -1056,8 +1056,41 @@ impl Parser {
         }
     }
 
+    /// Is `panic` (the current token) the SPEC §1.3 `PanicStmt` prefix form
+    /// `panic Expression`?
+    ///
+    /// A string literal operand was the only shape recognised, so
+    /// `panic msg`, `panic err`, `panic 42` or `panic f()` fell through to
+    /// `parse_simple_stmt`: the bare `panic` became one expression statement
+    /// and the operand a second one. `hyb check` accepted that, and the
+    /// emitter printed `panic` and the operand on two lines, which `go build`
+    /// refuses (`panic (built-in) must be called`).
+    ///
+    /// Any token that can only START an operand counts, as long as it sits on
+    /// the same source line as `panic` (statements are newline-delimited, so
+    /// a following line is a separate statement). Tokens that could continue
+    /// an expression whose operand is a user binding named `panic` (`(`,
+    /// `[`, `.`, binary operators, assignment) are left to the ordinary
+    /// statement parser, so a call `panic(x)` and a shadowed `panic` are
+    /// unchanged.
     fn panic_prefix_follows(&self) -> bool {
-        matches!(self.nth(1), Tok::StrChunk(_)) || matches!(self.nth(1), Tok::RawStr(_))
+        match self.nth(1) {
+            Tok::StrChunk(_) | Tok::RawStr(_) => true,
+            Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::CharLit(_) => {
+                self.next_on_same_line()
+            }
+            Tok::Kw(k) if matches!(*k, "true" | "false" | "move") => self.next_on_same_line(),
+            Tok::Punct("!") => self.next_on_same_line(),
+            _ => false,
+        }
+    }
+
+    /// Does the token after the current one start on the line the current
+    /// token ends on?
+    fn next_on_same_line(&self) -> bool {
+        let next = self.pos + 1;
+        next < self.toks.len()
+            && self.toks[next].span.start.line == self.toks[self.pos].span.end.line
     }
 
     /// `let`/`var`/`const` local. `let x := e` and `let x = e` both normalize
