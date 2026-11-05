@@ -118,3 +118,12 @@
 - Suites 416 -> 420. Differential 45/45 + 90/90 x3; corpus 135 tripwire not fired x3.
 - Worklog: this commit.
 - Next queue: #3566 -> #3438 -> #3056 -> #2456 -> #2937-family leftovers.
+
+## Session 107 — 2026-11-05 11:10 UTC+8 tick
+- approve 8/8 ok; scan skipped.
+- Landed PR #3566 -> aa1549c2 (value-shadowed type args in new/make reject HYB-E1002; fixes #3561, Dimank92). In-merge conflict vs #3355: unioned both into one check_type_arg_instantiation walker; Index arm recurses type args only (bare generic head would false-positive E1002 — caught by #3684 accept pin).
+- INCIDENT + REPAIR: aa1549c2 shipped the PRE-FIX resolution text — the three in-merge fixes were applied to the worktree working tree and verified there (421/421 + corpus + diff green) but never committed before the tree-hash assertion, making the assertion vacuous and main non-compiling. Root cause: verified state != committed state. Repair 60950594 (fixup commit, no force-push) brought main to the exact verified state; re-verified ON THE PUSHED HEAD: cargo 421/421, corpus 135 tripwire not fired, differential 45/45+90/90 FULL AGREEMENT. Disclosure posted on #3566 (201). NEW RULE: for any in-merge resolution, commit the resolution FIRST, then verify the committed SHA, then tree-assert against THAT commit.
+- Landed PR #3438 -> 6b398a23 (emit-guard bounds/overflow on elided slice literals in map + nested slots; fixes #3437, Shokun123). Battery on trial merge cf83d248; tree asserted identical post-push. ALL-GREEN 422 suites.
+- Suites 420 -> 422 (net, incl. repair re-verification).
+- Worklog: this commit.
+- Next queue: #3056 -> #2456 -> reap scan for new arrivals.
