@@ -256,7 +256,22 @@ impl<'a> Checker<'a> {
             // array, or string yields exactly one and has no comma-ok form.
             // Binding a count the source cannot yield fails go build with
             // `assignment mismatch` — reject fail-closed as T23.
-            if let Some(bound) = self.static_bind_source_bound(st, value) {
+            if let Some(bound) = self.static_bind_source_bound(st, value).or_else(|| {
+                let Expr::Index { base, .. } = unwrap_parens_and_move(value) else {
+                    return None;
+                };
+                let base_ty = self.projected_composite_ty(st, base)?;
+                match self.peel_pointer_and_alias(&base_ty) {
+                    TypeExpr::Map { .. } => Some(BindSourceBound::AtMost(2)),
+                    TypeExpr::Slice { .. } | TypeExpr::Array { .. } => {
+                        Some(BindSourceBound::Exact(1))
+                    }
+                    TypeExpr::Named { name, .. } if name == "string" => {
+                        Some(BindSourceBound::Exact(1))
+                    }
+                    _ => None,
+                }
+            }) {
                 let (desc, over) = match bound {
                     BindSourceBound::AtMost(n) => (
                         format!("yields at most {n} values (`v` or `v, ok`)"),
