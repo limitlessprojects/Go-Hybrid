@@ -71,8 +71,30 @@ class CheckClaimsLinksTest(unittest.TestCase):
         self.assertEqual(mismatch[0]["expected"], "ACCEPT")
         self.assertEqual(mismatch[0]["found"], "REJECT")
 
-    def test_missing_verdict_header_is_reported(self):
-        (self.root / "tests" / "checker-corpus" / "01-bad.hy").write_text("fn main() {}\n", encoding="utf-8")
+    def test_accept_marker_rejects_accept_managed_fixture(self):
+        (self.root / "tests" / "checker-corpus" / "15-good.hy").write_text(
+            "// EXPECTED-VERDICT: ACCEPT-MANAGED\n", encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1)
+        report = json.loads(result.stdout)
+        mismatch = [i for i in report["issues"] if i["kind"] == "verdict-mismatch"]
+        self.assertEqual(len(mismatch), 1)
+        self.assertEqual(mismatch[0]["expected"], "ACCEPT")
+        self.assertEqual(mismatch[0]["found"], "ACCEPT-MANAGED")
+
+    def test_missing_verdict_header_is_reported_with_or_without_marker(self):
+        (self.root / "tests" / "checker-corpus" / "16-move.hy").write_text("fn main() {}\n", encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1)
+        report = json.loads(result.stdout)
+        self.assertEqual([i["kind"] for i in report["issues"]], ["no-verdict-header"])
+        self.assertIn("16-move.hy", report["issues"][0]["target"])
+
+    def test_unanchored_or_invalid_verdict_token_fails_closed(self):
+        (self.root / "tests" / "checker-corpus" / "15-good.hy").write_text(
+            "/* EXPECTED-VERDICT: ACCEPT */\n// EXPECTED-VERDICT: ACCEPT-BOGUS\n",
+            encoding="utf-8",
+        )
         result = self.run_tool()
         self.assertEqual(result.returncode, 1)
         report = json.loads(result.stdout)
