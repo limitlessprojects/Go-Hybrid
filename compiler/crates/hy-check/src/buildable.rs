@@ -716,6 +716,11 @@ struct Collector<'a> {
     kind_scopes: Vec<HashMap<String, OpKind>>,
     /// Parallel lexical scope stack tracking declared concrete type names (#2738).
     type_name_scopes: Vec<HashMap<String, String>>,
+    /// #3102 — the declared/inferred type text of a binding (`[]i8`,
+    /// `map[string]int8`, `chan u16`, or `func->int8` for a local bound to a
+    /// one-result fn literal), scoped like `scalar_scopes`: every rebinding
+    /// resets it to `None` so an outer text never leaks into a shadow.
+    vtext_scopes: Vec<HashMap<String, Option<String>>>,
     /// `set[T]` bindings -> their element type text (`"int"`), scoped like
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
@@ -728,6 +733,9 @@ struct Collector<'a> {
     copy_var_scopes: Vec<HashSet<String>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
+    /// #3107 — file-level consts declared with a predeclared numeric type
+    /// (`const k i8 = 3`) -> that type. Untyped consts are absent.
+    file_const_scalars: HashMap<String, &'static str>,
     file_untyped_consts: HashSet<String>,
     /// Result kinds of the function whose body is currently being walked
     /// (#577 C9/C10). Empty for a fn declared with no results — which is also
@@ -796,9 +804,11 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
             type_name_scopes: Vec::new(),
+            vtext_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
+            file_const_scalars: HashMap::new(),
             file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
             fn_result_type_names: Vec::new(),
@@ -825,6 +835,9 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                     .map(|t| c.kind_of_ty(t, 0))
                     .unwrap_or_else(|| c.kind_of_expr(&cd.value));
                 c.file_consts.insert(cd.name.clone(), k);
+                if let Some(s) = cd.ty.as_ref().and_then(|t| c.scalar_of_ty(t)) {
+                    c.file_const_scalars.insert(cd.name.clone(), s);
+                }
                 if cd.ty.is_none() {
                     c.file_untyped_consts.insert(cd.name.clone());
                 }
@@ -867,6 +880,7 @@ impl<'a> Collector<'a> {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
         self.type_name_scopes.push(HashMap::new());
+        self.vtext_scopes.push(HashMap::new());
         self.scalar_scopes.push(HashMap::new());
         self.container_elem_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
@@ -877,6 +891,7 @@ impl<'a> Collector<'a> {
         self.scopes.pop();
         self.kind_scopes.pop();
         self.type_name_scopes.pop();
+        self.vtext_scopes.pop();
         self.scalar_scopes.pop();
         self.container_elem_scopes.pop();
         self.set_elem_scopes.pop();
@@ -988,6 +1003,9 @@ impl<'a> Collector<'a> {
             // #1031: every binding shadows an outer exact numeric type until
             // `set_scalar` proves otherwise.
             if let Some(top) = self.scalar_scopes.last_mut() {
+                top.insert(name.to_string(), None);
+            }
+            if let Some(top) = self.vtext_scopes.last_mut() {
                 top.insert(name.to_string(), None);
             }
             // #2858: every binding shadows an outer container element scalar.
@@ -1123,6 +1141,212 @@ impl<'a> Collector<'a> {
                 top.insert(name.to_string(), scalar);
             }
         }
+    }
+
+    /// #3102 — record the type text of a binding `bind_kind` just made.
+    fn set_vtext(&mut self, name: &str, text: Option<String>) {
+        if name != "_" {
+            if let Some(top) = self.vtext_scopes.last_mut() {
+                top.insert(name.to_string(), text);
+            }
+        }
+    }
+
+    /// #3102 — the type text of the innermost binding of `name`, if known.
+    fn lookup_vtext(&self, name: &str) -> Option<String> {
+        for layer in self.vtext_scopes.iter().rev() {
+            if let Some(t) = layer.get(name) {
+                return t.clone();
+            }
+        }
+        None
+    }
+
+    /// #3102 — the type text of a value whose type is spelled at its source:
+    /// a local with recorded text, a typed slice/array/map literal, `make(T,
+    /// …)`, a `chan T` type-as-value, or a one-result fn literal. Anything
+    /// else fails open.
+    fn value_type_text(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if self
+                    .vtext_scopes
+                    .iter()
+                    .any(|l| l.contains_key(name.as_str()))
+                    || self.scopes.iter().any(|l| l.contains_key(name.as_str()))
+                {
+                    return self.lookup_vtext(name);
+                }
+                // #3107 — a top-level non-generic one-result function used
+                // as a value (`f := get`).
+                let fd = self.ck.fns.get(name.as_str())?;
+                if fd.receiver.is_some() || !fd.type_params.is_empty() || fd.results.len() != 1 {
+                    return None;
+                }
+                Some(format!("func->{}", fd.results[0].ty.render()))
+            }
+            // #3107 — a method value on a non-generic struct (`f := a.get`).
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let sn = self.struct_base_name(&bk)?;
+                if self
+                    .ck
+                    .struct_type_params
+                    .get(sn.as_str())
+                    .is_some_and(|tp| !tp.is_empty())
+                {
+                    return None;
+                }
+                let m = self.ck.method_decls.get(&(sn, name.clone()))?;
+                if !m.type_params.is_empty() || m.results.len() != 1 {
+                    return None;
+                }
+                Some(format!("func->{}", m.results[0].ty.render()))
+            }
+            Expr::SliceLit { elem: Some(t), .. } => {
+                if let Some((_, _, arr)) = bare.as_array_lit() {
+                    Some(arr.render())
+                } else {
+                    Some(format!("[]{}", t.render()))
+                }
+            }
+            Expr::MapLit { key, value, .. } => {
+                Some(format!("map[{}]{}", key.render(), value.render()))
+            }
+            Expr::StructLit {
+                ty: Some(t),
+                fields,
+                ..
+            } if fields.is_empty() => {
+                let r = t.render();
+                if r.starts_with("chan ") || r.starts_with("<-chan ") {
+                    Some(r)
+                } else {
+                    None
+                }
+            }
+            Expr::Call { callee, args, .. } => match unwrap_parens(callee) {
+                Expr::Ident { name, .. }
+                    if name == "make"
+                        && !self.scopes.iter().any(|l| l.contains_key("make")) =>
+                {
+                    args.first().and_then(|a| self.value_type_text(&a.value))
+                }
+                _ => None,
+            },
+            Expr::FnLit { results, .. } if results.len() == 1 => {
+                Some(format!("func->{}", results[0].ty.render()))
+            }
+            // #3111 — `x[a:b]` of a slice or array is a slice of its element.
+            Expr::Slice { base, .. } => {
+                let text = self.value_type_text(base)?;
+                slice_or_array_elem_text(&text).map(|e| format!("[]{e}"))
+            }
+            _ => None,
+        }
+    }
+
+    /// #3102 — the exact predeclared numeric type a type text names. A
+    /// user-declared struct/enum/alias of that name fails open.
+    fn scalar_of_type_text(&self, t: &str) -> Option<&'static str> {
+        let t = t.trim();
+        if self.ck.structs.contains_key(t)
+            || self.ck.enums.contains_key(t)
+            || self.ck.type_aliases.contains_key(t)
+        {
+            return None;
+        }
+        canonical_numeric_name(t)
+    }
+
+    /// #3102 — the exact numeric types of `for … in expr` bindings over a
+    /// typed slice/array (`x` / `i, x`: element) or map (`k` / `k, v`). Index
+    /// bindings and anything without a known type text stay `None`.
+    fn iterate_var_scalars(&self, expr: &Expr, n: usize) -> Vec<Option<&'static str>> {
+        let mut out = vec![None; n];
+        let Some(text) = self.value_type_text(expr) else {
+            return out;
+        };
+        let text = text.trim();
+        if let Some(rest) = text.strip_prefix("map[") {
+            let mut depth = 1usize;
+            let mut close = None;
+            for (i, ch) in rest.char_indices() {
+                match ch {
+                    '[' => depth += 1,
+                    ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(c) = close {
+                let (k, v) = (&rest[..c], &rest[c + 1..]);
+                if n >= 1 {
+                    out[0] = self.scalar_of_type_text(k);
+                }
+                if n == 2 {
+                    out[1] = self.scalar_of_type_text(v);
+                }
+            }
+        } else if let Some(elem) = text
+            .strip_prefix("<-chan ")
+            .or_else(|| text.strip_prefix("chan "))
+        {
+            // #3105 — `for v in ch` binds the channel's element.
+            if n == 1 {
+                out[0] = self.scalar_of_type_text(elem);
+            }
+        } else if let Some(rest) = text.strip_prefix('[') {
+            if let Some(c) = rest.find(']') {
+                let elem = self.scalar_of_type_text(&rest[c + 1..]);
+                if n == 1 {
+                    out[0] = elem;
+                } else if n == 2 {
+                    out[1] = elem;
+                }
+            }
+        }
+        out
+    }
+
+    /// The type text of each `for … in expr` binding over a typed
+    /// slice/array (element) or map (`k` / `k, v`); anything else is `None`.
+    fn iterate_var_texts(&self, expr: &Expr, n: usize) -> Vec<Option<String>> {
+        let mut out = vec![None; n];
+        let Some(text) = self.value_type_text(expr) else {
+            return out;
+        };
+        let text = text.trim();
+        if text.starts_with("map[") || text.starts_with("chan ") || text.starts_with("<-chan ") {
+            return out;
+        }
+        if let Some(rest) = text.strip_prefix('[') {
+            if let Some(c) = rest.find(']') {
+                let elem = rest[c + 1..].trim().to_string();
+                if n == 1 {
+                    out[0] = Some(elem);
+                } else if n == 2 {
+                    out[1] = Some(elem);
+                }
+            }
+        }
+        out
+    }
+
+    /// #3102 — the exact numeric element type of a receive `<-c` on a local
+    /// whose type text is `chan T` / `<-chan T`.
+    fn receive_scalar(&self, chan: &Expr) -> Option<&'static str> {
+        let text = self.value_type_text(chan)?;
+        let elem = text
+            .strip_prefix("<-chan ")
+            .or_else(|| text.strip_prefix("chan "))?;
+        self.scalar_of_type_text(elem)
     }
 
     /// #1031 — the exact numeric type of a binding, if provably typed. A name
@@ -1469,21 +1693,99 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-            return None;
+        let name = match unwrap_parens(callee) {
+            Expr::Ident { name, .. } if !(name.contains('[') && name.ends_with(']')) => name,
+            // #3102 — a method call on a non-generic struct receiver takes
+            // the method's declared result types.
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let full = self.struct_name(&bk)?;
+                let sn = Checker::base_named_type_str(&full).to_string();
+                let generic = self
+                    .ck
+                    .struct_type_params
+                    .get(sn.as_str())
+                    .is_some_and(|tp| !tp.is_empty());
+                let m = self.ck.method_decls.get(&(sn, name.clone()))?;
+                if !m.type_params.is_empty() {
+                    return None;
+                }
+                if generic {
+                    // #3111 — a method on a generic struct instance takes its
+                    // results with the receiver's type parameters bound to
+                    // the instance's type arguments (`box[int8]{}.get()`).
+                    let bound = self.receiver_type_arg_map(m, &full)?;
+                    return Some(
+                        m.results
+                            .iter()
+                            .map(|r| self.subst_scalar_of_ty(&r.ty, &bound))
+                            .collect(),
+                    );
+                }
+                return Some(m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+            }
+            // #3111 — an explicitly instantiated generic fn: the parser folds
+            // `id[int8](a)` into the callee name `id[int8]`.
+            Expr::Ident { name, .. } if name.contains('[') && name.ends_with(']') => {
+                let open = name.find('[')?;
+                let base = &name[..open];
+                if self.scopes.iter().any(|l| l.contains_key(base)) {
+                    return None;
+                }
+                let fd = self.ck.fns.get(base)?;
+                let targs = split_top_level_type_args(&name[open + 1..name.len() - 1]);
+                if fd.receiver.is_some() || fd.type_params.len() != targs.len() {
+                    return None;
+                }
+                let bound: HashMap<String, String> = fd
+                    .type_params
+                    .iter()
+                    .zip(targs)
+                    .map(|(tp, a)| (tp.name.clone(), a.trim().to_string()))
+                    .collect();
+                return Some(
+                    fd.results
+                        .iter()
+                        .map(|r| self.subst_scalar_of_ty(&r.ty, &bound))
+                        .collect(),
+                );
+            }
+            _ => return None,
         };
         if self
             .scopes
             .iter()
             .any(|layer| layer.contains_key(name.as_str()))
         {
-            return None;
+            // #3102 — a local bound to a one-result fn literal returns that
+            // literal's declared result type.
+            let text = self.lookup_vtext(name)?;
+            let r = text.strip_prefix("func->")?;
+            return Some(vec![self.scalar_of_type_text(r)]);
         }
         if let Some(fd) = self.ck.fns.get(name.as_str()) {
-            if fd.receiver.is_some() || !fd.type_params.is_empty() {
+            if fd.receiver.is_some() {
                 return None;
             }
+            if !fd.type_params.is_empty() {
+                // #3111 — a generic fn's results with its type parameters
+                // inferred from the call's arguments.
+                let bound = self.infer_type_arg_map(fd, args)?;
+                return Some(
+                    fd.results
+                        .iter()
+                        .map(|r| self.subst_scalar_of_ty(&r.ty, &bound))
+                        .collect(),
+                );
+            }
             return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+        }
+        // #3107 — `len`, `cap` and `copy` always yield a typed `int` (even
+        // `len` of a const string or an array is a constant OF TYPE int).
+        if ((name == "len" || name == "cap") && args.len() == 1)
+            || (name == "copy" && args.len() == 2)
+        {
+            return Some(vec![canonical_numeric_name("int")]);
         }
         if name == "min" || name == "max" {
             let res_scalar = args
@@ -1503,12 +1805,138 @@ impl<'a> Collector<'a> {
         None
     }
 
+    /// #3111 — the exact numeric type of a result/field type with type
+    /// parameters substituted. A type parameter with no binding is unknown;
+    /// any other spelling resolves as usual.
+    fn subst_scalar_of_ty(
+        &self,
+        ty: &TypeExpr,
+        bound: &HashMap<String, String>,
+    ) -> Option<&'static str> {
+        if let TypeExpr::Named { name, .. } = ty {
+            if let Some(arg) = bound.get(name.as_str()) {
+                return self.scalar_of_type_text(arg);
+            }
+        }
+        self.scalar_of_ty(ty)
+    }
+
+    /// #3111 — a generic method's receiver type parameter names (`fn (b
+    /// box[u]) ...` may rename the struct's `t`) bound to the type arguments
+    /// of the instance `full` (`box[int8]`). Unmatched shapes fail open.
+    fn receiver_type_arg_map(&self, m: &FnDecl, full: &str) -> Option<HashMap<String, String>> {
+        let recv = m.receiver.as_ref()?.ty.render();
+        let recv = recv.trim_start_matches('*');
+        let open = recv.find('[')?;
+        let names = split_top_level_type_args(recv[open + 1..].strip_suffix(']')?);
+        let fopen = full.find('[')?;
+        let args = split_top_level_type_args(full[fopen + 1..].strip_suffix(']')?);
+        if names.len() != args.len() || args.is_empty() {
+            return None;
+        }
+        Some(
+            names
+                .into_iter()
+                .zip(args)
+                .map(|(n, a)| (n.trim().to_string(), a.trim().to_string()))
+                .collect(),
+        )
+    }
+
+    /// #3111 — a generic fn's type arguments inferred from a call: a `t`
+    /// parameter binds the type of a typed argument, a `[]t` parameter the
+    /// element of a typed slice/array argument. A type parameter whose
+    /// arguments are all untyped numeric literals takes their default type
+    /// (`id(3)` is `int`); any other argument shape leaves it unbound.
+    fn infer_type_arg_map(&self, fd: &FnDecl, args: &[CallArg]) -> Option<HashMap<String, String>> {
+        if fd.params.len() != args.len() {
+            return None;
+        }
+        let is_tp = |n: &str| fd.type_params.iter().any(|t| t.name == n);
+        let mut bound: HashMap<String, String> = HashMap::new();
+        let mut defaults: HashMap<String, Option<&'static str>> = HashMap::new();
+        for (p, a) in fd.params.iter().zip(args) {
+            match &p.ty {
+                TypeExpr::Named { name, .. } if is_tp(name) => {
+                    if let Some(s) = self.typed_value_scalar(&a.value) {
+                        bound.entry(name.clone()).or_insert_with(|| s.to_string());
+                    } else if let Some(d) = self.untyped_literal_default(&a.value) {
+                        let e = defaults.entry(name.clone()).or_insert(Some(d));
+                        if *e != Some(d) {
+                            *e = None;
+                        }
+                    } else {
+                        defaults.insert(name.clone(), None);
+                    }
+                }
+                TypeExpr::Slice { elem, .. } => {
+                    let TypeExpr::Named { name, .. } = elem.as_ref() else {
+                        continue;
+                    };
+                    if !is_tp(name) {
+                        continue;
+                    }
+                    let el = self
+                        .value_type_text(&a.value)
+                        .and_then(|t| slice_or_array_elem_text(&t).map(|e| e.to_string()));
+                    match el.as_deref().and_then(|e| self.scalar_of_type_text(e)) {
+                        Some(s) => {
+                            bound.entry(name.clone()).or_insert_with(|| s.to_string());
+                        }
+                        None => {
+                            defaults.insert(name.clone(), None);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (tp, d) in defaults {
+            if let Some(d) = d {
+                bound.entry(tp).or_insert_with(|| d.to_string());
+            }
+        }
+        Some(bound)
+    }
+
+    /// #3111 — Go's default type of an untyped numeric literal argument.
+    fn untyped_literal_default(&self, e: &Expr) -> Option<&'static str> {
+        let lit = match unwrap_parens(e) {
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => unwrap_parens(operand),
+            other => other,
+        };
+        match lit {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Float(_) | LitKind::Char(_),
+                ..
+            } => self.initializer_scalar(e),
+            _ => None,
+        }
+    }
+
     /// #1031 — the exact numeric type of a value that is provably TYPED.
     /// Literals are untyped constants (assignable to any numeric type), so
     /// they are deliberately `None` here.
     fn typed_value_scalar(&self, e: &Expr) -> Option<&'static str> {
         match unwrap_parens(e) {
-            Expr::Ident { name, .. } => self.lookup_scalar(name),
+            Expr::Ident { name, .. } => self.lookup_scalar(name).or_else(|| {
+                // #3107 — a typed file-level const keeps its declared width
+                // unless a local binding shadows it.
+                if self.scopes.iter().any(|l| l.contains_key(name.as_str()))
+                    || self
+                        .scalar_scopes
+                        .iter()
+                        .any(|l| l.contains_key(name.as_str()))
+                {
+                    None
+                } else {
+                    self.file_const_scalars.get(name.as_str()).copied()
+                }
+            }),
             // Typed arithmetic keeps its operand type: in any program that
             // builds, both operands share one type or one is an untyped
             // constant, so the typed side names the result type. A shift's
@@ -1536,18 +1964,56 @@ impl<'a> Collector<'a> {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
             },
-            // #2858: struct field scalar resolution
+            Expr::Receive { chan, .. } => self.receive_scalar(chan),
+            // #3111/#2858 — field read: generic struct instance first, else struct field scalar.
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
-                self.struct_field_scalar(&bk, name)
+                let generic = self
+                    .struct_name(&bk)
+                    .map(|full| {
+                        let sn = Checker::base_named_type_str(&full);
+                        self.ck
+                            .struct_type_params
+                            .get(sn)
+                            .is_some_and(|tp| !tp.is_empty())
+                    })
+                    .unwrap_or(false);
+                if generic {
+                    let full = self.struct_name(&bk)?;
+                    let sn = Checker::base_named_type_str(&full);
+                    let bound = self.struct_type_arg_map(&full);
+                    let (_, ty) = self.ck.structs.get(sn)?.iter().find(|(n, _)| n == name)?;
+                    self.subst_scalar_of_ty(ty, &bound)
+                } else {
+                    self.struct_field_scalar(&bk, name)
+                }
             }
-            // #2858: index into slice/array/map/string
+            // #2858 / #3111 — index read: string/container element scalar, else typed local text.
             Expr::Index { base, .. } => {
                 if self.kind_of_expr(base) == OpKind::Str {
-                    Some("uint8")
-                } else {
-                    self.container_elem_scalar_of_expr(base)
+                    return Some("uint8");
                 }
+                if let Some(sc) = self.container_elem_scalar_of_expr(base) {
+                    return Some(sc);
+                }
+                let text = self.value_type_text(base)?;
+                if let Some(rest) = text.strip_prefix("map[") {
+                    let mut depth = 1usize;
+                    for (i, ch) in rest.char_indices() {
+                        match ch {
+                            '[' => depth += 1,
+                            ']' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    return self.scalar_of_type_text(&rest[i + 1..]);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    return None;
+                }
+                self.scalar_of_type_text(slice_or_array_elem_text(&text)?)
             }
             _ => None,
         }
@@ -1638,6 +2104,12 @@ impl<'a> Collector<'a> {
         }
         if n == l.values.len() {
             return l.values.iter().map(|v| self.initializer_scalar(v)).collect();
+        }
+        if n == 2 && l.values.len() == 1 {
+            // Comma-ok receive `v, ok := <-c`: `v` takes the element type.
+            if let Expr::Receive { chan, .. } = unwrap_parens(&l.values[0]) {
+                return vec![self.receive_scalar(chan), None];
+            }
         }
         if n >= 2 && l.values.len() == 1 {
             if let Expr::Call { callee, args, .. } = unwrap_parens(&l.values[0]) {
@@ -1932,6 +2404,7 @@ impl<'a> Collector<'a> {
             self.set_container_elem_scalar(&p.name, ces);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
             self.bind_type_name(&p.name, p.ty.render());
+            self.set_vtext(&p.name, Some(p.ty.render()));
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -2166,8 +2639,22 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        for ((((name, kind), scalar), set_elem), container_elem_scalar) in
-            l.names.iter().zip(kinds).zip(scalars).zip(set_elems).zip(container_elem_scalars)
+        // #3102 — the type text each fresh binding takes.
+        let vtexts: Vec<Option<String>> = (0..l.names.len())
+            .map(|i| match (&l.ty, l.values.len() == l.names.len()) {
+                (Some(t), _) => Some(t.render()),
+                (None, true) => self.value_type_text(&l.values[i]),
+                _ => None,
+            })
+            .collect();
+        for (((((name, kind), scalar), set_elem), vtext), container_elem_scalar) in l
+            .names
+            .iter()
+            .zip(kinds)
+            .zip(scalars)
+            .zip(set_elems)
+            .zip(vtexts)
+            .zip(container_elem_scalars)
         {
             // #1031: a same-scope `:=` re-define keeps the EXISTING variable
             // (and its type) in Go, so only a fresh binding takes the
@@ -2179,6 +2666,7 @@ impl<'a> Collector<'a> {
             self.bind_kind(name, kind);
             if fresh || l.ty.is_some() {
                 self.set_scalar(name, scalar);
+                self.set_vtext(name, vtext);
                 self.set_container_elem_scalar(name, container_elem_scalar);
             }
             self.bind_set_elem(name, set_elem);
@@ -2368,10 +2856,18 @@ impl<'a> Collector<'a> {
                         // checks then catch `var b byte = c` and `n + c`.
                         let str_elem = matches!(self.kind_of_expr(expr), OpKind::Str)
                             .then(|| vars.len().saturating_sub(1));
+                        let iter_scalars = self.iterate_var_scalars(expr, vars.len());
+                        let iter_texts = self.iterate_var_texts(expr, vars.len());
                         // Unread iterate bindings are lowered to `_` at
                         // emission (issue #139); write-only ones still
                         // reject as unused (PR #536).
-                        for (vi, (v, k)) in vars.iter().zip(iter_kinds).enumerate() {
+                        for (vi, (((v, k), sc), vt)) in vars
+                            .iter()
+                            .zip(iter_kinds)
+                            .zip(iter_scalars)
+                            .zip(iter_texts)
+                            .enumerate()
+                        {
                             self.define_elidable(v, *span);
                             // #1480: a struct/array element binding is a
                             // per-iteration copy at emission (`for _, x :=
@@ -2389,7 +2885,12 @@ impl<'a> Collector<'a> {
                             self.bind_kind(v, k);
                             if str_elem == Some(vi) {
                                 self.set_scalar(v, Some("int32"));
+                            } else {
+                                self.set_scalar(v, sc);
                             }
+                            // Nested `for row in xs { for v in row }` needs
+                            // the element's own type text.
+                            self.set_vtext(v, vt);
                         }
                         // #2858: record element scalar for iterate variables
                         if let Some(iter_elem_scalar) = self.container_elem_scalar_of_expr(expr) {
@@ -2586,9 +3087,13 @@ impl<'a> Collector<'a> {
                                 OpKind::Chan(e) => *e,
                                 _ => OpKind::Unknown,
                             };
+                            // #3105 — the value binding carries the channel's
+                            // element width for the #2712 scalar check.
+                            let elem_scalar = self.receive_scalar(chan);
                             for (i, n) in names.iter().enumerate() {
                                 self.define_elidable(n, chan.span());
                                 self.bind_kind(n, if i == 0 { elem.clone() } else { OpKind::Bool });
+                                self.set_scalar(n, if i == 0 { elem_scalar } else { None });
                             }
                         }
                         SelectArmKind::Default => {}
@@ -3047,6 +3552,7 @@ impl<'a> Collector<'a> {
                     self.set_container_elem_scalar(&p.name, ces);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
                     self.bind_type_name(&p.name, p.ty.render());
+                    self.set_vtext(&p.name, Some(p.ty.render()));
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -4319,8 +4825,17 @@ impl<'a> Collector<'a> {
                     // the field's own Go spelling may differ from the typed
                     // initializer's (`int` into `int64`, `float64` into
                     // `float32`) — Go refuses that in a struct literal.
+                    // #3120: a generic struct's field is spelled with its type
+                    // parameter (`v t`); substitute the literal's type
+                    // arguments (`box[int8]` → `t = int8`) first.
+                    let field_scalar = match fty {
+                        TypeExpr::Named { name, .. } if subst.contains_key(name.as_str()) => {
+                            self.scalar_of_type_text(&subst[name.as_str()])
+                        }
+                        _ => self.scalar_of_ty(fty),
+                    };
                     let scalar_mismatch =
-                        self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
+                        self.scalar_names_conflict(field_scalar, self.typed_value_scalar(&f.value));
                     let rendered_fty = fty.render();
                     let substituted_fty = if subst.is_empty() {
                         rendered_fty
@@ -9206,4 +9721,12 @@ fn untyped_slice_head_ty(first: &Expr) -> Option<TypeExpr> {
         Expr::StructLit { ty: Some(t), .. } => Some(t.clone()),
         _ => None,
     }
+}
+
+/// #3111 — the element type text of a `[]T` / `[N]T` type text.
+fn slice_or_array_elem_text(text: &str) -> Option<&str> {
+    let rest = text.trim().strip_prefix('[')?;
+    let close = rest.find(']')?;
+    let elem = rest[close + 1..].trim();
+    (!elem.is_empty()).then_some(elem)
 }
