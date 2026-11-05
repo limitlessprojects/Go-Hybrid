@@ -838,7 +838,7 @@ impl Emitter {
             .decls
             .iter()
             .filter_map(|d| match d {
-                Decl::Struct(s) if s.type_params.is_empty() => {
+                Decl::Struct(s) => {
                     Some((s.name.clone(), s.fields.clone()))
                 }
                 _ => None,
