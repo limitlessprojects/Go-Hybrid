@@ -325,6 +325,12 @@ class TestRunnerShaValidation(unittest.TestCase):
             self.assertEqual(summary["steps"][0]["exit"], 1)
 
 
+    def test_author_stage_gh_token_and_scope_guard(self):
+        from tools import author_stage
+        self.assertFalse(author_stage.scope_ok("--- a/README.md\n+++ /dev/null\n+++ b/compiler/x.rs\n"))
+        self.assertFalse(author_stage.scope_ok("+++ b/compiler/../tools/autoland.py\n"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

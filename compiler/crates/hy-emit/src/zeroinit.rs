@@ -45,6 +45,14 @@ impl Emitter {
         self.n5_zero_init_at(ty, 0)
     }
 
+    pub(crate) fn n5_zero_init_addr(&mut self, ty: &TypeExpr) -> Option<String> {
+        if let TypeExpr::Array { len: Some(_), elem, .. } = self.n5_resolve_alias(ty) {
+            let (init, arr) = (self.n5_zero_init_at(&elem, 1)?, self.type_text(ty));
+            return Some(format!("func() *{arr} {{ var hyArr {arr}; for hyIdx := range hyArr {{ hyArr[hyIdx] = {init} }}; return &hyArr }}()"));
+        }
+        self.n5_zero_init(ty).map(|init| format!("&{}", init))
+    }
+
     fn n5_zero_init_at(&mut self, ty: &TypeExpr, depth: usize) -> Option<String> {
         if depth > MAX_DEPTH {
             return None;
@@ -55,7 +63,7 @@ impl Emitter {
             // element, so the init is one expression for a literal or const N.
             TypeExpr::Array { len: Some(_), elem, .. } => {
                 let (init, arr) = (self.n5_zero_init_at(&elem, depth + 1)?, self.type_text(ty));
-                Some(format!("func() (hyArr {arr}) {{ for i := range hyArr {{ hyArr[i] = {init} }}; return hyArr }}()"))
+                Some(format!("func() (hyArr {arr}) {{ for hyIdx := range hyArr {{ hyArr[hyIdx] = {init} }}; return hyArr }}()"))
             }
             TypeExpr::Named { name, .. } => {
                 let fields = self.n5_structs.get(&name)?.clone();
@@ -134,6 +142,7 @@ impl Emitter {
                 value: value.clone(),
                 span: *span,
             },
+            Expr::SliceLit { items, .. } if items.is_empty() => value.as_array_lit()?.2.clone(),
             _ => return None,
         };
         if let TypeExpr::Named { name, .. } = &ty {
@@ -142,7 +151,7 @@ impl Emitter {
                 return None;
             }
         }
-        self.n5_zero_init(&ty).map(|init| format!("&{}", init))
+        self.n5_zero_init_addr(&ty)
     }
 
     /// Follow user type aliases (`type counts = map[string]int`) to the
