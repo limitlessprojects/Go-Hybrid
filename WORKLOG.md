@@ -109,3 +109,12 @@
 - Suites 414 -> 416. Differential 45/45 + 90/90 x3; corpus 135 tripwire not fired x3.
 - Worklog: this commit.
 - Next queue: #3611 -> #3355 -> #3554 -> #3566 -> #3438 -> #3056 -> #2456.
+
+## Session 106 — 2026-11-05 10:10 UTC+8 tick
+- approve 9/9 ok; scan skipped.
+- Landed PR #3611 -> 0d90fc52 (hy-check: callee_reaches_foreign interprocedural escape tracing for first-class foreign callees at A5 sites + fn_call_sites caller binding; fixes #3610, produckq-boop). ALL-GREEN 418 suites (+2).
+- Landed PR #3355 -> b509d284 (hy-check: make() first type-arg routed through declared-position ty() walker — alias/StructLit/SliceLit/array/MapLit with check_map_key_comparable; fixes #3248, Dimank92). ALL-GREEN 419 suites.
+- Landed PR #3554 -> 11afb872 (hy-syntax lexer: LX6 underscore separator validation across int/fraction/exponent, is_ident_start drops _, digits-only token value; fixes #3548, gauravatwork117). ALL-GREEN 420 suites.
+- Suites 416 -> 420. Differential 45/45 + 90/90 x3; corpus 135 tripwire not fired x3.
+- Worklog: this commit.
+- Next queue: #3566 -> #3438 -> #3056 -> #2456 -> #2937-family leftovers.
