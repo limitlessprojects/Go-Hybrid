@@ -369,9 +369,16 @@ impl<'a> Checker<'a> {
             // the accepted program emitted Go that fails `go build` with
             // `invalid operation: cannot receive from send-only channel`.
             // These arms mirror `sendability::dir_ty_of_expr`'s projections.
+            Expr::Field { base, name, .. } => {
+                let base_ty = self.recv_chan_type_expr(st, base)?;
+                self.struct_fields_for_type(&base_ty)?
+                    .into_iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, t)| t)
+            }
             Expr::Index { base, .. } => {
                 let base_ty = self.recv_chan_type_expr(st, base)?;
-                match self.resolve_type_alias(&base_ty) {
+                match self.peel_pointer_and_alias(&base_ty) {
                     TypeExpr::Slice { elem, .. }
                     | TypeExpr::Array { elem, .. }
                     | TypeExpr::Map { value: elem, .. } => Some(*elem),
@@ -380,7 +387,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Slice { base, span, .. } => {
                 let base_ty = self.recv_chan_type_expr(st, base)?;
-                match self.resolve_type_alias(&base_ty) {
+                match self.peel_pointer_and_alias(&base_ty) {
                     TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
                         Some(TypeExpr::Slice { elem, span: *span })
                     }

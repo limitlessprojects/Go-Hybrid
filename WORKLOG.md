@@ -148,3 +148,17 @@
 - Suites 423 -> 428 (+5). Six landings, zero gate failures; every merge tree-asserted against its committed trial SHA pre-commit; all six landing replies posted.
 - Next queue (wave continues, oldest-first): #3706 -> #3709 -> #3711 -> #3712 -> #3713 -> #3717 -> #3721 -> #3688/#3689/#3695/#3697 -> #3671..#3677.
 - Worklog: this commit.
+
+## Session 110 — 2026-11-05 16:10 UTC+8 tick
+- env cold-recycled again; rust 1.99.0 + go1.26.9 restored, target cold-rebuilt. approve 5/5 (4989 left).
+- Landed PR #3706 -> 9b6b54a5 (kind_of_type_str via CompFamily::split adds Array/Map/option[] parses; type-param composite scalar subst; Field bases in type-name lookup + map_key_scalar_name; fixes #3705, dextermos-dev). ALL-GREEN 429 suites.
+- Landed PR #3709 -> b840d3b4 (divisor_int_fold: FnState shadow checks on len/operand consts, Unary-Neg arm w/ checked_neg; float fold consts filtered by defined; fixes #3708, aswadi). ALL-GREEN 430 suites.
+- Landed PR #3711 -> 7fe6c90e (hy-emit fn_ret_struct map + call/receiver/assoc struct shapes + ForeignTy receiver methods + Expr::Call as shape-bearing operand; fixes #3710, dextermos-dev). ALL-GREEN 431 suites.
+- Rejected PR #3712 (dup of landed #3704/d012da3c, same issue #3694, parallel ty_of_expr_at_pos resolver; hall of fame credit; offered call_ret_ty_of_expr delta as fresh follow-up). Evidence reply posted.
+- Rejected PR #3713 (dup of #3694, third claimant; hall of fame credit). Evidence reply posted.
+- Landed PR #3717 -> e128e49e (recv_chan_type_expr Field arm + peel_pointer_and_alias in Index/Slice arms; fixes #3716, aswadi). ALL-GREEN 432 suites.
+- Landed PR #3721 -> afe0420a (explicit curated imports normalized via import_path_of at insert+lookup; net/url added to package roots; fixes #3720, marhabynova). ALL-GREEN 433 suites.
+- Rejected PR #3689 (dup of landed d25a5ab7 for #3684; stale base predates #3355/#3566 rework; hall of fame credit). Evidence reply posted.
+- Suites 428 -> 433 (+5). 5 landed, 3 dup rejections, 8 written replies total this tick; every merge tree-asserted pre-commit.
+- Next queue (wave remainder): #3688 -> #3695 -> #3697 -> #3671 -> #3673 -> #3675 -> #3676 -> #3677 -> reap scan.
+- Worklog: this commit.
