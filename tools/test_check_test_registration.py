@@ -346,5 +346,74 @@ class GuardMisuseTests(unittest.TestCase):
     def test_start_directory_escaping_repo_root_is_rejected(self):
         self.assertEqual(self.run_main("python3 -m unittest discover -s .. -p 'test_*.py'\n", ["tools/test_x.py"]), 1)
 
+
+
+class HeredocRegistrationTests(unittest.TestCase):
+    """Issue #3297: here-document payloads must not register test suites."""
+
+    def test_heredoc_payload_is_not_registered(self):
+        workflow = """
+        run: |
+          cat > commands.txt <<'TEST_COMMANDS'
+          python3 -m unittest discover -s tools -p test_disabled.py
+          python3 tests/test_disabled.py
+          TEST_COMMANDS
+          python3 tests/test_live.py
+        """
+        cmds = list(guard.python_commands(workflow))
+        self.assertEqual(cmds, [["tests/test_live.py"]])
+
+    def test_heredoc_tab_strip_and_quoted_delimiters(self):
+        workflow = """
+        run: |
+          cat <<-EOF
+          \tpython3 tests/test_tab_payload.py
+          \tEOF
+          python3 tests/test_after_tab.py
+          cat <<"CUSTOM_DELIM"
+          python3 tests/test_custom_payload.py
+          CUSTOM_DELIM
+          python3 tests/test_after_custom.py
+        """
+        cmds = list(guard.python_commands(workflow))
+        self.assertEqual(cmds, [["tests/test_after_tab.py"], ["tests/test_after_custom.py"]])
+
+    def test_quoted_double_arrow_is_not_heredoc(self):
+        workflow = """
+        run: |
+          echo "<<not_heredoc"
+          python3 tests/test_real.py
+        """
+        cmds = list(guard.python_commands(workflow))
+        self.assertEqual(cmds, [["tests/test_real.py"]])
+
+    def test_chained_multiple_heredocs(self):
+        workflow = """
+        run: |
+          cat <<EOF1 <<EOF2
+          python3 tests/test_in_eof1.py
+          EOF1
+          python3 tests/test_in_eof2.py
+          EOF2
+          python3 tests/test_after_multi.py
+        """
+        cmds = list(guard.python_commands(workflow))
+        self.assertEqual(cmds, [["tests/test_after_multi.py"]])
+
+    def test_trailing_space_does_not_terminate_payload(self):
+        workflow = """
+        run: |
+          cat <<EOF
+          python3 tests/test_payload1.py
+          EOF 
+          python3 tests/test_payload2.py
+          EOF
+          python3 tests/test_finally_real.py
+        """
+        cmds = list(guard.python_commands(workflow))
+        self.assertEqual(cmds, [["tests/test_finally_real.py"]])
+
+
 if __name__ == "__main__":
     unittest.main()
+

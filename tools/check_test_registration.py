@@ -50,13 +50,91 @@ def shell_words(line):
     return list(lexer)
 
 
+def extract_heredocs(tokens):
+    """Extract (delimiter, strip_tabs) for explicit heredoc redirects.
+    Only token == "<<" counts. Quoted "<<..." strings never equal "<<".
+    """
+    heredocs = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i] == "<<":
+            if i + 1 < len(tokens):
+                next_tok = tokens[i + 1]
+                if next_tok == "-":
+                    if i + 2 < len(tokens):
+                        heredocs.append((tokens[i + 2], True))
+                        i += 3
+                        continue
+                elif next_tok.startswith("-") and len(next_tok) > 1:
+                    heredocs.append((next_tok[1:], True))
+                    i += 2
+                    continue
+                else:
+                    heredocs.append((next_tok, False))
+                    i += 2
+                    continue
+        i += 1
+    return heredocs
+
 def python_commands(workflow_text):
     """Yield arguments of explicit, single-line Python invocations."""
-    for line in workflow_text.splitlines():
-        line = line.strip()
+    lines = workflow_text.splitlines()
+    pending_heredocs = []
+    in_block_run = False
+    block_indent = None
+    base_indent = None
+
+    for raw_line in lines:
+        # Check block run boundary if inside one
+        if in_block_run:
+            if not raw_line.strip():
+                # Blank lines inside block run or heredoc
+                continue
+            line_indent = len(raw_line) - len(raw_line.lstrip(" "))
+            if block_indent is None:
+                if line_indent > base_indent:
+                    block_indent = line_indent
+                else:
+                    in_block_run = False
+                    block_indent = None
+            elif line_indent <= base_indent:
+                in_block_run = False
+                block_indent = None
+
+        # If we are consuming a heredoc payload:
+        if pending_heredocs:
+            target_delim, strip_tabs = pending_heredocs[0]
+            line_content = raw_line
+            # If in a literal run block, strip the YAML block indentation
+            if in_block_run and block_indent is not None:
+                if len(raw_line) >= block_indent and raw_line[:block_indent] == " " * block_indent:
+                    line_content = raw_line[block_indent:]
+                else:
+                    line_content = raw_line.lstrip(" ")
+            else:
+                line_content = raw_line.lstrip(" ")
+
+            if strip_tabs:
+                line_content = line_content.lstrip("\t")
+
+            # Check exact match with delimiter (no trailing whitespace stripping)
+            if line_content == target_delim:
+                pending_heredocs.pop(0)
+            continue
+
+        # Check if line declares a YAML literal block scalar: `run: |`
+        run_block_match = re.search(r"^(\s*)(?:-\s+)?run:\s*[|>][-+]?\s*(?:#.*)?$", raw_line)
+        if run_block_match:
+            in_block_run = True
+            base_indent = len(run_block_match.group(1))
+            block_indent = None
+            continue
+
+        line = raw_line.strip()
         inline_run = re.match(r"(?:-\s+)?run:\s*(.*)", line)
         if inline_run:
             line = inline_run.group(1)
+
         try:
             tokens = shell_words(line)
             # A quoted YAML run scalar wraps the whole shell command.
@@ -64,14 +142,15 @@ def python_commands(workflow_text):
                 tokens = shell_words(tokens[0])
         except ValueError:
             continue
+
+        # Check for heredocs declared on this line
+        new_heredocs = extract_heredocs(tokens)
+        if new_heredocs:
+            pending_heredocs.extend(new_heredocs)
+
         if tokens and PYTHON_RE.fullmatch(tokens[0]):
-            # Only the first simple command is covered. A following echo's
-            # -p flag must never become another unittest discovery pattern.
             end = next((i for i, token in enumerate(tokens)
                         if token and all(c in ";&|<>()" for c in token)), len(tokens))
-            # Issue #2880: an OR-list (`||`), pipeline (`|`), or background
-            # operator (`&`) masks a non-zero exit status under `set -e`
-            # (without `pipefail`), so a failing test suite would not fail CI.
             if any(
                 token and all(c in ";&|<>()" for c in token)
                 and ("|" in token or "&" in token.replace("&&", ""))
@@ -91,7 +170,7 @@ def python_commands(workflow_text):
                     arguments = arguments[1:]
                     break
                 else:
-                    break  # In particular, never interpret a -c string.
+                    break
             yield arguments
 
 
