@@ -171,3 +171,12 @@
 - Merge-gate triage for wave remainder: #3688 #3695 #3671 #3673 #3675 #3676 #3677 all auto-merge clean (merge-tree).
 - Next queue: #3673 (+9-3) -> #3675 -> #3676 -> #3677 -> #3671 -> wildcard spikes #3688 (W-004) / #3695 (W-024, dup family with #3679 — check BOUNTY.md spike policy before battery) -> fresh 11-05 wave #3727 #3730 (families: 3730/3733/3737, 3731/3732, 3736/3738, 3739-3742 — dedupe first).
 - Suites 433 -> 434 (+1). Worklog: this commit.
+
+## Session 112 — 2026-11-05 20:10 UTC+8 tick
+- env cold-recycled (new container); rust 1.99.0 + go1.26.9 restored, tarball re-cached; target warm (15s). approve 5/5 (4995 left), scan skipped.
+- NOTE: #3676/#3677 heads were force-pushed since yesterday's triage (c8da915f->523de34b, 84b22912->4194c48e) — must re-read diffs next tick, old merge-gate results void.
+- Landed PR #3673 -> 41f1b609 (n5_structs registers generic struct decls for place/binding field resolution; PlaceKind::Field member names via resolve_to_struct_name alias-hop walk; fixes #3672, dukenordj-rgb). PR fixture used Go syntax for v := range ch in .hy — parse HYB-E0002 on current main; in-merge fixture fixup to LX13 for v in ch committed inside trial merge 72489e2a (emitted-Go assertions unchanged, they pin the emitter output) and credited in merge message. ALL-GREEN 435 suites, corpus 135/135, differential 45/45+90/90, tree-asserted 56afe913, remote asserted, reply 201.
+- Landed PR #3675 -> df73308c (freeze.rs single-var Map replay binds KEY per LX13; shape.rs shape_of_expr vec![v]->vec![k]; fixes #3422, CarlitoDon). ALL-GREEN 437 suites (+2), corpus 135/135, differential 45/45+90/90, tree-asserted 5b1724da, remote asserted, reply 201.
+- Suites 434 -> 437 (+3). Two landings, zero gate failures this tick.
+- Next queue: #3676 (re-verify, force-pushed head) -> #3677 (re-verify, force-pushed) -> #3671 (CI test registration, +281-2) -> wildcard spikes #3688 (W-004) / #3695 (W-024, dup family with #3679; check BOUNTY.md spike policy) -> fresh 11-05 wave #3727..#3742 (families: 3730/3733/3737, 3731/3732, 3736/3738, 3739-3742 — dedupe first, oldest-first).
+- Worklog: this commit.
