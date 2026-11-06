@@ -923,8 +923,13 @@ impl<'a> Checker<'a> {
             TypeExpr::Named { name, .. } if self.type_aliases.contains_key(name) => {
                 Some("a method receiver must be a defined (named) type, not a type alias")
             }
+            TypeExpr::Named { name, .. } if name.contains('.') => {
+                Some("cannot define new methods on a non-local (foreign package) type")
+            }
             TypeExpr::Named { name, .. }
-                if !self.structs.contains_key(name) && is_primitive_receiver(name) =>
+                if !self.structs.contains_key(name)
+                    && self.pkg_names.get(name.as_str()) != Some(&"struct")
+                    && is_primitive_receiver(name) =>
             {
                 Some("a method receiver must be a defined (named) type, not a primitive or interface")
             }
@@ -975,6 +980,27 @@ impl<'a> Checker<'a> {
                     format!(
                         "fix: rename one of the `{}.{}` methods, or define a second receiver type for the overloaded behaviour",
                         base, f.name
+                    ),
+                ]),
+            );
+        } else if self
+            .structs
+            .get(&base)
+            .is_some_and(|fs| fs.iter().any(|(fname, _)| fname == &f.name))
+        {
+            let msg = format!(
+                "type `{}` has both field and method named `{}` — Go refuses `field and method with the same name {}` (HYB-E1003)",
+                base, f.name, f.name
+            );
+            self.diags.push(
+                Diagnostic::error("HYB-E1003", self.path.clone(), f.span, msg).with_notes(vec![
+                    format!(
+                        "why: Go shares one selector namespace for a struct's fields and methods (`field and method with the same name {}`)",
+                        f.name
+                    ),
+                    format!(
+                        "fix: rename either the `{}` field on `{}` or the `{}.{}` method",
+                        f.name, base, base, f.name
                     ),
                 ]),
             );
