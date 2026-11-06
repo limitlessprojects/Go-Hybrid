@@ -1,16 +1,15 @@
-use hy_check::{check_file, Verdict};
+use hy_check::{check_file, CheckResult, Verdict};
 use hy_syntax::parse_file;
 
-fn check(src: &str) -> hy_check::CheckReport {
-    let parsed = parse_file("test.hy", src).expect("parse should succeed");
-    check_file("test.hy", &parsed)
+fn check(src: &str) -> CheckResult {
+    let ast = parse_file("inline.hy", src)
+        .unwrap_or_else(|diags| panic!("must parse (parser contract): {:?}", diags));
+    check_file(&ast)
 }
 
 #[test]
 fn rejects_exclusive_range_with_call_in_untyped_hi_and_fixed_width_lo() {
     let src = r#"
-package main
-
 import "fmt"
 
 fn main() {
@@ -31,8 +30,6 @@ fn main() {
 #[test]
 fn rejects_exclusive_range_with_shadowed_var_in_untyped_hi_and_fixed_width_lo() {
     let src = r#"
-package main
-
 import "fmt"
 
 fn main() {
@@ -54,8 +51,6 @@ fn main() {
 #[test]
 fn allows_exclusive_range_with_inline_untyped_hi_and_fixed_width_lo() {
     let src = r#"
-package main
-
 import "fmt"
 
 fn main() {
