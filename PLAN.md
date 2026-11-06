@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — installer upgrade rollback (2026-11-06)
+
+- On base `c3c78c0`, a valid candidate followed by a payload `cp` failure removed the installed runtime and CLI before the copy. New offline regressions fail on baseline for runtime/CLI copy and promotion failures. The installer stages both payloads on the install filesystem, backs up existing paths, restores them if promotion fails, and retains rollback data if restoration itself fails. `test_install_checksums.py`: 9/9, including old launcher execution and file/mode snapshots after injected failures. Shell installer change; compiler suite not run. Hosted CI, review, and any bounty award remain pending.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.

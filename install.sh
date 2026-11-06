@@ -92,7 +92,48 @@ BASE_URL="https://github.com/$REPO/releases/download/${TAG}"
 
 # --- download + verify ---
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+STAGE=""
+TRANSACTION_ACTIVE=0
+OLD_RUNTIME=0
+OLD_BIN=0
+NEW_RUNTIME=0
+NEW_BIN=0
+
+rollback_install() {
+    [ "$TRANSACTION_ACTIVE" -eq 1 ] || return 0
+    rollback_ok=1
+    if [ "$NEW_RUNTIME" -eq 1 ]; then
+        rm -rf "$INSTALL_DIR/runtime" || rollback_ok=0
+    fi
+    if [ "$NEW_BIN" -eq 1 ]; then
+        rm -rf "$INSTALL_DIR/bin" || rollback_ok=0
+    fi
+    if [ "$OLD_RUNTIME" -eq 1 ]; then
+        mv "$STAGE/old-runtime" "$INSTALL_DIR/runtime" || rollback_ok=0
+    fi
+    if [ "$OLD_BIN" -eq 1 ]; then
+        mv "$STAGE/old-bin" "$INSTALL_DIR/bin" || rollback_ok=0
+    fi
+    if [ "$rollback_ok" -eq 1 ]; then
+        TRANSACTION_ACTIVE=0
+        return 0
+    fi
+    echo "install.sh: rollback could not restore every path; backup retained at $STAGE" >&2
+    return 1
+}
+
+cleanup() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    rollback_install || :
+    rm -rf "$TMP"
+    if [ -n "$STAGE" ] && [ "$TRANSACTION_ACTIVE" -eq 0 ]; then
+        rm -rf "$STAGE"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 echo "==> downloading $ASSET"
 fetch "$BASE_URL/$ASSET" "$TMP/$ASSET"
 if ! fetch "$BASE_URL/$ASSET.sha256" "$TMP/$ASSET.sha256"; then
@@ -138,11 +179,40 @@ if [ "$PAYLOAD_BIN" = "$LAUNCHER_BIN" ]; then
     echo "install.sh: HYB_BIN_DIR must differ from HYB_INSTALL_DIR/bin; existing installation preserved" >&2
     exit 1
 fi
-rm -rf "$INSTALL_DIR/runtime" "$INSTALL_DIR/bin"
-cp -R "$TMP/hybrid-${TAG}/runtime" "$INSTALL_DIR/runtime"
-mkdir -p "$INSTALL_DIR/bin"
-cp "$TMP/hybrid-${TAG}/hyb" "$INSTALL_DIR/bin/hyb"
-chmod +x "$INSTALL_DIR/bin/hyb"
+# Stage complete payloads on the install filesystem before moving any old path.
+STAGE="$(mktemp -d "$INSTALL_DIR/.hybrid-install.XXXXXX")"
+cp -R "$PACKAGE_DIR/runtime" "$STAGE/runtime"
+mkdir "$STAGE/bin"
+cp "$PACKAGE_DIR/hyb" "$STAGE/bin/hyb"
+chmod +x "$STAGE/bin/hyb"
+
+# Keep rollback copies beside the staged payloads until promotion succeeds.
+TRANSACTION_ACTIVE=1
+if [ -e "$INSTALL_DIR/runtime" ] || [ -L "$INSTALL_DIR/runtime" ]; then
+    if ! mv "$INSTALL_DIR/runtime" "$STAGE/old-runtime"; then
+        echo "install.sh: could not back up the existing runtime" >&2
+        exit 1
+    fi
+    OLD_RUNTIME=1
+fi
+if [ -e "$INSTALL_DIR/bin" ] || [ -L "$INSTALL_DIR/bin" ]; then
+    if ! mv "$INSTALL_DIR/bin" "$STAGE/old-bin"; then
+        echo "install.sh: could not back up the existing CLI directory" >&2
+        exit 1
+    fi
+    OLD_BIN=1
+fi
+if ! mv "$STAGE/runtime" "$INSTALL_DIR/runtime"; then
+    echo "install.sh: could not install the new runtime" >&2
+    exit 1
+fi
+NEW_RUNTIME=1
+if ! mv "$STAGE/bin" "$INSTALL_DIR/bin"; then
+    echo "install.sh: could not install the new CLI" >&2
+    exit 1
+fi
+NEW_BIN=1
+TRANSACTION_ACTIVE=0
 
 # --- launcher (bakes the install path; runtime override still wins) ---
 # Encode the path as a shell literal; the launcher parses it again later.
