@@ -182,12 +182,14 @@ fi
 if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" $CROSS_GO_ENV $QEMU_RUNNER \
         "$SMOKE/hybrid-${VER}/$HYB_OUT_NAME" build \
         "$REPO_ROOT/examples/01-hello/program.hy" -o "$SMOKE/hello" ) \
-    && $QEMU_RUNNER "$SMOKE/hello" > "$SMOKE/out.txt" 2>&1 \
-    && grep -q 'hello, Hybrid!' "$SMOKE/out.txt"; then
+    && $QEMU_RUNNER "$SMOKE/hello" > "$SMOKE/out.txt" 2> "$SMOKE/hello.err" \
+    && diff -u "$REPO_ROOT/examples/01-hello/expected.txt" "$SMOKE/out.txt" > "$SMOKE/hello.diff"; then
     echo "    smoke PASS ($PKG_OS/$ARCH${QEMU_RUNNER:+ under $QEMU_RUNNER}): $(head -1 "$SMOKE/out.txt")"
 else
     echo "SMOKE FAILED ($PKG_OS/$ARCH)" >&2
-    cat "$SMOKE/out.txt" 2>/dev/null >&2
+    for log in "$SMOKE/out.txt" "$SMOKE/hello.err" "$SMOKE/hello.diff"; do
+        if [ -f "$log" ]; then cat "$log" >&2; fi
+    done
     exit 1
 fi
 
@@ -200,12 +202,14 @@ if { [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; } || [ "$PKG_
     if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" $CROSS_GO_ENV $QEMU_RUNNER \
             "$SMOKE/hybrid-${VER}/$HYB_OUT_NAME" build \
             "$REPO_ROOT/examples/05-json-transform/program.hy" -o "$SMOKE/json" ) \
-        && $QEMU_RUNNER "$SMOKE/json" > "$SMOKE/json.txt" 2>&1 \
-        && grep -q '"ada"' "$SMOKE/json.txt"; then
+        && $QEMU_RUNNER "$SMOKE/json" > "$SMOKE/json.txt" 2> "$SMOKE/json.err" \
+        && diff -u "$REPO_ROOT/examples/05-json-transform/expected.txt" "$SMOKE/json.txt" > "$SMOKE/json.diff"; then
         echo "    bridge smoke PASS ($PKG_OS/$ARCH trampolines exercised): $(tr '\n' ' ' < "$SMOKE/json.txt" | tr -s ' ')"
     else
         echo "BRIDGE SMOKE FAILED ($PKG_OS/$ARCH — the asset is FULL only if this passes)" >&2
-        cat "$SMOKE/json.txt" 2>/dev/null >&2
+        for log in "$SMOKE/json.txt" "$SMOKE/json.err" "$SMOKE/json.diff"; do
+            if [ -f "$log" ]; then cat "$log" >&2; fi
+        done
         exit 1
     fi
 fi

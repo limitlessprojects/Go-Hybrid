@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor validation (2026-11-04): release smoke now requires the complete example stdout (hello and JSON bridge), with stderr kept for diagnostics. On base433d778, the new regressions show6 false-success cases and2 lost-diagnostic cases; after the fix all10 offline package tests pass, including an autocrlf checkout control. Rust1.99.0/Go1.26.9 Darwin-arm64: workspace2720/0, corpus135/135, differential45/45 accepted +90/90 rejected. Python3.14 tooling507/507 and native Darwin-arm64 release packaging (hello plus serde_json bridge from the tarball without cargo on PATH) pass; hosted CI pending; no language semantics changed.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.
