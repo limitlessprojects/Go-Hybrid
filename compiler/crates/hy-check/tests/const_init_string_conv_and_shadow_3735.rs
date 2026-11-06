@@ -86,3 +86,19 @@ fn const_init_valid_string_conversions_and_ascriptions_accept() {
         "const x int = 1\nconst y = x + 2\nfn main() {\n    _ = y\n}\n",
     );
 }
+
+#[test]
+fn const_init_rejects_type_param_shadowed_conversions_ascriptions_and_consts() {
+    assert_reject_e6003(
+        "type my_int = int\nfn f[my_int]() {\n    const c = my_int(1)\n    _ = c\n}\nfn main() {}\n",
+    );
+    assert_reject_e6003(
+        "type my_int = int\nfn f[my_int]() {\n    const c my_int = 1\n    _ = c\n}\nfn main() {}\n",
+    );
+    assert_reject_e6003(
+        "const k = 42\nfn f[k]() {\n    const c = k + 1\n    _ = c\n}\nfn main() {}\n",
+    );
+    assert_reject_e6003(
+        "const s = \"abc\"\nfn f[s]() {\n    const n = len(s)\n    _ = n\n}\nfn main() {}\n",
+    );
+}
