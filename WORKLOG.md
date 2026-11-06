@@ -1,4 +1,14 @@
 
+## Session 120 — 2026-11-06 16:10 UTC+8 tick
+- env cold-recycled (new rootfs); node_modules deleted FIRST per S119 lesson, rust 1.99.0 + go1.26.9 restored. approve 16/16 (4972 left). No disk incidents this tick (pre-deleted node_modules kept headroom).
+- **2 landed**:
+  - **#3753** -> `21f58ac2` (Burapa-J, fixes #3752 T24/O8): addr_loan — PlaceKind::AddrOf targets reject (&q.val/&m[k].val via place_is_map_element_or_value_projection + shape_of_place); mixed parallel rebinds gated on all-Ident targets (allow_addr_root); move-wrapped &(move ...) via unwrap_parens_and_move; Return slot-loan escape; walk_for_loop_carried two-pass while-cond replay; bind_shadow_locals_only keeps shadow accepts. MERGE trial 76722c38, tree asserted. ALL-GREEN 448 suites. Reply 201 + dup #3754.
+  - **#3757** -> `4a79347a` (Burapa-J, fixes #3756): recv — recv_chan_type_expr Pointer projection (&x), slice.pop() Fn(elem), some(x) Option(elem) w/ degraded-any, unwrap/or payload (any-elem unprojected), bare none->Option(any); bind_if_init_for_recv composite fallbacks (Recv->Chan elem, Index->Map value); match-guard option.some via composite_type_expr. MERGE trial 7a7362af, tree asserted. ALL-GREEN 449 suites. Reply 201 + dup #3758.
+- NOTE: /home/z/my-project/scripts/reply_dup.py did NOT survive sandbox recycle (recreated via Write; keep generator under scripts/ and verify existence before use).
+- Suites 447 -> 449 (+2: 3752-test, 3756-test). Zero gate failures.
+- Next queue: #3759 (const_overflow, Burapa-J) -> #3761/#3770 (bracketed generic args) -> #3763/#3769 (walk nested assign) -> #3755/#3768/#3771/#3772/#3775/#3779/#3782/#3781+#3785 (go_keyword_names ext)/#3787/#3788/#3791/#3792/#3793+#3794/#3796/#3797/#3798/#3800/#3803/#3804; spikes #3765/#3774 Track-3 route.
+- Worklog: this commit.
+
 ## Session 119 — 2026-11-06 15:10 UTC+8 tick
 - env cold-recycled (new rootfs); rust 1.99.0 + go1.26.9 restored, tarball re-cached. approve 13/13 (4992 left), scan skipped. Open PRs still >100 (list-capped); new arrivals #3796/#3797/#3798/#3800/#3803/#3804.
 - **2 landed**:
