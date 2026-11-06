@@ -3,6 +3,7 @@
 - Contributor (2026-11-05): default Actions watch selects the heavy workflow before pagination; three focused regressions pass (two failed before). The full Linux job suite passes 95/95 with no skips; earlier Windows environment limitations remain recorded in PLAN.md. Hosted CI/review pending.
 
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
+- Contributor (2026-11-06): claims-link checker now resolves angle-delimited Markdown evidence paths (including spaces) and checks `.hy` verdicts; 11 focused tests and repository guards pass. Hosted CI, review, and any bounty award remain pending. See PLAN.md.
 
 - Contributor #1165: range bounds spelled as different names of one Go integer type no longer raise a false HYB-E2009 (shared canonicaliser in `hy-check` + regression pin); workspace/corpus/differential/CI remain delivery gates.
 - Contributor #2199: a store whose target is a type name (`n string = "str"`, `q.n int = 5`) is rejected as HYB-E1002 (Row 13 BUILDABLE) — the #778 check now also covers assignment targets; declarations and plain stores unchanged; 3 new tests in `type_name_in_value_position.rs` (16/16 green).

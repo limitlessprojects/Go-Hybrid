@@ -1,5 +1,8 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — Markdown angle destinations (2026-11-06)
+
+- On base `c3c78c0`, angle-delimited CommonMark destinations in `GUARANTEES.md` evidence were not recognized when they contained spaces; `.hy` paths also retained the delimiters and failed resolution. Regression tests fail on baseline and now cover spaces, parentheses, fragments, titles, external/empty targets, missing paths, and corpus verdicts. Focused suite: 11/11; claims check: 20 rows / 14 links / 0 issues; registration, conflict-marker, and diff checks pass. Tooling-only change; compiler suite not run. Hosted CI, review, and any bounty award remain pending.
 ## Contributor validation — Actions watch workflow selection (2026-11-05)
 
 - `job.py actions watch` now queries the heavy workflow before pagination, so newer CI runs cannot hide dispatched heavy jobs. Explicit run IDs still inspect the requested workflow. No compiler or language behavior changes.
