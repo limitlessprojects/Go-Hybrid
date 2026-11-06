@@ -162,7 +162,7 @@ impl<'a> Checker<'a> {
                             if segments == &["some"] {
                                 arm_st.scope_push();
                                 self.bind_match_arm(&mut arm_st, b, subject, false);
-                                if let Some(TypeExpr::Option { elem, .. }) = self.ty_of_expr(st, subject).map(|t| self.resolve_type_alias(&t)) {
+                                if let Some(TypeExpr::Option { elem, .. }) = self.composite_type_expr(st, subject).map(|t| self.resolve_type_alias(&t)) {
                                     if let Some(bind) = arm_st.env_lookup_mut(b) {
                                         bind.ty = Some(*elem);
                                     }
