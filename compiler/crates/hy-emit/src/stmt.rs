@@ -773,42 +773,47 @@ impl Emitter {
         }
     }
 
-    pub(crate) fn expr_has_call_or_recv(e: &Expr) -> bool {
+    /// Go orders logical operations as well as calls and receives. Even a
+    /// call-free `flag && true` must be evaluated before a later hoisted `?`
+    /// call can change `flag`. Do not descend into an unevaluated closure body.
+    pub(crate) fn expr_has_ordered_evaluation(e: &Expr) -> bool {
         match e {
             Expr::Call { .. } | Expr::Receive { .. } | Expr::Try { .. } => true,
-            Expr::Binary { lhs, rhs, .. } => {
-                Self::expr_has_call_or_recv(lhs) || Self::expr_has_call_or_recv(rhs)
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(op, BinOp::And | BinOp::Or)
+                    || Self::expr_has_ordered_evaluation(lhs)
+                    || Self::expr_has_ordered_evaluation(rhs)
             }
             Expr::Unary { operand, .. }
             | Expr::AddrOf { operand, .. }
             | Expr::Move { operand, .. }
             | Expr::Paren { inner: operand, .. }
-            | Expr::Field { base: operand, .. } => Self::expr_has_call_or_recv(operand),
+            | Expr::Field { base: operand, .. } => Self::expr_has_ordered_evaluation(operand),
             Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
-                InterpPart::Expr(x) => Self::expr_has_call_or_recv(x),
+                InterpPart::Expr(x) => Self::expr_has_ordered_evaluation(x),
                 InterpPart::Lit(_) => false,
             }),
             Expr::Index { base, index, .. } => {
-                Self::expr_has_call_or_recv(base) || Self::expr_has_call_or_recv(index)
+                Self::expr_has_ordered_evaluation(base) || Self::expr_has_ordered_evaluation(index)
             }
             Expr::Slice { base, lo, hi, .. } => {
-                Self::expr_has_call_or_recv(base)
+                Self::expr_has_ordered_evaluation(base)
                     || lo
                         .as_deref()
-                        .map(Self::expr_has_call_or_recv)
+                        .map(Self::expr_has_ordered_evaluation)
                         .unwrap_or(false)
                     || hi
                         .as_deref()
-                        .map(Self::expr_has_call_or_recv)
+                        .map(Self::expr_has_ordered_evaluation)
                         .unwrap_or(false)
             }
-            Expr::StructLit { fields, .. } => {
-                fields.iter().any(|f| Self::expr_has_call_or_recv(&f.value))
-            }
-            Expr::SliceLit { items, .. } => items.iter().any(Self::expr_has_call_or_recv),
-            Expr::MapLit { entries, .. } => entries
+            Expr::StructLit { fields, .. } => fields
                 .iter()
-                .any(|(k, v)| Self::expr_has_call_or_recv(k) || Self::expr_has_call_or_recv(v)),
+                .any(|f| Self::expr_has_ordered_evaluation(&f.value)),
+            Expr::SliceLit { items, .. } => items.iter().any(Self::expr_has_ordered_evaluation),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                Self::expr_has_ordered_evaluation(k) || Self::expr_has_ordered_evaluation(v)
+            }),
             Expr::FnLit { .. } | Expr::Lit { .. } | Expr::Ident { .. } => false,
         }
     }
@@ -824,7 +829,7 @@ impl Emitter {
         {
             return Ok(());
         }
-        if Self::expr_has_call_or_recv(inner) {
+        if Self::expr_has_ordered_evaluation(inner) {
             let text = self.emit_expr(e, 0)?;
             let temp = self.next_temp("hyT");
             self.push(&format!("{} := {}", temp, text));
@@ -2186,7 +2191,7 @@ impl Emitter {
                         v, cont, lo_once, lo_once, hi_once, cont, v
                     )
                 } else if (!Self::expr_mentions_ident(hi, &v) || !var_in_scope)
-                    && !Self::expr_has_call_or_recv(hi)
+                    && !Self::expr_has_ordered_evaluation(hi)
                 {
                     format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_t, v)
                 } else {

@@ -1,5 +1,10 @@
 # Hybrid Language: Development Plan
 
+## Contributor refresh — logical evaluation before hoisted `?` (2026-11-04, #3116 / #3117)
+
+- Refreshed the original 2 November contribution onto `435e149`. The same unchanged eight real CLI tests produce six wrong-output failures and two passing controls before the fix, then pass8/8; the minimal accepted program changes `false 1` to `true 1`. The original ordered-expression predicate change and its callers are retained; no checker, dependency or lockfile change.
+- Linux Rust1.99.0 / Go1.26.9: workspace2744passed/0failed/0ignored; corpus135/135; differential45/45build/run +90/90reject; all ten examples; all35registered Python suites (551tests,0skipped),24offline installer tests, CI runner/static checks, row13sample generation/drift guard and runtime hygiene (native Linux; Windows/Darwin compile+vet) pass. All58delivery stages exit0. Refreshed-head hosted CI, review, merge and any award remain pending.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.

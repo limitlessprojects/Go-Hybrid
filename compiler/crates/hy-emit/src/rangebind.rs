@@ -216,7 +216,7 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
                         // so it counts regardless. Conservative direction:
                         // treat the name as read; a missing `_` merely leaves
                         // the old emission.
-                        if *inclusive || crate::Emitter::expr_has_call_or_recv(hi) {
+                        if *inclusive || crate::Emitter::expr_has_ordered_evaluation(hi) {
                             if expr_reads(hi, target) {
                                 return true;
                             }
