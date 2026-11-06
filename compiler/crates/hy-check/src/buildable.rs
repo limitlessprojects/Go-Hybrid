@@ -4474,6 +4474,141 @@ impl<'a> Collector<'a> {
         )
     }
 
+    /// #3385 — compare two type strings for conflict in equality comparisons.
+    fn map_or_chan_type_str_conflict(&self, target_t: &str, arg_t: &str) -> bool {
+        let t_trim = target_t.trim();
+        let a_trim = arg_t.trim();
+        if t_trim == a_trim {
+            return false;
+        }
+        if let (Some(t_num), Some(a_num)) = (
+            canonical_numeric_name(t_trim),
+            canonical_numeric_name(a_trim),
+        ) {
+            return t_num != a_num;
+        }
+        if (t_trim.starts_with('[') && a_trim.starts_with('[')) || t_trim != a_trim {
+            return true;
+        }
+        false
+    }
+
+    /// #3385 — base type name of a pointer type alias or direct `*T` spelling.
+    fn named_pointer_base_name(&self, name: &str) -> Option<String> {
+        let trimmed = name.trim();
+        if let Some(stripped) = trimmed.strip_prefix('*') {
+            return Some(stripped.trim().to_string());
+        }
+        let base = Checker::base_named_type_str(trimmed);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            match self.ck.resolve_type_alias(ty) {
+                hy_syntax::TypeExpr::Pointer { to, .. } => Some(to.render()),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// #3385 — base type of a pointer-typed expression.
+    fn pointer_base_type_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                self.named_pointer_base_name(&tn)
+            }
+            Expr::AddrOf { operand, .. } => {
+                let bare = unwrap_parens(operand);
+                if let Some(scalar) = self.typed_value_scalar(bare) {
+                    return Some(scalar.to_string());
+                }
+                if let Expr::Ident { name, .. } = bare {
+                    if let Some(tn) = self.lookup_type_name(name) {
+                        return Some(tn);
+                    }
+                }
+                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                    return Some(self.ck.resolve_type_alias(arr_ty).render());
+                }
+                None
+            }
+            Expr::Unary { op: hy_syntax::UnOp::Addr, operand, .. } => {
+                let bare = unwrap_parens(operand);
+                if let Some(scalar) = self.typed_value_scalar(bare) {
+                    return Some(scalar.to_string());
+                }
+                if let Expr::Ident { name, .. } = bare {
+                    if let Some(tn) = self.lookup_type_name(name) {
+                        return Some(tn);
+                    }
+                }
+                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                    return Some(self.ck.resolve_type_alias(arr_ty).render());
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// #3385 — element type name of a channel type alias or direct channel spelling.
+    fn named_channel_elem_name(&self, name: &str) -> Option<String> {
+        let trimmed = name.trim();
+        if let Some(rest) = trimmed
+            .strip_prefix("<-chan ")
+            .or_else(|| trimmed.strip_prefix("chan<- "))
+            .or_else(|| trimmed.strip_prefix("chan "))
+        {
+            return Some(rest.trim().to_string());
+        }
+        let base = Checker::base_named_type_str(trimmed);
+        if let Some(ty) = self.ck.type_aliases.get(base) {
+            match self.ck.resolve_type_alias(ty) {
+                hy_syntax::TypeExpr::Chan { elem, .. } => Some(elem.render()),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// #3385 — element type of a channel-typed expression.
+    fn channel_elem_type_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                self.named_channel_elem_name(&tn)
+            }
+            _ => None,
+        }
+    }
+
+    /// #3385 — resolved array type of an array-typed expression.
+    fn resolved_array_type_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let tn = self.lookup_type_name(name)?;
+                let base = Checker::base_named_type_str(&tn);
+                if let Some(ty) = self.ck.type_aliases.get(base) {
+                    let res = self.ck.resolve_type_alias(ty);
+                    if matches!(res, hy_syntax::TypeExpr::Array { .. }) {
+                        return Some(res.render());
+                    }
+                }
+                if is_sized_array_spelling(&tn) {
+                    return Some(tn);
+                }
+                None
+            }
+            _ => {
+                if let Some((_, _, arr_ty)) = unwrap_parens(e).as_array_lit() {
+                    return Some(self.ck.resolve_type_alias(arr_ty).render());
+                }
+                None
+            }
+        }
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -6019,9 +6154,39 @@ impl<'a> Collector<'a> {
                         || (lk == OpKind::Int
                             && rk == OpKind::Float
                             && !self.is_untyped_int_const(lhs));
+                    let ptr_conflict = matches!(lk, OpKind::Pointer(_))
+                        && matches!(rk, OpKind::Pointer(_))
+                        && match (
+                            self.pointer_base_type_of_expr(lhs),
+                            self.pointer_base_type_of_expr(rhs),
+                        ) {
+                            (Some(p1), Some(p2)) => self.map_or_chan_type_str_conflict(&p1, &p2),
+                            _ => false,
+                        };
+                    let chan_conflict = matches!(lk, OpKind::Chan(_))
+                        && matches!(rk, OpKind::Chan(_))
+                        && match (
+                            self.channel_elem_type_of_expr(lhs),
+                            self.channel_elem_type_of_expr(rhs),
+                        ) {
+                            (Some(c1), Some(c2)) => self.map_or_chan_type_str_conflict(&c1, &c2),
+                            _ => false,
+                        };
+                    let array_conflict = matches!(lk, OpKind::Array(_))
+                        && matches!(rk, OpKind::Array(_))
+                        && match (
+                            self.resolved_array_type_of_expr(lhs),
+                            self.resolved_array_type_of_expr(rhs),
+                        ) {
+                            (Some(a1), Some(a2)) => self.map_or_chan_type_str_conflict(&a1, &a2),
+                            _ => false,
+                        };
                     if equality_kinds_conflict(&lk, &rk)
                         || int_float_conflict
                         || self.scalar_conflict(lhs, rhs)
+                        || ptr_conflict
+                        || chan_conflict
+                        || array_conflict
                         || self.sized_array_names_differ(
                             self.typed_value_type_name(lhs).as_deref(),
                             self.typed_value_type_name(rhs).as_deref(),
