@@ -3,7 +3,7 @@
 ## Contributor validation — relative runtime Cargo target paths (2026-11-07)
 
 - `hyb` probes explicit `CARGO_TARGET_DIR` paths relative to its caller, but builds the runtime with Cargo's working directory set to `runtime/rust/hyrt`. Resolve that environment value to an absolute path before launching Cargo so both operations use the same directory; absolute paths and the unset crate-local default are preserved.
-- On base `fca2f63a`, the four new real CLI regressions have two relative-path failures and two passing absolute/unset controls. After the fix, all four pass, including caller/target paths containing spaces and second-invocation cache reuse. A separate smoke with real pinned Cargo and a dependency-free Rust staticlib also passes all four cases. Full workspace, corpus, differential and hosted CI remain pending; details in `spikes/relative-runtime-target-dir/RESULTS.md`.
+- On base `fca2f63a`, the four new real CLI regressions have two relative-path failures and two passing absolute/unset controls. After the fix, all four pass, including caller/target paths containing spaces and second-invocation cache reuse. A separate smoke with real pinned Cargo and a dependency-free Rust staticlib also passes all four cases. On `4cda40a`, macOS x86_64 / Rust 1.99.0 / Go 1.26.9 validation passes: compiler workspace 2945/2945, corpus 135/135, differential 45/45 build-and-run + 90/90 reject, registration/conflict/census/changed-test-format/whitespace guards. Hosted CI and maintainer review remain pending; details in `spikes/relative-runtime-target-dir/RESULTS.md`.
 
 ## Contributor validation — Actions watch workflow selection (2026-11-05)
 

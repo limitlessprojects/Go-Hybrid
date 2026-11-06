@@ -46,4 +46,24 @@ and one exported function. Each first invocation successfully built and
 vendored the real staticlib from the expected directory; each second
 invocation reused it without running Cargo. No package download was needed.
 
-Full workspace, corpus, differential and hosted CI validation are pending.
+## Full local validation
+
+Tested commit: `4cda40a288d2e6278610bb55a7936c47b8e29952`.
+Host: macOS x86_64, Rust 1.99.0, Go 1.26.9. The jobs ran sequentially
+under an exclusive `/tmp/heavy.lock`, with two Cargo jobs and isolated
+Cargo/Go caches. This evidence update does not change the tested code.
+
+| Check | Result |
+| --- | --- |
+| `cargo test --manifest-path compiler/Cargo.toml --locked --workspace -j2 -- --test-threads=2` | 2945 passed, 0 failed, 0 ignored |
+| `python3 tools/corpus_harness.py --bin <built-hyb>` | 135/135, managed tripwire not fired |
+| `python3 tools/differential_loop.py --bin <built-hyb>` | 45/45 build-and-run, 90/90 reject |
+| `python3 tools/check_test_registration.py` | Pass |
+| `python3 tools/check_conflict_markers.py` | Pass |
+| `python3 tools/check_corpus_census.py` | All 7 count surfaces agree |
+| `rustfmt --check --edition 2021 compiler/crates/hyb/tests/vendor_runtime_target_dir.rs` | Pass |
+| `git diff --check` | Pass |
+
+Existing unused-code warnings for `hy-check::resolve::Mode` and the
+`import_shadowing_guards` test helper remain. Hosted CI and maintainer
+review are pending.
