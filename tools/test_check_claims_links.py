@@ -59,6 +59,66 @@ class CheckClaimsLinksTest(unittest.TestCase):
         self.assertEqual([i["kind"] for i in report["issues"]], ["missing"])
         self.assertIn("15-good.hy", report["issues"][0]["target"])
 
+    def set_evidence(self, target):
+        (self.root / "GUARANTEES.md").write_text(
+            "## The claims table\n\n"
+            "| # | Surface | Checker | Claim | Evidence |\n"
+            "|---|---|---|---|---|\n"
+            f"| 1 | spawn | test | Guaranteed | [proof]({target}) (reject) |\n",
+            encoding="utf-8")
+
+    def assert_outside_repository(self, target):
+        self.set_evidence(target)
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["issues"], [
+            {"row": 1, "kind": "outside-repository", "target": target}])
+
+    def test_parent_traversal_cannot_certify_external_evidence(self):
+        with tempfile.TemporaryDirectory(dir=self.root.parent) as directory:
+            external = Path(directory) / "proof.hy"
+            external.write_text("// EXPECTED-VERDICT: REJECT A1c\n", encoding="utf-8")
+            self.assert_outside_repository("../" + external.parent.name + "/proof.hy")
+
+    def test_absolute_paths_are_not_repository_relative_citations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            external = Path(directory) / "proof.hy"
+            external.write_text("// EXPECTED-VERDICT: REJECT A1c\n", encoding="utf-8")
+            for target in (external, self.root / "tests/checker-corpus/01-bad.hy"):
+                with self.subTest(target=target):
+                    self.assert_outside_repository(str(target))
+
+    def test_symlink_cannot_certify_external_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            external = Path(directory) / "proof.hy"
+            external.write_text("// EXPECTED-VERDICT: REJECT A1c\n", encoding="utf-8")
+            link = self.root / "proof.hy"
+            try:
+                link.symlink_to(external)
+            except (OSError, NotImplementedError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+            self.assert_outside_repository("./proof.hy")
+
+    def test_normalized_relative_path_inside_repository_still_passes(self):
+        (self.root / "docs").mkdir()
+        self.set_evidence("docs/../tests/checker-corpus/01-bad.hy#example")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(json.loads(result.stdout)["ok"])
+
+    def test_symlink_to_evidence_inside_repository_still_passes(self):
+        link = self.root / "proof.hy"
+        try:
+            link.symlink_to("tests/checker-corpus/01-bad.hy")
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"symlinks unavailable: {error}")
+        self.set_evidence("./proof.hy")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(json.loads(result.stdout)["ok"])
+
     def test_verdict_mismatch_is_reported(self):
         (self.root / "tests" / "checker-corpus" / "15-good.hy").write_text(
             "// EXPECTED-VERDICT: REJECT A1c\n", encoding="utf-8")
