@@ -316,3 +316,23 @@
 - Suites 453 -> 455 (+2: issue_3240, issue_3572). Three landings, one gate-fail reply, one dup reply, zero silent closes.
 - Next queue: #3787/#3788 -> #3791/#3792 -> #3793+#3794 (shadowed strings/http family) -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route; fresh wave 3807..3881 family scan+dedupe (note #3898/#3877/#1912 approved this tick).
 - Worklog: this commit.
+
+## Session 127 — 2026-11-07 04:10 UTC+8 tick
+- env cold-recycled on stale session-44 snapshot; node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached, main fast-forwarded c403585c -> fca2f63a (S126 head). approve 20/20 (4980 left), scan skipped.
+- **NEW PATTERN — chronology-only PLAN.md conflicts resolved in-merge (doctrine-compliant fixture fixups, credited)**: both #3787/#3788 were authored on old base c3c78c0 and prepend contributor notes at the PLAN.md top; every landed PR since shifts the header, so the note hunks collide while all code auto-merges. Resolution: PR note re-inserted at top verbatim, fixup committed inside the merge, named in the credit commit + landing reply. Code conflicts (#3775-style, divergent function rewrites) still go the gate-fail evidence-reply route.
+- **2 landed**:
+  - **#3787** -> `471e2117` (liudabo-art): check_claims_links.py LINK_RE accepts angle-delimited CommonMark destinations (spaces/parens/fragments/titles), angled .hy targets unwrapped before is_checkable; tools suite extended (11/11 OK), claims check on landed GUARANTEES.md 20 rows/14 links/0 issues. Battery on merged main: 455 suites, corpus 135/135 tripwire clean, differential FULL AGREEMENT. PLAN.md in-merge fixup. Remote asserted.
+  - **#3788** -> `8b914525` (liudabo-art): install.sh payload staging on install filesystem + rollback_install/cleanup trap + signal mapping (destroys destroy-then-copy failure window); test_install_checksums.py extended 9/9 OK incl. injected-failure snapshots. Battery on merged main: 455 suites, corpus 135/135, differential FULL AGREEMENT. PLAN.md in-merge fixup. Remote asserted.
+- Suites 455 (unchanged — tools/installer PRs add no rust suites). Two landings, zero gate fails, zero dup replies, zero silent closes.
+- Next queue: #3791 (cyzcz, some(v) arm body redefinition, fixes #3790) -> #3792 (kjaylee, hy-diag alias normalization, fixes #3786) -> #3793+#3794 (shadowed strings/http family) -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route; fresh wave 3807..3881 family scan+dedupe.
+- Worklog: this commit.
+
+## Session 128 — 2026-11-07 05:10 UTC+8 tick
+- env cold-recycled on stale session-44 snapshot; node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached, main fast-forwarded c403585c -> b62b87f6 (S127 head). approve 17/17 (4958 left), scan skipped.
+- Extension-landing pattern reused (as with #3759 extending #3625): #3791 verified as a genuine EXTENSION of landed 62b1e857 (grep -S proved main had wraps_body at only 2 of the some(v) emission sites; the breads/greads chain paths and needs_ordered_arms lowering still unwrapped) — merge gate confirmed the already-wrapped sites auto-merge as identical changes, only missing paths added. Not a dup of 62b1e857's author; extension credit to cyzcz with the lineage named in the merge commit and reply.
+- **2 landed**:
+  - **#3791** -> `6e6fb517` (cyzcz, fixes #3790): hy-emit stmt.rs nested-scope wrap for redefining some(v) arm bodies extended to guarded-chain (breads/greads) + ordered-arms lowerings; match_arm_redeclare_scope 6->8 tests (guarded multi-arm, ordered arms; injection inside guard block + body-only wrap asserted on emitted Go). MERGE case. Trial-tree-asserted 6aa1f127, remote asserted. ALL-GREEN 455 suites, corpus 135/135, differential FULL AGREEMENT. Landing reply 201.
+  - **#3792** -> `8755ba23` (kjaylee, fixes #3786): hy-diag trim_code_query shared normalizer (brackets/quotes/angles/parens/trailing punctuation), lookup resolves (E3003)/<HYB-E3003>/E-3003/HYB-prefixed machine names, coherence assert normalized; +1 suite (456 total). MERGE case. Trial-tree-asserted 2f7042a9, remote asserted. ALL-GREEN 456 suites, corpus 135/135, differential FULL AGREEMENT. Landing reply 201.
+- Suites 455 -> 456 (+1: diag alias suite; #3791 extended an existing suite). Two landings, zero gate fails, zero dup replies, zero silent closes.
+- Next queue: #3793+#3794 (shadowed strings/http family — dedupe first) -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route; fresh wave 3807..3881 family scan+dedupe.
+- Worklog: this commit.
