@@ -291,3 +291,15 @@
 - Suites 452 -> 453 (+1: issue_3767 test file). One landing, one dup reply, zero gate failures.
 - Next queue: #3755 (EazyHood job-watch, tools) -> #3771/#3772 -> #3775 -> #3779/#3782 (installer family, dedupe) -> #3781+#3785+#3841 (go_keyword_names TypeExpr walk family, extends landed #3677 — three-way dedupe first) -> #3787/#3788 -> #3791/#3792 -> #3793+#3794 -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route. Fresh wave 3807..3881 needs family scan+dedupe.
 - Worklog: this commit.
+
+## Session 125 — 2026-11-06 23:10 UTC+8 tick
+- env cold-recycled on stale session-44 snapshot; node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached, main fast-forwarded c403585c -> b4d1ded7. approve 18/18 (4955 left), scan skipped.
+- **S119 false-red recurrence handled by protocol**: first full-suite run on #3755 failed hy-emit emitter test ("go run failed on emitted Go") at 89% disk — test passes in isolation, suite re-ran 453/453 clean after freeing 610M incremental cache. No source change; documented in merge commit. False-red protocol (isolate re-run + free space + full re-run) worked first try.
+- go_keyword_names TypeExpr-walk family 3-way patch-id matrix: #3781 34c946c7 vs #3785 4968dd58 vs #3841 fec67279 — ALL DISTINCT, first-to-land = oldest #3781.
+- **2 landed**:
+  - **#3755** -> `9a6d169e` (EazyHood): job.py actions watch (no run_id) queries heavy.yml workflow runs before pagination; explicit run IDs unchanged. PR pytest 52/52 incl. new ActionsWatchWorkflowTests. MERGE case. Trial-tree-asserted 7368f2bd, remote asserted. ALL-GREEN 453 suites/2933 tests (after false-red re-run), corpus 135/135, differential 45/45+90/90. Landing reply 201.
+  - **#3781** -> `d9cd4e38` (ocakciomursel-pixel, extends landed #3677): go_keyword_names kw_type TypeExpr walker (const/struct-field/alias/receiver/params/results/locals; pointer/slice/chan/option/map/fn recurse; array lens re-walked as exprs) — rejects `default` as fn-type param name in all type positions; 12 new cases in existing suite. MERGE case. Trial-tree-asserted 4871db35, remote asserted. ALL-GREEN 453 suites/2933 tests, corpus 135/135, differential 45/45+90/90. Landing reply 201.
+- **2 dup hall-of-fame replies**: #3785 (Primuez), #3841 (dextermos-dev). 201 x2. PRs stay open as artifacts.
+- Suites 453 (unchanged — both PRs extend existing suites). Two landings, two dup replies, one false-red handled, zero real gate failures.
+- Next queue: #3771/#3772 -> #3775 -> #3779/#3782 (installer family, dedupe) -> #3787/#3788 -> #3791/#3792 -> #3793+#3794 -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route. Fresh wave 3807..3881 needs family scan+dedupe (many cyzcz/Burapa-J/dextermos-dev/bradwue313 entries).
+- Worklog: this commit.
