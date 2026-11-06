@@ -23,7 +23,7 @@
 //! and the closure walk (closures.rs — FnLit bodies sit outside the flat
 //! walk, the A5 perimeter).
 
-use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
+use crate::model::{unwrap_parens_and_move, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{Expr, ForKind, LitKind, Stmt, TypeExpr};
 
@@ -153,7 +153,7 @@ impl<'a> Checker<'a> {
         if depth > 32 {
             return None;
         }
-        match unwrap_parens(expr) {
+        match unwrap_parens_and_move(expr) {
             Expr::Lit {
                 kind: LitKind::Float(_),
                 ..
@@ -213,7 +213,7 @@ impl<'a> Checker<'a> {
                 return Some("pointer".to_string());
             }
             Expr::Call { callee, args, .. } => {
-                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                if let Expr::Ident { name, .. } = unwrap_parens_and_move(callee) {
                     if st.env_lookup(name).is_none()
                         && !self.fns.contains_key(name.as_str())
                         && !self.structs.contains_key(name.as_str())
@@ -248,7 +248,7 @@ impl<'a> Checker<'a> {
         // the initializer through the file const map (#998 pattern) and
         // classify the literal. Block-scoped consts stay fail-open (no
         // const-value map in FnState — the #998 precedent).
-        if let Expr::Ident { name, .. } = unwrap_parens(expr) {
+        if let Expr::Ident { name, .. } = unwrap_parens_and_move(expr) {
             if st.env_lookup(name).is_none() {
                 if let Some(b) = self.consts.get(name.as_str()) {
                     if let Some(ty) = &b.ty {
@@ -376,8 +376,8 @@ impl<'a> Checker<'a> {
     /// The bound's INTEGER type when a typed expression fixes it — `None`
     /// for untyped literals and untyped consts, which adapt to the
     /// counter's type in the lowering (and in Go's constant arithmetic).
-    fn typed_int_bound(&self, st: &FnState, e: &Expr) -> Option<String> {
-        match unwrap_parens(e) {
+    pub(crate) fn typed_int_bound(&self, st: &FnState, e: &Expr) -> Option<String> {
+        match unwrap_parens_and_move(e) {
             Expr::Lit { .. } => None,
             Expr::Ident { name, .. } => {
                 if st.env_lookup(name).is_none() {
@@ -419,7 +419,7 @@ impl<'a> Checker<'a> {
             Expr::Call { callee, args, .. } => {
                 // a fixed-width conversion names its own type: `u32(0)`
                 // is a u32 bound regardless of what ty_of_expr infers.
-                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                if let Expr::Ident { name, .. } = unwrap_parens_and_move(callee) {
                     if st.env_lookup(name).is_none()
                         && !self.fns.contains_key(name.as_str())
                         && !self.structs.contains_key(name.as_str())
@@ -444,12 +444,32 @@ impl<'a> Checker<'a> {
                             && args.len() == 1
                             && !args[0].spread
                             && !self.type_aliases.contains_key(name.as_str())
-                            && matches!(
-                                self.shape_of_expr(st, &args[0].value),
-                                TypeShape::Slice(_) | TypeShape::Map(_, _) | TypeShape::Chan(_)
-                            )
+                            && match self.shape_of_expr(st, &args[0].value) {
+                                TypeShape::Slice(_) | TypeShape::Map(_, _) | TypeShape::Chan(_) => true,
+                                TypeShape::Str => name == "len" && match unwrap_parens_and_move(&args[0].value) {
+                                    Expr::Ident { name: s, .. } => st.env_lookup(s).is_some_and(|b| !b.immutable),
+                                    Expr::Index { .. } | Expr::Field { .. } | Expr::Call { .. } | Expr::Receive { .. } => true,
+                                    _ => false,
+                                },
+                                TypeShape::Struct(Some(ref n)) => {
+                                    name == "len"
+                                        && !self.structs.contains_key("set")
+                                        && (n.starts_with("set[") || n == "set")
+                                }
+                                _ => false,
+                            }
                         {
                             return Some("int".to_string());
+                        }
+                        if matches!(name.as_str(), "min" | "max")
+                            && !self.type_aliases.contains_key(name.as_str())
+                        {
+                            if let Some(w) = args.iter().find_map(|a| self.typed_int_bound(st, &a.value)) {
+                                return Some(w);
+                            }
+                            if !args.is_empty() && args.iter().all(|a| self.non_integer_bound_kind(st, &a.value).is_none()) {
+                                return Some("int".to_string());
+                            }
                         }
                     }
                 }
@@ -507,14 +527,24 @@ impl<'a> Checker<'a> {
                 let chan_ty = self
                     .ty_of_expr(st, expr)
                     .or_else(|| {
-                        if let Expr::Ident { name, .. } = unwrap_parens(expr) {
+                        if let Expr::Ident { name, .. } = unwrap_parens_and_move(expr) {
                             let root = crate::freeze::resolve_alias(st, name);
                             self.lookup_binding(st, &root).and_then(|b| b.ty.clone())
                         } else {
                             None
                         }
                     })
-                    .or_else(|| self.composite_type_expr(st, expr));
+                    .or_else(|| self.composite_type_expr(st, expr))
+                    .or_else(|| match unwrap_parens_and_move(expr) {
+                        Expr::Call { callee, .. } => match unwrap_parens_and_move(callee) {
+                            Expr::Field { base, name, .. } => {
+                                let rb = Self::base_named_type(&self.peel_pointer_and_alias(&self.composite_type_expr(st, base)?))?;
+                                self.method_decls.get(&(rb, Self::base_named_type_str(name).to_string()))?.results.first().map(|r| r.ty.clone())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    });
                 if let Some(ty) = chan_ty {
                     let resolved = self.resolve_type_alias(&ty);
                     if matches!(

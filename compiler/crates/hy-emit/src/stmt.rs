@@ -1066,7 +1066,7 @@ impl Emitter {
     /// convention (1, true). None = unknown → callers keep today's shape.
     fn call_results(&self, e: &Expr) -> Option<(usize, bool)> {
         let callee = match e {
-            Expr::Try { operand, .. } => match operand.as_ref() {
+            Expr::Try { operand, .. } => match Self::peel_parens(operand) {
                 Expr::Call { callee, .. } => callee.as_ref(),
                 _ => return None,
             },
@@ -1311,6 +1311,7 @@ impl Emitter {
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
         let e = Self::peel_parens(e);
+        if let Expr::Move { operand, .. } | Expr::AddrOf { operand, .. } | Expr::Unary { op: UnOp::Addr, operand, .. } = e { return self.binding_kind_of(operand); }
         if let Expr::Ident { name, .. } = e {
             return self.bindings.get(name).copied().unwrap_or(BindingKind::Plain);
         }
@@ -1331,7 +1332,7 @@ impl Emitter {
             }
         }
         let (call, args) = match e {
-            Expr::Try { operand, .. } => match operand.as_ref() {
+            Expr::Try { operand, .. } => match Self::peel_parens(operand) {
                 Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
                 _ => return BindingKind::Plain,
             },
@@ -1367,21 +1368,41 @@ impl Emitter {
         // binding resolves through the shape table (Batch I, corpus 13:
         // `s := summary(doc)?` — s.set normalizes like any rust-call
         // result).
-        if let Expr::Ident { name, .. } = call {
-            if let Some((_, _, Some(kind), _)) = self.fn_shapes.get(name.as_str()) {
-                return *kind;
+        let callee_base = match Self::peel_parens(call) {
+            Expr::Index { base, .. } => Self::peel_parens(base),
+            other => other,
+        };
+        let fn_name = match callee_base {
+            Expr::Ident { name, .. } => Some(name.split('[').next().unwrap_or(name).to_string()),
+            Expr::Field { base, name, .. } => {
+                let head = name.split('[').next().unwrap_or(name);
+                if let Some(recv_sn) = self.user_struct_name_of(base) {
+                    Some(format!("{recv_sn}.{head}"))
+                } else if matches!(Self::peel_parens(base), Expr::Ident { .. }) && !self.local_vars.contains(&Self::peel_parens(base).render()) {
+                    Some(format!("{}.{head}", Self::peel_parens(base).render()))
+                } else {
+                    None
+                }
             }
+            _ => None,
+        };
+        if let Some(fn_head) = fn_name.as_deref().filter(|h| !self.local_vars.contains(*h)) {
+            if let Some((_, _, Some(kind), _)) = self.fn_shapes.get(fn_head) { return *kind; }
         }
         // make(chan …) → Chan (single-var range emits the value directly).
         // Only classify as Chan if the first argument is a channel type.
         // make([]T, n) (SliceLit) and make(map[K]V) (MapLit) must remain Plain
         // so single-var range binds elements/keys rather than channel values.
-        if matches!(Self::peel_parens(call), Expr::Ident { name, .. } if name == "make") {
+        if matches!(Self::peel_parens(call), Expr::Ident { name, .. } if (name == "make" || name == "new") && !self.local_vars.contains(name.as_str()) && !self.fn_shapes.contains_key(name.as_str())) {
             return match args.first().map(|a| Self::peel_parens(&a.value)) {
-                Some(Expr::Ident { name, .. }) => self
-                    .n5_aliases
-                    .get(name)
-                    .and_then(|t| self.binding_kind_of_ty(t))
+                Some(Expr::Ident { name, span }) => self
+                    .binding_kind_of_ty(&TypeExpr::Named { name: name.clone(), span: *span })
+                    .unwrap_or(BindingKind::Plain),
+                Some(Expr::Field { base, name, span }) if matches!(Self::peel_parens(base), Expr::Ident { .. }) => self
+                    .binding_kind_of_ty(&TypeExpr::Named { name: format!("{}.{name}", base.render()), span: *span })
+                    .unwrap_or(BindingKind::Plain),
+                Some(Expr::Index { base, index, span }) => self
+                    .binding_kind_of_ty(&TypeExpr::Named { name: format!("{}[{}]", base.render(), index.render()), span: *span })
                     .unwrap_or(BindingKind::Plain),
                 Some(v) => self.binding_kind_of(v),
                 None => BindingKind::Plain,
@@ -1698,7 +1719,7 @@ impl Emitter {
             PlaceKind::Field { base, name } => {
                 let f = self.n5_structs.get(self.user_struct_name_of_place(base)?)?.iter().find(|f| &f.name == name)?;
                 let fty = super::base_ty_name(self.resolve_type_alias(&f.ty))?;
-                self.struct_fields.get_key_value(fty.as_str()).map(|(k, _)| k.as_str())
+                self.resolve_to_struct_name(&fty)
             }
             _ => None,
         }

@@ -23,7 +23,7 @@
 
 use std::collections::HashSet;
 
-use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
+use crate::model::{as_addr_of, unwrap_parens_and_move, Checker, FnState, TypeShape};
 use hy_diag::Diagnostic;
 use hy_syntax::{Block, Expr, ForKind, MatchPattern, Param, Place, PlaceKind, SelectArmKind, Stmt};
 
@@ -46,10 +46,10 @@ impl<'a> Checker<'a> {
     /// copy back into `operand` at the loan's last use, so `operand` must
     /// be assignable in Go.
     pub(crate) fn check_slot_loan_operand_addressable(&mut self, st: &FnState, value: &Expr) {
-        let Some(operand) = as_addr_of(value) else {
+        let Some(operand) = as_addr_of(unwrap_parens_and_move(value)) else {
             return;
         };
-        let operand = unwrap_parens(operand);
+        let operand = unwrap_parens_and_move(operand);
         if !matches!(operand, Expr::Index { .. } | Expr::Field { .. }) {
             return;
         }
@@ -78,12 +78,23 @@ impl<'a> Checker<'a> {
             .push(Diagnostic::error("HYB-E2010", self.path.clone(), span, msg).with_notes(notes));
     }
 
+    fn addr_place_shape(&self, st: &FnState, p: &Place) -> Option<TypeShape> {
+        self.place_shape(st, p).or_else(|| self.place_target_ty(st, p).map(|t| self.shape_of_type(&t)))
+    }
+
+    fn addr_expr_shape(&self, st: &FnState, e: &Expr) -> TypeShape {
+        match self.shape_of_expr(st, e) {
+            TypeShape::Unknown => self.composite_type_expr(st, e).map(|t| self.shape_of_type(&t)).unwrap_or(TypeShape::Unknown),
+            s => s,
+        }
+    }
+
     /// `Some(map element)` when `p` is provably not a Go assignment target.
     /// A bare map index `m[k]` is assignable even though it is not
     /// addressable.
     fn place_unassignable_at<'p>(&self, st: &FnState, p: &'p Place) -> Option<&'p Place> {
         if let PlaceKind::Index { base, .. } = &p.kind {
-            if matches!(self.place_shape(st, base), Some(TypeShape::Map(..))) {
+            if matches!(self.addr_place_shape(st, base), Some(TypeShape::Map(..))) {
                 return None;
             }
         }
@@ -93,12 +104,12 @@ impl<'a> Checker<'a> {
     /// `Some(map element)` when `p` is provably not addressable in Go.
     fn place_unaddressable_at<'p>(&self, st: &FnState, p: &'p Place) -> Option<&'p Place> {
         match &p.kind {
-            PlaceKind::Index { base, .. } => match self.place_shape(st, base) {
+            PlaceKind::Index { base, .. } => match self.addr_place_shape(st, base) {
                 Some(TypeShape::Map(..)) | Some(TypeShape::Str) => Some(p),
                 Some(TypeShape::Array(_)) => self.place_unaddressable_at(st, base),
                 _ => None,
             },
-            PlaceKind::Field { base, .. } => match self.place_shape(st, base) {
+            PlaceKind::Field { base, .. } => match self.addr_place_shape(st, base) {
                 Some(TypeShape::Struct(_)) => self.place_unaddressable_at(st, base),
                 _ => None,
             },
@@ -107,8 +118,8 @@ impl<'a> Checker<'a> {
     }
 
     fn expr_unassignable_at<'e>(&self, st: &FnState, e: &'e Expr) -> Option<&'e Expr> {
-        if let Expr::Index { base, .. } = unwrap_parens(e) {
-            if matches!(self.shape_of_expr(st, base), TypeShape::Map(..)) {
+        if let Expr::Index { base, .. } = unwrap_parens_and_move(e) {
+            if matches!(self.addr_expr_shape(st, base), TypeShape::Map(..)) {
                 return None;
             }
         }
@@ -116,23 +127,24 @@ impl<'a> Checker<'a> {
     }
 
     fn expr_unaddressable_at<'e>(&self, st: &FnState, e: &'e Expr) -> Option<&'e Expr> {
-        let e = unwrap_parens(e);
+        let e = unwrap_parens_and_move(e);
         match e {
-            Expr::Index { base, .. } => match self.shape_of_expr(st, base) {
+            Expr::Index { base, .. } => match self.addr_expr_shape(st, base) {
                 TypeShape::Map(..) | TypeShape::Str => Some(e),
                 TypeShape::Array(_) => self.expr_unaddressable_at(st, base),
                 _ => None,
             },
-            Expr::Field { base, .. } => match self.shape_of_expr(st, base) {
+            Expr::Field { base, .. } => match self.addr_expr_shape(st, base) {
                 TypeShape::Struct(_) => self.expr_unaddressable_at(st, base),
                 _ => None,
             },
+            Expr::Try { operand, .. } => self.expr_unaddressable_at(st, operand),
             Expr::Call { .. }
             | Expr::StructLit { .. }
             | Expr::SliceLit { .. }
             | Expr::Receive { .. }
                 if matches!(
-                    self.shape_of_expr(st, e),
+                    self.addr_expr_shape(st, e),
                     TypeShape::Struct(_) | TypeShape::Array(_)
                 ) =>
             {
