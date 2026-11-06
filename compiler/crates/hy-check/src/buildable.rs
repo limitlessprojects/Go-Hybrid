@@ -1775,9 +1775,8 @@ impl<'a> Collector<'a> {
             || self.ck.struct_type_params.contains_key(head)
             || self.ck.enums.contains_key(name)
             || self.ck.type_aliases.contains_key(name)
-            || name == "any"
-            || name == "error"
-            || crate::const_init::is_conversion_type_name(name);
+            || crate::const_init::is_conversion_type_name(name)
+            || matches!(name, "any" | "error" | "interface{}");
         if !is_declared_type {
             return;
         }
@@ -1788,6 +1787,40 @@ impl<'a> Collector<'a> {
                 name, name
             ),
             "a type name can only be used in a type position or as a conversion callee (`T(x)`)",
+        );
+    }
+
+    fn check_type_name_in_target_position(&mut self, name: &str, span: Span) {
+        if self
+            .scopes
+            .iter()
+            .rev()
+            .any(|layer| layer.contains_key(name))
+        {
+            return;
+        }
+        if self.ck.consts.contains_key(name) {
+            return;
+        }
+        let head = Checker::base_named_type_str(name);
+        if self.ck.fns.contains_key(name) || self.ck.fns.contains_key(head) {
+            return;
+        }
+        let is_declared_type = self.ck.structs.contains_key(name)
+            || self.ck.enums.contains_key(name)
+            || self.ck.type_aliases.contains_key(name)
+            || crate::const_init::is_conversion_type_name(name)
+            || matches!(name, "any" | "error" | "interface{}");
+        if !is_declared_type {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "`{}` is a type, not a value — Go refuses `{} (type) is not an expression` (HYB-E1002)",
+                name, name
+            ),
+            "type annotations are only legal in declarations (`var x T = ...` or `x := ...`), not in assignment statements; an assignment target must be a variable, field, or index expression",
         );
     }
 
@@ -2695,6 +2728,7 @@ impl<'a> Collector<'a> {
     fn place(&mut self, p: &Place, op: AssignOp) {
         match &p.kind {
             PlaceKind::Ident(n) => {
+                self.check_type_name_in_target_position(n, p.span);
                 // A bare `x = v` store is the ONE target form Go does not
                 // count as a read; `x++`, `x += 1` and every non-ident
                 // target (`x[k] = v`, `x.f = v`, `&x`) read the root.
@@ -2720,6 +2754,21 @@ impl<'a> Collector<'a> {
                 self.place_read(p);
             }
             PlaceKind::Field { base, name } => {
+                if let PlaceKind::Ident(pkg) = &base.kind {
+                    if self.ck.packages.contains(pkg) || crate::foreign::BUILTIN_PACKAGES.contains(&pkg.as_str()) {
+                        let full = format!("{}.{}", pkg, name);
+                        if crate::foreign::foreign_named_type(&full).is_some() {
+                            self.emit_e1002(
+                                p.span,
+                                format!(
+                                    "`{}` is a type, not a value - Go refuses `{} (type) is not an expression` (HYB-E1002)",
+                                    full, full
+                                ),
+                                "type annotations are only legal in declarations (`var x T = ...` or `x := ...`), not in assignment statements; an assignment target must be a variable, field, or index expression",
+                            );
+                        }
+                    }
+                }
                 let bk = self.kind_of_place(base);
                 self.check_field_selector_kind(&base.render(), name, &bk, p.span);
                 self.check_range_copy_write(p);
