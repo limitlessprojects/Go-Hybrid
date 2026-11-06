@@ -372,11 +372,31 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
     const SYNC_WAIT_GROUP: &[&str] = &["add", "done", "wait"];
     const SYNC_ONCE: &[&str] = &["do"];
+    const SYNC_COND: &[&str] = &["wait", "signal", "broadcast"];
+    const SYNC_POOL: &[&str] = &["get", "put"];
+    const SYNC_MAP: &[&str] = &[
+        "load",
+        "store",
+        "delete",
+        "load_or_store",
+        "load_and_delete",
+        "range",
+        "compare_and_swap",
+        "compare_and_delete",
+        "swap",
+    ];
+    const TIME_TICKER: &[&str] = &["stop", "reset"];
+    const TIME_TIMER: &[&str] = &["stop", "reset"];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
         "sync.once" | "sync.Once" => Some(SYNC_ONCE),
+        "sync.cond" | "sync.Cond" => Some(SYNC_COND),
+        "sync.pool" | "sync.Pool" => Some(SYNC_POOL),
+        "sync.map" | "sync.Map" => Some(SYNC_MAP),
+        "time.ticker" | "time.Ticker" => Some(TIME_TICKER),
+        "time.timer" | "time.Timer" => Some(TIME_TIMER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
