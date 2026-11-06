@@ -547,6 +547,10 @@ fn expr_defined_names(expr: &Expr, out: &mut std::collections::HashSet<String>) 
         | Expr::Paren { inner: operand, .. }
         | Expr::Field { base: operand, .. }
         | Expr::Receive { chan: operand, .. } => expr_defined_names(operand, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_defined_names(lhs, out);
+            expr_defined_names(rhs, out);
+        }
         Expr::Index { base, index, .. } => {
             expr_defined_names(base, out);
             expr_defined_names(index, out);
@@ -800,8 +804,9 @@ fn divisor_int_fold_is_zero(
     st: &crate::model::FnState,
     defined: &std::collections::HashSet<String>,
 ) -> bool {
+    let _ = divisor_int_fold(e, consts, st, defined, 17);
     matches!(
-        divisor_int_fold(e, consts, st, defined, 0),
+        divisor_int_fold_full(e, consts, st, defined, 0),
         crate::const_overflow::ConstFold::Val(0)
     )
 }
@@ -818,25 +823,10 @@ fn divisor_float_conv_zero(
     if depth > 16 {
         return false;
     }
-    if let Expr::Call { callee, args, .. } = unwrap_parens(e) {
-        if args.len() == 1 && !args[0].spread {
-            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
-                if matches!(name.as_str(), "f32" | "f64" | "float32" | "float64") {
-                    let a = &args[0].value;
-                    if divisor_int_fold_is_zero(a, consts, st, defined) {
-                        return true;
-                    }
-                    if matches!(
-                        crate::const_overflow::const_float_fold_with(a, consts, 0, Some(st)),
-                        Some(f) if f == 0.0
-                    ) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
+    matches!(
+        divisor_float_fold_full(e, consts, st, defined, depth),
+        Some(f) if f == 0.0
+    )
 }
 
 fn divisor_float_fold_is_zero(
@@ -867,9 +857,268 @@ fn is_const_map_expr(
         return true;
     }
     !matches!(
-        divisor_int_fold(e, consts, st, defined, 0),
+        divisor_int_fold_full(e, consts, st, defined, 0),
         crate::const_overflow::ConstFold::NotConst
-    ) || crate::const_overflow::const_float_fold_with(e, consts, 0, Some(st)).is_some()
+    ) || divisor_float_fold_full(e, consts, st, defined, 0).is_some()
+}
+
+fn wrap_int_into(v: i128, lo: i128, hi: i128) -> i128 {
+    let span = hi.wrapping_sub(lo);
+    let bits = (span as u128).wrapping_add(1).trailing_zeros();
+    if bits == 0 || bits > 64 {
+        return v;
+    }
+    let len = 1i128 << bits;
+    let masked = v & (len - 1);
+    if lo < 0 && (masked >> (bits - 1)) & 1 == 1 {
+        masked - len
+    } else {
+        masked
+    }
+}
+
+fn eval_const_str_expr(
+    e: &Expr,
+    consts: &std::collections::HashMap<String, &Expr>,
+    st: &crate::model::FnState,
+    defined: &std::collections::HashSet<String>,
+    depth: u32,
+) -> Option<String> {
+    if depth > 16 {
+        return None;
+    }
+    match unwrap_parens(e) {
+        Expr::Lit {
+            kind: LitKind::Str(s) | LitKind::RawStr(s),
+            ..
+        } => Some(s.clone()),
+        Expr::Ident { name, .. } => {
+            if st.env_lookup(name).is_some() || defined.contains(name) {
+                return None;
+            }
+            let v = consts.get(name.as_str())?;
+            eval_const_str_expr(
+                v,
+                consts,
+                &crate::model::FnState::default(),
+                &std::collections::HashSet::new(),
+                depth + 1,
+            )
+        }
+        Expr::Binary {
+            op: BinOp::Add,
+            lhs,
+            rhs,
+            ..
+        } => {
+            let l = eval_const_str_expr(lhs, consts, st, defined, depth + 1)?;
+            let r = eval_const_str_expr(rhs, consts, st, defined, depth + 1)?;
+            Some(format!("{}{}", l, r))
+        }
+        _ => None,
+    }
+}
+
+fn const_len_str_full(
+    e: &Expr,
+    consts: &std::collections::HashMap<String, &Expr>,
+    st: &crate::model::FnState,
+    defined: &std::collections::HashSet<String>,
+    depth: u32,
+) -> Option<i128> {
+    if depth > 16 {
+        return None;
+    }
+    if let Expr::Call { callee, args, .. } = unwrap_parens(e) {
+        if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+            if name == "len"
+                && st.env_lookup("len").is_none()
+                && !defined.contains("len")
+                && args.len() == 1
+                && !args[0].spread
+            {
+                return eval_const_str_expr(&args[0].value, consts, st, defined, depth + 1)
+                    .map(|s| s.len() as i128);
+            }
+        }
+    }
+    None
+}
+
+fn divisor_int_fold_full(
+    e: &Expr,
+    consts: &std::collections::HashMap<String, &Expr>,
+    st: &crate::model::FnState,
+    defined: &std::collections::HashSet<String>,
+    depth: u32,
+) -> crate::const_overflow::ConstFold {
+    use crate::const_overflow::{const_int_fold_with, ConstFold};
+    if depth > 16 {
+        return ConstFold::NotConst;
+    }
+    let bare = unwrap_parens(e);
+    if let Some(n) = const_len_str_full(bare, consts, st, defined, depth) {
+        return ConstFold::Val(n);
+    }
+    match bare {
+        Expr::Ident { name, .. } => {
+            if st.env_lookup(name).is_some() || defined.contains(name) {
+                return ConstFold::NotConst;
+            }
+            if let Some(v) = consts.get(name.as_str()) {
+                return divisor_int_fold_full(
+                    v,
+                    consts,
+                    &crate::model::FnState::default(),
+                    &std::collections::HashSet::new(),
+                    depth + 1,
+                );
+            }
+            ConstFold::NotConst
+        }
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => match divisor_int_fold_full(operand, consts, st, defined, depth + 1) {
+            ConstFold::Val(v) => v.checked_neg().map(ConstFold::Val).unwrap_or(ConstFold::TooBig),
+            other => other,
+        },
+        Expr::Binary { op, lhs, rhs, .. } => {
+            let l = divisor_int_fold_full(lhs, consts, st, defined, depth + 1);
+            let r = divisor_int_fold_full(rhs, consts, st, defined, depth + 1);
+            crate::const_overflow::fold_bin(*op, l, r)
+        }
+        Expr::Call { callee, args, .. } => {
+            if args.len() != 1 || args[0].spread {
+                return ConstFold::NotConst;
+            }
+            let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+                return ConstFold::NotConst;
+            };
+            if st.env_lookup(name).is_some() || defined.contains(name) {
+                return ConstFold::NotConst;
+            }
+            let Some((lo, hi)) = crate::const_overflow::fixed_width_int_range(name) else {
+                return ConstFold::NotConst;
+            };
+            match divisor_int_fold_full(&args[0].value, consts, st, defined, depth + 1) {
+                ConstFold::Val(v) => ConstFold::Val(wrap_int_into(v, lo, hi)),
+                other => other,
+            }
+        }
+        _ => {
+            let filtered: std::collections::HashMap<String, &Expr> = consts
+                .iter()
+                .filter(|(k, _)| !defined.contains(*k))
+                .map(|(k, &v)| (k.clone(), v))
+                .collect();
+            const_int_fold_with(bare, &filtered, depth, Some(st))
+        }
+    }
+}
+
+fn divisor_float_fold_full(
+    e: &Expr,
+    consts: &std::collections::HashMap<String, &Expr>,
+    st: &crate::model::FnState,
+    defined: &std::collections::HashSet<String>,
+    depth: u32,
+) -> Option<f64> {
+    if depth > 16 {
+        return None;
+    }
+    let bare = unwrap_parens(e);
+    match bare {
+        Expr::Lit {
+            kind: LitKind::Float(s),
+            ..
+        } => {
+            let clean: String = s.chars().filter(|c| *c != '_').collect();
+            clean.parse::<f64>().ok()
+        }
+        Expr::Lit {
+            kind: LitKind::Int(s),
+            ..
+        } => {
+            if let Some(v) = int_lit_value(s) {
+                Some(v as f64)
+            } else {
+                let clean: String = s.chars().filter(|c| *c != '_').collect();
+                clean.parse::<f64>().ok()
+            }
+        }
+        Expr::Lit {
+            kind: LitKind::Char(c),
+            ..
+        } => Some(*c as u32 as f64),
+        Expr::Ident { name, .. } => {
+            if st.env_lookup(name).is_some() || defined.contains(name) {
+                return None;
+            }
+            let v = consts.get(name.as_str())?;
+            divisor_float_fold_full(
+                v,
+                consts,
+                &crate::model::FnState::default(),
+                &std::collections::HashSet::new(),
+                depth + 1,
+            )
+        }
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => divisor_float_fold_full(operand, consts, st, defined, depth + 1).map(|v| -v),
+        Expr::Binary { op, lhs, rhs, .. } => {
+            let l = divisor_float_fold_full(lhs, consts, st, defined, depth + 1)?;
+            let r = divisor_float_fold_full(rhs, consts, st, defined, depth + 1)?;
+            match op {
+                BinOp::Add => Some(l + r),
+                BinOp::Sub => Some(l - r),
+                BinOp::Mul => Some(l * r),
+                BinOp::Div => {
+                    if r == 0.0 {
+                        None
+                    } else {
+                        Some(l / r)
+                    }
+                }
+                _ => None,
+            }
+        }
+        Expr::Call { callee, args, .. } => {
+            if let Some(n) = const_len_str_full(bare, consts, st, defined, depth) {
+                return Some(n as f64);
+            }
+            if args.len() != 1 || args[0].spread {
+                return None;
+            }
+            let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+                return None;
+            };
+            if st.env_lookup(name).is_some() || defined.contains(name) {
+                return None;
+            }
+            if matches!(name.as_str(), "f32" | "f64" | "float32" | "float64") {
+                if let crate::const_overflow::ConstFold::Val(v) =
+                    divisor_int_fold_full(&args[0].value, consts, st, defined, depth + 1)
+                {
+                    return Some(v as f64);
+                }
+                return divisor_float_fold_full(&args[0].value, consts, st, defined, depth + 1);
+            }
+            if crate::const_overflow::fixed_width_int_range(name).is_some() {
+                if let crate::const_overflow::ConstFold::Val(v) =
+                    divisor_int_fold_full(bare, consts, st, defined, depth)
+                {
+                    return Some(v as f64);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
