@@ -184,7 +184,7 @@ impl<'a> Checker<'a> {
         name == "string"
     }
 
-    fn is_const_string_expr(&self, e: &Expr, st: Option<&FnState>, ref_depth: usize) -> bool {
+    pub(crate) fn is_const_string_expr(&self, e: &Expr, st: Option<&FnState>, ref_depth: usize) -> bool {
         if ref_depth > 32 {
             return false;
         }

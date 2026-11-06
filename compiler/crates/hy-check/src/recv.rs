@@ -446,6 +446,15 @@ impl<'a> Checker<'a> {
                     _ => None,
                 }
             }
+            Expr::Field { base, name, .. } => {
+                let base_ty = self.recv_chan_type_expr(st, base)?;
+                let fty = self
+                    .struct_fields_for_type(&base_ty)?
+                    .into_iter()
+                    .find(|(n, _)| n == name)?
+                    .1;
+                Some(self.resolve_type_alias(&fty))
+            }
             // A local whose `ty_of_expr` entry is missing (the initializer was
             // a call the type cache does not project) still carries the
             // written type on its binding.

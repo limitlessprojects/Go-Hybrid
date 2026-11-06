@@ -312,8 +312,8 @@ impl<'a> Checker<'a> {
         hi: &Expr,
         inclusive: bool,
     ) {
-        let tl = self.typed_int_bound(st, lo);
-        let th = self.typed_int_bound(st, hi);
+        let tl = self.typed_int_bound(st, lo).or_else(|| self.runtime_string_len_bound(st, lo));
+        let th = self.typed_int_bound(st, hi).or_else(|| self.runtime_string_len_bound(st, hi));
         // Issue #1165: compare the two bounds as *Go types*, not as spellings.
         // `byte` and `rune` are Go aliases of `uint8`/`int32`, and `u8`/`i32`
         // are the SPEC spellings the emitter maps onto those same Go types, so
@@ -603,5 +603,34 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+    }
+
+    fn runtime_string_len_bound(&self, st: &FnState, e: &Expr) -> Option<String> {
+        let mut cur = e;
+        while let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = cur {
+            cur = inner;
+        }
+        if let Expr::Call { callee, args, .. } = cur {
+            let mut cal = callee.as_ref();
+            while let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = cal {
+                cal = inner;
+            }
+            if let Expr::Ident { name, .. } = cal {
+                if name == "len"
+                    && args.len() == 1
+                    && !args[0].spread
+                    && st.env_lookup(name).is_none()
+                    && !self.fns.contains_key(name.as_str())
+                    && !self.structs.contains_key(name.as_str())
+                    && !self.enums.contains_key(name.as_str())
+                    && !self.type_aliases.contains_key(name.as_str())
+                    && matches!(self.shape_of_expr(st, &args[0].value), TypeShape::Str)
+                    && !self.is_const_string_expr(&args[0].value, Some(st), 0)
+                {
+                    return Some("int".to_string());
+                }
+            }
+        }
+        None
     }
 }
