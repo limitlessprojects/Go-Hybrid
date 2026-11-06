@@ -1203,7 +1203,12 @@ fn ensure_staticlib(rt: &std::path::Path) -> Result<std::path::PathBuf, BuildErr
                 .current_dir(&crate_dir)
                 .env("CARGO_BUILD_JOBS", "2");
             if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
-                cargo.env("CARGO_TARGET_DIR", t);
+                // Probes resolve this path from hyb's caller, while Cargo runs
+                // in crate_dir. Keep both looking in the same target directory.
+                let target = std::path::absolute(t).map_err(|e| {
+                    BuildError::Tool(format!("resolving CARGO_TARGET_DIR: {}", e))
+                })?;
+                cargo.env("CARGO_TARGET_DIR", target);
             }
             let out = cargo
                 .output()

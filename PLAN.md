@@ -1,5 +1,10 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — relative runtime Cargo target paths (2026-11-07)
+
+- `hyb` probes explicit `CARGO_TARGET_DIR` paths relative to its caller, but builds the runtime with Cargo's working directory set to `runtime/rust/hyrt`. Resolve that environment value to an absolute path before launching Cargo so both operations use the same directory; absolute paths and the unset crate-local default are preserved.
+- On base `fca2f63a`, the four new real CLI regressions have two relative-path failures and two passing absolute/unset controls. After the fix, all four pass, including caller/target paths containing spaces and second-invocation cache reuse. A separate smoke with real pinned Cargo and a dependency-free Rust staticlib also passes all four cases. Full workspace, corpus, differential and hosted CI remain pending; details in `spikes/relative-runtime-target-dir/RESULTS.md`.
+
 ## Contributor validation — Actions watch workflow selection (2026-11-05)
 
 - `job.py actions watch` now queries the heavy workflow before pagination, so newer CI runs cannot hide dispatched heavy jobs. Explicit run IDs still inspect the requested workflow. No compiler or language behavior changes.
