@@ -3590,7 +3590,9 @@ impl<'a> Collector<'a> {
             "any" | "interface{}" => OpKind::Interface,
             "bool" => OpKind::Bool,
             "string" => OpKind::Str,
-            "float32" | "float64" | "f32" | "f64" => OpKind::Float,
+            "float32" | "float64" | "f32" | "f64" | "complex64" | "complex128" | "c64" | "c128" => {
+                OpKind::Float
+            }
             "int" | "uint" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
             | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
@@ -4475,6 +4477,30 @@ impl<'a> Collector<'a> {
         )
     }
 
+    fn find_untyped_nonconst_shift<'b>(&self, e: &'b Expr) -> Option<(&'b Expr, BinOp)> {
+        match unwrap_parens(e) {
+            Expr::Binary {
+                op: op @ (BinOp::Shl | BinOp::Shr),
+                lhs,
+                rhs,
+                ..
+            } => {
+                if self.is_untyped_int_const(lhs) && !self.is_untyped_int_const(rhs) {
+                    Some((e, *op))
+                } else {
+                    self.find_untyped_nonconst_shift(lhs)
+                        .or_else(|| self.find_untyped_nonconst_shift(rhs))
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.find_untyped_nonconst_shift(lhs)
+                    .or_else(|| self.find_untyped_nonconst_shift(rhs))
+            }
+            Expr::Unary { operand, .. } => self.find_untyped_nonconst_shift(operand),
+            _ => None,
+        }
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -4495,6 +4521,33 @@ impl<'a> Collector<'a> {
         }
         let arg = &args[0].value;
         self.check_single_value_position(arg, "a type conversion", /*binding_position=*/ false);
+
+        // #3767: In Go specification (§Operators / Arithmetic operators / Integer operators):
+        // "If the left operand of a non-constant shift expression is an untyped constant,
+        // it is first implicitly converted to the type it would assume if the shift expression
+        // were replaced by its left operand alone."
+        // When an untyped shift (`1 << n`) appears inside a float/complex conversion
+        // (`float64(...)`, `complex128(...)`), the untyped constant left operand adopts
+        // the non-integer target type, which Go forbids with `invalid operation: 1 << n (shift of type float64)`.
+        if matches!(
+            name,
+            "float32" | "float64" | "f32" | "f64" | "complex64" | "complex128" | "c64" | "c128"
+        ) {
+            if let Some((shift_expr, _)) = self.find_untyped_nonconst_shift(arg) {
+                self.emit_e1002(
+                    shift_expr.span(),
+                    format!(
+                        "invalid operation `{}`: shift of type `{}` in conversion to `{}` (HYB-E1002)",
+                        shift_expr.render(),
+                        name,
+                        name
+                    ),
+                    "a non-constant shift of an untyped constant inherits the target type of the enclosing conversion; bitwise shifts are not defined on floating-point or complex types",
+                );
+                return;
+            }
+        }
+
         let arg_k = self.kind_of_expr(arg);
         // #2811: `string`↔slice conversions are restricted to byte/rune
         // elements; `OpKind::Int` cannot tell `int64` from `uint8`.
