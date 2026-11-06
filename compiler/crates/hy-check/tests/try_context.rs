@@ -161,3 +161,72 @@ fn main() {
     let r2 = check(reject_non_error);
     assert_eq!(e2011(&r2), 1, "non-error type alias must reject with HYB-E2011: {:?}", r2.diagnostics);
 }
+
+#[test]
+fn e11_and_e4_reject_type_param_and_lexical_value_shadows_on_signature_types() {
+    let shadowed_e11 = r#"
+import "net/http"
+
+type rw = http.response_writer
+type req = http.request
+
+fn step() (int, error) {
+    return 1, nil
+}
+
+fn bad_w[rw]() {
+    h := http.handler(fn(w rw, r *http.request) {
+        x := step()?
+        _ = x
+    })
+    _ = h
+}
+
+fn bad_r[req]() {
+    h := http.handler(fn(w http.response_writer, r *req) {
+        x := step()?
+        _ = x
+    })
+    _ = h
+}
+
+fn bad_lexical_w(rw int) {
+    _ = rw
+    h := http.handler(fn(w rw, r *http.request) {
+        x := step()?
+        _ = x
+    })
+    _ = h
+}
+
+fn bad_lexical_err(error int) {
+    _ = error
+    f := fn() (int, error) {
+        x := step()?
+        return x, 0
+    }
+    _, _ = f()
+}
+
+fn main() {}
+"#;
+    let r = check(shadowed_e11);
+    assert_eq!(e2011(&r), 4, "type-param and lexical value shadows on rw/req/error must reject: {:?}", r.diagnostics);
+
+    let const_shadowed_err = r#"
+const error = 1
+
+fn step() (int, int) {
+    return 1, 0
+}
+
+fn bad() (int, error) {
+    x := step()?
+    return x, 0
+}
+
+fn main() {}
+"#;
+    let r2 = check(const_shadowed_err);
+    assert_eq!(e2011(&r2), 1, "top-level const error shadow must reject E4 `?`: {:?}", r2.diagnostics);
+}
