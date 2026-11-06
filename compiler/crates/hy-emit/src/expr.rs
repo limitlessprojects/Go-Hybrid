@@ -889,12 +889,15 @@ impl Emitter {
                                         | "seconds"
                                         | "minutes"
                                         | "hours"
-                                        | "parse_duration",
+                                        | "parse_duration"
+                                        | "microseconds"
+                                        | "nanoseconds",
                                     ) => Some("time.duration"),
                                     ("time", "now" | "parse") => Some("time.time"),
                                     ("serde_json", "parse" | "new_object" | "new_array") => {
                                         Some("serde_json.value")
                                     }
+                                    ("http", "new_request") => Some("http.request"),
                                     ("http", "new_serve_mux") => Some("http.serve_mux"),
                                     ("url", "parse") => Some("url.url"),
                                     _ => None,
