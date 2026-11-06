@@ -180,3 +180,30 @@
 - Suites 434 -> 437 (+3). Two landings, zero gate failures this tick.
 - Next queue: #3676 (re-verify, force-pushed head) -> #3677 (re-verify, force-pushed) -> #3671 (CI test registration, +281-2) -> wildcard spikes #3688 (W-004) / #3695 (W-024, dup family with #3679; check BOUNTY.md spike policy) -> fresh 11-05 wave #3727..#3742 (families: 3730/3733/3737, 3731/3732, 3736/3738, 3739-3742 — dedupe first, oldest-first).
 - Worklog: this commit.
+
+## Session 114 — 2026-11-06 03:10 UTC+8 tick
+- (carries S113's queue; S113 died on total Bash-tool failure after env restore only)
+- env cold-recycled; rust 1.99.0 + go1.26.9 restored, tarball re-cached, target warm (15s). approve 12/12 (4988 left), scan skipped.
+- Heads re-fetched: #3676/#3677 force-pushed AGAIN before this tick (6cf2cd00 / 3928d52d) — verified the pushed heads as-is.
+- Landed PR #3676 -> 1a5c63e9 (parser report_at non-unwinding diag; LX9 same-line type annotations on let/var/const; SPEC 1.3 missing-initializer HYB-E0002 w/ fixits; fixes declaration-shape gaps, RPMFAN). FF case, tree-asserted 1226b648. ALL-GREEN 438 suites, corpus 135/135, differential 45/45+90/90. Reply 201.
+- Landed PR #3677 -> b3876bed (go_keyword_names.rs: declarations named `default` rejected HYB-E1002 across 15+ sites, uses stay legal incl. select default:; SPEC 8.3 updated; RPMFAN). Battery on committed trial 31f7dc12 (contains same-tick #3676), tree 450aa48f asserted. ALL-GREEN 439 suites, corpus 135/135 (corpus 24 unaffected), differential 45/45+90/90. Reply 201.
+- Suites 437 -> 439 (+2). Two landings, zero gate failures.
+- Next queue: #3671 (CI test registration +281-2, balckwell) -> wildcard spikes #3688 (W-004) / #3695 (W-024, dup family with #3679; check BOUNTY.md spike policy first) -> fresh 11-05 wave #3727..#3742 (families 3730/3733/3737, 3731/3732, 3736/3738, 3739-3742 — dedupe first, oldest-first).
+- Worklog: this commit.
+
+## Session 115 — 2026-11-06 04:10 UTC+8 tick
+- env cold-recycled; rust 1.99.0 + go1.99.0-go1.26.9 restored, tarball re-cached, target warm (15s). approve 13/13 (4970 left), scan skipped.
+- Landed PR #3671 -> ac9b90a3 (tools/check_test_registration.py: step > job > workflow working-directory precedence, bounded YAML block reader, fail-closed merge keys; fixes #3658, balckwell). Battery on committed trial 9e9e37bd tree 4fa9a352: cargo 439 suites 0 failed, PR pytest 51+39 subtests, live tool OK (38 files/35 patterns), corpus 135/135 tripwire clean, differential 45/45+90/90. Reply 201.
+- Wildcard policy resolved (BOUNTY.md Track 3 + MOONSHOT.md): spike PRs do NOT merge to main; lifecycle = ledger + discussion #365 M1 window (opened 2026-11-01). W-004 already ledgered accepted (slot 4, area523ufo, #174; prior spike PR #507 cited). W-024 NOT in ledger yet; #3695 duplicates #3679 family. Routing replies posted on #3688 and #3695 (201 x2) — no battery, no merge; PRs stay open as artifacts.
+- Next queue: fresh 11-05 wave #3727..#3742 oldest-first with family dedupe (3730/3733/3737 same title; 3731/3732; 3736/3738; 3739-3742) — first check which families are true resubmissions vs independent fixes via diff-against-each-other, then battery the oldest of each family. Wave is BUILDABLE-style hy-check fixes; #3727 (shadowed lowering packages) may collide with landed curated-import work (#3721/#3726) — dup-check against main first.
+- Worklog: this commit.
+
+## Session 116 — 2026-11-06 10:10 UTC+8 tick
+- env cold-recycled; rust 1.99.0 + go1.26.9 restored, tarball re-cached, target warm (15s). approve 12/12 (4988 left), scan skipped.
+- Wave grew to 39 open PRs (3727..3784). Patch-id matrix over the 5 same-title families (3727, 3730/3733/3737, 3731/3732, 3736/3738, 3739-3742): ALL patch-ids distinct -> independent implementations, first-to-land wins per family, later members get hall-of-fame dup replies.
+- Landed PR #3727 -> 1c5e1cac (main-wrapper shadowed os/filepath/fmt rejects + fmt.print byte-slice + io.read_all Field callee; Row 13, seenorht). FF, tree 88e2da18 asserted. ALL-GREEN 440 suites. Reply 201.
+- Landed PR #3730 -> b0866d90 (tuple bind-source composite bounds + Field->method-value Fn fallback; fixes #3729, aswadi). Trial 0ca06cb3 tree 17a428d0 asserted. ALL-GREEN 441 suites. Reply 201.
+- Replied dup-hall-of-fame on #3733 + #3737 (independent implementations of #3729, first-reporter protocol; deltas invited as fresh issues). 201 x2.
+- Suites 439 -> 441 (+2). Two landings, two dup replies, zero gate failures.
+- Next queue: #3731/#3732 (range_iter len(string) family) -> #3736/#3738 (addressable family) -> #3739-3742 (const_init family) -> then newer arrivals #3744..#3784 (more families: 3744/3745, 3747/3748, 3750/3751, 3753/3754, 3757/3758, 3761/3770, 3763/3769, 3779/3782; wildcard spikes 3765/3774/3783/3784 route per Track 3; #3781 extends landed #3677; #3775/#3768/#3771/#3772/#3755 standalone).
+- Worklog: this commit.
