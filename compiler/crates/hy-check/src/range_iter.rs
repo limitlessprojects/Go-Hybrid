@@ -45,6 +45,8 @@ impl<'a> Checker<'a> {
                     let shape = self.shape_of_expr(st, expr);
                     let is_chan = matches!(shape, TypeShape::Chan(_));
                     let is_set = !self.structs.contains_key("set")
+                        && !self.enums.contains_key("set")
+                        && !st.type_params.contains("set")
                         && matches!(
                             shape,
                             TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set"
@@ -249,7 +251,7 @@ impl<'a> Checker<'a> {
         // classify the literal. Block-scoped consts stay fail-open (no
         // const-value map in FnState — the #998 precedent).
         if let Expr::Ident { name, .. } = unwrap_parens_and_move(expr) {
-            if st.env_lookup(name).is_none() {
+            if st.env_lookup(name).is_none() && !st.type_params.contains(name.as_str()) {
                 if let Some(b) = self.consts.get(name.as_str()) {
                     if let Some(ty) = &b.ty {
                         if let Some(desc) = self.non_integer_type_desc(ty) {
@@ -258,7 +260,8 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if let Some(init) = self.const_values.get(name.as_str()) {
-                    if let Some(k) = self.non_integer_bound_kind_at(st, init, depth + 1) {
+                    let empty_st = FnState::default();
+                    if let Some(k) = self.non_integer_bound_kind_at(&empty_st, init, depth + 1) {
                         return Some(k);
                     }
                 }
@@ -377,19 +380,33 @@ impl<'a> Checker<'a> {
     /// for untyped literals and untyped consts, which adapt to the
     /// counter's type in the lowering (and in Go's constant arithmetic).
     pub(crate) fn typed_int_bound(&self, st: &FnState, e: &Expr) -> Option<String> {
+        self.typed_int_bound_at(st, e, 0)
+    }
+
+    fn typed_int_bound_at(&self, st: &FnState, e: &Expr, depth: usize) -> Option<String> {
+        if depth > 32 {
+            return None;
+        }
         match unwrap_parens_and_move(e) {
             Expr::Lit { .. } => None,
             Expr::Ident { name, .. } => {
-                if st.env_lookup(name).is_none() {
+                if st.env_lookup(name).is_none() && !st.type_params.contains(name.as_str()) {
                     if let Some(b) = self.consts.get(name.as_str()) {
                         // a file-level const: a TYPED const fixes the
-                        // bound's type; an untyped const adapts.
-                        let ty = b.ty.as_ref()?;
-                        let resolved = self.resolve_type_alias(ty);
-                        if let TypeExpr::Named { name: rn, .. } = resolved {
-                            if crate::const_overflow::fixed_width_int_range(&rn).is_some() {
-                                return Some(rn);
+                        // bound's type; an untyped const initialized from a
+                        // typed expression inherits that type.
+                        if let Some(ty) = b.ty.as_ref() {
+                            let resolved = self.resolve_type_alias(ty);
+                            if let TypeExpr::Named { name: rn, .. } = resolved {
+                                if crate::const_overflow::fixed_width_int_range(&rn).is_some() {
+                                    return Some(rn);
+                                }
                             }
+                            return None;
+                        }
+                        if let Some(init) = self.const_values.get(name.as_str()) {
+                            let empty_st = FnState::default();
+                            return self.typed_int_bound_at(&empty_st, init, depth + 1);
                         }
                         return None;
                     }
@@ -401,7 +418,7 @@ impl<'a> Checker<'a> {
                 op: hy_syntax::UnOp::Neg,
                 operand,
                 ..
-            } => self.typed_int_bound(st, operand),
+            } => self.typed_int_bound_at(st, operand, depth + 1),
             Expr::Binary { op, lhs, rhs, .. } => match op {
                 hy_syntax::BinOp::Add
                 | hy_syntax::BinOp::Sub
@@ -411,9 +428,11 @@ impl<'a> Checker<'a> {
                 | hy_syntax::BinOp::BitAnd
                 | hy_syntax::BinOp::BitOr
                 | hy_syntax::BinOp::BitXor => self
-                    .typed_int_bound(st, lhs)
-                    .or_else(|| self.typed_int_bound(st, rhs)),
-                hy_syntax::BinOp::Shl | hy_syntax::BinOp::Shr => self.typed_int_bound(st, lhs),
+                    .typed_int_bound_at(st, lhs, depth + 1)
+                    .or_else(|| self.typed_int_bound_at(st, rhs, depth + 1)),
+                hy_syntax::BinOp::Shl | hy_syntax::BinOp::Shr => {
+                    self.typed_int_bound_at(st, lhs, depth + 1)
+                }
                 _ => None,
             },
             Expr::Call { callee, args, .. } => {
@@ -421,16 +440,23 @@ impl<'a> Checker<'a> {
                 // is a u32 bound regardless of what ty_of_expr infers.
                 if let Expr::Ident { name, .. } = unwrap_parens_and_move(callee) {
                     if st.env_lookup(name).is_none()
+                        && !st.type_params.contains(name.as_str())
                         && !self.fns.contains_key(name.as_str())
                         && !self.structs.contains_key(name.as_str())
                         && !self.enums.contains_key(name.as_str())
+                        && !self.consts.contains_key(name.as_str())
                     {
-                        if args.len() == 1
-                            && !args[0].spread
-                            && !self.type_aliases.contains_key(name.as_str())
-                            && crate::const_overflow::fixed_width_int_range(name).is_some()
-                        {
-                            return Some(name.clone());
+                        if args.len() == 1 && !args[0].spread {
+                            if !self.type_aliases.contains_key(name.as_str())
+                                && crate::const_overflow::fixed_width_int_range(name).is_some()
+                            {
+                                return Some(name.clone());
+                            }
+                            if let Some(alias_ty) = self.type_aliases.get(name.as_str()) {
+                                if let Some(rn) = self.named_int_of(alias_ty) {
+                                    return Some(rn);
+                                }
+                            }
                         }
                         if name == "copy"
                             && args.len() == 2
@@ -522,7 +548,24 @@ impl<'a> Checker<'a> {
             | TypeShape::BorrowHandle(_) => {}
             TypeShape::Struct(Some(ref n))
                 if !self.structs.contains_key("set")
+                    && !self.enums.contains_key("set")
+                    && !st.type_params.contains("set")
                     && (n.starts_with("set[") || n == "set") => {}
+            TypeShape::Struct(Some(ref n))
+                if n == "set" && st.type_params.contains("set") =>
+            {
+                let msg = format!(
+                    "cannot prove `{}` is iterable — `for x in e` needs a slice, array, string, map, or channel (LX13; O4.9)",
+                    expr.render()
+                );
+                let notes = vec![
+                    "why: the checker cannot classify the iterable's type, and Go cannot range over it (issue #411)".to_string(),
+                    "fix: bind the iterable to a local with a visible type first, so the checker can resolve it".to_string(),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E3005", self.path.clone(), span, msg).with_notes(notes),
+                );
+            }
             TypeShape::Chan(_) => {
                 let chan_ty = self
                     .ty_of_expr(st, expr)

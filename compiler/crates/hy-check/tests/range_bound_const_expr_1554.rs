@@ -84,3 +84,27 @@ fn compound_integer_const_bound_stays_accepted() {
 fn const_cycle_terminates_without_e2009() {
     accepts_without_e2009(&range_with("const a = b\nconst b = a", "a"));
 }
+
+#[test]
+fn chained_const_bound_isolated_from_local_shadow_and_typed_const_chain_rejects() {
+    rejects_with_e2009(
+        "const a = 1.5\nconst b = a\nfn main() {\n    a := 1\n    _ = a\n    for i in 0..b {\n        _ = i\n    }\n}\n",
+    );
+    accepts_without_e2009(
+        "const a = 5\nconst b = a\nfn main() {\n    a := 1.5\n    _ = a\n    for i in 0..b {\n        _ = i\n    }\n}\n",
+    );
+    rejects_with_e2009(
+        "const a u32 = 1\nconst b = a\nfn main() {\n    var hi u64 = 10\n    for i in b..hi {\n        _ = i\n    }\n}\n",
+    );
+    rejects_with_e2009(
+        "const b = u32(1)\nfn main() {\n    var hi u64 = 10\n    for i in b..hi {\n        _ = i\n    }\n}\n",
+    );
+    rejects_with_e2009(
+        "type my_u32 = u32\nfn main() {\n    var hi u64 = 10\n    for i in my_u32(0)..hi {\n        _ = i\n    }\n}\n",
+    );
+    rejects_with_e2009(
+        "enum set { a }\nfn f(x set) {\n    for v in x {\n        _ = v\n    }\n}\nfn main() {}\n",
+    );
+    let cs = codes(&check("fn f[set](x set) {\n    for v in x {\n        _ = v\n    }\n}\nfn main() {}\n"));
+    assert!(cs.iter().any(|c| c == "HYB-E3005"), "expected HYB-E3005 for type-param set, got {cs:?}");
+}
