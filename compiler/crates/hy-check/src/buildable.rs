@@ -7702,6 +7702,42 @@ impl<'a> Collector<'a> {
                             }
                         }
                     }
+                    // #3789: `httptest.get` and `httptest.post` lower to
+                    // `http.NewRequest`, `httptest.NewRecorder`, and `strings.TrimSuffix` in `hy-emit`.
+                    // When `strings` or `http` is shadowed by an in-scope parameter, local binding,
+                    // loop variable, closure argument, type parameter, or package-level declaration,
+                    // emitted Go fails downstream compilation (Row 13 BUILDABLE).
+                    if pkg == "httptest"
+                        && self.lookup_kind(pkg).is_none()
+                        && matches!(name.as_str(), "get" | "post")
+                    {
+                        if self.is_strings_shadowed() {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot call `httptest.{}` because `strings` is shadowed by an in-scope declaration (HYB-E1002)",
+                                    name
+                                ),
+                                &format!(
+                                    "`httptest.{}` lowers to `strings.TrimSuffix`; rename the shadowing `strings` declaration so `strings.TrimSuffix` is accessible",
+                                    name
+                                ),
+                            );
+                        }
+                        if self.is_http_shadowed() {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot call `httptest.{}` because `http` is shadowed by an in-scope declaration (HYB-E1002)",
+                                    name
+                                ),
+                                &format!(
+                                    "`httptest.{}` lowers to `http.NewRequest`; rename the shadowing `http` declaration so `http.NewRequest` is accessible",
+                                    name
+                                ),
+                            );
+                        }
+                    }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -7853,6 +7889,14 @@ impl<'a> Collector<'a> {
 
     fn is_fmt_shadowed(&self) -> bool {
         self.is_pkg_symbol_shadowed("fmt")
+    }
+
+    fn is_strings_shadowed(&self) -> bool {
+        self.is_pkg_symbol_shadowed("strings")
+    }
+
+    fn is_http_shadowed(&self) -> bool {
+        self.is_pkg_symbol_shadowed("http")
     }
 
     fn check_fn_type_arg_arity(&mut self, fn_key: &str, raw_callee: &str, span: Span) {
