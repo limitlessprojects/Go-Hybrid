@@ -1,4 +1,34 @@
 
+## Session 120 — 2026-11-06 16:10 UTC+8 tick
+- env cold-recycled (new rootfs); node_modules deleted FIRST per S119 lesson, rust 1.99.0 + go1.26.9 restored. approve 16/16 (4972 left). No disk incidents this tick (pre-deleted node_modules kept headroom).
+- **2 landed**:
+  - **#3753** -> `21f58ac2` (Burapa-J, fixes #3752 T24/O8): addr_loan — PlaceKind::AddrOf targets reject (&q.val/&m[k].val via place_is_map_element_or_value_projection + shape_of_place); mixed parallel rebinds gated on all-Ident targets (allow_addr_root); move-wrapped &(move ...) via unwrap_parens_and_move; Return slot-loan escape; walk_for_loop_carried two-pass while-cond replay; bind_shadow_locals_only keeps shadow accepts. MERGE trial 76722c38, tree asserted. ALL-GREEN 448 suites. Reply 201 + dup #3754.
+  - **#3757** -> `4a79347a` (Burapa-J, fixes #3756): recv — recv_chan_type_expr Pointer projection (&x), slice.pop() Fn(elem), some(x) Option(elem) w/ degraded-any, unwrap/or payload (any-elem unprojected), bare none->Option(any); bind_if_init_for_recv composite fallbacks (Recv->Chan elem, Index->Map value); match-guard option.some via composite_type_expr. MERGE trial 7a7362af, tree asserted. ALL-GREEN 449 suites. Reply 201 + dup #3758.
+- NOTE: /home/z/my-project/scripts/reply_dup.py did NOT survive sandbox recycle (recreated via Write; keep generator under scripts/ and verify existence before use).
+- Suites 447 -> 449 (+2: 3752-test, 3756-test). Zero gate failures.
+- Next queue: #3759 (const_overflow, Burapa-J) -> #3761/#3770 (bracketed generic args) -> #3763/#3769 (walk nested assign) -> #3755/#3768/#3771/#3772/#3775/#3779/#3782/#3781+#3785 (go_keyword_names ext)/#3787/#3788/#3791/#3792/#3793+#3794/#3796/#3797/#3798/#3800/#3803/#3804; spikes #3765/#3774 Track-3 route.
+- Worklog: this commit.
+
+## Session 119 — 2026-11-06 15:10 UTC+8 tick
+- env cold-recycled (new rootfs); rust 1.99.0 + go1.26.9 restored, tarball re-cached. approve 13/13 (4992 left), scan skipped. Open PRs still >100 (list-capped); new arrivals #3796/#3797/#3798/#3800/#3803/#3804.
+- **2 landed**:
+  - **#3747** -> `d4a8f057` (Burapa-J, fixes #3746 Row 13): try_context — is_builtin_error_type alias-chain walk w/ type-param shadow reject (fn f[error any], alias failure=error, receiver type params); new Ctx::E11Handler + is_writer_shadowed_since (? in http.handler closure rejects on shadowed http/writer, inner-scope-only shadow stays accepted); array-len TypeExpr ? reject. MERGE trial 44e86452, tree 54b689a5 asserted. ALL-GREEN 446 suites. Reply 201 + dup reply #3748.
+  - **#3750** -> `53bebfb3` (Burapa-J, fixes #3749): arith — recursive divisor_float_fold (f32/f64 conv fast-path+recursion, neg, binops, named float consts, len(str)); divisor_int_fold fixed-width conv arm w/ wrap_divisor_int (u8(256)->0, int8 sign-ext); const_str_byte_len chains+concat; expr_has_shadowed_int_conv guard keeps shadowed conv callees accepted. MERGE trial 40bd0efa, tree asserted. ALL-GREEN 447 suites. Reply 201 + dup reply #3751.
+- **Disk discipline (recurring)**: rootfs hit 93% mid-battery AGAIN on fresh sandbox (go-build temp no-space = go-build-fixture false reds). Freed 1.8G (incremental 602M + puppeteer + playwright) + node_modules 1.2G -> 2.4G. NOTE: node_modules reappears on every sandbox restore (persisted snapshot) — delete it FIRST in each cold tick; check df BEFORE battery, not after a failure.
+- Suites 445 -> 447 (+2: 3746-test, 3749-test). Zero gate failures; one environmental rerun (3747 battery1 disk).
+- Next queue: #3753/#3754 (addr_loan, Burapa-J first) -> #3757/#3758 (recv) -> #3759 (const_overflow) -> #3761/#3770 (generic args) -> #3763/#3769 (walk) -> #3755/#3768/#3771/#3772/#3775/#3779/#3782/#3781+#3785 (go_keyword_names ext)/#3787/#3788/#3791/#3792/#3793+#3794/#3796/#3797/#3798/#3800/#3803/#3804; spikes #3765/#3774 Track-3 route.
+- Worklog: this commit.
+
+## Session 118 — 2026-11-06 14:10 UTC+8 tick
+- env cold-recycled; rust 1.99.0 + go1.26.9 restored, tarball re-cached. approve 15/15 (4985 left), scan skipped. Open PR wave at 100 (list cap).
+- **2 landed**:
+  - **#3739** -> `69564b1b` (dextermos-dev, fixes #3735): const_init string-conv args gated by expr_is_constant_inner; consts-shadowed string target joins shadow guards; is_const_allowed_ty rejects struct/tp/enum-shadowed Named pre+post alias resolve. New test const_init_string_conv_and_shadow_3735.rs. FF tree 5244df94 asserted. ALL-GREEN 444 suites. Reply 201 (id 6678589502).
+  - **#3744** -> `71749fda` (Burapa-J, fixes #3743 Row 13 BUILDABLE): check_elided_struct_fields (unknown/dup fields HYB-E1002 in elided-head slots); new elided_type walker (array-len TypeExprs across consts/structs/aliases/enum payloads/fn sigs); is_non_struct_foreign_type curation ({ } in io.*/http.handler/time.duration/os.file_mode/net.conn rejects). MERGE-scenario trial e191ffeb (no conflicts), tree af3340f7 asserted. ALL-GREEN 445 suites. Reply 201.
+- **3 dup replies** (hall-of-fame, independent patch-ids): #3740 (jpereyra243-byte) + #3741 (aswadi) + #3742 (ThanhWinter) re #3735 via #3739; #3745 (jpereyra243-byte) re #3743 via #3744 — 4 total. NOTE: first loop iteration had unquoted heredoc (backticked SHA command-substituted) + loop slice bug (6 items not 3 pairs) -> 3 comments PATCH-fixed (6678593476/6678594333/6678595206), 3 harmless 404s on author-name "issues". Lesson: always quote heredoc delimiters in bodies containing backticks; enumerate pairs explicitly.
+- **Disk crisis mid-battery**: rustc temp "No space left" — rootfs 93%. Freed: puppeteer 608M + ms-playwright 613M + node_modules 1.2G + target/debug/incremental 1.2G -> 2.2G avail; df numbers initially stale, write-test used to confirm real space. Suites 443 -> 445 (+2: 3735-test, 3743-test). Zero gate failures.
+- Next queue: #3747/#3748 (try_context shadowed error type params, Burapa-J first) -> #3750/#3751 (arith fold) -> #3753/#3754 (addr_loan) -> #3757/#3758 (recv) -> #3759 (const_overflow) -> #3761/#3770 (bracketed generic args) -> #3763/#3769 (walk nested assign) -> #3755/#3768/#3771/#3772/#3775/#3779/#3782/#3781(+#3785 extends #3677)/#3787/#3788/#3791/#3792/#3793/#3794; spikes #3765/#3774 Track-3 route.
+- Worklog: this commit.
+
 ## Session 93 (2026-11-04 19:10Z+08 tick)
 - env fully recycled; standard restore (rust 1.99.0, go1.26.9, tarball re-cached). Mirror rolled back to s44 snapshot, pull caught up to 05448f75 (s92 #3609 landed + underscore-cluster addendum; replies verified posted on #3606/#3607).
 - **2 landed**:
@@ -206,4 +236,14 @@
 - Replied dup-hall-of-fame on #3733 + #3737 (independent implementations of #3729, first-reporter protocol; deltas invited as fresh issues). 201 x2.
 - Suites 439 -> 441 (+2). Two landings, two dup replies, zero gate failures.
 - Next queue: #3731/#3732 (range_iter len(string) family) -> #3736/#3738 (addressable family) -> #3739-3742 (const_init family) -> then newer arrivals #3744..#3784 (more families: 3744/3745, 3747/3748, 3750/3751, 3753/3754, 3757/3758, 3761/3770, 3763/3769, 3779/3782; wildcard spikes 3765/3774/3783/3784 route per Track 3; #3781 extends landed #3677; #3775/#3768/#3771/#3772/#3755 standalone).
+- Worklog: this commit.
+
+## Session 117 — 2026-11-06 13:10 UTC+8 tick
+- env cold-recycled; rust 1.99.0 + go1.26.9 restored, tarball re-cached, target warm (15s). approve 13/13 (4987 left), scan skipped.
+- Landed PR #3731 -> eb30520c (range_iter runtime len(str) sources + method-value chan element via method_decls; fixes #3728, aswadi). FF tree df51f7ac asserted. ALL-GREEN 442 suites. Reply 201.
+- Replied dup-hall-of-fame on #3732 (independent impl of #3728). 201.
+- Landed PR #3736 -> merged 65947b67 (addressable addr_place_shape/addr_expr_shape fallbacks via place_target_ty/composite_type_expr; E2010 on unaddressable hops; fixes #3734, aswadi). Trial tree 397f75ee asserted. ALL-GREEN 443 suites. Reply 201.
+- Replied dup-hall-of-fame on #3738 (independent impl of #3734). 201.
+- Suites 441 -> 443 (+2). Two landings, two dup replies, zero gate failures.
+- Next queue: const_init family #3739 (dextermos-dev) / #3740 (jpereyra) / #3741 (aswadi) / #3742 (ThanthWinter) -> then #3744/#3745 (elided_literal family, Burapa-J first) -> #3747/#3748 (try_context) -> #3750/#3751 (arith) -> #3753/#3754 (addr_loan) -> #3757/#3758 (recv) -> #3761/#3770 (generic args) -> #3763/#3769 (walk) -> #3755, #3768, #3771/#3772, #3775, #3779/#3782, #3781 (extends landed #3677).
 - Worklog: this commit.
