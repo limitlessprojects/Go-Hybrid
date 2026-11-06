@@ -1,5 +1,20 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — punctuation allocation reduction (2026-11-04)
+
+- Tested code `7f1116d8` borrows punctuation lookahead; the ordinary fixture makes 5,006→3,004 successful allocation calls per lex, with requested bytes about 2% lower. Other measured allocation counts do not increase. Timing is inconclusive after a failed gate and 4.75% identical-binary control difference; no new speed claim.
+- 2,635 workspace tests, 178 full snapshots, 130/130 corpus, 42/42 accepted + 88/88 rejected differential cases and all ten examples pass. Source/test behavior is unchanged; two punctuation span/EOF guards and a standalone counting example preserve reproducibility. Details in `spikes/lexer-borrowed-cursor/RESULTS.md`. Hosted CI/maintainer decision and any award/payment remain pending.
+
+## Contributor follow-up — 2026-11-04: lexer identifiers
+
+Preserve the borrowed cursor and scan ASCII identifier prefixes directly, borrowing keyword text and owning only Ident strings. Code046dfa9 retains all178token/diagnostic snapshots; four position regressions pass. Paired macOS/Rust1.99 observations versus submitted2deb0be: ordinary8.4%faster, Unicode12.8%faster, comment/real cases nearly unchanged; no newRSS/universal-speed claim. Full local workspace2633passed, corpus130/130, differential42+88, ten examples. Raw data and honest private-preregistration/format limits are in `spikes/lexer-borrowed-cursor/RESULTS.md`. New-head hosted CI, review, merge and reward/payment remain pending.
+
+## Contributor validation — borrowed lexer cursor (2026-11-03)
+
+- The private cursor borrows UTF-8 instead of making a full `Vec<char>` copy. No grammar, API or diagnostic change is intended; token strings still allocate.
+- Base `b803f555`: full snapshots agree on 175 tracked `.hy` files plus three generated inputs, and two new Unicode/trivia/span tests pass. Three short macOS arm64 observations show comment-heavy ten-lex process peak RSS 45.08 → 2.64 MiB; the ordinary-source elapsed median is 4.9% slower. Raw results/limits: `spikes/lexer-borrowed-cursor/RESULTS.md`.
+- Tested code `16353dbb`: pinned offline workspace 2,631 passed/zero failed or ignored; fresh compiler build, corpus 130/130, differential 42/42 build-and-run + 88/88 rejects and all ten examples pass. New Rust files format-check clean; final evidence updates keep tested Rust bytes. Hosted CI, review, award and payment remain unconfirmed; no independent human review claimed.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.

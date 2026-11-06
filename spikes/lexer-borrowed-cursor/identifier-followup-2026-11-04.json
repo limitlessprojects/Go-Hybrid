@@ -1,0 +1,610 @@
+{
+  "baseline_source": "2deb0be3f4136aa314aacd72b2870837c6831af7",
+  "candidate_code_source": "046dfa9a0ef37ad6f242faac2a164a00fa7e9df6",
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)"
+  },
+  "measured_at_utc": "2026-11-04T00:19:23.934451+00:00",
+  "source_baseline_sha256": "66eb36ea082e48df6ac716f260abf7552ce6b9e52c551e0ed6be3538b0b5ed2c",
+  "source_candidate_sha256": "d2fcd044eba714b9d837fbce37d79b4da8e4d845a7fd59ace6665dc849bc5b25",
+  "binary_sha256": {
+    "identifier-baseline": "0bf622d29ed5fa905a6c23b43e2b04648fcc36ff33123776c152e8e83ded3dcd",
+    "identifier-candidate2": "b3baf7a365674c6d6e21840e59690e2f23240b9911200224d2999d991a578221"
+  },
+  "protocol": "Five alternating baseline/candidate fresh-process pairs per case.2000lexes/process for generated inputs;20000for one deterministically selected real source. Release profile/Rust1.99.0; input read outside Instant; token construction/drop included. Existing lexer_cursor example reused.",
+  "selection_rule": "At least5%ordinary median improvement and no>5%median slowdown in other cases; all178snapshot outputs identical. Recorded privately before timing, not publicly committed ahead of the experiment.",
+  "real_case_selection": "Largest byte-length lex-valid tracked source among the existing178snapshot inputs, selected before timings; name breaks ties.",
+  "call_count_profile_limit": "Instrumented call frequencies, not CPU samples or timing attribution.12912of56835ordinary lookaheads occur in identifier loop.",
+  "first_candidate_result": {
+    "ordinary": -0.040019520882783155,
+    "comments": -0.002555076084487795,
+    "unicode": -0.08057678542907032,
+    "real_corpus": -0.03165870440709129
+  },
+  "reviewed_refinement": "First version still allocated keyword strings and missed5%ordinary target. Final version borrows the prefix through keyword checking, owning only actual Ident strings. Real-case timing extended after first-run25ms/process observation.",
+  "summary": {
+    "ordinary": {
+      "input_bytes": 27808,
+      "input_sha256": "a2f197c13a154f0ee4783b836480fece0c6dbe690cf7c46dcd4de5bf167e6383",
+      "iterations_per_process": 2000,
+      "baseline_median_ns": 370887.5625,
+      "candidate_median_ns": 339594.229,
+      "fraction_change": -0.08437417876475706,
+      "baseline_samples_ns": [
+        368448.3125,
+        367793.1875,
+        371345.979,
+        376736.3335,
+        370887.5625
+      ],
+      "candidate_samples_ns": [
+        339594.229,
+        338656.8125,
+        349187.25,
+        337863.0,
+        343015.167
+      ],
+      "input_name": "ordinary.hy"
+    },
+    "comments": {
+      "input_bytes": 1080014,
+      "input_sha256": "77ea99a6eb1779f41220580171627307e5f7fdd2aff16755d4bef41a1c6b3376",
+      "iterations_per_process": 2000,
+      "baseline_median_ns": 689549.625,
+      "candidate_median_ns": 687893.9585,
+      "fraction_change": -0.00240108389588356,
+      "baseline_samples_ns": [
+        689549.625,
+        708386.146,
+        691637.125,
+        685998.9795,
+        688209.125
+      ],
+      "candidate_samples_ns": [
+        687678.8125,
+        687893.9585,
+        690845.521,
+        686738.25,
+        689409.3955
+      ],
+      "input_name": "comments.hy"
+    },
+    "unicode": {
+      "input_bytes": 54808,
+      "input_sha256": "105b431d9c39fd6c2ee37f344c8680d88fff3c2ae701af6e22b55abe9e5780f8",
+      "iterations_per_process": 2000,
+      "baseline_median_ns": 321783.8125,
+      "candidate_median_ns": 280642.979,
+      "fraction_change": -0.12785240245731755,
+      "baseline_samples_ns": [
+        316600.604,
+        321783.8125,
+        319336.7295,
+        327346.7705,
+        324378.542
+      ],
+      "candidate_samples_ns": [
+        280642.979,
+        278828.4795,
+        280160.4795,
+        285418.1875,
+        281241.6665
+      ],
+      "input_name": "unicode.hy"
+    },
+    "real_corpus": {
+      "input_bytes": 5364,
+      "input_sha256": "b406a8e22b86d7a2a5c5369c7bcb871434b32924e53a8e1e87851fffa847fe0a",
+      "iterations_per_process": 20000,
+      "baseline_median_ns": 12316.24795,
+      "candidate_median_ns": 12219.89585,
+      "fraction_change": -0.007823169880239345,
+      "baseline_samples_ns": [
+        12316.24795,
+        12780.4125,
+        12745.84375,
+        12312.0708,
+        12202.04165
+      ],
+      "candidate_samples_ns": [
+        12362.7542,
+        12519.27705,
+        12219.89585,
+        12101.61875,
+        12203.52085
+      ],
+      "input_name": "tests/checker-corpus/45-composite-literal-embeds-shared-map.hy"
+    }
+  },
+  "raw": [
+    {
+      "case": "ordinary",
+      "pair": 1,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 27808,
+        "iterations": 2000,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 736896625
+      },
+      "ns_per_lex": 368448.3125
+    },
+    {
+      "case": "ordinary",
+      "pair": 1,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 27808,
+        "iterations": 2000,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 679188458
+      },
+      "ns_per_lex": 339594.229
+    },
+    {
+      "case": "ordinary",
+      "pair": 2,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 27808,
+        "iterations": 2000,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 677313625
+      },
+      "ns_per_lex": 338656.8125
+    },
+    {
+      "case": "ordinary",
+      "pair": 2,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 27808,
+        "iterations": 2000,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 735586375
+      },
+      "ns_per_lex": 367793.1875
+    },
+    {
+      "case": "ordinary",
+      "pair": 3,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 27808,
+        "iterations": 2000,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 742691958
+      },
+      "ns_per_lex": 371345.979
+    },
+    {
+      "case": "ordinary",
+      "pair": 3,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 27808,
+        "iterations": 2000,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 698374500
+      },
+      "ns_per_lex": 349187.25
+    },
+    {
+      "case": "ordinary",
+      "pair": 4,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 27808,
+        "iterations": 2000,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 675726000
+      },
+      "ns_per_lex": 337863.0
+    },
+    {
+      "case": "ordinary",
+      "pair": 4,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 27808,
+        "iterations": 2000,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 753472667
+      },
+      "ns_per_lex": 376736.3335
+    },
+    {
+      "case": "ordinary",
+      "pair": 5,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 27808,
+        "iterations": 2000,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 741775125
+      },
+      "ns_per_lex": 370887.5625
+    },
+    {
+      "case": "ordinary",
+      "pair": 5,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 27808,
+        "iterations": 2000,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 686030334
+      },
+      "ns_per_lex": 343015.167
+    },
+    {
+      "case": "comments",
+      "pair": 1,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 1080014,
+        "iterations": 2000,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 1379099250
+      },
+      "ns_per_lex": 689549.625
+    },
+    {
+      "case": "comments",
+      "pair": 1,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 1080014,
+        "iterations": 2000,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 1375357625
+      },
+      "ns_per_lex": 687678.8125
+    },
+    {
+      "case": "comments",
+      "pair": 2,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 1080014,
+        "iterations": 2000,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 1375787917
+      },
+      "ns_per_lex": 687893.9585
+    },
+    {
+      "case": "comments",
+      "pair": 2,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 1080014,
+        "iterations": 2000,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 1416772292
+      },
+      "ns_per_lex": 708386.146
+    },
+    {
+      "case": "comments",
+      "pair": 3,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 1080014,
+        "iterations": 2000,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 1383274250
+      },
+      "ns_per_lex": 691637.125
+    },
+    {
+      "case": "comments",
+      "pair": 3,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 1080014,
+        "iterations": 2000,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 1381691042
+      },
+      "ns_per_lex": 690845.521
+    },
+    {
+      "case": "comments",
+      "pair": 4,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 1080014,
+        "iterations": 2000,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 1373476500
+      },
+      "ns_per_lex": 686738.25
+    },
+    {
+      "case": "comments",
+      "pair": 4,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 1080014,
+        "iterations": 2000,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 1371997959
+      },
+      "ns_per_lex": 685998.9795
+    },
+    {
+      "case": "comments",
+      "pair": 5,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 1080014,
+        "iterations": 2000,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 1376418250
+      },
+      "ns_per_lex": 688209.125
+    },
+    {
+      "case": "comments",
+      "pair": 5,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 1080014,
+        "iterations": 2000,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 1378818791
+      },
+      "ns_per_lex": 689409.3955
+    },
+    {
+      "case": "unicode",
+      "pair": 1,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 54808,
+        "iterations": 2000,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 633201208
+      },
+      "ns_per_lex": 316600.604
+    },
+    {
+      "case": "unicode",
+      "pair": 1,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 54808,
+        "iterations": 2000,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 561285958
+      },
+      "ns_per_lex": 280642.979
+    },
+    {
+      "case": "unicode",
+      "pair": 2,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 54808,
+        "iterations": 2000,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 557656959
+      },
+      "ns_per_lex": 278828.4795
+    },
+    {
+      "case": "unicode",
+      "pair": 2,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 54808,
+        "iterations": 2000,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 643567625
+      },
+      "ns_per_lex": 321783.8125
+    },
+    {
+      "case": "unicode",
+      "pair": 3,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 54808,
+        "iterations": 2000,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 638673459
+      },
+      "ns_per_lex": 319336.7295
+    },
+    {
+      "case": "unicode",
+      "pair": 3,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 54808,
+        "iterations": 2000,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 560320959
+      },
+      "ns_per_lex": 280160.4795
+    },
+    {
+      "case": "unicode",
+      "pair": 4,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 54808,
+        "iterations": 2000,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 570836375
+      },
+      "ns_per_lex": 285418.1875
+    },
+    {
+      "case": "unicode",
+      "pair": 4,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 54808,
+        "iterations": 2000,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 654693541
+      },
+      "ns_per_lex": 327346.7705
+    },
+    {
+      "case": "unicode",
+      "pair": 5,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 54808,
+        "iterations": 2000,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 648757084
+      },
+      "ns_per_lex": 324378.542
+    },
+    {
+      "case": "unicode",
+      "pair": 5,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 54808,
+        "iterations": 2000,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 562483333
+      },
+      "ns_per_lex": 281241.6665
+    },
+    {
+      "case": "real_corpus",
+      "pair": 1,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 5364,
+        "iterations": 20000,
+        "tokens_per_iteration": 105,
+        "elapsed_ns": 246324959
+      },
+      "ns_per_lex": 12316.24795
+    },
+    {
+      "case": "real_corpus",
+      "pair": 1,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 5364,
+        "iterations": 20000,
+        "tokens_per_iteration": 105,
+        "elapsed_ns": 247255084
+      },
+      "ns_per_lex": 12362.7542
+    },
+    {
+      "case": "real_corpus",
+      "pair": 2,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 5364,
+        "iterations": 20000,
+        "tokens_per_iteration": 105,
+        "elapsed_ns": 250385541
+      },
+      "ns_per_lex": 12519.27705
+    },
+    {
+      "case": "real_corpus",
+      "pair": 2,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 5364,
+        "iterations": 20000,
+        "tokens_per_iteration": 105,
+        "elapsed_ns": 255608250
+      },
+      "ns_per_lex": 12780.4125
+    },
+    {
+      "case": "real_corpus",
+      "pair": 3,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 5364,
+        "iterations": 20000,
+        "tokens_per_iteration": 105,
+        "elapsed_ns": 254916875
+      },
+      "ns_per_lex": 12745.84375
+    },
+    {
+      "case": "real_corpus",
+      "pair": 3,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 5364,
+        "iterations": 20000,
+        "tokens_per_iteration": 105,
+        "elapsed_ns": 244397917
+      },
+      "ns_per_lex": 12219.89585
+    },
+    {
+      "case": "real_corpus",
+      "pair": 4,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 5364,
+        "iterations": 20000,
+        "tokens_per_iteration": 105,
+        "elapsed_ns": 242032375
+      },
+      "ns_per_lex": 12101.61875
+    },
+    {
+      "case": "real_corpus",
+      "pair": 4,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 5364,
+        "iterations": 20000,
+        "tokens_per_iteration": 105,
+        "elapsed_ns": 246241416
+      },
+      "ns_per_lex": 12312.0708
+    },
+    {
+      "case": "real_corpus",
+      "pair": 5,
+      "label": "baseline",
+      "data": {
+        "input_bytes": 5364,
+        "iterations": 20000,
+        "tokens_per_iteration": 105,
+        "elapsed_ns": 244040833
+      },
+      "ns_per_lex": 12202.04165
+    },
+    {
+      "case": "real_corpus",
+      "pair": 5,
+      "label": "candidate",
+      "data": {
+        "input_bytes": 5364,
+        "iterations": 20000,
+        "tokens_per_iteration": 105,
+        "elapsed_ns": 244070417
+      },
+      "ns_per_lex": 12203.52085
+    }
+  ],
+  "snapshots_equal": 178,
+  "coverage_limits": [
+    "Single macOSarm64host; generated ordinary/comment/Unicode fixtures and one real file only.",
+    "No new RSS, allocation-counter or CPU-sample measurement; not a universal speedup.",
+    "Earlier cursor-only RSS/time results remain historical, not remeasured or multiplied into these ratios.",
+    "Full token/diagnostic Debug comparison is same-Rust-version evidence, not a public serialization format."
+  ]
+}

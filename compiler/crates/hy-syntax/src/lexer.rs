@@ -184,8 +184,7 @@ enum StrEscape {
 
 struct Lexer<'a> {
     path: String,
-    chars: Vec<char>,
-    i: usize,
+    chars: std::str::Chars<'a>,
     line: u32,
     col: u32,
     diags: Vec<Diagnostic>,
@@ -194,34 +193,30 @@ struct Lexer<'a> {
     /// InterpOpen in the same segment scan).
     pending: Option<Token>,
     eof_done: bool,
-    _src: &'a str,
 }
 
 impl<'a> Lexer<'a> {
     fn new(path: &str, src: &'a str) -> Self {
         Lexer {
             path: path.to_string(),
-            chars: src.chars().collect(),
-            i: 0,
+            chars: src.chars(),
             line: 1,
             col: 1,
             diags: Vec::new(),
             frames: Vec::new(),
             pending: None,
             eof_done: false,
-            _src: src,
         }
     }
 
     // -- low-level cursor ---------------------------------------------------
 
     fn at(&self, off: usize) -> Option<char> {
-        self.chars.get(self.i + off).copied()
+        self.chars.clone().nth(off)
     }
 
     fn bump(&mut self) -> Option<char> {
-        let c = self.chars.get(self.i).copied()?;
-        self.i += 1;
+        let c = self.chars.next()?;
         if c == '\n' {
             self.line += 1;
             self.col = 1;
@@ -256,33 +251,36 @@ impl<'a> Lexer<'a> {
     /// `skip_trivia` without consuming anything. Used by the contextual
     /// `map` + `[` rule.
     fn next_code_char_after_trivia(&self) -> Option<char> {
-        let mut i = self.i;
+        let mut chars = self.chars.clone();
         loop {
-            match self.chars.get(i).copied() {
-                Some(c) if c.is_whitespace() => i += 1,
-                Some('/') if self.chars.get(i + 1).copied() == Some('/') => {
-                    i += 2;
-                    while let Some(c) = self.chars.get(i).copied() {
+            let c = chars.next()?;
+            if c.is_whitespace() {
+                continue;
+            }
+            if c != '/' {
+                return Some(c);
+            }
+            match chars.clone().next() {
+                Some('/') => {
+                    chars.next();
+                    for c in chars.by_ref() {
                         if c == '\n' {
                             break;
                         }
-                        i += 1;
                     }
                 }
-                Some('/') if self.chars.get(i + 1).copied() == Some('*') => {
-                    i += 2;
+                Some('*') => {
+                    chars.next();
+                    let mut previous = None;
                     loop {
-                        if i + 1 >= self.chars.len() {
-                            return None;
-                        }
-                        if self.chars[i] == '*' && self.chars[i + 1] == '/' {
-                            i += 2;
+                        let c = chars.next()?;
+                        if previous == Some('*') && c == '/' {
                             break;
                         }
-                        i += 1;
+                        previous = Some(c);
                     }
                 }
-                other => return other,
+                _ => return Some('/'),
             }
         }
     }
@@ -427,15 +425,17 @@ impl<'a> Lexer<'a> {
 
     fn lex_ident_or_kw(&mut self) -> Token {
         let start = self.pos();
-        let mut s = String::new();
-        while let Some(c) = self.at(0) {
-            if c == '_' || c.is_ascii_alphanumeric() {
-                s.push(c);
-                self.bump();
-            } else {
-                break;
-            }
-        }
+        let remaining = self.chars.as_str();
+        let length = remaining
+            .as_bytes()
+            .iter()
+            .position(|&c| c != b'_' && !c.is_ascii_alphanumeric())
+            .unwrap_or(remaining.len());
+        // Identifiers are ASCII, so every consumed byte is one column and
+        // the first non-identifier byte remains at a UTF-8 boundary.
+        let s = &remaining[..length];
+        self.chars = remaining[length..].chars();
+        self.col += length as u32;
         if s.chars().any(|c| c.is_ascii_uppercase()) {
             // LX2: Hybrid identifiers are snake_case; foreign names are
             // normalized at binding time, so uppercase never appears here.
@@ -465,7 +465,7 @@ impl<'a> Lexer<'a> {
         if let Some(kw) = KEYWORDS.iter().find(|k| **k == s) {
             self.tok(start, Tok::Kw(kw))
         } else {
-            self.tok(start, Tok::Ident(s))
+            self.tok(start, Tok::Ident(s.to_owned()))
         }
     }
 
@@ -824,16 +824,10 @@ impl<'a> Lexer<'a> {
 
     fn lex_punct(&mut self) -> Token {
         let start = self.pos();
-        let rest: String = {
-            let mut r = String::new();
-            for k in 0..4 {
-                match self.at(k) {
-                    Some(c) => r.push(c),
-                    None => break,
-                }
-            }
-            r
-        };
+        // Operator spellings are ASCII; borrow the existing UTF-8 remainder
+        // instead of allocating a short lookahead buffer for every token.
+        let rest = self.chars.as_str();
+        let first = rest.as_bytes()[0];
         // MULTI is scanned IN ORDER and matches by prefix, so the 3-char
         // compound forms must precede their 2-char prefixes (`<<=` before
         // `<<`, `>>=` before `>>`).
@@ -842,7 +836,7 @@ impl<'a> Lexer<'a> {
             "<<", ">>", "++", "--", "+=", "-=", "*=", "/=", "%=", "|=", "&=", "^=", "..",
         ];
         for m in MULTI {
-            if rest.starts_with(m) {
+            if m.as_bytes()[0] == first && rest.starts_with(m) {
                 for _ in 0..m.chars().count() {
                     self.bump();
                 }
@@ -1465,6 +1459,55 @@ mod tests {
         assert!(t.contains(&Tok::Punct("--")));
         assert!(t.contains(&Tok::Punct("+=")));
         assert!(t.contains(&Tok::Punct("...")));
+    }
+
+    #[test]
+    fn punctuation_preserves_longest_matches_at_eof() {
+        assert_eq!(
+            toks("<<=>>=... ..=<<>>..:=:"),
+            vec![
+                Tok::Punct("<<="),
+                Tok::Punct(">>="),
+                Tok::Punct("..."),
+                Tok::Punct("..="),
+                Tok::Punct("<<"),
+                Tok::Punct(">>"),
+                Tok::Punct(".."),
+                Tok::Punct(":="),
+                Tok::Punct(":"),
+                Tok::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn punctuation_preserves_scalar_columns_around_utf8_trivia() {
+        let tokens = lex("t.hy", ">>=\u{2003}+\n<-\u{2003}(").unwrap();
+        let punctuation: Vec<_> = tokens
+            .iter()
+            .filter_map(|token| match token.tok {
+                Tok::Punct(p) => Some((
+                    p,
+                    token.span.start.line,
+                    token.span.start.col,
+                    token.span.end.line,
+                    token.span.end.col,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            punctuation,
+            vec![
+                (">>=", 1, 1, 1, 4),
+                ("+", 1, 5, 1, 6),
+                ("<-", 2, 1, 2, 3),
+                ("(", 2, 4, 2, 5),
+            ]
+        );
+        let eof = tokens.last().unwrap();
+        assert_eq!(eof.tok, Tok::Eof);
+        assert_eq!((eof.span.start.line, eof.span.start.col), (2, 5));
     }
 
     #[test]

@@ -1,0 +1,266 @@
+{
+  "base": "b803f5556f4f75e8400bffe137f30717ae2e7831",
+  "baseline_measurement_head": "df0cae633be1be62b510a6bc0f31f30744a1dd59",
+  "candidate_measurement_head": "eb432aa44a5ed88125bbb26a1c4cf5245bc7de2f",
+  "environment": {
+    "os": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "cpu": "Apple M2",
+    "rust": "1.99.0-aarch64-apple-darwin",
+    "profile": "release",
+    "iterations_per_process": 10,
+    "process_observations_per_input": 3
+  },
+  "inputs": [
+    {
+      "name": "ordinary.hy",
+      "bytes": 27808,
+      "sha256": "a2f197c13a154f0ee4783b836480fece0c6dbe690cf7c46dcd4de5bf167e6383"
+    },
+    {
+      "name": "comments.hy",
+      "bytes": 1080014,
+      "sha256": "77ea99a6eb1779f41220580171627307e5f7fdd2aff16755d4bef41a1c6b3376"
+    },
+    {
+      "name": "unicode.hy",
+      "bytes": 54808,
+      "sha256": "105b431d9c39fd6c2ee37f344c8680d88fff3c2ae701af6e22b55abe9e5780f8"
+    }
+  ],
+  "baseline": {
+    "phase": "baseline",
+    "binary_sha256": "33644d7d82dfc7b23bf8be47cbd99fa2dcbc8c09c0630548bae4bea8582c4cdc",
+    "snapshot_inputs": 178,
+    "full_snapshot_mismatches": [],
+    "observations": [
+      {
+        "input_bytes": 27808,
+        "iterations": 10,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 3527500,
+        "case": "ordinary",
+        "repeat": 1,
+        "maximum_rss_bytes": 2342912,
+        "ns_per_iteration": 352750.0
+      },
+      {
+        "input_bytes": 27808,
+        "iterations": 10,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 3528584,
+        "case": "ordinary",
+        "repeat": 2,
+        "maximum_rss_bytes": 2342912,
+        "ns_per_iteration": 352858.4
+      },
+      {
+        "input_bytes": 27808,
+        "iterations": 10,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 3525209,
+        "case": "ordinary",
+        "repeat": 3,
+        "maximum_rss_bytes": 2326528,
+        "ns_per_iteration": 352520.9
+      },
+      {
+        "input_bytes": 1080014,
+        "iterations": 10,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 13105042,
+        "case": "comments",
+        "repeat": 1,
+        "maximum_rss_bytes": 47251456,
+        "ns_per_iteration": 1310504.2
+      },
+      {
+        "input_bytes": 1080014,
+        "iterations": 10,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 13157000,
+        "case": "comments",
+        "repeat": 2,
+        "maximum_rss_bytes": 47267840,
+        "ns_per_iteration": 1315700.0
+      },
+      {
+        "input_bytes": 1080014,
+        "iterations": 10,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 14116167,
+        "case": "comments",
+        "repeat": 3,
+        "maximum_rss_bytes": 47267840,
+        "ns_per_iteration": 1411616.7
+      },
+      {
+        "input_bytes": 54808,
+        "iterations": 10,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 3594667,
+        "case": "unicode",
+        "repeat": 1,
+        "maximum_rss_bytes": 2342912,
+        "ns_per_iteration": 359466.7
+      },
+      {
+        "input_bytes": 54808,
+        "iterations": 10,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 3413458,
+        "case": "unicode",
+        "repeat": 2,
+        "maximum_rss_bytes": 2342912,
+        "ns_per_iteration": 341345.8
+      },
+      {
+        "input_bytes": 54808,
+        "iterations": 10,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 3375500,
+        "case": "unicode",
+        "repeat": 3,
+        "maximum_rss_bytes": 2342912,
+        "ns_per_iteration": 337550.0
+      }
+    ],
+    "medians": {
+      "ordinary": {
+        "ns_per_iteration": 352750.0,
+        "maximum_rss_bytes": 2342912
+      },
+      "comments": {
+        "ns_per_iteration": 1315700.0,
+        "maximum_rss_bytes": 47267840
+      },
+      "unicode": {
+        "ns_per_iteration": 341345.8,
+        "maximum_rss_bytes": 2342912
+      }
+    },
+    "completed_at": "2026-11-03T11:43:49.197936+00:00",
+    "seconds": 1.086
+  },
+  "candidate": {
+    "phase": "candidate",
+    "binary_sha256": "0bf622d29ed5fa905a6c23b43e2b04648fcc36ff33123776c152e8e83ded3dcd",
+    "snapshot_inputs": 178,
+    "full_snapshot_mismatches": [],
+    "observations": [
+      {
+        "input_bytes": 27808,
+        "iterations": 10,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 3636375,
+        "case": "ordinary",
+        "repeat": 1,
+        "maximum_rss_bytes": 2244608,
+        "ns_per_iteration": 363637.5
+      },
+      {
+        "input_bytes": 27808,
+        "iterations": 10,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 3699709,
+        "case": "ordinary",
+        "repeat": 2,
+        "maximum_rss_bytes": 2244608,
+        "ns_per_iteration": 369970.9
+      },
+      {
+        "input_bytes": 27808,
+        "iterations": 10,
+        "tokens_per_iteration": 6009,
+        "elapsed_ns": 4051542,
+        "case": "ordinary",
+        "repeat": 3,
+        "maximum_rss_bytes": 2228224,
+        "ns_per_iteration": 405154.2
+      },
+      {
+        "input_bytes": 1080014,
+        "iterations": 10,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 7006667,
+        "case": "comments",
+        "repeat": 1,
+        "maximum_rss_bytes": 2768896,
+        "ns_per_iteration": 700666.7
+      },
+      {
+        "input_bytes": 1080014,
+        "iterations": 10,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 6713625,
+        "case": "comments",
+        "repeat": 2,
+        "maximum_rss_bytes": 2768896,
+        "ns_per_iteration": 671362.5
+      },
+      {
+        "input_bytes": 1080014,
+        "iterations": 10,
+        "tokens_per_iteration": 3,
+        "elapsed_ns": 6680375,
+        "case": "comments",
+        "repeat": 3,
+        "maximum_rss_bytes": 2768896,
+        "ns_per_iteration": 668037.5
+      },
+      {
+        "input_bytes": 54808,
+        "iterations": 10,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 3247875,
+        "case": "unicode",
+        "repeat": 1,
+        "maximum_rss_bytes": 2179072,
+        "ns_per_iteration": 324787.5
+      },
+      {
+        "input_bytes": 54808,
+        "iterations": 10,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 3285833,
+        "case": "unicode",
+        "repeat": 2,
+        "maximum_rss_bytes": 2179072,
+        "ns_per_iteration": 328583.3
+      },
+      {
+        "input_bytes": 54808,
+        "iterations": 10,
+        "tokens_per_iteration": 4009,
+        "elapsed_ns": 3337084,
+        "case": "unicode",
+        "repeat": 3,
+        "maximum_rss_bytes": 2179072,
+        "ns_per_iteration": 333708.4
+      }
+    ],
+    "medians": {
+      "ordinary": {
+        "ns_per_iteration": 369970.9,
+        "maximum_rss_bytes": 2244608
+      },
+      "comments": {
+        "ns_per_iteration": 671362.5,
+        "maximum_rss_bytes": 2768896
+      },
+      "unicode": {
+        "ns_per_iteration": 328583.3,
+        "maximum_rss_bytes": 2179072
+      }
+    },
+    "completed_at": "2026-11-03T11:50:59.571320+00:00",
+    "seconds": 1.116
+  },
+  "full_snapshot_comparison": {
+    "tracked_files": 175,
+    "generated_inputs": 3,
+    "byte_compared": 178,
+    "mismatches": []
+  },
+  "limit": "RSS includes process/input/output across10lexes; time excludes input reading; files already written. Three short observations on one machine, no universal-speed/statistical-significance claim."
+}
