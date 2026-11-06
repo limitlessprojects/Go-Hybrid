@@ -92,6 +92,9 @@ impl<'a> Checker<'a> {
         if let Some(target) = self.type_aliases.get(base) {
             return self.shape_of_type_depth(target, depth + 1);
         }
+        if self.enums.contains_key(base) {
+            return TypeShape::Primitive;
+        }
         // #884: the T9 prelude's `set[T]` lowers to a struct wrapping a Go
         // map (`type set[t comparable] struct { m map[t]struct{} }`), so a
         // shallow copy shares that map exactly like any other map-carrying

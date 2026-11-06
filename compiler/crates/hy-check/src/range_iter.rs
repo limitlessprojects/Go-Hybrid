@@ -45,6 +45,8 @@ impl<'a> Checker<'a> {
                     let shape = self.shape_of_expr(st, expr);
                     let is_chan = matches!(shape, TypeShape::Chan(_));
                     let is_set = !self.structs.contains_key("set")
+                        && !self.enums.contains_key("set")
+                        && !st.type_params.contains("set")
                         && matches!(
                             shape,
                             TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set"
@@ -258,7 +260,8 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if let Some(init) = self.const_values.get(name.as_str()) {
-                    if let Some(k) = self.non_integer_bound_kind_at(st, init, depth + 1) {
+                    let file_st = FnState::default();
+                    if let Some(k) = self.non_integer_bound_kind_at(&file_st, init, depth + 1) {
                         return Some(k);
                     }
                 }
@@ -384,10 +387,16 @@ impl<'a> Checker<'a> {
                     if let Some(b) = self.consts.get(name.as_str()) {
                         // a file-level const: a TYPED const fixes the
                         // bound's type; an untyped const adapts.
-                        let ty = b.ty.as_ref()?;
-                        let resolved = self.resolve_type_alias(ty);
-                        if let TypeExpr::Named { name: rn, .. } = resolved {
-                            if crate::const_overflow::fixed_width_int_range(&rn).is_some() {
+                        if let Some(ty) = b.ty.as_ref() {
+                            let resolved = self.resolve_type_alias(ty);
+                            if let TypeExpr::Named { name: rn, .. } = resolved {
+                                if crate::const_overflow::fixed_width_int_range(&rn).is_some() {
+                                    return Some(rn);
+                                }
+                            }
+                        } else if let Some(init) = self.const_values.get(name.as_str()) {
+                            let file_st = FnState::default();
+                            if let Some(rn) = self.typed_int_bound(&file_st, init) {
                                 return Some(rn);
                             }
                         }
@@ -427,10 +436,21 @@ impl<'a> Checker<'a> {
                     {
                         if args.len() == 1
                             && !args[0].spread
-                            && !self.type_aliases.contains_key(name.as_str())
-                            && crate::const_overflow::fixed_width_int_range(name).is_some()
                         {
-                            return Some(name.clone());
+                            if !self.type_aliases.contains_key(name.as_str())
+                                && crate::const_overflow::fixed_width_int_range(name).is_some()
+                            {
+                                return Some(name.clone());
+                            }
+                            let resolved = self.resolve_type_alias(&TypeExpr::Named {
+                                name: name.clone(),
+                                span: callee.span(),
+                            });
+                            if let TypeExpr::Named { name: rn, .. } = resolved {
+                                if crate::const_overflow::fixed_width_int_range(&rn).is_some() {
+                                    return Some(rn);
+                                }
+                            }
                         }
                         if name == "copy"
                             && args.len() == 2
@@ -507,10 +527,24 @@ impl<'a> Checker<'a> {
         // only pointer-to-ARRAY is rangeable (`*struct` / `*slice` /
         // `*string` are not), so normalize exactly one Pointer level for
         // arrays and leave every other shape as classified.
-        let shape = if matches!(self.ty_of_expr(st, expr).map(|t| self.resolve_type_alias(&t)), Some(TypeExpr::Option { .. })) { TypeShape::Struct(None) } else { match self.shape_of_expr(st, expr) {
-            TypeShape::Pointer(inner) if matches!(*inner, TypeShape::Array(_)) => *inner,
-            other => other,
-        } };
+        let shape = if matches!(self.ty_of_expr(st, expr).map(|t| self.resolve_type_alias(&t)), Some(TypeExpr::Option { .. })) { TypeShape::Struct(None) } else {
+            if let Some(TypeExpr::Named { name, .. }) = self.ty_of_expr(st, expr) {
+                let base = Self::base_named_type_str(&name);
+                if st.type_params.contains(base) {
+                    TypeShape::Unknown
+                } else {
+                    match self.shape_of_expr(st, expr) {
+                        TypeShape::Pointer(inner) if matches!(*inner, TypeShape::Array(_)) => *inner,
+                        other => other,
+                    }
+                }
+            } else {
+                match self.shape_of_expr(st, expr) {
+                    TypeShape::Pointer(inner) if matches!(*inner, TypeShape::Array(_)) => *inner,
+                    other => other,
+                }
+            }
+        };
         match shape {
             TypeShape::Slice(_)
             | TypeShape::Array(_)
@@ -522,6 +556,8 @@ impl<'a> Checker<'a> {
             | TypeShape::BorrowHandle(_) => {}
             TypeShape::Struct(Some(ref n))
                 if !self.structs.contains_key("set")
+                    && !self.enums.contains_key("set")
+                    && !st.type_params.contains("set")
                     && (n.starts_with("set[") || n == "set") => {}
             TypeShape::Chan(_) => {
                 let chan_ty = self
