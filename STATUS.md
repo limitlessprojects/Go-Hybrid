@@ -1,4 +1,5 @@
 # STATUS (for the human — 15 lines max)
+- Contributor #2361 (2026-11-03): refreshed against main 421ae80; workflow-run approval regressions 5/5 (baseline 3 failures), CI conflict resolved preserving newer suites. Linux hosted validation/review and any bounty award remain pending; see PLAN.md.
 
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
 

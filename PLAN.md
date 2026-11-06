@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor validation (2026-11-03, #2361): merged current main `421ae80`; retained all newer CI registrations and the workflow-run identity regression. Against unchanged current main, three of five focused tests fail; with run-ID deduplication, all five pass offline. Registration (39 files), queue-sweeper (15), registration guard (34), conflict-marker guard (27), and Shepherd gate (17) tests pass locally. The four POSIX Git-shim verify-assert tests cannot execute on Windows; unchanged Linux CI remains required for them and the compiler/corpus/differential delivery gates.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.
