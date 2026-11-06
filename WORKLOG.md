@@ -1,4 +1,14 @@
 
+## Session 118 — 2026-11-06 14:10 UTC+8 tick
+- env cold-recycled; rust 1.99.0 + go1.26.9 restored, tarball re-cached. approve 15/15 (4985 left), scan skipped. Open PR wave at 100 (list cap).
+- **2 landed**:
+  - **#3739** -> `69564b1b` (dextermos-dev, fixes #3735): const_init string-conv args gated by expr_is_constant_inner; consts-shadowed string target joins shadow guards; is_const_allowed_ty rejects struct/tp/enum-shadowed Named pre+post alias resolve. New test const_init_string_conv_and_shadow_3735.rs. FF tree 5244df94 asserted. ALL-GREEN 444 suites. Reply 201 (id 6678589502).
+  - **#3744** -> `71749fda` (Burapa-J, fixes #3743 Row 13 BUILDABLE): check_elided_struct_fields (unknown/dup fields HYB-E1002 in elided-head slots); new elided_type walker (array-len TypeExprs across consts/structs/aliases/enum payloads/fn sigs); is_non_struct_foreign_type curation ({ } in io.*/http.handler/time.duration/os.file_mode/net.conn rejects). MERGE-scenario trial e191ffeb (no conflicts), tree af3340f7 asserted. ALL-GREEN 445 suites. Reply 201.
+- **3 dup replies** (hall-of-fame, independent patch-ids): #3740 (jpereyra243-byte) + #3741 (aswadi) + #3742 (ThanhWinter) re #3735 via #3739; #3745 (jpereyra243-byte) re #3743 via #3744 — 4 total. NOTE: first loop iteration had unquoted heredoc (backticked SHA command-substituted) + loop slice bug (6 items not 3 pairs) -> 3 comments PATCH-fixed (6678593476/6678594333/6678595206), 3 harmless 404s on author-name "issues". Lesson: always quote heredoc delimiters in bodies containing backticks; enumerate pairs explicitly.
+- **Disk crisis mid-battery**: rustc temp "No space left" — rootfs 93%. Freed: puppeteer 608M + ms-playwright 613M + node_modules 1.2G + target/debug/incremental 1.2G -> 2.2G avail; df numbers initially stale, write-test used to confirm real space. Suites 443 -> 445 (+2: 3735-test, 3743-test). Zero gate failures.
+- Next queue: #3747/#3748 (try_context shadowed error type params, Burapa-J first) -> #3750/#3751 (arith fold) -> #3753/#3754 (addr_loan) -> #3757/#3758 (recv) -> #3759 (const_overflow) -> #3761/#3770 (bracketed generic args) -> #3763/#3769 (walk nested assign) -> #3755/#3768/#3771/#3772/#3775/#3779/#3782/#3781(+#3785 extends #3677)/#3787/#3788/#3791/#3792/#3793/#3794; spikes #3765/#3774 Track-3 route.
+- Worklog: this commit.
+
 ## Session 93 (2026-11-04 19:10Z+08 tick)
 - env fully recycled; standard restore (rust 1.99.0, go1.26.9, tarball re-cached). Mirror rolled back to s44 snapshot, pull caught up to 05448f75 (s92 #3609 landed + underscore-cluster addendum; replies verified posted on #3606/#3607).
 - **2 landed**:
