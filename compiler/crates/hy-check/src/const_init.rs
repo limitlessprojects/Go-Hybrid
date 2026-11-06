@@ -165,6 +165,7 @@ impl<'a> Checker<'a> {
             || self.structs.contains_key(name)
             || self.struct_type_params.contains_key(name)
             || self.enums.contains_key(name)
+            || self.consts.contains_key(name)
         {
             return false;
         }
@@ -204,10 +205,8 @@ impl<'a> Checker<'a> {
                 if let Some(st) = st {
                     if let Some(b) = st.env_lookup(name) {
                         if let Some(ty) = &b.ty {
-                            if matches!(
-                                self.resolve_type_alias(ty),
-                                hy_syntax::TypeExpr::Option { .. }
-                            ) || !matches!(self.shape_of_type(ty), TypeShape::Str)
+                            if !self.is_const_allowed_ty(ty)
+                                || !matches!(self.shape_of_type(ty), TypeShape::Str)
                             {
                                 return false;
                             }
@@ -217,10 +216,8 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(cdecl) = self.file_const_decl(name) {
                     if let Some(ty) = &cdecl.ty {
-                        if matches!(
-                            self.resolve_type_alias(ty),
-                            hy_syntax::TypeExpr::Option { .. }
-                        ) || !matches!(self.shape_of_type(ty), TypeShape::Str)
+                        if !self.is_const_allowed_ty(ty)
+                            || !matches!(self.shape_of_type(ty), TypeShape::Str)
                         {
                             return false;
                         }
@@ -249,20 +246,23 @@ impl<'a> Checker<'a> {
     }
 
     fn is_const_allowed_ty(&self, ty: &hy_syntax::TypeExpr) -> bool {
+        if let hy_syntax::TypeExpr::Named { name, .. } = ty {
+            if self.structs.contains_key(name.as_str())
+                || self.struct_type_params.contains_key(name.as_str())
+                || self.enums.contains_key(name.as_str())
+            {
+                return false;
+            }
+        }
         let resolved = self.resolve_type_alias(ty);
-        if matches!(resolved, hy_syntax::TypeExpr::Option { .. }) {
-            return false;
-        }
-        if matches!(self.shape_of_type(ty), TypeShape::Primitive | TypeShape::Str) {
-            return true;
-        }
         matches!(
             resolved,
             hy_syntax::TypeExpr::Named { ref name, .. }
                 if !self.structs.contains_key(name.as_str())
                     && !self.struct_type_params.contains_key(name.as_str())
                     && !self.enums.contains_key(name.as_str())
-                    && is_conversion_type_name(name)
+                    && (matches!(self.shape_of_type(ty), TypeShape::Primitive | TypeShape::Str)
+                        || is_conversion_type_name(name))
         )
     }
 
