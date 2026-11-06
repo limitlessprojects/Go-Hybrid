@@ -347,3 +347,4 @@
 - Suites 456 -> 457 (+1: shadowed_httptest_and_e11_handler_3789). One landing, one dup reply, zero gate fails, zero silent closes.
 - Next queue: #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route; fresh wave 3807..3881 family scan+dedupe (bradwue313 already seen in wave — note #3793 was his too).
 - Worklog: this commit.
+- **S129 CORRECTION (posted same tick)**: the in-merge arrow restoration for #3793 was written to the worktree but NOT staged before the merge committed — `30e75134` shipped the mangled comments (0 arrows). Follow-up commit `a516dd26` restores all 10 lines byte-identical + drops the EOF blank; remote asserted (8/2 arrows verified in HEAD blob). Correction comment posted on #3793 (201). LESSON: worktree edits during a `merge --no-commit` must be followed by explicit `git add` of every touched path — verify the committed blob (git show HEAD:<path> | grep) before claiming a fixup landed in the merge.
