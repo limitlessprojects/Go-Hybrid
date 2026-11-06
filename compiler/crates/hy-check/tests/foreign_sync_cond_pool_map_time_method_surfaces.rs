@@ -1,5 +1,5 @@
 //! Regression tests for foreign method surface gating on `sync.cond`, `sync.pool`,
-//! `sync.map`, `time.ticker`, and `time.timer` handles (`HYB-E1002`, Row 13 BUILDABLE).
+//! `sync.Map`, `time.ticker`, and `time.timer` handles (`HYB-E1002`, Row 13 BUILDABLE).
 //!
 //! Under GUARANTEES.md Row 13 (BUILDABLE), every program accepted by `hyb check`
 //! must emit valid Go that builds with `go build`.
@@ -97,7 +97,7 @@ fn test_sync_map_phantom_method_rejects() {
 import "sync"
 
 struct state {
-    m sync.map
+    m sync.Map
 }
 
 fn main() {
@@ -105,7 +105,7 @@ fn main() {
     s.m.bogus_call()
 }
 "#;
-    rejects_e1002(src, "sync.map");
+    rejects_e1002(src, "sync.Map");
 }
 
 #[test]
@@ -151,7 +151,7 @@ import "time"
 struct state {
     cond   sync.cond
     pool   sync.pool
-    smap   sync.map
+    smap   sync.Map
     ticker time.ticker
     timer  time.timer
 }
@@ -163,7 +163,7 @@ fn main() {
     _ = s.pool.get()
     s.pool.put(1)
     s.smap.store("k", "v")
-    _ = s.smap.delete("k")
+    s.smap.delete("k")
     s.ticker.stop()
     s.timer.stop()
 }
