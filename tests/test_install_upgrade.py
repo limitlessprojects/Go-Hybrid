@@ -124,6 +124,79 @@ class UpgradeTests(unittest.TestCase):
             )
             self.assertEqual((probe.returncode, probe.stdout), (0, version + "\n"))
 
+    def upgrade_with_launcher_symlink(self, target):
+        self.package("old")
+        installed = self.install_release()
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        launcher = self.bin_dir / "hyb"
+        launcher.unlink()
+        launcher.symlink_to(target)
+        self.package("new")
+        proc = subprocess.Popen(
+            ["sh", str(ROOT / "install.sh")], env=self.env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            self.fail("installer followed the launcher symlink and hung in an exec loop")
+        self.assertEqual(proc.returncode, 0, stdout + stderr)
+        return launcher
+
+    def test_launcher_symlink_to_payload_is_replaced(self):
+        launcher = self.upgrade_with_launcher_symlink(self.install / "bin" / "hyb")
+        self.assertFalse(launcher.is_symlink())
+        probe = subprocess.run(
+            [str(launcher)], env=self.env,
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual((probe.returncode, probe.stdout), (0, "new\n"))
+
+    def test_launcher_symlink_does_not_overwrite_unrelated_target(self):
+        target = self.root / "unrelated CLI"
+        original = b"#!/bin/sh\nprintf 'unrelated\\n'\n"
+        target.write_bytes(original)
+        target.chmod(0o755)
+        mode = target.stat().st_mode
+        launcher = self.upgrade_with_launcher_symlink(target)
+        self.assertEqual(target.read_bytes(), original)
+        self.assertEqual(target.stat().st_mode, mode)
+        self.assertFalse(launcher.is_symlink())
+
+    def test_dangling_launcher_symlink_does_not_create_target(self):
+        target = self.root / "absent CLI"
+        launcher = self.upgrade_with_launcher_symlink(target)
+        self.assertFalse(target.exists())
+        self.assertFalse(launcher.is_symlink())
+
+    def test_launcher_directory_is_rejected_before_replacing_payload(self):
+        self.package("old")
+        installed = self.install_release()
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        launcher = self.bin_dir / "hyb"
+        launcher.unlink()
+        target = self.root / "unrelated directory"
+        target.mkdir()
+        for use_symlink in (False, True):
+            with self.subTest(symlink=use_symlink):
+                if use_symlink:
+                    launcher.symlink_to(target, target_is_directory=True)
+                else:
+                    launcher.mkdir()
+                self.package("new")
+                failed = self.install_release()
+                self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+                self.assertIn("launcher path is a directory", failed.stderr)
+                self.assertEqual((self.install / "runtime" / "version").read_text(), "old")
+                self.assertEqual(list(target.iterdir()), [])
+                if use_symlink:
+                    launcher.unlink()
+                else:
+                    launcher.rmdir()
+
     def test_launcher_cannot_overwrite_payload_through_directory_alias(self):
         self.package("old")
         installed = self.install_release()

@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor PR #1663 revalidation (2026-11-02, PABixn): refreshed onto main `77ebac9`, retaining its relative-bin-directory fix. On that main the three symlink regressions fail and the healthy-upgrade control passes; the refreshed tree passes all 28 offline installer tests (25.851s), shell syntax and diff checks. Canonicalized the temporary runtime-test root to handle macOS `/var`/`/private/var` aliases without relaxing assertions. Compiler/runtime suites were not rerun; upstream CI and maintainer/bounty review remain required.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.
