@@ -31,8 +31,8 @@ fn closure_for_and_select_binders_preserve_type_exprs() {
     for src in [
         "fn main() {\n  f := fn() {\n    for i in i8(0)..i8(4) {\n      i = 300\n      _ = i\n    }\n  }\n  f()\n}",
         "fn main() {\n  f := fn() {\n    xs := []i8{1, 2}\n    for x in xs {\n      x = 300\n      _ = x\n    }\n  }\n  f()\n}",
-        "fn main() {\n  f := fn() {\n    ms := []map[i8]int{{1: 2}}\n    for m in ms {\n      m[300] = 1\n    }\n  }\n  f()\n}",
-        "fn main() {\n  f := fn() {\n    rows := [][]i8{{1, 2}}\n    for row in rows {\n      _ = append(row, 300)\n    }\n  }\n  f()\n}",
+        "fn main() {\n  f := fn() {\n    var ms []map[i8]int\n    for m in ms {\n      m[300] = 1\n    }\n  }\n  f()\n}",
+        "fn main() {\n  f := fn() {\n    var rows [][]i8\n    for row in rows {\n      _ = append(row, 300)\n    }\n  }\n  f()\n}",
     ] {
         let codes = check_codes(src);
         assert!(
