@@ -267,3 +267,39 @@
 - Suites 450 (unchanged — #3759 extends the existing 3624 test file with 3 fns, 5/5 pass). One landing, zero gate failures.
 - Next queue: **#3761 battery+land (MERGE case), hall-of-fame #3770** -> **#3763 battery+land (MERGE case), hall-of-fame #3769** -> #3755/#3768/#3771/#3772/#3775/#3779/#3782/#3781+#3785/#3787/#3788/#3791/#3792/#3793+#3794/#3796/#3797/#3798/#3800/#3803/#3804; spikes #3765/#3774 Track-3 route. Fresh wave 3807..3881 (cyzcz/Burapa-J/dextermos-dev batch) needs scan+family dedupe next tick.
 - Worklog: this commit.
+
+## Session 123 — 2026-11-06 21:10 UTC+8 tick
+- env cold-recycled on a STALE snapshot (session-44-era rootfs): node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached, main fast-forwarded 403585c -> be51e2f5. approve 31/31 (4969 left), scan skipped.
+- NOTE: /home/z/go-hybrid-target materialized warm-ish mid-build (snapshot lazy layering?) — workspace build finished in 2 min after initial full-ish recompile; keep treating cold tick as potentially-warm, verify with build time not du.
+- NOTE: transient push slowness this tick — first two push attempts hit the 120s/200s tool timeout mid-transfer; push succeeded on retry (git protocol fine, api.github.com fast). Use timeout 170-200 for pushes.
+- **2 landed**:
+  - **#3761** -> `4ccbd0b7` (Burapa-J, fixes #3760): resolve.rs bracketed generic type args re-parsed as `type _hy_ty_arg = <args>` + run_parsed_type walk (named heads/package roots checked, set/option/type-params whitelisted, array lens re-run as exprs with span re-attribution); replaces alphanumeric inner-ident scan. MERGE case (base 3d029ca5 behind). Trial-tree-asserted b0c38c68 (== battery tree; differs from PR head tree by carrying #3759 state — MERGE-case assert is vs TRIAL tree, not PR head tree). ALL-GREEN 451 suites/2920 tests, corpus 135/135, differential 45/45+90/90. Landing reply 201.
+  - **#3763** -> `44af2b93` (Burapa-J, fixes #3762): walk.rs place_calls/place_fnlits recursive walkers for Assign target places (Index base+index, Field base, AddrOf base); A5 closure-unit perimeter preserved. MERGE case. Trial-tree-asserted d473df3a, remote asserted. ALL-GREEN 452 suites/2924 tests, corpus 135/135, differential 45/45+90/90. Landing reply 201.
+- **2 dup hall-of-fame replies** (patch-ids precomputed S122, confirmed this tick): #3770 (akashmanjunath2505, #3760 family) and #3769 (akashmanjunath2505, #3762 family). 201 x2. PRs stay open as artifacts.
+- Suites 450 -> 452 (+2: resolve_generic_bracket_type_args, walk_assign_target_place_calls). Two landings, two dup replies, zero gate failures.
+- Next queue: #3755 (EazyHood, job watch) -> #3768 (#3767 shift-in-float-conv; NOTE family with #3820 dextermos-dev — dedupe first) -> #3771/#3772 -> #3775 -> #3779/#3782 (installer family) -> #3781+#3785 (go_keyword_names TypeExpr walk, extends landed #3677 — check family 3841 too) -> #3787/#3788 -> #3791/#3792 -> #3793+#3794 (shadowed strings/http family) -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route. Fresh wave 3807..3881 (cyzcz/Burapa-J/dextermos-dev/bradwue313 batch) needs family scan+dedupe next tick.
+- Worklog: this commit.
+
+## Session 124 — 2026-11-06 22:10 UTC+8 tick
+- env cold-recycled on the stale session-44 snapshot again; node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached, main fast-forwarded c403585c -> f9c49978. approve 22/22 (4978 left), scan skipped.
+- Target materialized warm again mid-build (2 min to Finished; lazy snapshot layering confirmed twice — S123/S124).
+- Patch-id matrix: #3768 5290c2df vs #3820 284f7d34 (#3767 shift-in-float-conv family) — DISTINCT, independent implementations, first-to-land wins.
+- Pre-battery dup-check vs main: no existing untyped-const-shift-in-float-conversion rule on main (grep 3631/non-integer-conversion/inherits-the-target empty) — genuine new fix, not a dup of landed work.
+- **Landed PR #3768** -> `d9fda1ce` (akashmanjunath2505, fixes #3767): buildable.rs find_untyped_nonconst_shift (untyped const lhs of non-const shift inside float/complex conversion arg, all-constant shifts exempt per Go spec), complex64/128/c64/c128 classified OpKind::Float, HYB-E1002 with spec rationale. MERGE case. Trial-tree-asserted 04548cae, remote asserted. ALL-GREEN 453 suites/2933 tests, corpus 135/135, differential 45/45+90/90. Landing reply 201.
+- Dup hall-of-fame reply #3820 (dextermos-dev). 201. PRs stay open as artifacts.
+- **PROCESS BUG RECURRED (S118 lesson, variant)**: backticks inside a DOUBLE-QUOTED `git merge -m "..."` message got command-substituted (`untyped_const << non_const` clause swallowed; bash ran it as a substitution and left a gap). Push already done — message not amendable on main. RULE: commit messages with any backtick/dollar content must go through single-quoted heredoc file + `git commit -F file` (or escape). Landing reply carries the full correct description.
+- Suites 452 -> 453 (+1: issue_3767 test file). One landing, one dup reply, zero gate failures.
+- Next queue: #3755 (EazyHood job-watch, tools) -> #3771/#3772 -> #3775 -> #3779/#3782 (installer family, dedupe) -> #3781+#3785+#3841 (go_keyword_names TypeExpr walk family, extends landed #3677 — three-way dedupe first) -> #3787/#3788 -> #3791/#3792 -> #3793+#3794 -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route. Fresh wave 3807..3881 needs family scan+dedupe.
+- Worklog: this commit.
+
+## Session 125 — 2026-11-06 23:10 UTC+8 tick
+- env cold-recycled on stale session-44 snapshot; node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached, main fast-forwarded c403585c -> b4d1ded7. approve 18/18 (4955 left), scan skipped.
+- **S119 false-red recurrence handled by protocol**: first full-suite run on #3755 failed hy-emit emitter test ("go run failed on emitted Go") at 89% disk — test passes in isolation, suite re-ran 453/453 clean after freeing 610M incremental cache. No source change; documented in merge commit. False-red protocol (isolate re-run + free space + full re-run) worked first try.
+- go_keyword_names TypeExpr-walk family 3-way patch-id matrix: #3781 34c946c7 vs #3785 4968dd58 vs #3841 fec67279 — ALL DISTINCT, first-to-land = oldest #3781.
+- **2 landed**:
+  - **#3755** -> `9a6d169e` (EazyHood): job.py actions watch (no run_id) queries heavy.yml workflow runs before pagination; explicit run IDs unchanged. PR pytest 52/52 incl. new ActionsWatchWorkflowTests. MERGE case. Trial-tree-asserted 7368f2bd, remote asserted. ALL-GREEN 453 suites/2933 tests (after false-red re-run), corpus 135/135, differential 45/45+90/90. Landing reply 201.
+  - **#3781** -> `d9cd4e38` (ocakciomursel-pixel, extends landed #3677): go_keyword_names kw_type TypeExpr walker (const/struct-field/alias/receiver/params/results/locals; pointer/slice/chan/option/map/fn recurse; array lens re-walked as exprs) — rejects `default` as fn-type param name in all type positions; 12 new cases in existing suite. MERGE case. Trial-tree-asserted 4871db35, remote asserted. ALL-GREEN 453 suites/2933 tests, corpus 135/135, differential 45/45+90/90. Landing reply 201.
+- **2 dup hall-of-fame replies**: #3785 (Primuez), #3841 (dextermos-dev). 201 x2. PRs stay open as artifacts.
+- Suites 453 (unchanged — both PRs extend existing suites). Two landings, two dup replies, one false-red handled, zero real gate failures.
+- Next queue: #3771/#3772 -> #3775 -> #3779/#3782 (installer family, dedupe) -> #3787/#3788 -> #3791/#3792 -> #3793+#3794 -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route. Fresh wave 3807..3881 needs family scan+dedupe (many cyzcz/Burapa-J/dextermos-dev/bradwue313 entries).
+- Worklog: this commit.
