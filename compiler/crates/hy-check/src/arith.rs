@@ -10,8 +10,8 @@
 use crate::model::{unwrap_parens, Checker};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    AssignOp, BinOp, Expr, ForKind, InterpPart, LitKind, Place, PlaceKind, SelectArmKind,
-    Stmt, UnOp,
+    AssignOp, BinOp, Expr, ForKind, InterpPart, LitKind, MatchPattern, Place, PlaceKind,
+    SelectArmKind, Stmt, UnOp,
 };
 
 impl<'a> Checker<'a> {
@@ -320,20 +320,24 @@ impl<'a> Checker<'a> {
                 // Their scopes differ from `st`: a closure-local shadow of a
                 // file const is invisible to env_lookup, so resolution fails
                 // open on every name the body defines (issue #758 guard).
-                {
-                    let mut defined = std::collections::HashSet::new();
-                    for p in params {
-                        defined.insert(p.name.clone());
-                    }
-                    for stmt in &body.stmts {
-                        stmt_defined_names(stmt, &mut defined);
-                    }
-                    self.zd_defined = defined;
+                let prev_defined = std::mem::take(&mut self.zd_defined);
+                let mut defined = prev_defined.clone();
+                for p in params {
+                    defined.insert(p.name.clone());
                 }
+                for r in results {
+                    if let Some(n) = &r.name {
+                        defined.insert(n.clone());
+                    }
+                }
+                for stmt in &body.stmts {
+                    stmt_defined_names(stmt, &mut defined);
+                }
+                self.zd_defined = defined;
                 for stmt in &body.stmts {
                     self.check_stmt_const_zero_divisor_inner(st, stmt, /*deep=*/ true);
                 }
-                self.zd_defined.clear();
+                self.zd_defined = prev_defined;
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
         }
@@ -557,9 +561,14 @@ fn int_lit_is_zero(raw: &str) -> bool {
 /// reject); the house rule is fail-open.
 fn expr_defined_names(expr: &Expr, out: &mut std::collections::HashSet<String>) {
     match expr {
-        Expr::FnLit { params, body, .. } => {
+        Expr::FnLit { params, results, body, .. } => {
             for p in params {
                 out.insert(p.name.clone());
+            }
+            for r in results {
+                if let Some(n) = &r.name {
+                    out.insert(n.clone());
+                }
             }
             for s in &body.stmts {
                 stmt_defined_names(s, out);
@@ -665,6 +674,9 @@ fn stmt_defined_names(stmt: &Stmt, out: &mut std::collections::HashSet<String>) 
         Stmt::Match { subject, arms, .. } => {
             expr_defined_names(subject, out);
             for arm in arms {
+                if let MatchPattern::Path { binding: Some(b), .. } = &arm.pattern {
+                    out.insert(b.clone());
+                }
                 if let Some(g) = &arm.guard {
                     expr_defined_names(g, out);
                 }
@@ -840,6 +852,12 @@ fn divisor_int_fold(
             let Some((lo, hi)) = crate::const_overflow::fixed_width_int_range(name) else { return ConstFold::NotConst; };
             match divisor_int_fold(&args[0].value, consts, st, defined, depth + 1) {
                 ConstFold::Val(v) => ConstFold::Val(wrap_divisor_int(v, lo, hi)),
+                ConstFold::NotConst => match divisor_float_fold(&args[0].value, consts, st, defined, depth + 1) {
+                    Some(f) if f.is_finite() && f.fract() == 0.0 && f >= i128::MIN as f64 && f <= i128::MAX as f64 => {
+                        ConstFold::Val(wrap_divisor_int(f as i128, lo, hi))
+                    }
+                    _ => ConstFold::NotConst,
+                },
                 other => other,
             }
         }
