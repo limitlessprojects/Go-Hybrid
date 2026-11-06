@@ -1,5 +1,11 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — queue-sweeper refresh (2026-11-02)
+
+- Refresh existing PR #2354 against main `d8b3fe05d3de5612a55d2ff2104c4e0186d297df`. Before each queued closure, re-fetch the candidate and refuse unavailable/malformed details, protected labels, closed/merged state, or a fresh/unverifiable reopen history. Dry runs remain read-only and unchanged old unprotected PRs still close with the existing explanation.
+- The existing 15-test reopen-policy suite now contains five further tests (20 total); 14 new subcases fail on unpatched main and all 20 tests pass on the candidate. All API requests/writes are mocked. This narrows the snapshot window rather than claiming an atomic GET/PATCH guarantee. Config loading/CLI validation/mutation-status policy stay separate from #3051.
+- Python 3.13 / Windows targeted validation passes. Rust/Go toolchains are unavailable locally; no compiler/corpus execution or full local CI pass is claimed. Existing corpus-harness subprocess tests cannot launch their Unix shebang fixtures on Windows (WinError 193); those unrelated files are unchanged. Hosted CI and maintainer review remain required; no award is claimed.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.

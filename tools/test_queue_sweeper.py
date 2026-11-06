@@ -40,15 +40,19 @@ def reopen_event(at):
 class ReviewWindowPolicyTests(unittest.TestCase):
     def run_sweep(self, *, created_at=stamp(NOW - timedelta(days=20)),
                   updated_at=stamp(NOW - timedelta(hours=1)), pages=None,
-                  labels=(), protected=(), dry=True, extra_args=()):
+                  labels=(), protected=(), dry=True, extra_args=(),
+                  latest=None, latest_status=200, latest_pages=None):
         pr = {"number": 42, "created_at": created_at, "updated_at": updated_at,
               "labels": [{"name": name} for name in labels],
-              "title": "Offline contribution", "user": {"login": "fixture"}}
+              "title": "Offline contribution", "user": {"login": "fixture"},
+              "state": "open", "merged_at": None}
         pages = pages or {}
         reads = []
         self.writes = []
+        rechecked = False
 
         def offline_api(path, method="GET", body=None):
+            nonlocal rechecked
             if method == "GET":
                 reads.append(path)
             else:
@@ -59,9 +63,13 @@ class ReviewWindowPolicyTests(unittest.TestCase):
                 return 200, {"open_issues_count": 0}
             if path.startswith("/repos/example/project/pulls?"):
                 return 200, [pr]
+            if path == "/repos/example/project/pulls/42":
+                rechecked = True
+                return latest_status, {**pr, **(latest or {})}
             prefix = "/repos/example/project/issues/42/events?per_page=100&page="
             if path.startswith(prefix):
-                return pages.get(int(path[len(prefix):]), (200, []))
+                active_pages = latest_pages if rechecked and latest_pages is not None else pages
+                return active_pages.get(int(path[len(prefix):]), (200, []))
             raise AssertionError(f"unexpected API path: {path}")
 
         argv = ["queue_sweeper"] + (["--dry"] if dry else []) + list(extra_args)
@@ -165,6 +173,36 @@ class ReviewWindowPolicyTests(unittest.TestCase):
         self.assertTrue(any(p.endswith("page=2") for p in reads))
 
     # -- the written close reply cites the configured window, not the PR age ---
+
+    def test_protection_added_after_listing_prevents_close(self):
+        for label in SWEEPER.PROTECTED_LABELS:
+            with self.subTest(label=label):
+                output, _ = self.run_sweep(dry=False, latest={"labels": [{"name": label}]})
+                self.assert_due(output, 1)
+                self.assertEqual(self.writes, [])
+
+    def test_closed_or_merged_after_listing_is_not_written(self):
+        for latest in ({"state": "closed"}, {"merged_at": stamp(NOW)}):
+            with self.subTest(latest=latest):
+                self.run_sweep(dry=False, latest=latest)
+                self.assertEqual(self.writes, [])
+
+    def test_failed_recheck_never_authorizes_close(self):
+        for status in (0, 403, 404, 500):
+            with self.subTest(status=status):
+                self.run_sweep(dry=False, latest_status=status)
+                self.assertEqual(self.writes, [])
+
+    def test_reopened_after_listing_renews_window(self):
+        self.run_sweep(dry=False, latest={"updated_at": stamp(NOW)},
+                       latest_pages={1: (200, [reopen_event(NOW)])})
+        self.assertEqual(self.writes, [])
+
+    def test_malformed_current_labels_prevent_close(self):
+        for labels in (None, [None], [{}], ["triage:keep"]):
+            with self.subTest(labels=labels):
+                self.run_sweep(dry=False, latest={"labels": labels})
+                self.assertEqual(self.writes, [])
 
     def test_close_comment_shows_the_review_window_not_the_age(self):
         for window in ("3", "5"):
