@@ -4307,8 +4307,16 @@ impl<'a> Collector<'a> {
         };
         let sname = Checker::base_named_type_str(&full_name).to_string();
         // Clone: the diagnostics below need `&mut self` while the declaration
-        // table is borrowed from it.
-        let Some(declared) = self.ck.structs.get(&sname).cloned() else {
+        // table is borrowed from it. Zero-field structs (`struct empty {}`)
+        // are recorded in `pkg_names` ("struct") rather than `structs`.
+        let declared = if let Some(d) = self.ck.structs.get(&sname).cloned() {
+            Some(d)
+        } else if self.ck.pkg_names.get(sname.as_str()) == Some(&"struct") {
+            Some(Vec::new())
+        } else {
+            None
+        };
+        let Some(declared) = declared else {
             return;
         };
         let subst = self.struct_type_arg_map(&full_name);
@@ -4343,80 +4351,110 @@ impl<'a> Collector<'a> {
                     "a struct literal may only name fields the struct declares",
                 ),
                 Some((_, fty)) => {
-                    if self.non_single_value_count(&f.value).is_some() {
-                        continue;
-                    }
-                    let want = self.kind_of_ty_with_subst(fty, &subst, 0);
-                    let got = self.kind_of_expr(&f.value);
-                    let is_untyped_int_to_float = want == OpKind::Float
-                        && got == OpKind::Int
-                        && self.is_untyped_int_const(&f.value);
-                    // #2782: `want`/`got` both collapse to `Int`/`Float`, but
-                    // the field's own Go spelling may differ from the typed
-                    // initializer's (`int` into `int64`, `float64` into
-                    // `float32`) — Go refuses that in a struct literal.
-                    let scalar_mismatch =
-                        self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
-                    let rendered_fty = fty.render();
-                    let substituted_fty = if subst.is_empty() {
-                        rendered_fty
-                    } else {
-                        Self::substitute_type_str(&rendered_fty, &subst)
-                    };
-                    let field_type_name = substituted_fty.as_str();
-                    let got_type_name = self.typed_value_type_name(&f.value);
-                    let is_generic_ty = |s: &str| {
-                        let inner = s.trim_start_matches("[]").trim_start_matches('*');
-                        inner.len() == 1 && inner.chars().all(|c| c.is_ascii_lowercase())
-                    };
-                    let container_or_alias_mismatch = match (&got_type_name, &want, &got) {
-                        (Some(gname), OpKind::Chan(_), OpKind::Chan(_))
-                        | (Some(gname), OpKind::Map(_, _), OpKind::Map(_, _))
-                        | (Some(gname), OpKind::Slice(_), OpKind::Slice(_))
-                        | (Some(gname), OpKind::Pointer(_), OpKind::Pointer(_))
-                        | (Some(gname), OpKind::Array(_), OpKind::Array(_)) => {
-                            if field_type_name == gname.as_str() || is_generic_ty(field_type_name) || is_generic_ty(gname) {
-                                false
-                            } else {
-                                true
-                            }
-                        }
-                        (Some(gname), _, _) => self.sized_array_names_differ(Some(field_type_name), Some(gname.as_str())),
-                        _ => false,
-                    };
-                    let array_mismatch = self.sized_array_names_differ(
-                        Some(field_type_name),
-                        got_type_name.as_deref(),
-                    );
-                    let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
-                        || kinds_conflict(&want, &got)
-                        || scalar_mismatch
-                        || container_or_alias_mismatch
-                        || array_mismatch;
-                    let already_diagnosed_e3012 = self
-                        .ck
-                        .diags
-                        .iter()
-                        .chain(self.diags.iter())
-                        .any(|d| d.code == "HYB-E3012" && d.span == f.value.span());
-                    if conflict && !already_diagnosed_e3012 {
-                        self.emit_e1002(
-                            f.value.span(),
-                            format!(
-                                "cannot use a value of type `{}` for field `{}` of `{}` (declared `{}`) — Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
-                                got.label(),
-                                f.name,
-                                full_name,
-                                want.label(),
-                                want.label()
-                            ),
-                            "the field's declared type is fixed; write an explicit conversion when a conversion is intended",
-                        );
-                    }
+                    self.check_struct_field_value(&full_name, &subst, f, fty);
                 }
             }
         }
         let _ = span;
+    }
+
+    fn check_elided_struct_field_values(&mut self, slot_ty: &TypeExpr, fields: &[FieldInit]) {
+        if fields.is_empty() {
+            return;
+        }
+        let sk = self.kind_of_ty(slot_ty, 0);
+        let Some(full_name) = self.struct_name(&sk) else {
+            return;
+        };
+        let sname = Checker::base_named_type_str(&full_name).to_string();
+        let Some(declared) = self.ck.structs.get(&sname).cloned() else {
+            return;
+        };
+        let subst = self.struct_type_arg_map(&full_name);
+        for f in fields {
+            if let Some((_, fty)) = declared.iter().find(|(n, _)| n == &f.name) {
+                self.check_struct_field_value(&full_name, &subst, f, fty);
+            }
+        }
+    }
+
+    fn check_struct_field_value(
+        &mut self,
+        full_name: &str,
+        subst: &HashMap<String, String>,
+        f: &FieldInit,
+        fty: &TypeExpr,
+    ) {
+        if self.non_single_value_count(&f.value).is_some() {
+            return;
+        }
+        let want = self.kind_of_ty_with_subst(fty, subst, 0);
+        let got = self.kind_of_expr(&f.value);
+        let is_untyped_int_to_float = want == OpKind::Float
+            && got == OpKind::Int
+            && self.is_untyped_int_const(&f.value);
+        // #2782: `want`/`got` both collapse to `Int`/`Float`, but
+        // the field's own Go spelling may differ from the typed
+        // initializer's (`int` into `int64`, `float64` into
+        // `float32`) — Go refuses that in a struct literal.
+        let scalar_mismatch =
+            self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
+        let rendered_fty = fty.render();
+        let substituted_fty = if subst.is_empty() {
+            rendered_fty
+        } else {
+            Self::substitute_type_str(&rendered_fty, subst)
+        };
+        let field_type_name = substituted_fty.as_str();
+        let got_type_name = self.typed_value_type_name(&f.value);
+        let is_generic_ty = |s: &str| {
+            let inner = s.trim_start_matches("[]").trim_start_matches('*');
+            inner.len() == 1 && inner.chars().all(|c| c.is_ascii_lowercase())
+        };
+        let container_or_alias_mismatch = match (&got_type_name, &want, &got) {
+            (Some(gname), OpKind::Chan(_), OpKind::Chan(_))
+            | (Some(gname), OpKind::Map(_, _), OpKind::Map(_, _))
+            | (Some(gname), OpKind::Slice(_), OpKind::Slice(_))
+            | (Some(gname), OpKind::Pointer(_), OpKind::Pointer(_))
+            | (Some(gname), OpKind::Array(_), OpKind::Array(_)) => {
+                if field_type_name == gname.as_str() || is_generic_ty(field_type_name) || is_generic_ty(gname) {
+                    false
+                } else {
+                    true
+                }
+            }
+            (Some(gname), _, _) => self.sized_array_names_differ(Some(field_type_name), Some(gname.as_str())),
+            _ => false,
+        };
+        let array_mismatch = self.sized_array_names_differ(
+            Some(field_type_name),
+            got_type_name.as_deref(),
+        );
+        let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
+            || kinds_conflict(&want, &got)
+            || scalar_mismatch
+            || container_or_alias_mismatch
+            || array_mismatch;
+        let already_diagnosed_e3012 = self
+            .ck
+            .diags
+            .iter()
+            .chain(self.diags.iter())
+            .any(|d| d.code == "HYB-E3012" && d.span == f.value.span());
+        if conflict && !already_diagnosed_e3012 {
+            self.emit_e1002(
+                f.value.span(),
+                format!(
+                    "cannot use a value of type `{}` for field `{}` of `{}` (declared `{}`) — Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
+                    got.label(),
+                    f.name,
+                    full_name,
+                    want.label(),
+                    want.label()
+                ),
+                "the field's declared type is fixed; write an explicit conversion when a conversion is intended",
+            );
+        }
     }
 
     /// #682 U13 — a type conversion takes exactly one argument. Go refuses
@@ -7010,6 +7048,7 @@ impl<'a> Collector<'a> {
                 ty: None, fields, ..
             } = bare
             {
+                self.check_elided_struct_field_values(&resolved_ty, fields);
                 if matches!(expected, OpKind::Struct(_))
                     || (fields.is_empty()
                         && matches!(
@@ -7120,6 +7159,7 @@ impl<'a> Collector<'a> {
                 ty: None, fields, ..
             } = bare
             {
+                self.check_elided_struct_field_values(&resolved_ty, fields);
                 if matches!(expected, OpKind::Struct(_))
                     || (fields.is_empty()
                         && matches!(
@@ -7316,6 +7356,12 @@ impl<'a> Collector<'a> {
                         }
                         _ => {}
                     }
+                } else if let Expr::StructLit {
+                    ty: None, fields, ..
+                } = unwrap_parens(k)
+                {
+                    self.check_elided_struct_field_values(&resolved_key, fields);
+                    key_delegated = true;
                 }
             }
             if !key_delegated
@@ -7387,6 +7433,12 @@ impl<'a> Collector<'a> {
                         }
                         _ => {}
                     }
+                } else if let Expr::StructLit {
+                    ty: None, fields, ..
+                } = unwrap_parens(v)
+                {
+                    self.check_elided_struct_field_values(&resolved_val, fields);
+                    value_delegated = true;
                 }
             }
             if !value_delegated
