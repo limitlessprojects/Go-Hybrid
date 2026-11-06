@@ -938,11 +938,19 @@ impl<'a> Collector<'a> {
                 }
             }
             Expr::Slice { base, .. } => self.slice_element_type_name(base),
+            Expr::Try { operand, .. } => self.slice_element_type_name(operand),
             Expr::Call { callee, args, .. } => {
-                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                let unwrapped_callee = unwrap_parens(callee);
+                if let Expr::Ident { name, .. } = unwrapped_callee {
                     if name == "make" {
                         if let Some(first) = args.first() {
                             return self.slice_element_type_name(&first.value);
+                        }
+                    }
+                } else if let Expr::Field { base, name, .. } = unwrapped_callee {
+                    if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                        if pkg == "io" && name == "read_all" {
+                            return Some("byte".to_string());
                         }
                     }
                 }
@@ -1857,8 +1865,9 @@ impl<'a> Collector<'a> {
 
     fn fn_decl(&mut self, f: &FnDecl) {
         if f.receiver.is_none() {
-            if f.name == "main" && (!f.params.is_empty() || !f.type_params.is_empty()) {
-                self.diags.push(
+            if f.name == "main" {
+                if !f.params.is_empty() || !f.type_params.is_empty() {
+                    self.diags.push(
                     Diagnostic::error(
                         "HYB-E1002",
                         self.path.clone(),
@@ -1869,7 +1878,34 @@ impl<'a> Collector<'a> {
                         "remove parameters from `fn main()`, or read CLI arguments via `os.args()`".to_string(),
                     ]),
                 );
-            } else if f.name == "init"
+                } else {
+                    let body_has_try = f.body.as_ref().map_or(false, block_has_try);
+                    let main_needs_wrapper = !f.results.is_empty() || body_has_try;
+                    if main_needs_wrapper {
+                        if self.is_os_shadowed() {
+                            self.emit_e1002(
+                                f.span,
+                                "cannot declare `fn main` with error/exit return or `?` because `os` is shadowed by an in-scope declaration (HYB-E1002)".to_string(),
+                                "error-returning `fn main` lowers to `os.Exit` and `os.Stderr`; rename the shadowing `os` declaration so the standard `os` package is accessible",
+                            );
+                        }
+                        if self.is_filepath_shadowed() {
+                            self.emit_e1002(
+                                f.span,
+                                "cannot declare `fn main` with error/exit return or `?` because `filepath` is shadowed by an in-scope declaration (HYB-E1002)".to_string(),
+                                "error-returning `fn main` lowers to `filepath.Base`; rename the shadowing `filepath` declaration so `path/filepath` is accessible",
+                            );
+                        }
+                        if self.is_fmt_shadowed() {
+                            self.emit_e1002(
+                                f.span,
+                                "cannot declare `fn main` with error/exit return or `?` because `fmt` is shadowed by an in-scope declaration (HYB-E1002)".to_string(),
+                                "error-returning `fn main` lowers to `fmt.Fprintln`; rename the shadowing `fmt` declaration so the standard `fmt` package is accessible",
+                            );
+                        }
+                    }
+                }
+            } else if f.name == "init" 
                 && (!f.params.is_empty() || !f.results.is_empty() || !f.type_params.is_empty())
             {
                 self.diags.push(
@@ -7579,18 +7615,40 @@ impl<'a> Collector<'a> {
                     // type parameter, or package-level declaration, emitted Go fails
                     // downstream compilation (Row 13 BUILDABLE).
                     if pkg == "fmt"
-                        && matches!(name.as_str(), "eprint" | "eprintln" | "eprintf")
                         && self.lookup_kind(pkg).is_none()
                         && self.is_os_shadowed()
                     {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "cannot call `fmt.{}` because `os` is shadowed by an in-scope declaration (HYB-E1002)",
-                                name
-                            ),
-                            "`fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to `os.Stderr`; rename the shadowing `os` binding so `os.Stderr` is accessible",
-                        );
+                        if matches!(name.as_str(), "eprint" | "eprintln" | "eprintf") {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot call `fmt.{}` because `os` is shadowed by an in-scope declaration (HYB-E1002)",
+                                    name
+                                ),
+                                "`fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to `os.Stderr`; rename the shadowing `os` binding so `os.Stderr` is accessible",
+                            );
+                        } else if name == "print" && args.len() == 1 {
+                            let arg_expr = unwrap_parens(&args[0].value);
+                            let is_bytes = match arg_expr {
+                                Expr::Ident { name: b, .. } => {
+                                    self.lookup_type_name(b).as_deref() == Some("[]byte")
+                                        || self.lookup_type_name(b).as_deref() == Some("[]u8")
+                                        || self.slice_element_type_name(arg_expr).as_deref() == Some("byte")
+                                        || self.slice_element_type_name(arg_expr).as_deref() == Some("u8")
+                                }
+                                other => {
+                                    self.slice_element_type_name(other).as_deref() == Some("byte")
+                                        || self.slice_element_type_name(other).as_deref() == Some("u8")
+                                }
+                            };
+                            if is_bytes {
+                                self.emit_e1002(
+                                    span,
+                                    "cannot call `fmt.print` on byte slice because `os` is shadowed by an in-scope declaration (HYB-E1002)".to_string(),
+                                    "`fmt.print` on a byte slice lowers to `os.Stdout.Write`; rename the shadowing `os` binding so `os.Stdout` is accessible",
+                                );
+                            }
+                        }
                     }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
@@ -7720,13 +7778,29 @@ impl<'a> Collector<'a> {
     /// an in-scope parameter, local binding, loop variable, closure argument,
     /// type parameter, or package-level declaration, emitted Go resolves `os.Stderr`
     /// to the shadowing entity, causing downstream compilation to fail (Row 13 BUILDABLE).
+    fn is_pkg_symbol_shadowed(&self, pkg: &str) -> bool {
+        self.scopes.iter().any(|s| s.contains_key(pkg))
+            || self.fn_type_params.contains(pkg)
+            || self.lookup_kind(pkg).is_some()
+            || self.ck.pkg_names.contains_key(pkg)
+            || self.file_consts.contains_key(pkg)
+            || self.file_untyped_consts.contains(pkg)
+            || self.ck.structs.contains_key(pkg)
+            || self.ck.fns.contains_key(pkg)
+            || self.ck.type_aliases.contains_key(pkg)
+            || self.ck.enums.contains_key(pkg)
+    }
+
     fn is_os_shadowed(&self) -> bool {
-        self.scopes.iter().any(|s| s.contains_key("os"))
-            || self.fn_type_params.contains("os")
-            || self.lookup_kind("os").is_some()
-            || self.ck.pkg_names.contains_key("os")
-            || self.file_consts.contains_key("os")
-            || self.file_untyped_consts.contains("os")
+        self.is_pkg_symbol_shadowed("os")
+    }
+
+    fn is_filepath_shadowed(&self) -> bool {
+        self.is_pkg_symbol_shadowed("filepath")
+    }
+
+    fn is_fmt_shadowed(&self) -> bool {
+        self.is_pkg_symbol_shadowed("fmt")
     }
 
     fn check_fn_type_arg_arity(&mut self, fn_key: &str, raw_callee: &str, span: Span) {
@@ -9626,5 +9700,100 @@ fn untyped_slice_head_ty(first: &Expr) -> Option<TypeExpr> {
         },
         Expr::StructLit { ty: Some(t), .. } => Some(t.clone()),
         _ => None,
+    }
+}
+
+
+fn block_has_try(b: &Block) -> bool {
+    b.stmts.iter().any(stmt_has_try)
+}
+
+fn stmt_has_try(s: &Stmt) -> bool {
+    match s {
+        Stmt::Local(l) => l.values.iter().any(expr_has_try),
+        Stmt::Assign { targets, values, .. } => {
+            targets.iter().any(place_has_try) || values.iter().any(expr_has_try)
+        }
+        Stmt::Expr { expr, .. } => expr_has_try(expr),
+        Stmt::Send { chan, value, .. } => expr_has_try(chan) || expr_has_try(value),
+        Stmt::If { init, cond, then, otherwise, .. } => {
+            init.as_deref().map_or(false, stmt_has_try)
+                || expr_has_try(cond)
+                || block_has_try(then)
+                || otherwise.as_deref().map_or(false, stmt_has_try)
+        }
+        Stmt::For { kind, body, .. } => {
+            let kind_try = match kind {
+                ForKind::While { cond } => expr_has_try(cond),
+                ForKind::Range { lo, hi, .. } => expr_has_try(lo) || expr_has_try(hi),
+                ForKind::Iterate { expr, .. } => expr_has_try(expr),
+                ForKind::Infinite => false,
+            };
+            kind_try || block_has_try(body)
+        }
+        Stmt::Return { values, .. } => values.iter().any(expr_has_try),
+        Stmt::Task { callee, args, .. } => {
+            expr_has_try(callee) || args.iter().any(|a| expr_has_try(&a.value))
+        }
+        Stmt::Managed { body, .. } => block_has_try(body),
+        Stmt::Match { subject, arms, .. } => {
+            expr_has_try(subject)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().map_or(false, expr_has_try) || block_has_try(&a.body)
+                })
+        }
+        Stmt::Defer { call, .. } => expr_has_try(call),
+        Stmt::Block { block, .. } => block_has_try(block),
+        Stmt::Select { arms, .. } => arms.iter().any(|a| {
+            let arm_try = match &a.kind {
+                SelectArmKind::Send { chan, value, .. } => {
+                    expr_has_try(chan) || expr_has_try(value)
+                }
+                SelectArmKind::Recv { chan, .. } => expr_has_try(chan),
+                SelectArmKind::Default => false,
+            };
+            arm_try || block_has_try(&a.body)
+        }),
+        Stmt::Break { .. } | Stmt::Continue { .. } => false,
+    }
+}
+
+fn place_has_try(p: &Place) -> bool {
+    match &p.kind {
+        PlaceKind::Ident(_) => false,
+        PlaceKind::Index { base, index } => place_has_try(base) || expr_has_try(index),
+        PlaceKind::Field { base, .. } => place_has_try(base),
+        PlaceKind::AddrOf { base } => place_has_try(base),
+    }
+}
+
+fn expr_has_try(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::Try { .. } => true,
+        Expr::Unary { operand, .. } => expr_has_try(operand),
+        Expr::Binary { lhs, rhs, .. } => expr_has_try(lhs) || expr_has_try(rhs),
+        Expr::Call { callee, args, .. } => {
+            expr_has_try(callee) || args.iter().any(|a| expr_has_try(&a.value))
+        }
+        Expr::Field { base, .. } => expr_has_try(base),
+        Expr::Index { base, index, .. } => expr_has_try(base) || expr_has_try(index),
+        Expr::Slice { base, lo, hi, .. } => {
+            expr_has_try(base)
+                || lo.as_deref().map_or(false, expr_has_try)
+                || hi.as_deref().map_or(false, expr_has_try)
+        }
+        Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+            InterpPart::Expr(e) => expr_has_try(e),
+            _ => false,
+        }),
+        Expr::Move { operand, .. } | Expr::AddrOf { operand, .. } => expr_has_try(operand),
+        Expr::Receive { chan, .. } => expr_has_try(chan),
+        Expr::SliceLit { items, .. } => items.iter().any(expr_has_try),
+        Expr::MapLit { entries, .. } => {
+            entries.iter().any(|(k, v)| expr_has_try(k) || expr_has_try(v))
+        }
+        Expr::StructLit { fields, .. } => fields.iter().any(|f| expr_has_try(&f.value)),
+        Expr::Paren { inner, .. } => expr_has_try(inner),
+        Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => false,
     }
 }
