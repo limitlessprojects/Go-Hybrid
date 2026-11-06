@@ -1,4 +1,14 @@
 
+## Session 119 — 2026-11-06 15:10 UTC+8 tick
+- env cold-recycled (new rootfs); rust 1.99.0 + go1.26.9 restored, tarball re-cached. approve 13/13 (4992 left), scan skipped. Open PRs still >100 (list-capped); new arrivals #3796/#3797/#3798/#3800/#3803/#3804.
+- **2 landed**:
+  - **#3747** -> `d4a8f057` (Burapa-J, fixes #3746 Row 13): try_context — is_builtin_error_type alias-chain walk w/ type-param shadow reject (fn f[error any], alias failure=error, receiver type params); new Ctx::E11Handler + is_writer_shadowed_since (? in http.handler closure rejects on shadowed http/writer, inner-scope-only shadow stays accepted); array-len TypeExpr ? reject. MERGE trial 44e86452, tree 54b689a5 asserted. ALL-GREEN 446 suites. Reply 201 + dup reply #3748.
+  - **#3750** -> `53bebfb3` (Burapa-J, fixes #3749): arith — recursive divisor_float_fold (f32/f64 conv fast-path+recursion, neg, binops, named float consts, len(str)); divisor_int_fold fixed-width conv arm w/ wrap_divisor_int (u8(256)->0, int8 sign-ext); const_str_byte_len chains+concat; expr_has_shadowed_int_conv guard keeps shadowed conv callees accepted. MERGE trial 40bd0efa, tree asserted. ALL-GREEN 447 suites. Reply 201 + dup reply #3751.
+- **Disk discipline (recurring)**: rootfs hit 93% mid-battery AGAIN on fresh sandbox (go-build temp no-space = go-build-fixture false reds). Freed 1.8G (incremental 602M + puppeteer + playwright) + node_modules 1.2G -> 2.4G. NOTE: node_modules reappears on every sandbox restore (persisted snapshot) — delete it FIRST in each cold tick; check df BEFORE battery, not after a failure.
+- Suites 445 -> 447 (+2: 3746-test, 3749-test). Zero gate failures; one environmental rerun (3747 battery1 disk).
+- Next queue: #3753/#3754 (addr_loan, Burapa-J first) -> #3757/#3758 (recv) -> #3759 (const_overflow) -> #3761/#3770 (generic args) -> #3763/#3769 (walk) -> #3755/#3768/#3771/#3772/#3775/#3779/#3782/#3781+#3785 (go_keyword_names ext)/#3787/#3788/#3791/#3792/#3793+#3794/#3796/#3797/#3798/#3800/#3803/#3804; spikes #3765/#3774 Track-3 route.
+- Worklog: this commit.
+
 ## Session 118 — 2026-11-06 14:10 UTC+8 tick
 - env cold-recycled; rust 1.99.0 + go1.26.9 restored, tarball re-cached. approve 15/15 (4985 left), scan skipped. Open PR wave at 100 (list cap).
 - **2 landed**:
