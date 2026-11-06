@@ -514,6 +514,7 @@ fn copy_element_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
 
 /// Non-nilable types in Go and Hybrid cannot be compared to untyped nil (SPEC §3.1 N1).
 /// Nilable types: pointer, interface, slice, map, channel, function.
+/// `option[T]` lowers to the generic prelude struct `hyOption[T]`, which is non-nilable in Go.
 fn is_non_nilable(k: &OpKind) -> bool {
     matches!(
         k,
@@ -523,6 +524,7 @@ fn is_non_nilable(k: &OpKind) -> bool {
             | OpKind::Str
             | OpKind::Struct(_)
             | OpKind::Array(_)
+            | OpKind::Option(_)
     )
 }
 
