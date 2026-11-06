@@ -7597,16 +7597,41 @@ impl<'a> Collector<'a> {
                     if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
-                        && args.len() != 2
                     {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "`errors.wrap` takes 2 arguments `(err, message)`, got {} (HYB-E1002)",
-                                args.len()
-                            ),
-                            "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
-                        );
+                        if args.len() != 2 {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`errors.wrap` takes 2 arguments `(err, message)`, got {} (HYB-E1002)",
+                                    args.len()
+                                ),
+                                "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
+                            );
+                        }
+                        // E2 / Row 13 (BUILDABLE): `errors.wrap` lowers to `fmt.Errorf("%s: %w", msg, err)`
+                        // in `hy-emit`. When `fmt` is shadowed by an in-scope parameter, local binding,
+                        // generic type parameter, or package-level declaration, emitted Go fails to compile
+                        // with `fmt.Errorf undefined` or `fmt redeclared in this block`.
+                        let fmt_shadowed = self
+                            .scopes
+                            .iter()
+                            .rev()
+                            .any(|layer| layer.contains_key("fmt"))
+                            || self.fn_type_params.contains("fmt")
+                            || self.ck.pkg_names.contains_key("fmt")
+                            || self.ck.fns.contains_key("fmt")
+                            || self.ck.structs.contains_key("fmt")
+                            || self.ck.struct_type_params.contains_key("fmt")
+                            || self.ck.enums.contains_key("fmt")
+                            || self.ck.consts.contains_key("fmt")
+                            || self.ck.type_aliases.contains_key("fmt");
+                        if fmt_shadowed {
+                            self.emit_e1002(
+                                span,
+                                "call to `errors.wrap` requires package `fmt`, which is shadowed by an in-scope or package-level `fmt` declaration — Go refuses `fmt.Errorf` (HYB-E1002)".to_string(),
+                                "rename the `fmt` binding or declaration so emitter-generated `fmt.Errorf(...)` resolves to Go's `fmt` package",
+                            );
+                        }
                     }
                     // #3598: `fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to
                     // `fmt.Fprint*(os.Stderr, ...)` in `hy-emit`. When `os` is shadowed by
