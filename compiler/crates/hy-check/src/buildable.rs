@@ -959,6 +959,63 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn resolve_map_type_str(&self, s: &str) -> Option<String> {
+        let trimmed = s.trim();
+        if trimmed.starts_with("map[") {
+            return Some(trimmed.to_string());
+        }
+        let base = Checker::base_named_type_str(trimmed);
+        if let Some(target) = self.ck.type_aliases.get(base) {
+            let resolved = self.ck.resolve_type_alias(target);
+            if let hy_syntax::TypeExpr::Map { key, value, .. } = &resolved {
+                return Some(format!("map[{}]{}", key.render(), value.render()));
+            }
+        }
+        None
+    }
+
+    fn map_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::MapLit { key, value, .. } => {
+                Some(format!("map[{}]{}", key.render(), value.render()))
+            }
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(m) = self.resolve_map_type_str(&tname) {
+                        return Some(m);
+                    }
+                }
+                if let Some(m) = self.resolve_map_type_str(name) {
+                    return Some(m);
+                }
+                None
+            }
+            Expr::Field { base: s, name, .. } => {
+                let bk = self.kind_of_expr(s);
+                let ty = self.struct_field_type_name(&bk, name)?;
+                self.resolve_map_type_str(&ty)
+            }
+            Expr::Call { callee, args, .. } => {
+                let bare_callee = unwrap_parens(callee);
+                if let Expr::Ident { name, .. } = bare_callee {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.map_type_name(&first.value);
+                        }
+                    }
+                    if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                        if fd.receiver.is_none() && fd.type_params.is_empty() && fd.results.len() == 1 {
+                            return self.resolve_map_type_str(&fd.results[0].ty.render());
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// #2817 — the exact numeric element type of a channel expression, when
     /// the channel is a plain identifier whose declared element type is a
     /// predeclared numeric type. `var ch chan int64` renders its declared type
@@ -2197,6 +2254,8 @@ impl<'a> Collector<'a> {
                     self.bind_type_name(name, tn);
                 } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Some(mtn) = self.map_type_name(val) {
+                    self.bind_type_name(name, mtn);
                 } else if let Some(tp) = self.expr_type_param(val) {
                     self.bind_type_name(name, tp);
                 }
@@ -6595,26 +6654,21 @@ impl<'a> Collector<'a> {
     /// Family C1 (#425, #708): `base[index]` requires a slice, array, map, or string,
     /// and constant indices on constant strings must satisfy `0 <= index < len(base)`.
 
-    /// #3292: the declared key scalar of a map-typed base, when it is a
+    /// #3292, #3440: the declared key scalar of a map-typed base, when it is a
     /// predeclared numeric spelling. Anything else (named type, unresolved)
     /// gives None and the caller fails open.
     fn map_key_scalar_name(&self, base: Option<&Expr>) -> Option<&'static str> {
         let base = base?;
-        let ty = match unwrap_parens(base) {
-            Expr::Ident { name, .. } => self
-                .type_name_scopes
-                .iter()
-                .rev()
-                .find_map(|l| l.get(name))
-                .cloned()?,
-            Expr::Field { base: s, name, .. } => {
-                let bk = self.kind_of_expr(s);
-                self.struct_field_type_name(&bk, name)?
-            }
-            _ => return None,
-        };
+        let ty = self.map_type_name(base)?;
         if let Some(CompFamily::Map { key, .. }) = CompFamily::split(ty.trim()) {
-            return canonical_numeric_name(key);
+            if let Some(s) = canonical_numeric_name(key) {
+                return Some(s);
+            }
+            let base_name = Checker::base_named_type_str(key);
+            if let Some(target) = self.ck.type_aliases.get(base_name) {
+                let resolved = self.ck.resolve_type_alias(target);
+                return canonical_numeric_name(&resolved.render());
+            }
         }
         None
     }
