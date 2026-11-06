@@ -54,6 +54,13 @@ fn every_declaration_site_named_default_is_rejected() {
         ("select receive binding", "fn main() {\n    ch := make(chan int, 1)\n    ch <- 1\n    select {\n        default := <-ch: fmt.println(\"{default}\")\n    }\n}\n"),
         ("match binding", "fn main() {\n    o := some(1)\n    match o {\n        some(default) => fmt.println(\"{default}\")\n        none => fmt.println(\"n\")\n    }\n}\n"),
         ("local", "fn main() {\n    f := fn() int {\n        if true {\n            default := 1\n            return default\n        }\n        return 0\n    }\n    fmt.println(\"{f()}\")\n}\n"),
+        // TypeExpr cases (Issue #3780)
+        ("parameter", "type cb = fn(default int) int\nfn main() {\n    var f cb = fn(x int) int { return x }\n    fmt.println(\"{f(1)}\")\n}\n"),
+        ("parameter", "struct s {\n    cb fn(default int) int\n}\nfn main() {\n    fmt.println(\"ok\")\n}\n"),
+        ("parameter", "fn run(f fn(default int) int) int {\n    return f(1)\n}\nfn main() {\n    fmt.println(\"ok\")\n}\n"),
+        ("parameter", "fn make_cb() fn(default int) int {\n    return fn(x int) int { return x }\n}\nfn main() {\n    fmt.println(\"ok\")\n}\n"),
+        ("parameter", "fn main() {\n    var f fn(default int) int\n    fmt.println(\"ok\")\n}\n"),
+        ("parameter", "fn main() {\n    var a [len([1]int{fn(default int) int { return default }(0)})]int\n    fmt.println(\"{len(a)}\")\n}\n"),
     ];
     for (what, src) in cases {
         assert_rejects(src, what);
