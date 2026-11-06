@@ -1,4 +1,44 @@
 
+## Session 121 — 2026-11-06 17:10 UTC+8 tick
+- env cold-recycled (new rootfs); node_modules pre-deleted, rust+go restored. approve 17/17 (4978 left).
+- **1 landed**:
+  - **#3625** -> `f1eb47af` (jpereyra243-byte, fixes #3624): const_overflow any/interface{} const-init+assign slots -> check_default_int_overflow; emit_guard curated fmt print/scan family variadic args (print* from 0, printf/fprint from 1, fprintf from 2) shadow-guarded. IN-MERGE CONFLICT RESOLVED (emit_guard.rs slice-lit hunk superseded by main's check_elided_slice_slot_emit_guard — HEAD side kept, any-slot + fmt hunks intact; credited in merge msg). MERGE trial 4b087055, tree c462fdbe asserted BOTH sides. ALL-GREEN 450 suites. Reply 201.
+- **#3759 status reply** (Burapa-J): NOT a dup (patch-id differs; covers panic/any()/some()/float beyond #3625) — stays open as lead extension candidate for remaining #3624 gaps; full battery next tick, land if green.
+- **PROCESS BUG FIXED**: `git merge ... && T1=.. && [ .. ] && echo OK || echo FAIL && push` chain — merge conflict exit didn't stop the chain after `||` (false REMOTE-ASSERT-OK, no-op push, merge left mid-conflict). Resolved same-tick; use explicit `if [ cond ]; then ... else exit 1; fi` for tree/remote asserts. Never trust a chain that mixes && and || around a multi-step commit sequence.
+- Suites 449 -> 450 (+1: 3624-test). Zero real gate failures (conflict was resolved in-merge, mechanical).
+- Next queue: **#3759 extension battery + land (priority)** -> #3761/#3770 (bracketed generic args) -> #3763/#3769 (walk) -> #3755/#3768/#3771/#3772/#3775/#3779/#3782/#3781+#3785/#3787/#3788/#3791/#3792/#3793+#3794/#3796/#3797/#3798/#3800/#3803/#3804; spikes #3765/#3774 Track-3 route.
+- Worklog: this commit.
+
+## Session 120 — 2026-11-06 16:10 UTC+8 tick
+- env cold-recycled (new rootfs); node_modules deleted FIRST per S119 lesson, rust 1.99.0 + go1.26.9 restored. approve 16/16 (4972 left). No disk incidents this tick (pre-deleted node_modules kept headroom).
+- **2 landed**:
+  - **#3753** -> `21f58ac2` (Burapa-J, fixes #3752 T24/O8): addr_loan — PlaceKind::AddrOf targets reject (&q.val/&m[k].val via place_is_map_element_or_value_projection + shape_of_place); mixed parallel rebinds gated on all-Ident targets (allow_addr_root); move-wrapped &(move ...) via unwrap_parens_and_move; Return slot-loan escape; walk_for_loop_carried two-pass while-cond replay; bind_shadow_locals_only keeps shadow accepts. MERGE trial 76722c38, tree asserted. ALL-GREEN 448 suites. Reply 201 + dup #3754.
+  - **#3757** -> `4a79347a` (Burapa-J, fixes #3756): recv — recv_chan_type_expr Pointer projection (&x), slice.pop() Fn(elem), some(x) Option(elem) w/ degraded-any, unwrap/or payload (any-elem unprojected), bare none->Option(any); bind_if_init_for_recv composite fallbacks (Recv->Chan elem, Index->Map value); match-guard option.some via composite_type_expr. MERGE trial 7a7362af, tree asserted. ALL-GREEN 449 suites. Reply 201 + dup #3758.
+- NOTE: /home/z/my-project/scripts/reply_dup.py did NOT survive sandbox recycle (recreated via Write; keep generator under scripts/ and verify existence before use).
+- Suites 447 -> 449 (+2: 3752-test, 3756-test). Zero gate failures.
+- Next queue: #3759 (const_overflow, Burapa-J) -> #3761/#3770 (bracketed generic args) -> #3763/#3769 (walk nested assign) -> #3755/#3768/#3771/#3772/#3775/#3779/#3782/#3781+#3785 (go_keyword_names ext)/#3787/#3788/#3791/#3792/#3793+#3794/#3796/#3797/#3798/#3800/#3803/#3804; spikes #3765/#3774 Track-3 route.
+- Worklog: this commit.
+
+## Session 119 — 2026-11-06 15:10 UTC+8 tick
+- env cold-recycled (new rootfs); rust 1.99.0 + go1.26.9 restored, tarball re-cached. approve 13/13 (4992 left), scan skipped. Open PRs still >100 (list-capped); new arrivals #3796/#3797/#3798/#3800/#3803/#3804.
+- **2 landed**:
+  - **#3747** -> `d4a8f057` (Burapa-J, fixes #3746 Row 13): try_context — is_builtin_error_type alias-chain walk w/ type-param shadow reject (fn f[error any], alias failure=error, receiver type params); new Ctx::E11Handler + is_writer_shadowed_since (? in http.handler closure rejects on shadowed http/writer, inner-scope-only shadow stays accepted); array-len TypeExpr ? reject. MERGE trial 44e86452, tree 54b689a5 asserted. ALL-GREEN 446 suites. Reply 201 + dup reply #3748.
+  - **#3750** -> `53bebfb3` (Burapa-J, fixes #3749): arith — recursive divisor_float_fold (f32/f64 conv fast-path+recursion, neg, binops, named float consts, len(str)); divisor_int_fold fixed-width conv arm w/ wrap_divisor_int (u8(256)->0, int8 sign-ext); const_str_byte_len chains+concat; expr_has_shadowed_int_conv guard keeps shadowed conv callees accepted. MERGE trial 40bd0efa, tree asserted. ALL-GREEN 447 suites. Reply 201 + dup reply #3751.
+- **Disk discipline (recurring)**: rootfs hit 93% mid-battery AGAIN on fresh sandbox (go-build temp no-space = go-build-fixture false reds). Freed 1.8G (incremental 602M + puppeteer + playwright) + node_modules 1.2G -> 2.4G. NOTE: node_modules reappears on every sandbox restore (persisted snapshot) — delete it FIRST in each cold tick; check df BEFORE battery, not after a failure.
+- Suites 445 -> 447 (+2: 3746-test, 3749-test). Zero gate failures; one environmental rerun (3747 battery1 disk).
+- Next queue: #3753/#3754 (addr_loan, Burapa-J first) -> #3757/#3758 (recv) -> #3759 (const_overflow) -> #3761/#3770 (generic args) -> #3763/#3769 (walk) -> #3755/#3768/#3771/#3772/#3775/#3779/#3782/#3781+#3785 (go_keyword_names ext)/#3787/#3788/#3791/#3792/#3793+#3794/#3796/#3797/#3798/#3800/#3803/#3804; spikes #3765/#3774 Track-3 route.
+- Worklog: this commit.
+
+## Session 118 — 2026-11-06 14:10 UTC+8 tick
+- env cold-recycled; rust 1.99.0 + go1.26.9 restored, tarball re-cached. approve 15/15 (4985 left), scan skipped. Open PR wave at 100 (list cap).
+- **2 landed**:
+  - **#3739** -> `69564b1b` (dextermos-dev, fixes #3735): const_init string-conv args gated by expr_is_constant_inner; consts-shadowed string target joins shadow guards; is_const_allowed_ty rejects struct/tp/enum-shadowed Named pre+post alias resolve. New test const_init_string_conv_and_shadow_3735.rs. FF tree 5244df94 asserted. ALL-GREEN 444 suites. Reply 201 (id 6678589502).
+  - **#3744** -> `71749fda` (Burapa-J, fixes #3743 Row 13 BUILDABLE): check_elided_struct_fields (unknown/dup fields HYB-E1002 in elided-head slots); new elided_type walker (array-len TypeExprs across consts/structs/aliases/enum payloads/fn sigs); is_non_struct_foreign_type curation ({ } in io.*/http.handler/time.duration/os.file_mode/net.conn rejects). MERGE-scenario trial e191ffeb (no conflicts), tree af3340f7 asserted. ALL-GREEN 445 suites. Reply 201.
+- **3 dup replies** (hall-of-fame, independent patch-ids): #3740 (jpereyra243-byte) + #3741 (aswadi) + #3742 (ThanhWinter) re #3735 via #3739; #3745 (jpereyra243-byte) re #3743 via #3744 — 4 total. NOTE: first loop iteration had unquoted heredoc (backticked SHA command-substituted) + loop slice bug (6 items not 3 pairs) -> 3 comments PATCH-fixed (6678593476/6678594333/6678595206), 3 harmless 404s on author-name "issues". Lesson: always quote heredoc delimiters in bodies containing backticks; enumerate pairs explicitly.
+- **Disk crisis mid-battery**: rustc temp "No space left" — rootfs 93%. Freed: puppeteer 608M + ms-playwright 613M + node_modules 1.2G + target/debug/incremental 1.2G -> 2.2G avail; df numbers initially stale, write-test used to confirm real space. Suites 443 -> 445 (+2: 3735-test, 3743-test). Zero gate failures.
+- Next queue: #3747/#3748 (try_context shadowed error type params, Burapa-J first) -> #3750/#3751 (arith fold) -> #3753/#3754 (addr_loan) -> #3757/#3758 (recv) -> #3759 (const_overflow) -> #3761/#3770 (bracketed generic args) -> #3763/#3769 (walk nested assign) -> #3755/#3768/#3771/#3772/#3775/#3779/#3782/#3781(+#3785 extends #3677)/#3787/#3788/#3791/#3792/#3793/#3794; spikes #3765/#3774 Track-3 route.
+- Worklog: this commit.
+
 ## Session 93 (2026-11-04 19:10Z+08 tick)
 - env fully recycled; standard restore (rust 1.99.0, go1.26.9, tarball re-cached). Mirror rolled back to s44 snapshot, pull caught up to 05448f75 (s92 #3609 landed + underscore-cluster addendum; replies verified posted on #3606/#3607).
 - **2 landed**:
@@ -179,4 +219,51 @@
 - Landed PR #3675 -> df73308c (freeze.rs single-var Map replay binds KEY per LX13; shape.rs shape_of_expr vec![v]->vec![k]; fixes #3422, CarlitoDon). ALL-GREEN 437 suites (+2), corpus 135/135, differential 45/45+90/90, tree-asserted 5b1724da, remote asserted, reply 201.
 - Suites 434 -> 437 (+3). Two landings, zero gate failures this tick.
 - Next queue: #3676 (re-verify, force-pushed head) -> #3677 (re-verify, force-pushed) -> #3671 (CI test registration, +281-2) -> wildcard spikes #3688 (W-004) / #3695 (W-024, dup family with #3679; check BOUNTY.md spike policy) -> fresh 11-05 wave #3727..#3742 (families: 3730/3733/3737, 3731/3732, 3736/3738, 3739-3742 — dedupe first, oldest-first).
+- Worklog: this commit.
+
+## Session 114 — 2026-11-06 03:10 UTC+8 tick
+- (carries S113's queue; S113 died on total Bash-tool failure after env restore only)
+- env cold-recycled; rust 1.99.0 + go1.26.9 restored, tarball re-cached, target warm (15s). approve 12/12 (4988 left), scan skipped.
+- Heads re-fetched: #3676/#3677 force-pushed AGAIN before this tick (6cf2cd00 / 3928d52d) — verified the pushed heads as-is.
+- Landed PR #3676 -> 1a5c63e9 (parser report_at non-unwinding diag; LX9 same-line type annotations on let/var/const; SPEC 1.3 missing-initializer HYB-E0002 w/ fixits; fixes declaration-shape gaps, RPMFAN). FF case, tree-asserted 1226b648. ALL-GREEN 438 suites, corpus 135/135, differential 45/45+90/90. Reply 201.
+- Landed PR #3677 -> b3876bed (go_keyword_names.rs: declarations named `default` rejected HYB-E1002 across 15+ sites, uses stay legal incl. select default:; SPEC 8.3 updated; RPMFAN). Battery on committed trial 31f7dc12 (contains same-tick #3676), tree 450aa48f asserted. ALL-GREEN 439 suites, corpus 135/135 (corpus 24 unaffected), differential 45/45+90/90. Reply 201.
+- Suites 437 -> 439 (+2). Two landings, zero gate failures.
+- Next queue: #3671 (CI test registration +281-2, balckwell) -> wildcard spikes #3688 (W-004) / #3695 (W-024, dup family with #3679; check BOUNTY.md spike policy first) -> fresh 11-05 wave #3727..#3742 (families 3730/3733/3737, 3731/3732, 3736/3738, 3739-3742 — dedupe first, oldest-first).
+- Worklog: this commit.
+
+## Session 115 — 2026-11-06 04:10 UTC+8 tick
+- env cold-recycled; rust 1.99.0 + go1.99.0-go1.26.9 restored, tarball re-cached, target warm (15s). approve 13/13 (4970 left), scan skipped.
+- Landed PR #3671 -> ac9b90a3 (tools/check_test_registration.py: step > job > workflow working-directory precedence, bounded YAML block reader, fail-closed merge keys; fixes #3658, balckwell). Battery on committed trial 9e9e37bd tree 4fa9a352: cargo 439 suites 0 failed, PR pytest 51+39 subtests, live tool OK (38 files/35 patterns), corpus 135/135 tripwire clean, differential 45/45+90/90. Reply 201.
+- Wildcard policy resolved (BOUNTY.md Track 3 + MOONSHOT.md): spike PRs do NOT merge to main; lifecycle = ledger + discussion #365 M1 window (opened 2026-11-01). W-004 already ledgered accepted (slot 4, area523ufo, #174; prior spike PR #507 cited). W-024 NOT in ledger yet; #3695 duplicates #3679 family. Routing replies posted on #3688 and #3695 (201 x2) — no battery, no merge; PRs stay open as artifacts.
+- Next queue: fresh 11-05 wave #3727..#3742 oldest-first with family dedupe (3730/3733/3737 same title; 3731/3732; 3736/3738; 3739-3742) — first check which families are true resubmissions vs independent fixes via diff-against-each-other, then battery the oldest of each family. Wave is BUILDABLE-style hy-check fixes; #3727 (shadowed lowering packages) may collide with landed curated-import work (#3721/#3726) — dup-check against main first.
+- Worklog: this commit.
+
+## Session 116 — 2026-11-06 10:10 UTC+8 tick
+- env cold-recycled; rust 1.99.0 + go1.26.9 restored, tarball re-cached, target warm (15s). approve 12/12 (4988 left), scan skipped.
+- Wave grew to 39 open PRs (3727..3784). Patch-id matrix over the 5 same-title families (3727, 3730/3733/3737, 3731/3732, 3736/3738, 3739-3742): ALL patch-ids distinct -> independent implementations, first-to-land wins per family, later members get hall-of-fame dup replies.
+- Landed PR #3727 -> 1c5e1cac (main-wrapper shadowed os/filepath/fmt rejects + fmt.print byte-slice + io.read_all Field callee; Row 13, seenorht). FF, tree 88e2da18 asserted. ALL-GREEN 440 suites. Reply 201.
+- Landed PR #3730 -> b0866d90 (tuple bind-source composite bounds + Field->method-value Fn fallback; fixes #3729, aswadi). Trial 0ca06cb3 tree 17a428d0 asserted. ALL-GREEN 441 suites. Reply 201.
+- Replied dup-hall-of-fame on #3733 + #3737 (independent implementations of #3729, first-reporter protocol; deltas invited as fresh issues). 201 x2.
+- Suites 439 -> 441 (+2). Two landings, two dup replies, zero gate failures.
+- Next queue: #3731/#3732 (range_iter len(string) family) -> #3736/#3738 (addressable family) -> #3739-3742 (const_init family) -> then newer arrivals #3744..#3784 (more families: 3744/3745, 3747/3748, 3750/3751, 3753/3754, 3757/3758, 3761/3770, 3763/3769, 3779/3782; wildcard spikes 3765/3774/3783/3784 route per Track 3; #3781 extends landed #3677; #3775/#3768/#3771/#3772/#3755 standalone).
+- Worklog: this commit.
+
+## Session 117 — 2026-11-06 13:10 UTC+8 tick
+- env cold-recycled; rust 1.99.0 + go1.26.9 restored, tarball re-cached, target warm (15s). approve 13/13 (4987 left), scan skipped.
+- Landed PR #3731 -> eb30520c (range_iter runtime len(str) sources + method-value chan element via method_decls; fixes #3728, aswadi). FF tree df51f7ac asserted. ALL-GREEN 442 suites. Reply 201.
+- Replied dup-hall-of-fame on #3732 (independent impl of #3728). 201.
+- Landed PR #3736 -> merged 65947b67 (addressable addr_place_shape/addr_expr_shape fallbacks via place_target_ty/composite_type_expr; E2010 on unaddressable hops; fixes #3734, aswadi). Trial tree 397f75ee asserted. ALL-GREEN 443 suites. Reply 201.
+- Replied dup-hall-of-fame on #3738 (independent impl of #3734). 201.
+- Suites 441 -> 443 (+2). Two landings, two dup replies, zero gate failures.
+- Next queue: const_init family #3739 (dextermos-dev) / #3740 (jpereyra) / #3741 (aswadi) / #3742 (ThanthWinter) -> then #3744/#3745 (elided_literal family, Burapa-J first) -> #3747/#3748 (try_context) -> #3750/#3751 (arith) -> #3753/#3754 (addr_loan) -> #3757/#3758 (recv) -> #3761/#3770 (generic args) -> #3763/#3769 (walk) -> #3755, #3768, #3771/#3772, #3775, #3779/#3782, #3781 (extends landed #3677).
+- Worklog: this commit.
+
+## Session 122 — 2026-11-06 19:10 UTC+8 tick
+- env cold-recycled (4th consecutive); node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached. approve 20/20 (4980 left), scan skipped.
+- **SANDBOX LESSON (hardened)**: background processes are reaped when their launching Bash call returns — even `setsid nohup ... &` dies (two batteries lost: 11:16 and 11:30, both silent, load 0.00, no VERDICT line). Batteries MUST run as foreground segments ≤10 min per call; cargo incremental cache resumes cleanly after a mid-crate kill (a timeout-killed rustc shows as a transient "could not compile" — just re-run the segment).
+- Cold target this tick (go-hybrid-target missing from snapshot) → full workspace rebuild ~25 min at CARGO_BUILD_JOBS=1 across foreground segments; disk peaked 79% (pre-cleaned /tmp go tarball; node_modules deletion kept headroom).
+- Patch-id matrix pre-computed for next-tick families: #3761 c4f58a6c vs #3770 71c1ea2e (bracketed generic args, fixes #3760); #3763 d4963773 vs #3769 ce0fc523 (nested assign target walk, fixes #3762). ALL DISTINCT -> independent implementations, first-to-land wins: land #3761 then #3763 (Burapa-J heads, both "behind" state -> MERGE-case trials needed), hall-of-fame replies on #3770/#3769.
+- **Landed PR #3759** -> `c4805940` (Burapa-J, fixes #3624, extension of #3625): const_overflow option[T] some() inner-element checks, any/interface{} default-FLOAT overflow, precise has_explicit_fixed_int_ty gating (u8/u64 conv, fixed const chains, shift lhs, negation), lexical-binder shadow defense in const_int_fold_at, curated fmt/log/print/panic/any() argument overflow with same-span E6002 dedup. MERGE trial (script) then foreground battery; TREE-ASSERT-OK a8fa259d; REMOTE-ASSERT-OK c4805940. ALL-GREEN: 450 suites/2916 tests/0 failed, corpus 135/135 tripwire clean, differential 45/45+90/90 FULL AGREEMENT. Landing reply 201.
+- Suites 450 (unchanged — #3759 extends the existing 3624 test file with 3 fns, 5/5 pass). One landing, zero gate failures.
+- Next queue: **#3761 battery+land (MERGE case), hall-of-fame #3770** -> **#3763 battery+land (MERGE case), hall-of-fame #3769** -> #3755/#3768/#3771/#3772/#3775/#3779/#3782/#3781+#3785/#3787/#3788/#3791/#3792/#3793+#3794/#3796/#3797/#3798/#3800/#3803/#3804; spikes #3765/#3774 Track-3 route. Fresh wave 3807..3881 (cyzcz/Burapa-J/dextermos-dev batch) needs scan+family dedupe next tick.
 - Worklog: this commit.
