@@ -279,3 +279,15 @@
 - Suites 450 -> 452 (+2: resolve_generic_bracket_type_args, walk_assign_target_place_calls). Two landings, two dup replies, zero gate failures.
 - Next queue: #3755 (EazyHood, job watch) -> #3768 (#3767 shift-in-float-conv; NOTE family with #3820 dextermos-dev — dedupe first) -> #3771/#3772 -> #3775 -> #3779/#3782 (installer family) -> #3781+#3785 (go_keyword_names TypeExpr walk, extends landed #3677 — check family 3841 too) -> #3787/#3788 -> #3791/#3792 -> #3793+#3794 (shadowed strings/http family) -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route. Fresh wave 3807..3881 (cyzcz/Burapa-J/dextermos-dev/bradwue313 batch) needs family scan+dedupe next tick.
 - Worklog: this commit.
+
+## Session 124 — 2026-11-06 22:10 UTC+8 tick
+- env cold-recycled on the stale session-44 snapshot again; node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached, main fast-forwarded c403585c -> f9c49978. approve 22/22 (4978 left), scan skipped.
+- Target materialized warm again mid-build (2 min to Finished; lazy snapshot layering confirmed twice — S123/S124).
+- Patch-id matrix: #3768 5290c2df vs #3820 284f7d34 (#3767 shift-in-float-conv family) — DISTINCT, independent implementations, first-to-land wins.
+- Pre-battery dup-check vs main: no existing untyped-const-shift-in-float-conversion rule on main (grep 3631/non-integer-conversion/inherits-the-target empty) — genuine new fix, not a dup of landed work.
+- **Landed PR #3768** -> `d9fda1ce` (akashmanjunath2505, fixes #3767): buildable.rs find_untyped_nonconst_shift (untyped const lhs of non-const shift inside float/complex conversion arg, all-constant shifts exempt per Go spec), complex64/128/c64/c128 classified OpKind::Float, HYB-E1002 with spec rationale. MERGE case. Trial-tree-asserted 04548cae, remote asserted. ALL-GREEN 453 suites/2933 tests, corpus 135/135, differential 45/45+90/90. Landing reply 201.
+- Dup hall-of-fame reply #3820 (dextermos-dev). 201. PRs stay open as artifacts.
+- **PROCESS BUG RECURRED (S118 lesson, variant)**: backticks inside a DOUBLE-QUOTED `git merge -m "..."` message got command-substituted (`untyped_const << non_const` clause swallowed; bash ran it as a substitution and left a gap). Push already done — message not amendable on main. RULE: commit messages with any backtick/dollar content must go through single-quoted heredoc file + `git commit -F file` (or escape). Landing reply carries the full correct description.
+- Suites 452 -> 453 (+1: issue_3767 test file). One landing, one dup reply, zero gate failures.
+- Next queue: #3755 (EazyHood job-watch, tools) -> #3771/#3772 -> #3775 -> #3779/#3782 (installer family, dedupe) -> #3781+#3785+#3841 (go_keyword_names TypeExpr walk family, extends landed #3677 — three-way dedupe first) -> #3787/#3788 -> #3791/#3792 -> #3793+#3794 -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route. Fresh wave 3807..3881 needs family scan+dedupe.
+- Worklog: this commit.
