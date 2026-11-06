@@ -330,8 +330,23 @@ impl<'a> Checker<'a> {
         // fails `go build` with `mismatched types` whenever `lo` fixes `v` to a
         // non-`int` integer width.
         let var_in_scope = var != "_" && st.env_lookup(var).is_some();
+        let is_bare_const_len = match unwrap_parens_and_move(hi) {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens_and_move(callee) {
+                    name == "len" && args.len() == 1 && match unwrap_parens_and_move(&args[0].value) {
+                        Expr::Ident { name: arg_name, .. } => {
+                            self.consts.contains_key(arg_name.as_str())
+                        }
+                        _ => false,
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
         let hi_hoisted = inclusive
-            || Self::range_bound_has_call_or_recv(hi)
+            || (!is_bare_const_len && Self::range_bound_has_call_or_recv(hi))
             || (var_in_scope && Self::range_bound_mentions_ident(hi, var));
         let mismatch = match (&tl_c, &th_c) {
             (Some(a), Some(b)) => a != b,
