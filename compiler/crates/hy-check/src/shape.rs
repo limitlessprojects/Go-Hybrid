@@ -642,6 +642,47 @@ impl<'a> Checker<'a> {
         }
     }
 
+    pub(crate) fn iterate_var_tys(
+        &self,
+        st: &FnState,
+        expr: &Expr,
+        n_vars: usize,
+    ) -> Vec<Option<TypeExpr>> {
+        let iter_ty = self.ty_of_expr(st, expr).map(|t| match self.resolve_type_alias(&t) {
+            TypeExpr::Pointer { to, .. }
+                if matches!(self.resolve_type_alias(&to), TypeExpr::Array { .. }) =>
+            {
+                self.resolve_type_alias(&to)
+            }
+            other => other,
+        });
+        let int_ty = || {
+            Some(TypeExpr::Named {
+                name: "int".to_string(),
+                span: expr.span(),
+            })
+        };
+        match &iter_ty {
+            Some(TypeExpr::Slice { elem, .. }) | Some(TypeExpr::Array { elem, .. }) => {
+                if n_vars >= 2 {
+                    vec![int_ty(), Some((**elem).clone())]
+                } else {
+                    vec![Some((**elem).clone())]
+                }
+            }
+            Some(TypeExpr::Map { key, value, .. }) => {
+                if n_vars >= 2 {
+                    vec![Some((**key).clone()), Some((**value).clone())]
+                } else {
+                    vec![Some((**key).clone())]
+                }
+            }
+            Some(TypeExpr::Chan { elem, .. }) => vec![Some((**elem).clone())],
+            Some(ty) if self.set_elem_type(ty).is_some() => vec![self.set_elem_type(ty)],
+            _ => vec![None; n_vars.max(1)],
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Source types for diagnostics
     // -----------------------------------------------------------------------
