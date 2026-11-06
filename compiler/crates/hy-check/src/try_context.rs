@@ -24,9 +24,23 @@ use hy_syntax::{
 /// Log entry" — keep in sync with hy-emit's `CONVERSIONS[..].propagate`.
 const E11_PROPAGATING_TARGETS: &[&str] = &["http.handler"];
 
-fn is_builtin_error_type(ck: &Checker<'_>, ty: &TypeExpr) -> bool {
-    let resolved = ck.resolve_type_alias(ty);
-    if !matches!(&resolved, TypeExpr::Named { name, .. } if name == "error")
+fn is_builtin_error_type(ck: &Checker<'_>, ty: &TypeExpr, type_params: &[String]) -> bool {
+    let mut cur = ty.clone();
+    for _ in 0..8 {
+        let TypeExpr::Named { name, .. } = &cur else {
+            return false;
+        };
+        if type_params.iter().any(|tp| tp == name) {
+            return false;
+        }
+        if let Some(next) = ck.type_aliases.get(name.as_str()) {
+            cur = next.clone();
+        } else {
+            break;
+        }
+    }
+    if !matches!(&cur, TypeExpr::Named { name, .. } if name == "error")
+        || type_params.iter().any(|tp| tp == "error")
         || ck.structs.contains_key("error")
         || ck.struct_type_params.contains_key("error")
         || ck.enums.contains_key("error")
@@ -38,8 +52,29 @@ fn is_builtin_error_type(ck: &Checker<'_>, ty: &TypeExpr) -> bool {
     })
 }
 
-fn results_end_in_error(ck: &Checker<'_>, results: &[FnResult]) -> bool {
-    results.last().is_some_and(|r| is_builtin_error_type(ck, &r.ty))
+fn results_end_in_error(ck: &Checker<'_>, results: &[FnResult], type_params: &[String]) -> bool {
+    results
+        .last()
+        .is_some_and(|r| is_builtin_error_type(ck, &r.ty, type_params))
+}
+
+fn collect_receiver_type_params(ty: &TypeExpr, out: &mut Vec<String>) {
+    match ty {
+        TypeExpr::Pointer { to, .. } => collect_receiver_type_params(to, out),
+        TypeExpr::Named { name, .. } => {
+            if let Some((_, rest)) = name.split_once('[') {
+                if let Some(inner) = rest.strip_suffix(']') {
+                    for part in inner.split(',') {
+                        let tp = part.trim();
+                        if !tp.is_empty() && tp != "_" {
+                            out.push(tp.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn is_e11_result_type(ck: &Checker<'_>, results: &[FnResult], http_unshadowed: bool) -> bool {
@@ -54,8 +89,21 @@ fn is_e11_result_type(ck: &Checker<'_>, results: &[FnResult], http_unshadowed: b
         )
 }
 
-fn fnlit_has_valid_e11_signature(ck: &Checker<'_>, params: &[Param], results: &[FnResult]) -> bool {
-    if !results.is_empty() || params.len() != 2 || params[0].name == "_" {
+fn fnlit_has_valid_e11_signature(
+    ck: &Checker<'_>,
+    params: &[Param],
+    results: &[FnResult],
+    http_unshadowed: bool,
+) -> bool {
+    if !http_unshadowed
+        || !results.is_empty()
+        || params.len() != 2
+        || params[0].name == "_"
+        || params[0].name.is_empty()
+        || params[0].name == "http"
+        || params[1].name == "http"
+        || params[0].name == params[1].name
+    {
         return false;
     }
     let w_ok = matches!(&params[0].ty, TypeExpr::Named { name, .. } if name.is_empty())
@@ -71,8 +119,11 @@ fn fnlit_has_valid_e11_signature(ck: &Checker<'_>, params: &[Param], results: &[
 /// What the enclosing function or closure offers a `?`.
 #[derive(Clone, Copy)]
 enum Ctx<'a> {
-    /// `main`, an error-result fn/closure, or an E11 handler closure.
+    /// `main` or an error-result fn/closure.
     Ok,
+    /// An E11 `http.handler` closure whose writer parameter is the first binding
+    /// in `scopes[fnlit_scope_idx]` (valid only while `http` and writer stay unshadowed).
+    E11Handler { fnlit_scope_idx: usize },
     /// No landing spot; the &str names the enclosing callable for the message.
     NoErrorResult(&'a str),
 }
@@ -80,6 +131,7 @@ enum Ctx<'a> {
 struct TryWalker<'a, 'b> {
     ck: &'b mut Checker<'a>,
     scopes: Vec<Vec<String>>,
+    type_params: Vec<String>,
     return_e11: bool,
 }
 
@@ -105,7 +157,16 @@ impl<'a, 'b> TryWalker<'a, 'b> {
             || self.ck.consts.contains_key(pkg)
             || self.ck.type_aliases.contains_key(pkg)
             || self.ck.file.decls.iter().any(|d| matches!(d, Decl::Const(c) if c.name == pkg))
+            || self.type_params.iter().any(|tp| tp == pkg)
             || self.scopes.iter().any(|s| s.iter().any(|n| n == pkg)))
+    }
+    fn is_writer_shadowed_since(&self, fnlit_scope_idx: usize) -> bool {
+        let Some(writer) = self.scopes.get(fnlit_scope_idx).and_then(|s| s.first()) else {
+            return true;
+        };
+        self.scopes
+            .get(fnlit_scope_idx.saturating_add(1)..)
+            .is_some_and(|inner| inner.iter().any(|s| s.iter().any(|n| n == writer)))
     }
     fn is_e11_conversion_call(&self, callee: &Expr) -> bool {
         if let Expr::Field { base, name, .. } = callee {
@@ -120,7 +181,12 @@ impl<'a, 'b> TryWalker<'a, 'b> {
 }
 
 pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
-    let mut w = TryWalker { ck, scopes: Vec::new(), return_e11: false };
+    let mut w = TryWalker {
+        ck,
+        scopes: Vec::new(),
+        type_params: Vec::new(),
+        return_e11: false,
+    };
     for d in &file.decls {
         match d {
             Decl::Const(c) => {
@@ -134,13 +200,25 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
             Decl::TypeAlias(a) => walk_type(&mut w, &a.ty, Ctx::NoErrorResult(a.name.as_str())),
             Decl::Enum(e) => e.variants.iter().filter_map(|v| v.payload.as_ref()).for_each(|p| walk_type(&mut w, p, Ctx::NoErrorResult(e.name.as_str()))),
             Decl::Fn(f) => {
+                w.type_params.clear();
+                for tp in &f.type_params {
+                    if !tp.name.is_empty() && tp.name != "_" {
+                        w.type_params.push(tp.name.clone());
+                    }
+                }
+                if let Some(r) = &f.receiver {
+                    collect_receiver_type_params(&r.ty, &mut w.type_params);
+                }
                 let sig_ctx = Ctx::NoErrorResult(f.name.as_str());
                 if let Some(r) = &f.receiver {
                     walk_type(&mut w, &r.ty, sig_ctx);
                 }
                 f.params.iter().for_each(|p| walk_type(&mut w, &p.ty, sig_ctx));
                 f.results.iter().for_each(|r| walk_type(&mut w, &r.ty, sig_ctx));
-                let Some(body) = &f.body else { continue };
+                let Some(body) = &f.body else {
+                    w.type_params.clear();
+                    continue;
+                };
                 w.push_scope();
                 if let Some(r) = &f.receiver {
                     w.bind_name(&r.name);
@@ -148,7 +226,7 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
                 f.params.iter().for_each(|p| w.bind_name(&p.name));
                 f.results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| w.bind_name(n));
                 let is_main = f.name == "main" && f.receiver.is_none();
-                let ctx = if is_main || results_end_in_error(w.ck, &f.results) {
+                let ctx = if is_main || results_end_in_error(w.ck, &f.results, &w.type_params) {
                     Ctx::Ok
                 } else {
                     Ctx::NoErrorResult(f.name.as_str())
@@ -158,6 +236,7 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
                 walk_block(&mut w, body, ctx);
                 w.return_e11 = false;
                 w.pop_scope();
+                w.type_params.clear();
             }
             Decl::Import { .. } => {}
         }
@@ -174,7 +253,7 @@ fn walk_type(ck: &mut TryWalker<'_, '_>, ty: &TypeExpr, ctx: Ctx<'_>) {
         TypeExpr::Array { len, elem, .. } => {
             if let Some(l) = len {
                 let len_ctx = match ctx {
-                    Ctx::Ok => Ctx::NoErrorResult("array length"),
+                    Ctx::Ok | Ctx::E11Handler { .. } => Ctx::NoErrorResult("array length"),
                     no_err => no_err,
                 };
                 walk_expr(ck, l, len_ctx);
@@ -339,20 +418,23 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
         params.iter().for_each(|p| walk_type(ck, &p.ty, outer_ctx));
         results.iter().for_each(|r| walk_type(ck, &r.ty, outer_ctx));
         // E4: lexical, like `return` — the closure's OWN results decide.
-        let ok = if e11 {
-            fnlit_has_valid_e11_signature(ck.ck, params, results)
-        } else {
-            results_end_in_error(ck.ck, results)
-        };
-        let ctx = if ok {
+        let http_before = ck.is_unshadowed_pkg_root("http");
+        let saved_return_e11 = std::mem::replace(&mut ck.return_e11, false);
+        ck.push_scope();
+        let fnlit_scope_idx = ck.scopes.len() - 1;
+        params.iter().for_each(|p| ck.bind_name(&p.name));
+        results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| ck.bind_name(n));
+        let ctx = if e11 {
+            if fnlit_has_valid_e11_signature(ck.ck, params, results, http_before) {
+                Ctx::E11Handler { fnlit_scope_idx }
+            } else {
+                Ctx::NoErrorResult("closure")
+            }
+        } else if results_end_in_error(ck.ck, results, &ck.type_params) {
             Ctx::Ok
         } else {
             Ctx::NoErrorResult("closure")
         };
-        let saved_return_e11 = std::mem::replace(&mut ck.return_e11, false);
-        ck.push_scope();
-        params.iter().for_each(|p| ck.bind_name(&p.name));
-        results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| ck.bind_name(n));
         let http_ok = ck.is_unshadowed_pkg_root("http");
         ck.return_e11 = is_e11_result_type(ck.ck, results, http_ok);
         walk_block(ck, body, ctx);
@@ -364,7 +446,20 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
 fn walk_expr(ck: &mut TryWalker<'_, '_>, e: &Expr, ctx: Ctx<'_>) {
     match e {
         Expr::Try { operand, span } => {
-            if let Ctx::NoErrorResult(owner) = ctx {
+            let missing_owner = match ctx {
+                Ctx::Ok => None,
+                Ctx::E11Handler { fnlit_scope_idx } => {
+                    if !ck.is_unshadowed_pkg_root("http")
+                        || ck.is_writer_shadowed_since(fnlit_scope_idx)
+                    {
+                        Some("closure")
+                    } else {
+                        None
+                    }
+                }
+                Ctx::NoErrorResult(owner) => Some(owner),
+            };
+            if let Some(owner) = missing_owner {
                 let owner_text = if owner == "closure" {
                     "this closure".to_string()
                 } else {
