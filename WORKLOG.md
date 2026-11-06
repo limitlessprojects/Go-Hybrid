@@ -291,3 +291,48 @@
 - Suites 452 -> 453 (+1: issue_3767 test file). One landing, one dup reply, zero gate failures.
 - Next queue: #3755 (EazyHood job-watch, tools) -> #3771/#3772 -> #3775 -> #3779/#3782 (installer family, dedupe) -> #3781+#3785+#3841 (go_keyword_names TypeExpr walk family, extends landed #3677 — three-way dedupe first) -> #3787/#3788 -> #3791/#3792 -> #3793+#3794 -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route. Fresh wave 3807..3881 needs family scan+dedupe.
 - Worklog: this commit.
+
+## Session 125 — 2026-11-06 23:10 UTC+8 tick
+- env cold-recycled on stale session-44 snapshot; node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached, main fast-forwarded c403585c -> b4d1ded7. approve 18/18 (4955 left), scan skipped.
+- **S119 false-red recurrence handled by protocol**: first full-suite run on #3755 failed hy-emit emitter test ("go run failed on emitted Go") at 89% disk — test passes in isolation, suite re-ran 453/453 clean after freeing 610M incremental cache. No source change; documented in merge commit. False-red protocol (isolate re-run + free space + full re-run) worked first try.
+- go_keyword_names TypeExpr-walk family 3-way patch-id matrix: #3781 34c946c7 vs #3785 4968dd58 vs #3841 fec67279 — ALL DISTINCT, first-to-land = oldest #3781.
+- **2 landed**:
+  - **#3755** -> `9a6d169e` (EazyHood): job.py actions watch (no run_id) queries heavy.yml workflow runs before pagination; explicit run IDs unchanged. PR pytest 52/52 incl. new ActionsWatchWorkflowTests. MERGE case. Trial-tree-asserted 7368f2bd, remote asserted. ALL-GREEN 453 suites/2933 tests (after false-red re-run), corpus 135/135, differential 45/45+90/90. Landing reply 201.
+  - **#3781** -> `d9cd4e38` (ocakciomursel-pixel, extends landed #3677): go_keyword_names kw_type TypeExpr walker (const/struct-field/alias/receiver/params/results/locals; pointer/slice/chan/option/map/fn recurse; array lens re-walked as exprs) — rejects `default` as fn-type param name in all type positions; 12 new cases in existing suite. MERGE case. Trial-tree-asserted 4871db35, remote asserted. ALL-GREEN 453 suites/2933 tests, corpus 135/135, differential 45/45+90/90. Landing reply 201.
+- **2 dup hall-of-fame replies**: #3785 (Primuez), #3841 (dextermos-dev). 201 x2. PRs stay open as artifacts.
+- Suites 453 (unchanged — both PRs extend existing suites). Two landings, two dup replies, one false-red handled, zero real gate failures.
+- Next queue: #3771/#3772 -> #3775 -> #3779/#3782 (installer family, dedupe) -> #3787/#3788 -> #3791/#3792 -> #3793+#3794 -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route. Fresh wave 3807..3881 needs family scan+dedupe (many cyzcz/Burapa-J/dextermos-dev/bradwue313 entries).
+- Worklog: this commit.
+
+## Session 126 — 2026-11-07 01:10 UTC+8 tick
+- env cold-recycled on stale session-44 snapshot; node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached, main fast-forwarded c403585c -> 6d3882e2 (S125 head). approve 13/13 (4987 left), scan skipped.
+- Target materialized warm on first battery access (third consecutive confirmation of lazy snapshot layering) — full battery per PR ran inside one 540s segment all tick.
+- **3 landed, 1 gate-fail, 1 dup reply**:
+  - **#3771** -> `fe5f2ff6` (marhabynova, fixes #3240): buildable.rs map_key_type_name refactor (map_key_scalar_name now wraps it); delete set[T] scalar-width + sized-array matching, delete map key array-length conflict via sized_array_names_differ, richer labels; new suite issue_3240 (5 tests, untyped literal exempt). MERGE case. Trial-tree-asserted 047e909c, remote asserted. ALL-GREEN 454 suites, corpus 135/135, differential 45/45+90/90. Landing reply 201.
+  - **#3772** -> `fb853be4` (marhabynova, fixes #3572): errors.wrap operand kinds — check_errors_wrap_operands rejects arg0 that can never be error / arg1 that is a resolved non-string (Str + Unknown fail open), HYB-E1002 at operand span; new suite issue_3572. MERGE case. Trial-tree-asserted b1012641, remote asserted. ALL-GREEN 455 suites, corpus 135/135, differential FULL AGREEMENT. Landing reply 201.
+  - **#3779** -> `34fe7f5d` (Yumihariii, fixes #3778): install.sh releases/latest sed class gains '+' (v[0-9A-Za-z._+-]*), SemVer build metadata no longer truncated; new offline suite test_install_release_tag.py (4 scenarios) + ci.yml registration. Battery ALL-GREEN (455 suites, corpus 135/135, differential FULL); new suite 4/4 OK in trial tree. Trial-tree-asserted 11073dbe, remote asserted. Landing reply 201.
+- **#3775 GATE FAIL (MERGE-CONFLICT)**: buildable.rs conflicts with landed #3771 map_key_type_name refactor (same function, divergent rewrites). Written evidence reply posted (rebase recipe: inferred map bindings via Collector::local, non-ident bases hooked into map_key_type_name match, aliases before CompFamily::split). Battery not run past gate. PR stays open.
+- **Dup hall-of-fame reply**: #3782 (dukenordj-rgb) vs landed #3779 (#3778 installer family; patch-ids f56ba208 vs 22cbfc05 — DISTINCT implementations, first-to-land). 201. PR stays open.
+- Suites 453 -> 455 (+2: issue_3240, issue_3572). Three landings, one gate-fail reply, one dup reply, zero silent closes.
+- Next queue: #3787/#3788 -> #3791/#3792 -> #3793+#3794 (shadowed strings/http family) -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route; fresh wave 3807..3881 family scan+dedupe (note #3898/#3877/#1912 approved this tick).
+- Worklog: this commit.
+
+## Session 127 — 2026-11-07 04:10 UTC+8 tick
+- env cold-recycled on stale session-44 snapshot; node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached, main fast-forwarded c403585c -> fca2f63a (S126 head). approve 20/20 (4980 left), scan skipped.
+- **NEW PATTERN — chronology-only PLAN.md conflicts resolved in-merge (doctrine-compliant fixture fixups, credited)**: both #3787/#3788 were authored on old base c3c78c0 and prepend contributor notes at the PLAN.md top; every landed PR since shifts the header, so the note hunks collide while all code auto-merges. Resolution: PR note re-inserted at top verbatim, fixup committed inside the merge, named in the credit commit + landing reply. Code conflicts (#3775-style, divergent function rewrites) still go the gate-fail evidence-reply route.
+- **2 landed**:
+  - **#3787** -> `471e2117` (liudabo-art): check_claims_links.py LINK_RE accepts angle-delimited CommonMark destinations (spaces/parens/fragments/titles), angled .hy targets unwrapped before is_checkable; tools suite extended (11/11 OK), claims check on landed GUARANTEES.md 20 rows/14 links/0 issues. Battery on merged main: 455 suites, corpus 135/135 tripwire clean, differential FULL AGREEMENT. PLAN.md in-merge fixup. Remote asserted.
+  - **#3788** -> `8b914525` (liudabo-art): install.sh payload staging on install filesystem + rollback_install/cleanup trap + signal mapping (destroys destroy-then-copy failure window); test_install_checksums.py extended 9/9 OK incl. injected-failure snapshots. Battery on merged main: 455 suites, corpus 135/135, differential FULL AGREEMENT. PLAN.md in-merge fixup. Remote asserted.
+- Suites 455 (unchanged — tools/installer PRs add no rust suites). Two landings, zero gate fails, zero dup replies, zero silent closes.
+- Next queue: #3791 (cyzcz, some(v) arm body redefinition, fixes #3790) -> #3792 (kjaylee, hy-diag alias normalization, fixes #3786) -> #3793+#3794 (shadowed strings/http family) -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route; fresh wave 3807..3881 family scan+dedupe.
+- Worklog: this commit.
+
+## Session 128 — 2026-11-07 05:10 UTC+8 tick
+- env cold-recycled on stale session-44 snapshot; node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached, main fast-forwarded c403585c -> b62b87f6 (S127 head). approve 17/17 (4958 left), scan skipped.
+- Extension-landing pattern reused (as with #3759 extending #3625): #3791 verified as a genuine EXTENSION of landed 62b1e857 (grep -S proved main had wraps_body at only 2 of the some(v) emission sites; the breads/greads chain paths and needs_ordered_arms lowering still unwrapped) — merge gate confirmed the already-wrapped sites auto-merge as identical changes, only missing paths added. Not a dup of 62b1e857's author; extension credit to cyzcz with the lineage named in the merge commit and reply.
+- **2 landed**:
+  - **#3791** -> `6e6fb517` (cyzcz, fixes #3790): hy-emit stmt.rs nested-scope wrap for redefining some(v) arm bodies extended to guarded-chain (breads/greads) + ordered-arms lowerings; match_arm_redeclare_scope 6->8 tests (guarded multi-arm, ordered arms; injection inside guard block + body-only wrap asserted on emitted Go). MERGE case. Trial-tree-asserted 6aa1f127, remote asserted. ALL-GREEN 455 suites, corpus 135/135, differential FULL AGREEMENT. Landing reply 201.
+  - **#3792** -> `8755ba23` (kjaylee, fixes #3786): hy-diag trim_code_query shared normalizer (brackets/quotes/angles/parens/trailing punctuation), lookup resolves (E3003)/<HYB-E3003>/E-3003/HYB-prefixed machine names, coherence assert normalized; +1 suite (456 total). MERGE case. Trial-tree-asserted 2f7042a9, remote asserted. ALL-GREEN 456 suites, corpus 135/135, differential FULL AGREEMENT. Landing reply 201.
+- Suites 455 -> 456 (+1: diag alias suite; #3791 extended an existing suite). Two landings, zero gate fails, zero dup replies, zero silent closes.
+- Next queue: #3793+#3794 (shadowed strings/http family — dedupe first) -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route; fresh wave 3807..3881 family scan+dedupe.
+- Worklog: this commit.
