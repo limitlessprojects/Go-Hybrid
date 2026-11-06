@@ -238,13 +238,33 @@ impl<'a> Scan<'a> {
                     let saved_allowed = self.allowed.clone();
                     let saved_locals = self.local_decls.clone();
                     if let MatchPattern::Path { segments, binding } = &arm.pattern {
+                        let arm_span = arm
+                            .guard
+                            .as_ref()
+                            .map(|g| g.span())
+                            .unwrap_or(arm.body.span);
                         if segments.len() == 1 {
-                            let arm_span = arm
-                                .guard
-                                .as_ref()
-                                .map(|g| g.span())
-                                .unwrap_or(arm.body.span);
                             self.ident(&segments[0], arm_span);
+                        } else if segments.len() == 2 {
+                            let root = &segments[0];
+                            let root_head =
+                                root.split_once('[').map(|(h, _)| h).unwrap_or(root.as_str());
+                            let is_pkg = !self.local_decls.contains(root_head)
+                                && (self.packages.contains(root_head)
+                                    || crate::foreign::BUILTIN_PACKAGES.contains(&root_head)
+                                    || crate::foreign::is_curated_package_root(root_head));
+                            if !(root_head == "option" && !self.local_decls.contains("option"))
+                                && !is_pkg
+                            {
+                                self.ident(root, arm_span);
+                            } else {
+                                self.run_opt_bracket_suffix(root, arm_span);
+                            }
+                            if !is_pkg {
+                                self.ident(&segments[1], arm_span);
+                            } else {
+                                self.run_opt_bracket_suffix(&segments[1], arm_span);
+                            }
                         }
                         if let Some(b) = binding {
                             self.define(b);
@@ -661,7 +681,7 @@ impl<'a> Scan<'a> {
             TypeExpr::Named { name, span } => {
                 if let Some((_, rest)) = name.split_once('[') {
                     if let Some(inside) = rest.strip_suffix(']') {
-                        self.run_bracketed_type_args(inside, *span, false);
+                        self.run_bracketed_type_args(inside, *span, true);
                     }
                 }
             }
