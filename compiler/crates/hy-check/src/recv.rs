@@ -118,6 +118,19 @@ impl<'a> Checker<'a> {
                                         }
                                     }
                                 }
+                            } else if b != "_" {
+                                if let Some(payload_ty) = self.resolve_recv_enum_arm_ty(segments) {
+                                    let shape = self.shape_of_type(&payload_ty);
+                                    self.define_binding(
+                                        &mut arm_st,
+                                        b,
+                                        shape,
+                                        Some(payload_ty),
+                                        false,
+                                        false,
+                                        false,
+                                    );
+                                }
                             }
                         }
                         self.check_expr_recv_operands(&arm_st, g);
@@ -363,8 +376,203 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn resolve_recv_enum_arm_ty(&self, segments: &[String]) -> Option<hy_syntax::TypeExpr> {
+        let vname = segments.last()?.as_str();
+        let enum_base = if segments.len() == 2 {
+            Some(segments[0].as_str())
+        } else {
+            None
+        };
+        for d in &self.file.decls {
+            let hy_syntax::Decl::Enum(ed) = d else {
+                continue;
+            };
+            if let Some(eb) = enum_base {
+                if ed.name != eb {
+                    continue;
+                }
+            }
+            if let Some(v) = ed.variants.iter().find(|v| v.name == vname) {
+                return v.payload.clone();
+            }
+        }
+        None
+    }
+
+    fn recv_subst_ty(
+        ty: &hy_syntax::TypeExpr,
+        subst: &std::collections::HashMap<String, hy_syntax::TypeExpr>,
+    ) -> hy_syntax::TypeExpr {
+        use hy_syntax::TypeExpr;
+        if subst.is_empty() {
+            return ty.clone();
+        }
+        match ty {
+            TypeExpr::Named { name, span } => {
+                if let Some(repl) = subst.get(name) {
+                    return repl.clone();
+                }
+                if let Some((base, args)) = Self::parse_generic_type_args(name) {
+                    let joined = args
+                        .iter()
+                        .map(|a| Self::recv_subst_ty(a, subst).render())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return TypeExpr::Named {
+                        name: format!("{base}[{joined}]"),
+                        span: *span,
+                    };
+                }
+                ty.clone()
+            }
+            TypeExpr::Pointer { to, span } => TypeExpr::Pointer {
+                to: Box::new(Self::recv_subst_ty(to, subst)),
+                span: *span,
+            },
+            TypeExpr::Slice { elem, span } => TypeExpr::Slice {
+                elem: Box::new(Self::recv_subst_ty(elem, subst)),
+                span: *span,
+            },
+            TypeExpr::Array { len, elem, span } => TypeExpr::Array {
+                len: len.clone(),
+                elem: Box::new(Self::recv_subst_ty(elem, subst)),
+                span: *span,
+            },
+            TypeExpr::Map { key, value, span } => TypeExpr::Map {
+                key: Box::new(Self::recv_subst_ty(key, subst)),
+                value: Box::new(Self::recv_subst_ty(value, subst)),
+                span: *span,
+            },
+            TypeExpr::Chan { dir, elem, span } => TypeExpr::Chan {
+                dir: *dir,
+                elem: Box::new(Self::recv_subst_ty(elem, subst)),
+                span: *span,
+            },
+            TypeExpr::Option { elem, span } => TypeExpr::Option {
+                elem: Box::new(Self::recv_subst_ty(elem, subst)),
+                span: *span,
+            },
+            TypeExpr::Fn {
+                params,
+                results,
+                span,
+            } => TypeExpr::Fn {
+                params: params
+                    .iter()
+                    .map(|p| hy_syntax::Param {
+                        name: p.name.clone(),
+                        ty: Self::recv_subst_ty(&p.ty, subst),
+                        span: p.span,
+                    })
+                    .collect(),
+                results: results
+                    .iter()
+                    .map(|r| Self::recv_subst_ty(r, subst))
+                    .collect(),
+                span: *span,
+            },
+        }
+    }
+
+    fn recv_call_return_ty(
+        &self,
+        st: &FnState,
+        callee: &Expr,
+        args: &[hy_syntax::CallArg],
+    ) -> Option<hy_syntax::TypeExpr> {
+        use hy_syntax::TypeExpr;
+        let head = crate::model::unwrap_parens(callee);
+        let (f, callee_name, recv_ty) = match head {
+            Expr::Ident { name, .. } => {
+                if self.lookup_binding(st, name).is_some() {
+                    return None;
+                }
+                let base = Self::base_named_type_str(name);
+                let decl = self.fns.get(name.as_str()).or_else(|| self.fns.get(base))?;
+                (*decl, name.as_str(), None)
+            }
+            Expr::Field { base, name, .. } => {
+                let mhead = Self::base_named_type_str(name);
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, root).is_none() {
+                        let full = format!("{root}.{mhead}");
+                        if let Some(decl) = self.fns.get(full.as_str()) {
+                            return Some(decl.results.first()?.ty.clone()).map(|ret| {
+                                let mut subst = std::collections::HashMap::new();
+                                if let Some((_, explicit)) = Self::parse_generic_type_args(name) {
+                                    for (tp, arg) in decl.type_params.iter().zip(explicit) {
+                                        subst.insert(tp.name.clone(), arg);
+                                    }
+                                }
+                                for (p, a) in decl.params.iter().zip(args.iter()) {
+                                    if let TypeExpr::Named { name: pn, .. } = &p.ty {
+                                        if decl.type_params.iter().any(|tp| &tp.name == pn) {
+                                            if let Some(aty) = self.recv_chan_type_expr(st, &a.value) {
+                                                subst.entry(pn.clone()).or_insert(aty);
+                                            }
+                                        }
+                                    }
+                                }
+                                Self::recv_subst_ty(&ret, &subst)
+                            });
+                        }
+                    }
+                }
+                let bty = self.recv_chan_type_expr(st, base)?;
+                let peeled = self.peel_pointer_and_alias(&bty);
+                let rbase = Self::base_named_type(&peeled).or_else(|| Self::base_named_type(&bty))?;
+                let decl = self.method_decls.get(&(rbase, mhead.to_string()))?;
+                (*decl, name.as_str(), Some(peeled))
+            }
+            _ => return None,
+        };
+        let ret = &f.results.first()?.ty;
+        let mut subst = std::collections::HashMap::new();
+        if let (Some(rdecl), Some(TypeExpr::Named { name: an, .. })) = (&f.receiver, &recv_ty) {
+            let rpeeled = self.peel_pointer_and_alias(&rdecl.ty);
+            if let TypeExpr::Named { name: dn, .. } = &rpeeled {
+                if let (Some((db, dargs)), Some((ab, aargs))) = (
+                    Self::parse_generic_type_args(dn),
+                    Self::parse_generic_type_args(an),
+                ) {
+                    if db == ab {
+                        for (da, aa) in dargs.into_iter().zip(aargs.into_iter()) {
+                            if let TypeExpr::Named { name: tpn, .. } = da {
+                                subst.insert(tpn, aa);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((_, explicit)) = Self::parse_generic_type_args(callee_name) {
+            for (tp, arg) in f.type_params.iter().zip(explicit) {
+                subst.insert(tp.name.clone(), arg);
+            }
+        }
+        for (p, a) in f.params.iter().zip(args.iter()) {
+            if let TypeExpr::Named { name: pn, .. } = &p.ty {
+                if f.type_params.iter().any(|tp| &tp.name == pn) || subst.contains_key(pn) {
+                    if let Some(aty) = self.recv_chan_type_expr(st, &a.value) {
+                        subst.entry(pn.clone()).or_insert(aty);
+                    }
+                }
+            }
+        }
+        if subst.is_empty() {
+            None
+        } else {
+            Some(Self::recv_subst_ty(ret, &subst))
+        }
+    }
+
     fn recv_chan_type_expr(&self, st: &FnState, expr: &Expr) -> Option<hy_syntax::TypeExpr> {
         use hy_syntax::TypeExpr;
+        if let Expr::Call { callee, args, .. } = expr {
+            if let Some(subst_ty) = self.recv_call_return_ty(st, callee, args) {
+                return Some(subst_ty);
+            }
+        }
         if let Some(ty) = self.ty_of_expr(st, expr) {
             let is_some_call = matches!(
                 expr,
@@ -450,7 +658,7 @@ impl<'a> Checker<'a> {
             // a call the type cache does not project) still carries the
             // written type on its binding.
             Expr::Ident { name, span } => {
-                if let Some(b) = st.env_lookup(name) {
+                if let Some(b) = self.lookup_binding(st, name) {
                     return b.ty.clone();
                 }
                 if name == "none" && !self.consts.contains_key("none") {
