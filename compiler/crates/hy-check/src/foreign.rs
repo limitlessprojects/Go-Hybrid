@@ -372,11 +372,26 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
     const SYNC_WAIT_GROUP: &[&str] = &["add", "done", "wait"];
     const SYNC_ONCE: &[&str] = &["do"];
+    /// `io.PipeReader`.
+    const IO_PIPE_READER: &[&str] = &["close", "close_with_error", "read"];
+    /// `io.PipeWriter`.
+    const IO_PIPE_WRITER: &[&str] = &["close", "close_with_error", "write"];
+    /// `io.SectionReader`.
+    const IO_SECTION_READER: &[&str] = &["outer", "read", "read_at", "seek", "size"];
+    /// `io.LimitedReader`.
+    const IO_LIMITED_READER: &[&str] = &["read"];
+    /// `io.OffsetWriter`.
+    const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
         "sync.once" | "sync.Once" => Some(SYNC_ONCE),
+        "io.pipe_reader" | "io.PipeReader" => Some(IO_PIPE_READER),
+        "io.pipe_writer" | "io.PipeWriter" => Some(IO_PIPE_WRITER),
+        "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
+        "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
+        "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
