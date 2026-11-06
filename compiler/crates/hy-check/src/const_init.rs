@@ -38,7 +38,7 @@ impl<'a> Checker<'a> {
                 .then(|| self.file_const_decl(name)?.ty.as_ref())
                 .flatten()
         });
-        let has_non_const_ty = effective_ty.is_some_and(|ty| !self.is_const_allowed_ty(ty));
+        let has_non_const_ty = effective_ty.is_some_and(|ty| !self.is_const_allowed_ty(ty, st));
         if !has_non_const_ty && self.expr_is_constant_inner(value, st, &mut visiting, 0) {
             return;
         }
@@ -145,13 +145,20 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn is_shadowed_const_ty_name(&self, name: &str, st: Option<&FnState>) -> bool {
+        st.is_some_and(|s| s.env_lookup(name).is_some())
+            || self.fns.contains_key(name)
+            || self.structs.contains_key(name)
+            || self.struct_type_params.contains_key(name)
+            || self.enums.contains_key(name)
+            || self.consts.contains_key(name)
+    }
+
     fn is_const_conversion_target(&self, name: &str) -> bool {
         if let Some(ty) = self.type_aliases.get(name) {
             let resolved = self.resolve_type_alias(ty);
             if let hy_syntax::TypeExpr::Named { name: target, .. } = resolved {
-                return !self.structs.contains_key(target.as_str())
-                    && !self.struct_type_params.contains_key(target.as_str())
-                    && !self.enums.contains_key(target.as_str())
+                return !self.is_shadowed_const_ty_name(target.as_str(), None)
                     && is_conversion_type_name(&target);
             }
             return false;
@@ -160,13 +167,7 @@ impl<'a> Checker<'a> {
     }
 
     fn is_const_string_conversion_target(&self, name: &str, st: Option<&FnState>) -> bool {
-        if st.is_some_and(|s| s.env_lookup(name).is_some())
-            || self.fns.contains_key(name)
-            || self.structs.contains_key(name)
-            || self.struct_type_params.contains_key(name)
-            || self.enums.contains_key(name)
-            || self.consts.contains_key(name)
-        {
+        if self.is_shadowed_const_ty_name(name, st) {
             return false;
         }
         if let Some(ty) = self.type_aliases.get(name) {
@@ -174,11 +175,7 @@ impl<'a> Checker<'a> {
             return matches!(
                 resolved,
                 hy_syntax::TypeExpr::Named { name: target, .. }
-                    if target == "string"
-                        && !self.structs.contains_key("string")
-                        && !self.struct_type_params.contains_key("string")
-                        && !self.enums.contains_key("string")
-                        && !self.consts.contains_key("string")
+                    if target == "string" && !self.is_shadowed_const_ty_name("string", None)
             );
         }
         name == "string"
@@ -206,7 +203,7 @@ impl<'a> Checker<'a> {
                 if let Some(st) = st {
                     if let Some(b) = st.env_lookup(name) {
                         if let Some(ty) = &b.ty {
-                            if !self.is_const_allowed_ty(ty)
+                            if !self.is_const_allowed_ty(ty, Some(st))
                                 || !matches!(self.shape_of_type(ty), TypeShape::Str)
                             {
                                 return false;
@@ -217,7 +214,7 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(cdecl) = self.file_const_decl(name) {
                     if let Some(ty) = &cdecl.ty {
-                        if !self.is_const_allowed_ty(ty)
+                        if !self.is_const_allowed_ty(ty, None)
                             || !matches!(self.shape_of_type(ty), TypeShape::Str)
                         {
                             return false;
@@ -247,12 +244,9 @@ impl<'a> Checker<'a> {
         })
     }
 
-    fn is_const_allowed_ty(&self, ty: &hy_syntax::TypeExpr) -> bool {
+    fn is_const_allowed_ty(&self, ty: &hy_syntax::TypeExpr, st: Option<&FnState>) -> bool {
         if let hy_syntax::TypeExpr::Named { ref name, .. } = ty {
-            if self.structs.contains_key(name.as_str())
-                || self.struct_type_params.contains_key(name.as_str())
-                || self.enums.contains_key(name.as_str())
-            {
+            if self.is_shadowed_const_ty_name(name.as_str(), st) {
                 return false;
             }
         }
@@ -261,10 +255,7 @@ impl<'a> Checker<'a> {
             return false;
         }
         if let hy_syntax::TypeExpr::Named { ref name, .. } = resolved {
-            if self.structs.contains_key(name.as_str())
-                || self.struct_type_params.contains_key(name.as_str())
-                || self.enums.contains_key(name.as_str())
-            {
+            if self.is_shadowed_const_ty_name(name.as_str(), None) {
                 return false;
             }
         }
@@ -294,7 +285,7 @@ impl<'a> Checker<'a> {
                 // Only scalar/string/complex `const` bindings are Go compile-time
                 // constants; composite `const`s lower to Go `var`.
                 if let Some(ty) = &b.ty {
-                    if !self.is_const_allowed_ty(ty) {
+                    if !self.is_const_allowed_ty(ty, Some(st)) {
                         return false;
                     }
                 }
@@ -313,7 +304,7 @@ impl<'a> Checker<'a> {
                 return false;
             }
             if let Some(ty) = &cdecl.ty {
-                if !self.is_const_allowed_ty(ty) {
+                if !self.is_const_allowed_ty(ty, None) {
                     return false;
                 }
             }
