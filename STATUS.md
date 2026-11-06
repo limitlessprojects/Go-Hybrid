@@ -1,5 +1,8 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor refresh (2026-11-03, PR #3528): integrated upstream `212af67e5df6452452c061e3dc3d3251faee790f` without conflicts. Python 3.12.14 top-level tooling: 503/503 passed; test-registration, conflict-marker and diff checks passed. Existing fix and regression tests preserved. Full Rust/Go verification on this refreshed head remains a hosted-CI/review gate; no award or payment claimed.
+
+- Contributor candidate (2026-11-03): Actions artifact downloads now stream in 1 MiB reads while retaining atomic publication and truncated-transfer detection; 13 download tests and all 501 Python 3.12 tooling tests pass. Hosted CI/review and any award pending; see PLAN.md.
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
 
 - Contributor #1165: range bounds spelled as different names of one Go integer type no longer raise a false HYB-E2009 (shared canonicaliser in `hy-check` + regression pin); workspace/corpus/differential/CI remain delivery gates.
