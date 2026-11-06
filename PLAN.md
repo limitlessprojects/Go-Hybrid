@@ -1,5 +1,15 @@
 # Hybrid Language: Development Plan
 
+## Contributor current-main refresh
+
+- Contributor refresh (2026-11-03, PR #3486): integrated upstream `212af67e5df6452452c061e3dc3d3251faee790f` without conflicts. Python 3.12.14 top-level tooling: 506/506 passed; test-registration, conflict-marker and diff checks passed. Existing fix and regression tests preserved. Full Rust/Go verification on this refreshed head remains a hosted-CI/review gate; no award or payment claimed.
+
+## Contributor validation — Kaggle wait deadline (2026-11-03)
+
+- Follow-up: the real status CLI survived its timeout because `sh` killed only the intermediate shell. A new POSIX subprocess regression fails on `b7c2feb` (the CLI PID remains alive), then passes when the polling command uses `exec` to replace the shell. The regression checks both the timeout result and that the CLI was reaped, including a CLI path/slug containing quotes. All **504 Python 3.12.14 tooling tests pass**; the 12 wait/argument tests also pass on Python 3.10.12. No live Kaggle request. Earlier full fork CI belongs to the previous head and is historical evidence, not a run of this follow-up.
+- Baseline `ab704645`: `kaggle wait 0.01` gives each status poll 60 seconds and always sleeps 5 seconds; a status subprocess timeout escapes as a traceback. Five offline deadline regressions fail before the fix (2 failures, 3 errors) and pass after it. Use a monotonic overall deadline, cap each poll and sleep to its remaining budget, and treat a timed-out poll as unknown while preserving the active-before-terminal rule.
+- Python 3.12.14 tooling discovery: **503 tests pass**; registration and conflict-marker guards pass. A real local subprocess timeout returns status 2 after 0.066 seconds for a 0.060-second budget. Python 3.10.12 job tests have an unrelated HTTP-308 redirect error, reproduced on the original `job.py`. Preserve that file's CRLF endings; `git -c core.whitespace=cr-at-eol diff --check` passes. No live Kaggle requests or compiler/runtime changes; full Rust/Go suites and hosted CI remain review gates. AI-assisted contribution; award and payment are not established.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.

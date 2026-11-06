@@ -163,11 +163,22 @@ def kaggle_wait(minutes, slug=None):
     Exit codes: 0 = COMPLETE, 1 = kernel error/cancel, 2 = timeout.
     """
     slug = slug or kaggle_slug()
-    deadline = time.time() + minutes * 60
+    deadline = time.monotonic() + minutes * 60
     saw_active = False
     state, polls = "?", 0
-    while time.time() < deadline:
-        rc, out = sh("{} kernels status {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(slug)), timeout=60)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            # Replace the shell so its timeout kills and reaps the status CLI,
+            # rather than leaving the CLI running as an orphan.
+            rc, out = sh("exec {} kernels status {}".format(
+                shlex.quote(KAGGLE_CLI), shlex.quote(slug)), timeout=min(60, remaining))
+        except subprocess.TimeoutExpired:
+            # A stalled status request is unknown, not a kernel failure.
+            # Retry only while the overall wait budget still permits it.
+            rc, out = 1, ""
         polls += 1
         if rc != 0:
             state = "?"
@@ -182,7 +193,9 @@ def kaggle_wait(minutes, slug=None):
         elif state in TERMINAL_STATES and saw_active:
             print("terminal after {} polls: {}".format(polls, state))
             return 0 if state == "COMPLETE" else 1
-        time.sleep(5)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(5, remaining))
     print("TIMEOUT after {} min (last state {}, saw_active={})".format(minutes, state, saw_active))
     return 2
 

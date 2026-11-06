@@ -90,7 +90,7 @@ class KaggleShellArgumentTests(unittest.TestCase):
     def test_wait_uses_the_same_literal_slug(self):
         slug = "owner/kernel with 'quotes'"
         with mock.patch.object(job_tool, "KAGGLE_CLI", str(self.plain_cli)), \
-             mock.patch.object(job_tool.time, "time", side_effect=[0, 0, 61]), \
+             mock.patch.object(job_tool.time, "monotonic", side_effect=[0, 0, 61, 61]), \
              mock.patch.object(job_tool.time, "sleep"), \
              contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(job_tool.kaggle_wait(1, slug), 2)
