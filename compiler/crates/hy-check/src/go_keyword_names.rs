@@ -29,7 +29,7 @@ use crate::model::Checker;
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
     Block, Decl, Expr, FnResult, ForKind, InterpPart, MatchPattern, Param, Place, PlaceKind,
-    SelectArmKind, Stmt, TypeParam,
+    SelectArmKind, Stmt, TypeExpr, TypeParam,
 };
 
 const GO_ONLY_KEYWORD: &str = "default";
@@ -41,6 +41,9 @@ impl<'a> Checker<'a> {
             match d {
                 Decl::Const(c) => {
                     self.kw_name(&c.name, "const", c.span);
+                    if let Some(ty) = &c.ty {
+                        self.kw_type(ty);
+                    }
                     self.kw_expr(&c.value);
                 }
                 Decl::Struct(s) => {
@@ -48,14 +51,19 @@ impl<'a> Checker<'a> {
                     self.kw_type_params(&s.type_params, s.span);
                     for f in &s.fields {
                         self.kw_name(&f.name, "struct field", f.span);
+                        self.kw_type(&f.ty);
                     }
                 }
-                Decl::TypeAlias(t) => self.kw_name(&t.name, "type alias", t.span),
+                Decl::TypeAlias(t) => {
+                    self.kw_name(&t.name, "type alias", t.span);
+                    self.kw_type(&t.ty);
+                }
                 Decl::Fn(f) => {
                     let what = if f.receiver.is_some() { "method" } else { "fn" };
                     self.kw_name(&f.name, what, f.span);
                     if let Some(r) = &f.receiver {
                         self.kw_name(&r.name, "receiver", f.span);
+                        self.kw_type(&r.ty);
                     }
                     self.kw_type_params(&f.type_params, f.span);
                     self.kw_params(&f.params);
@@ -64,7 +72,44 @@ impl<'a> Checker<'a> {
                         self.kw_block(b);
                     }
                 }
-                Decl::Import { .. } | Decl::Enum(_) => {}
+                Decl::Enum(e) => {
+                    for v in &e.variants {
+                        if let Some(p) = &v.payload {
+                            self.kw_type(p);
+                        }
+                    }
+                }
+                Decl::Import { .. } => {}
+            }
+        }
+    }
+
+    fn kw_type(&mut self, ty: &TypeExpr) {
+        match ty {
+            TypeExpr::Named { .. } => {}
+            TypeExpr::Pointer { to, .. }
+            | TypeExpr::Slice { elem: to, .. }
+            | TypeExpr::Option { elem: to, .. } => {
+                self.kw_type(to);
+            }
+            TypeExpr::Array { len, elem, .. } => {
+                if let Some(expr) = len {
+                    self.kw_expr(expr);
+                }
+                self.kw_type(elem);
+            }
+            TypeExpr::Map { key, value, .. } => {
+                self.kw_type(key);
+                self.kw_type(value);
+            }
+            TypeExpr::Chan { elem, .. } => {
+                self.kw_type(elem);
+            }
+            TypeExpr::Fn { params, results, .. } => {
+                self.kw_params(params);
+                for r in results {
+                    self.kw_type(r);
+                }
             }
         }
     }
@@ -99,6 +144,7 @@ impl<'a> Checker<'a> {
     fn kw_params(&mut self, params: &[Param]) {
         for p in params {
             self.kw_name(&p.name, "parameter", p.span);
+            self.kw_type(&p.ty);
         }
     }
 
@@ -107,6 +153,7 @@ impl<'a> Checker<'a> {
             if let Some(n) = &r.name {
                 self.kw_name(n, "named result", span);
             }
+            self.kw_type(&r.ty);
         }
     }
 
@@ -121,6 +168,9 @@ impl<'a> Checker<'a> {
             Stmt::Local(l) => {
                 for n in &l.names {
                     self.kw_name(n, "local", l.span);
+                }
+                if let Some(ty) = &l.ty {
+                    self.kw_type(ty);
                 }
                 for v in &l.values {
                     self.kw_expr(v);
@@ -285,17 +335,30 @@ impl<'a> Checker<'a> {
                     self.kw_expr(&a.value);
                 }
             }
-            Expr::StructLit { fields, .. } => {
+            Expr::StructLit { ty, fields, .. } => {
+                if let Some(t) = ty {
+                    self.kw_type(t);
+                }
                 for f in fields {
                     self.kw_expr(&f.value);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some(e) = elem {
+                    self.kw_type(e);
+                }
                 for i in items {
                     self.kw_expr(i);
                 }
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } => {
+                self.kw_type(key);
+                self.kw_type(value);
                 for (k, v) in entries {
                     self.kw_expr(k);
                     self.kw_expr(v);
