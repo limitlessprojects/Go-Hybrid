@@ -140,6 +140,7 @@ pub fn check_file(file: &File) -> CheckResult {
     // bindings (incl. `_ := 5`), unused imports, and repeated names on the
     // left of one `:=` are rejected fail-closed as HYB-E1002.
     buildable::check_buildable(&mut ck);
+    ck.check_try_context_shadows();
 
     let mut diags = ck.diags;
     diags.sort_by(|a, b| {
@@ -5280,3 +5281,4 @@ mod tests {
     }
 }
 
+mod try_context_shadow;
