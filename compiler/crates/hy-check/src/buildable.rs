@@ -3593,7 +3593,9 @@ impl<'a> Collector<'a> {
             "any" | "interface{}" => OpKind::Interface,
             "bool" => OpKind::Bool,
             "string" => OpKind::Str,
-            "float32" | "float64" | "f32" | "f64" => OpKind::Float,
+            "float32" | "float64" | "f32" | "f64" | "complex64" | "complex128" | "c64" | "c128" => {
+                OpKind::Float
+            }
             "int" | "uint" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
             | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
@@ -4477,6 +4479,30 @@ impl<'a> Collector<'a> {
         )
     }
 
+    fn find_untyped_nonconst_shift<'b>(&self, e: &'b Expr) -> Option<(&'b Expr, BinOp)> {
+        match unwrap_parens(e) {
+            Expr::Binary {
+                op: op @ (BinOp::Shl | BinOp::Shr),
+                lhs,
+                rhs,
+                ..
+            } => {
+                if self.is_untyped_int_const(lhs) && !self.is_untyped_int_const(rhs) {
+                    Some((e, *op))
+                } else {
+                    self.find_untyped_nonconst_shift(lhs)
+                        .or_else(|| self.find_untyped_nonconst_shift(rhs))
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.find_untyped_nonconst_shift(lhs)
+                    .or_else(|| self.find_untyped_nonconst_shift(rhs))
+            }
+            Expr::Unary { operand, .. } => self.find_untyped_nonconst_shift(operand),
+            _ => None,
+        }
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -4497,6 +4523,33 @@ impl<'a> Collector<'a> {
         }
         let arg = &args[0].value;
         self.check_single_value_position(arg, "a type conversion", /*binding_position=*/ false);
+
+        // #3767: In Go specification (§Operators / Arithmetic operators / Integer operators):
+        // "If the left operand of a non-constant shift expression is an untyped constant,
+        // it is first implicitly converted to the type it would assume if the shift expression
+        // were replaced by its left operand alone."
+        // When an untyped shift (`1 << n`) appears inside a float/complex conversion
+        // (`float64(...)`, `complex128(...)`), the untyped constant left operand adopts
+        // the non-integer target type, which Go forbids with `invalid operation: 1 << n (shift of type float64)`.
+        if matches!(
+            name,
+            "float32" | "float64" | "f32" | "f64" | "complex64" | "complex128" | "c64" | "c128"
+        ) {
+            if let Some((shift_expr, _)) = self.find_untyped_nonconst_shift(arg) {
+                self.emit_e1002(
+                    shift_expr.span(),
+                    format!(
+                        "invalid operation `{}`: shift of type `{}` in conversion to `{}` (HYB-E1002)",
+                        shift_expr.render(),
+                        name,
+                        name
+                    ),
+                    "a non-constant shift of an untyped constant inherits the target type of the enclosing conversion; bitwise shifts are not defined on floating-point or complex types",
+                );
+                return;
+            }
+        }
+
         let arg_k = self.kind_of_expr(arg);
         // #2811: `string`↔slice conversions are restricted to byte/rune
         // elements; `OpKind::Int` cannot tell `int64` from `uint8`.
@@ -6545,10 +6598,8 @@ impl<'a> Collector<'a> {
     /// Family C1 (#425, #708): `base[index]` requires a slice, array, map, or string,
     /// and constant indices on constant strings must satisfy `0 <= index < len(base)`.
 
-    /// #3292: the declared key scalar of a map-typed base, when it is a
-    /// predeclared numeric spelling. Anything else (named type, unresolved)
-    /// gives None and the caller fails open.
-    fn map_key_scalar_name(&self, base: Option<&Expr>) -> Option<&'static str> {
+    /// #3240: the declared key type spelling of a map-typed base.
+    fn map_key_type_name(&self, base: Option<&Expr>) -> Option<String> {
         let base = base?;
         let ty = match unwrap_parens(base) {
             Expr::Ident { name, .. } => self
@@ -6564,9 +6615,17 @@ impl<'a> Collector<'a> {
             _ => return None,
         };
         if let Some(CompFamily::Map { key, .. }) = CompFamily::split(ty.trim()) {
-            return canonical_numeric_name(key);
+            return Some(key.to_string());
         }
         None
+    }
+
+    /// #3292: the declared key scalar of a map-typed base, when it is a
+    /// predeclared numeric spelling. Anything else (named type, unresolved)
+    /// gives None and the caller fails open.
+    fn map_key_scalar_name(&self, base: Option<&Expr>) -> Option<&'static str> {
+        let key = self.map_key_type_name(base)?;
+        canonical_numeric_name(&key)
     }
 
     fn check_index_kind(
@@ -7600,16 +7659,19 @@ impl<'a> Collector<'a> {
                     if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
-                        && args.len() != 2
                     {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "`errors.wrap` takes 2 arguments `(err, message)`, got {} (HYB-E1002)",
-                                args.len()
-                            ),
-                            "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
-                        );
+                        if args.len() != 2 {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`errors.wrap` takes 2 arguments `(err, message)`, got {} (HYB-E1002)",
+                                    args.len()
+                                ),
+                                "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
+                            );
+                        } else {
+                            self.check_errors_wrap_operands(args);
+                        }
                     }
                     // #3598: `fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to
                     // `fmt.Fprint*(os.Stderr, ...)` in `hy-emit`. When `os` is shadowed by
@@ -8071,6 +8133,60 @@ impl<'a> Collector<'a> {
             _ => {}
         }
     }
+
+    /// #3572: `errors.wrap(err, message)` lowers to `fmt.Errorf("%s: %w", message, err)`.
+    /// Reject operands whose resolved kind can never be an `error` (argument 0) or
+    /// a `string` (argument 1) with HYB-E1002 (SPEC-LANGUAGE E2).
+    fn check_errors_wrap_operands(&mut self, args: &[CallArg]) {
+        let ek = self.kind_of_expr(&args[0].value);
+        if matches!(
+            ek,
+            OpKind::Int
+                | OpKind::Float
+                | OpKind::Bool
+                | OpKind::Str
+                | OpKind::Slice(_)
+                | OpKind::Array(_)
+                | OpKind::Map(..)
+                | OpKind::Chan(_)
+                | OpKind::Fn(..)
+                | OpKind::Option(_)
+                | OpKind::Void
+        ) {
+            self.emit_e1002(
+                args[0].value.span(),
+                format!(
+                    "`errors.wrap` needs an `error` as its first argument, got `{}` (HYB-E1002)",
+                    ek.label()
+                ),
+                "write `errors.wrap(err, \"context\")` with an error value first (SPEC-LANGUAGE E2)",
+            );
+        }
+        let mk = self.kind_of_expr(&args[1].value);
+        if matches!(
+            mk,
+            OpKind::Int
+                | OpKind::Float
+                | OpKind::Bool
+                | OpKind::Slice(_)
+                | OpKind::Array(_)
+                | OpKind::Map(..)
+                | OpKind::Chan(_)
+                | OpKind::Fn(..)
+                | OpKind::Option(_)
+                | OpKind::Void
+        ) {
+            self.emit_e1002(
+                args[1].value.span(),
+                format!(
+                    "`errors.wrap` needs a `string` message as its second argument, got `{}` (HYB-E1002)",
+                    mk.label()
+                ),
+                "write `errors.wrap(err, \"context\")` with a string context message (SPEC-LANGUAGE E2)",
+            );
+        }
+    }
+
     /// Family E1–E5 (#425): extend `HYB-E2005` (`BUILTIN-ARGS`) from literals
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
@@ -8273,14 +8389,34 @@ impl<'a> Collector<'a> {
                             let int_to_float_conflict = want == OpKind::Float
                                 && got == OpKind::Int
                                 && !self.is_untyped_int_const(key_arg);
-                            if kinds_conflict(&want, &got) || int_to_float_conflict {
+                            // #3240: compare scalar width and sized array dimensions for delete on set[T]
+                            let del_elem_scalar = canonical_numeric_name(&elem);
+                            let del_arg_scalar = self.typed_value_scalar(key_arg);
+                            let scalar_mismatch = matches!(
+                                (del_elem_scalar, del_arg_scalar),
+                                (Some(a), Some(b)) if a != b
+                            );
+                            let arg_ty = self.typed_value_type_name(key_arg);
+                            let array_mismatch = self.sized_array_names_differ(
+                                Some(&elem),
+                                arg_ty.as_deref(),
+                            );
+                            if kinds_conflict(&want, &got)
+                                || int_to_float_conflict
+                                || scalar_mismatch
+                                || array_mismatch
+                            {
+                                let got_label = del_arg_scalar
+                                    .map(|s| s.to_string())
+                                    .or_else(|| arg_ty.clone())
+                                    .unwrap_or_else(|| got.label());
                                 self.emit_e2005(
                                     span,
                                     format!(
                                         "cannot use `{}` (type `{}`) as element type `{}` in `delete` on `set[{}]` (HYB-E2005)",
                                         key_arg.render(),
-                                        got.label(),
-                                        want.label(),
+                                        got_label,
+                                        elem,
                                         elem
                                     ),
                                     "the second argument to `delete(s, v)` must match the set's element type",
@@ -8302,6 +8438,13 @@ impl<'a> Collector<'a> {
                             (del_key_scalar, del_arg_scalar),
                             (Some(a), Some(b)) if a != b
                         );
+                        // #3240: compare sized array length on map key arguments
+                        let map_key_ty = self.map_key_type_name(Some(map_arg));
+                        let arg_ty = self.typed_value_type_name(key_arg);
+                        let del_array_conflict = self.sized_array_names_differ(
+                            map_key_ty.as_deref(),
+                            arg_ty.as_deref(),
+                        );
                         // #3518: reject untyped nil passed to non-nilable map key types
                         if Checker::is_nil_literal(key_arg) && is_non_nilable(k_expected) {
                             let k_label = del_key_scalar
@@ -8322,18 +8465,23 @@ impl<'a> Collector<'a> {
                             && kk != **k_expected
                             && !is_untyped_int_to_float)
                             || del_width_conflict
+                            || del_array_conflict
                         {
+                            let got_label = del_arg_scalar
+                                .map(|s| s.to_string())
+                                .or_else(|| arg_ty.clone())
+                                .unwrap_or_else(|| kk.label());
+                            let want_label = del_key_scalar
+                                .map(|s| s.to_string())
+                                .or_else(|| map_key_ty.clone())
+                                .unwrap_or_else(|| k_expected.label());
                             self.emit_e2005(
                                 span,
                                 format!(
                                     "cannot use `{}` (type `{}`) as key type `{}` in `delete` (HYB-E2005)",
                                     key_arg.render(),
-                                    del_arg_scalar
-                                        .map(|s| s.to_string())
-                                        .unwrap_or_else(|| kk.label()),
-                                    del_key_scalar
-                                        .map(|s| s.to_string())
-                                        .unwrap_or_else(|| k_expected.label())
+                                    got_label,
+                                    want_label
                                 ),
                                 "the second argument to `delete(m, k)` must match the map's key type",
                             );
