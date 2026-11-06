@@ -1719,7 +1719,7 @@ impl Emitter {
             PlaceKind::Field { base, name } => {
                 let f = self.n5_structs.get(self.user_struct_name_of_place(base)?)?.iter().find(|f| &f.name == name)?;
                 let fty = super::base_ty_name(self.resolve_type_alias(&f.ty))?;
-                self.struct_fields.get_key_value(fty.as_str()).map(|(k, _)| k.as_str())
+                self.resolve_to_struct_name(&fty)
             }
             _ => None,
         }
