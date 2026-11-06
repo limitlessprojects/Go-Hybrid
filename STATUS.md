@@ -1,5 +1,7 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor (2026-11-07): `hyb build` preserves unmarked/unreadable Go sidecars before compilation; marked outputs remain reusable, while legacy unmarked output requires explicit migration. Six CLI regressions and the pinned macOS compiler workspace pass (2947/2947). Corpus/differential, hosted CI and review pending; see PLAN.md.
+
 - Contributor (2026-11-05): default Actions watch selects the heavy workflow before pagination; three focused regressions pass (two failed before). The full Linux job suite passes 95/95 with no skips; earlier Windows environment limitations remain recorded in PLAN.md. Hosted CI/review pending.
 
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
