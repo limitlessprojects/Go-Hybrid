@@ -336,3 +336,15 @@
 - Suites 455 -> 456 (+1: diag alias suite; #3791 extended an existing suite). Two landings, zero gate fails, zero dup replies, zero silent closes.
 - Next queue: #3793+#3794 (shadowed strings/http family — dedupe first) -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route; fresh wave 3807..3881 family scan+dedupe.
 - Worklog: this commit.
+
+## Session 129 — 2026-11-07 06:10 UTC+8 tick
+- env cold-recycled on stale session-44 snapshot; node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached, main fast-forwarded c403585c -> 973453c5 (S128 head). approve 16/16 (4982 left), scan skipped.
+- **NEW FIXUP CASE — encoding-damage restoration (in-merge, credited)**: #3793's patch replaced 10 UTF-8 arrows in unrelated buildable.rs doc comments (8 x U+2192, 2 x U+2194 -> literal ?) and appended a stray EOF blank line. Handled with merge --no-commit + deterministic restore (for each HEAD line containing an arrow, replace its ?-twin back), EOF stripped; net merge diff = +25 check lines + 85-line test file only. Third in-merge fixup class after PLAN.md chronology (S127) and fixture restoration; commit + reply both document it.
+- Patch-id family matrix: #3793 fca76dad vs #3794 0c9fec05 (both fix #3789, distinct implementations) — first-to-land = #3793.
+- **1 landed, 1 dup reply**:
+  - **#3793** -> `30e75134` (bradwue313, fixes #3789): httptest.get/post reject shadowed strings/http (HYB-E1002, is_pkg_symbol_shadowed, follows #3598/#3614/#3727 pattern); new 7-test suite also pins existing E11 ? propagation (HYB-E2011 for shadowed http/writer in http.handler). Battery: merge-gate CLEAN, 457 suites, corpus 135/135, differential FULL AGREEMENT. Remote asserted. Landing reply 201.
+  - Dup hall-of-fame reply on #3794 (dextermos-dev). 201. PR stays open.
+- Suites 456 -> 457 (+1: shadowed_httptest_and_e11_handler_3789). One landing, one dup reply, zero gate fails, zero silent closes.
+- Next queue: #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route; fresh wave 3807..3881 family scan+dedupe (bradwue313 already seen in wave — note #3793 was his too).
+- Worklog: this commit.
+- **S129 CORRECTION (posted same tick)**: the in-merge arrow restoration for #3793 was written to the worktree but NOT staged before the merge committed — `30e75134` shipped the mangled comments (0 arrows). Follow-up commit `a516dd26` restores all 10 lines byte-identical + drops the EOF blank; remote asserted (8/2 arrows verified in HEAD blob). Correction comment posted on #3793 (201). LESSON: worktree edits during a `merge --no-commit` must be followed by explicit `git add` of every touched path — verify the committed blob (git show HEAD:<path> | grep) before claiming a fixup landed in the merge.
