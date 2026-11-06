@@ -85,6 +85,15 @@ jobs:
             echo "- go vet: **FAIL**" >> /tmp/preflight.md
             exit 1
           fi
+          if [ -f go.mod ]; then
+            if go build ./... && go vet ./... ; then
+              echo "- root go build/vet: **pass**" >> /tmp/preflight.md
+            else
+              echo "- root go build/vet: **FAIL**" >> /tmp/preflight.md
+              exit 1
+            fi
+          fi
+          fi
           if cargo build --manifest-path compiler/Cargo.toml -p hyb --quiet ; then
             echo "- classifier build (hyb): **pass**" >> /tmp/preflight.md
           else
