@@ -504,7 +504,6 @@ impl<'a> Lexer<'a> {
                         prev_underscore = false;
                         trailing_underscore = false;
                     }
-                    first_char = false;
                     self.bump();
                 } else {
                     break;
@@ -589,7 +588,6 @@ impl<'a> Lexer<'a> {
                     prev_underscore = false;
                     trailing_underscore = false;
                 }
-                first_char = false;
                 self.bump();
             } else {
                 break;
@@ -634,7 +632,6 @@ impl<'a> Lexer<'a> {
                             prev_underscore = false;
                             trailing_underscore = false;
                         }
-                        first_char = false;
                         self.bump();
                     } else {
                         break;
@@ -681,7 +678,6 @@ impl<'a> Lexer<'a> {
                             prev_underscore = false;
                             trailing_underscore = false;
                         }
-                        first_char = false;
                         self.bump();
                     } else {
                         break;
@@ -695,41 +691,10 @@ impl<'a> Lexer<'a> {
                 for _ in 0..k {
                     s.push(self.bump().unwrap());
                 }
-                // `_` immediately after the exponent marker/sign is malformed (LX6 leading underscore).
-                if self.at(0) == Some('_') {
-                    self.escape_diag(
-                        start,
-                        false,
-                        "malformed numeric literal: '_' must separate successive digits (SPEC-LANGUAGE.md LX6)",
-                    );
-                }
-                let mut prev_was_underscore = self.at(0) == Some('_');
                 while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
-                    let c = self.at(0).unwrap();
-                    if c == '_' {
-                        if prev_was_underscore {
-                            self.escape_diag(
-                                start,
-                                false,
-                                "malformed numeric literal: '_' must separate successive digits (SPEC-LANGUAGE.md LX6)",
-                            );
-                        }
-                        prev_was_underscore = true;
-                    } else {
-                        prev_was_underscore = false;
-                    }
                     s.push(self.bump().unwrap());
                 }
-                if prev_was_underscore {
-                    self.escape_diag(
-                        start,
-                        false,
-                        "malformed numeric literal: '_' must separate successive digits (SPEC-LANGUAGE.md LX6)",
-                    );
-                }
-                if self.at(0) != Some('_') {
-                    self.escape_diag(start, false, "malformed float literal: exponent has no digits (SPEC-LANGUAGE.md LX6)");
-                }
+                self.escape_diag(start, false, "malformed float literal: exponent has no digits (SPEC-LANGUAGE.md LX6)");
             }
         }
         if is_float {
