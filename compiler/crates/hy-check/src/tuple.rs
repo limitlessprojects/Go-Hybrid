@@ -391,7 +391,11 @@ impl<'a> Checker<'a> {
                     TypeShape::Array(..) => Some(BindSourceBound::Exact(1)),
                     _ => None,
                 },
-                _ => None,
+                _ => match self.composite_type_expr(st, base).map(|t| self.peel_pointer_and_alias(&t)) {
+                    Some(TypeExpr::Map { .. }) => Some(BindSourceBound::AtMost(2)),
+                    Some(TypeExpr::Slice { .. } | TypeExpr::Array { .. }) => Some(BindSourceBound::Exact(1)),
+                    _ => None,
+                },
             },
             _ => None,
         }
@@ -636,10 +640,14 @@ impl<'a> Checker<'a> {
                     _ => None,
                 }
             }
-            Expr::Field { base, name, .. } => {
+            Expr::Field { base, name, span } => {
                 let base_ty = self.composite_type_expr(st, base)?;
-                let fty = self.struct_fields_for_type(&base_ty)?.into_iter().find(|(n, _)| n == name)?.1;
-                Some(self.resolve_type_alias(&fty))
+                if let Some((_, fty)) = self.struct_fields_for_type(&base_ty).and_then(|fs| fs.into_iter().find(|(n, _)| n == name)) {
+                    return Some(self.resolve_type_alias(&fty));
+                }
+                let rb = Self::base_named_type(&self.peel_pointer_and_alias(&base_ty))?;
+                let decl = self.method_decls.get(&(rb, Self::base_named_type_str(name).to_string()))?;
+                Some(TypeExpr::Fn { params: decl.params.clone(), results: decl.results.iter().map(|r| r.ty.clone()).collect(), span: *span })
             }
             Expr::Call { callee, .. } => {
                 if let Some(TypeExpr::Fn { results, .. }) = self.resolve_fn_callee_ty(st, callee) {
