@@ -698,6 +698,69 @@ impl<'a> Checker<'a> {
                 }
                 return;
             }
+            if (name == "min" || name == "max") && self.lookup_binding(st, name).is_none() {
+                let target_ty = args.iter().find_map(|a| {
+                    self.ty_of_expr(st, &a.value)
+                        .map(|t| self.resolve_type_alias(&t))
+                        .or_else(|| {
+                            self.fixed_width_int_ty_of(st, &a.value)
+                                .map(|(n, _, _)| TypeExpr::Named {
+                                    name: n,
+                                    span: a.value.span(),
+                                })
+                        })
+                });
+                if let Some(ref ty) = target_ty {
+                    let desc = format!("argument to {}", name);
+                    for a in args {
+                        if !a.spread {
+                            self.check_const_overflow_init(&desc, ty, &a.value, Some(st));
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
+        if let Expr::Field {
+            base,
+            name: method_name,
+            ..
+        } = unwrapped
+        {
+            if let Some(first_arg) = args.first() {
+                if !first_arg.spread {
+                    if matches!(method_name.as_str(), "insert" | "remove" | "contains") {
+                        if let Some(elem_ty) = self
+                            .ty_of_expr(st, base)
+                            .map(|t| self.resolve_type_alias(&t))
+                            .and_then(|t| self.set_elem_type(&t))
+                        {
+                            let resolved = self.resolve_type_alias(&elem_ty);
+                            self.check_const_overflow_init(
+                                &format!("argument to {}", method_name),
+                                &resolved,
+                                &first_arg.value,
+                                Some(st),
+                            );
+                            return;
+                        }
+                    } else if method_name == "or" {
+                        if let Some(TypeExpr::Option { elem, .. }) =
+                            self.ty_of_expr(st, base).map(|t| self.resolve_type_alias(&t))
+                        {
+                            let resolved = self.resolve_type_alias(&elem);
+                            self.check_const_overflow_init(
+                                "argument to or",
+                                &resolved,
+                                &first_arg.value,
+                                Some(st),
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
         }
 
         // 2. Resolve parameter list
