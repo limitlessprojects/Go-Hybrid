@@ -137,6 +137,15 @@ class InstallerChecksumTests(unittest.TestCase):
     def test_archive_download_failure_aborts(self):
         self.assert_rejected_without_installing(self.run_installer(HYB_TEST_FAIL_ARCHIVE="1"))
 
+    def test_location_header_with_plus_sign_extracts_full_tag(self):
+        cmd = [
+            SHELL, "-c",
+            r'printf "Location: https://github.com/limitlessprojects/Go-Hybrid/releases/tag/v1.2.3+build.7\r\n" '
+            r'| sed -n "s/^location:.*\/tag\/\(v[0-9A-Za-z._+-]*\).*/\1/ip" | head -1'
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        self.assertEqual(res.stdout.strip(), "v1.2.3+build.7")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
