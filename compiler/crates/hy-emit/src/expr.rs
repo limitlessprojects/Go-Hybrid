@@ -105,24 +105,28 @@ impl Emitter {
                         }
                         if let (
                             TypeExpr::Array {
-                                len:
-                                    Some(
-                                        len_expr,
-                                    ),
+                                len: Some(len_expr),
                                 ..
                             },
                             Some(init),
                         ) = (&resolved, self.n5_zero_init(elem))
                         {
                             if let Expr::Lit {
-                                kind: LitKind::Int(n),
+                                kind: LitKind::Int(s),
                                 ..
-                            } = len_expr.as_ref()
+                            } = Self::unwrap_parens(len_expr)
                             {
-                                parts.resize(
-                                    n.replace('_', "").parse().unwrap_or(0).max(parts.len()),
-                                    init,
-                                );
+                                if let Some(n) =
+                                    super::constconv::parse_int(s).and_then(|v| usize::try_from(v).ok())
+                                {
+                                    parts.resize(n.max(parts.len()), init);
+                                }
+                            } else {
+                                let skip = parts.len();
+                                return Ok(format!(
+                                    "func() (hyArr {head}) {{ hyArr = {head}{{{}}}; for hyIdx := {skip}; hyIdx < len(hyArr); hyIdx++ {{ hyArr[hyIdx] = {init} }}; return hyArr }}()",
+                                    parts.join(", ")
+                                ));
                             }
                         }
                         return Ok(format!("{}{{{}}}", head, parts.join(", ")));
