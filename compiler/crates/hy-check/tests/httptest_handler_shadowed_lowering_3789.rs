@@ -33,12 +33,13 @@ fn error_codes(r: &CheckResult) -> Vec<String> {
         .collect()
 }
 
-fn rejects(src: &str, expected_substring: &str) {
+fn rejects_with_code(src: &str, code: &str, expected_substring: &str) {
     let r = check(src);
     let cs = error_codes(&r);
     assert!(
-        cs.iter().any(|c| c == "HYB-E1002"),
-        "expected HYB-E1002 for {:?}, got {:?}",
+        cs.iter().any(|c| c == code),
+        "expected {} for {:?}, got {:?}",
+        code,
         src,
         cs
     );
@@ -50,6 +51,10 @@ fn rejects(src: &str, expected_substring: &str) {
         src,
         r.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
+}
+
+fn rejects(src: &str, expected_substring: &str) {
+    rejects_with_code(src, "HYB-E1002", expected_substring);
 }
 
 fn accepts(src: &str) {
@@ -175,7 +180,7 @@ fn main() {
     _ = h1
 }
 "#;
-    rejects(src, "http` is shadowed by an in-scope declaration (HYB-E1002)");
+    rejects_with_code(src, "HYB-E2011", "needs an `error` result to return through");
 }
 
 #[test]
@@ -199,7 +204,7 @@ fn main() {
     _ = h2
 }
 "#;
-    rejects(src, "response writer parameter `w` is shadowed by an in-scope declaration (HYB-E1002)");
+    rejects_with_code(src, "HYB-E2011", "needs an `error` result to return through");
 }
 
 #[test]
@@ -223,7 +228,7 @@ fn main() {
     _ = h
 }
 "#;
-    rejects(src, "response writer parameter `resp` is shadowed by an in-scope declaration (HYB-E1002)");
+    rejects_with_code(src, "HYB-E2011", "needs an `error` result to return through");
 }
 
 #[test]
