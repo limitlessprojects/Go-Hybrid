@@ -1,5 +1,8 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — installer upgrade rollback (2026-11-06)
+
+- On base `c3c78c0`, a valid candidate followed by a payload `cp` failure removed the installed runtime and CLI before the copy. New offline regressions fail on baseline for runtime/CLI copy and promotion failures. The installer stages both payloads on the install filesystem, backs up existing paths, restores them if promotion fails, and retains rollback data if restoration itself fails. `test_install_checksums.py`: 9/9, including old launcher execution and file/mode snapshots after injected failures. Shell installer change; compiler suite not run. Hosted CI, review, and any bounty award remain pending.
 ## Contributor validation — Markdown angle destinations (2026-11-06)
 
 - On base `c3c78c0`, angle-delimited CommonMark destinations in `GUARANTEES.md` evidence were not recognized when they contained spaces; `.hy` paths also retained the delimiters and failed resolution. Regression tests fail on baseline and now cover spaces, parentheses, fragments, titles, external/empty targets, missing paths, and corpus verdicts. Focused suite: 11/11; claims check: 20 rows / 14 links / 0 issues; registration, conflict-marker, and diff checks pass. Tooling-only change; compiler suite not run. Hosted CI, review, and any bounty award remain pending.
