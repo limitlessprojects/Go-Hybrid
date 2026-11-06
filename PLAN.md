@@ -4,7 +4,7 @@
 
 - On base `fca2f63`, `hyb build good.hy -o app --emit-go` overwrites an existing hand-written or non-UTF-8 `app.go`. The implicit sidecar now refuses unmarked/unreadable existing content before Go compilation and marks new output with a basename-only generated header. The emitter and bridge input are unchanged.
 - Legacy unmarked build output requires a one-time explicit migration: choose another `-o` path or verify and move the old generated artifact. Six real CLI regressions cover preservation with and without `--emit-go`, non-UTF-8 bytes, legacy output, new headers, and repeated updates. The original four tests all fail before the fix.
-- Pinned macOS Go 1.26.9 / Rust 1.99.0: compiler workspace 2947 passed, 0 failed/ignored; test registration, conflict-marker and new-test formatting checks pass. Corpus, differential, hosted CI and maintainer review remain pending.
+- Pinned macOS Go 1.26.9 / Rust 1.99.0: compiler workspace 2947 passed, 0 failed/ignored; corpus 135/135 (managed tripwire not fired); differential 45/45 build-and-run + 90/90 reject. The initial differential run lacked runtime Cargo dependencies; fetching the locked dependencies and rerunning offline passed without source changes. Test registration, conflict-marker, new-test formatting and changed-file whitespace checks pass. Hosted CI and maintainer review remain pending.
 
 ## Contributor validation — Actions watch workflow selection (2026-11-05)
 
