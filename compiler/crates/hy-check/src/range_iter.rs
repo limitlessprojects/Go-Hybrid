@@ -380,6 +380,13 @@ impl<'a> Checker<'a> {
     /// for untyped literals and untyped consts, which adapt to the
     /// counter's type in the lowering (and in Go's constant arithmetic).
     pub(crate) fn typed_int_bound(&self, st: &FnState, e: &Expr) -> Option<String> {
+        self.typed_int_bound_at(st, e, 0)
+    }
+
+    fn typed_int_bound_at(&self, st: &FnState, e: &Expr, depth: usize) -> Option<String> {
+        if depth > 32 {
+            return None;
+        }
         match unwrap_parens_and_move(e) {
             Expr::Lit { .. } => None,
             Expr::Ident { name, .. } => {
@@ -396,7 +403,7 @@ impl<'a> Checker<'a> {
                             }
                         } else if let Some(init) = self.const_values.get(name.as_str()) {
                             let file_st = FnState::default();
-                            if let Some(rn) = self.typed_int_bound(&file_st, init) {
+                            if let Some(rn) = self.typed_int_bound_at(&file_st, init, depth + 1) {
                                 return Some(rn);
                             }
                         }
@@ -410,7 +417,7 @@ impl<'a> Checker<'a> {
                 op: hy_syntax::UnOp::Neg,
                 operand,
                 ..
-            } => self.typed_int_bound(st, operand),
+            } => self.typed_int_bound_at(st, operand, depth + 1),
             Expr::Binary { op, lhs, rhs, .. } => match op {
                 hy_syntax::BinOp::Add
                 | hy_syntax::BinOp::Sub
@@ -420,9 +427,9 @@ impl<'a> Checker<'a> {
                 | hy_syntax::BinOp::BitAnd
                 | hy_syntax::BinOp::BitOr
                 | hy_syntax::BinOp::BitXor => self
-                    .typed_int_bound(st, lhs)
-                    .or_else(|| self.typed_int_bound(st, rhs)),
-                hy_syntax::BinOp::Shl | hy_syntax::BinOp::Shr => self.typed_int_bound(st, lhs),
+                    .typed_int_bound_at(st, lhs, depth + 1)
+                    .or_else(|| self.typed_int_bound_at(st, rhs, depth + 1)),
+                hy_syntax::BinOp::Shl | hy_syntax::BinOp::Shr => self.typed_int_bound_at(st, lhs, depth + 1),
                 _ => None,
             },
             Expr::Call { callee, args, .. } => {
