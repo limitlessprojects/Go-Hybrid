@@ -71,7 +71,7 @@ if [ -n "$VERSION" ]; then
 else
     echo "==> resolving latest release"
     TAG="$(curl -fsSI "https://github.com/$REPO/releases/latest" 2>/dev/null \
-        | sed -n 's/^location:.*\/tag\/\(v[0-9A-Za-z._-]*\).*/\1/ip' | head -1)"
+        | sed -n 's/^location:.*\/tag\/\(v[0-9A-Za-z._+-]*\).*/\1/ip' | head -1)"
     if [ -z "$TAG" ]; then
         API_JSON="$(mktemp)"
         if fetch "https://api.github.com/repos/$REPO/releases/latest" "$API_JSON" 2>/dev/null; then

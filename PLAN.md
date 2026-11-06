@@ -1,5 +1,10 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — Actions watch workflow selection (2026-11-05)
+
+- `job.py actions watch` now queries the heavy workflow before pagination, so newer CI runs cannot hide dispatched heavy jobs. Explicit run IDs still inspect the requested workflow. No compiler or language behavior changes.
+- On base `c716aeb`, the three new offline regressions produce two failures and one passing explicit-ID control; after the fix all three pass. The Windows job suite has the same ten environment errors and seven skips before (92 tests) and after (95 tests): unavailable make/POSIX shell and fixture commit identities rejected by a host Git hook. Test registration, conflict-marker and whitespace guards pass. Linux follow-up (isolated WSL Alpine 3.24, Python 3.14.10, GNU make, Git 2.54): `python3 -B -m unittest discover -s tools -p "test_job*.py" -v` passes all 95 tests with no skips in 9.049s; no source or test changes were needed. Hosted CI and maintainer review remain pending.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.
