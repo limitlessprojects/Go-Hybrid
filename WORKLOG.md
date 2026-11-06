@@ -303,3 +303,16 @@
 - Suites 453 (unchanged — both PRs extend existing suites). Two landings, two dup replies, one false-red handled, zero real gate failures.
 - Next queue: #3771/#3772 -> #3775 -> #3779/#3782 (installer family, dedupe) -> #3787/#3788 -> #3791/#3792 -> #3793+#3794 -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route. Fresh wave 3807..3881 needs family scan+dedupe (many cyzcz/Burapa-J/dextermos-dev/bradwue313 entries).
 - Worklog: this commit.
+
+## Session 126 — 2026-11-07 01:10 UTC+8 tick
+- env cold-recycled on stale session-44 snapshot; node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached, main fast-forwarded c403585c -> 6d3882e2 (S125 head). approve 13/13 (4987 left), scan skipped.
+- Target materialized warm on first battery access (third consecutive confirmation of lazy snapshot layering) — full battery per PR ran inside one 540s segment all tick.
+- **3 landed, 1 gate-fail, 1 dup reply**:
+  - **#3771** -> `fe5f2ff6` (marhabynova, fixes #3240): buildable.rs map_key_type_name refactor (map_key_scalar_name now wraps it); delete set[T] scalar-width + sized-array matching, delete map key array-length conflict via sized_array_names_differ, richer labels; new suite issue_3240 (5 tests, untyped literal exempt). MERGE case. Trial-tree-asserted 047e909c, remote asserted. ALL-GREEN 454 suites, corpus 135/135, differential 45/45+90/90. Landing reply 201.
+  - **#3772** -> `fb853be4` (marhabynova, fixes #3572): errors.wrap operand kinds — check_errors_wrap_operands rejects arg0 that can never be error / arg1 that is a resolved non-string (Str + Unknown fail open), HYB-E1002 at operand span; new suite issue_3572. MERGE case. Trial-tree-asserted b1012641, remote asserted. ALL-GREEN 455 suites, corpus 135/135, differential FULL AGREEMENT. Landing reply 201.
+  - **#3779** -> `34fe7f5d` (Yumihariii, fixes #3778): install.sh releases/latest sed class gains '+' (v[0-9A-Za-z._+-]*), SemVer build metadata no longer truncated; new offline suite test_install_release_tag.py (4 scenarios) + ci.yml registration. Battery ALL-GREEN (455 suites, corpus 135/135, differential FULL); new suite 4/4 OK in trial tree. Trial-tree-asserted 11073dbe, remote asserted. Landing reply 201.
+- **#3775 GATE FAIL (MERGE-CONFLICT)**: buildable.rs conflicts with landed #3771 map_key_type_name refactor (same function, divergent rewrites). Written evidence reply posted (rebase recipe: inferred map bindings via Collector::local, non-ident bases hooked into map_key_type_name match, aliases before CompFamily::split). Battery not run past gate. PR stays open.
+- **Dup hall-of-fame reply**: #3782 (dukenordj-rgb) vs landed #3779 (#3778 installer family; patch-ids f56ba208 vs 22cbfc05 — DISTINCT implementations, first-to-land). 201. PR stays open.
+- Suites 453 -> 455 (+2: issue_3240, issue_3572). Three landings, one gate-fail reply, one dup reply, zero silent closes.
+- Next queue: #3787/#3788 -> #3791/#3792 -> #3793+#3794 (shadowed strings/http family) -> #3796/#3797/#3798 -> #3800/#3803/#3804; spikes #3765/#3774 Track-3 route; fresh wave 3807..3881 family scan+dedupe (note #3898/#3877/#1912 approved this tick).
+- Worklog: this commit.
