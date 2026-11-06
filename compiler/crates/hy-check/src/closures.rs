@@ -866,6 +866,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 if let Some(v) = l.values.first() {
                     ck.link_multi_value_return_aliases(st, v, &l.names);
                 }
+                ck.record_local_borrow_aliases(st, l);
             }
             sync_nested_moves(st, nested);
         }
