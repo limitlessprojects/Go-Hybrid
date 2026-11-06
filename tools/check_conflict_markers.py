@@ -48,8 +48,11 @@ TEXT_EXTS = {
     ".hy", ".txt", ".cfg", ".ini", ".html", ".css", ".js", ".ts",
 }
 
-# Files with no extension that still matter.
-TEXT_NAMES = {"Makefile", "Dockerfile", "LICENSE", "NOTICE"}
+# Extensionless files and known text manifests outside TEXT_EXTS.
+TEXT_NAMES = {
+    "Makefile", "Dockerfile", "LICENSE", "NOTICE",
+    "Cargo.lock", "go.mod", "go.sum",
+}
 
 # A workflow file is a mapping at column zero, so every column-zero line must
 # be a key, a comment, or a document marker. Anything else is a parse error.
