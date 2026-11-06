@@ -7686,6 +7686,70 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+                    // #3863: special member lowerings (time duration constructors, os variables, hex.encode)
+                    if pkg == "time"
+                        && self.lookup_kind(pkg).is_none()
+                        && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
+                    {
+                        if args.len() != 1 {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`time.{}` takes exactly 1 argument `(n)`, got {} (HYB-E1002)",
+                                    name,
+                                    args.len()
+                                ),
+                                &format!("write `time.{}(10)` (SPEC duration constructor)", name),
+                            );
+                        } else {
+                            let arg = unwrap_parens(&args[0].value);
+                            if matches!(
+                                arg,
+                                Expr::Lit {
+                                    kind: LitKind::Str { .. } | LitKind::Bool(_) | LitKind::Nil,
+                                    ..
+                                }
+                            ) {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`time.{}` requires a numeric argument, found non-numeric literal (HYB-E1002)",
+                                        name
+                                    ),
+                                    &format!("pass an integer or float literal: `time.{}(10)`", name),
+                                );
+                            }
+                        }
+                    }
+                    if pkg == "os"
+                        && self.lookup_kind(pkg).is_none()
+                        && matches!(name.as_str(), "args" | "stdout" | "stderr" | "stdin")
+                        && !args.is_empty()
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`os.{}` takes no arguments, got {} (HYB-E1002)",
+                                name,
+                                args.len()
+                            ),
+                            &format!("read `os.{}` directly without call parens (or pass no arguments)", name),
+                        );
+                    }
+                    if pkg == "hex"
+                        && self.lookup_kind(pkg).is_none()
+                        && name == "encode"
+                        && args.len() != 1
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.encode` takes exactly 1 slice argument `(src)`, got {} (HYB-E1002)",
+                                args.len()
+                            ),
+                            "write `hex.encode(bytes)` (SPEC hex encoding)",
+                        );
+                    }
                     // #3598: `fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to
                     // `fmt.Fprint*(os.Stderr, ...)` in `hy-emit`. When `os` is shadowed by
                     // an in-scope parameter, local binding, loop variable, closure argument,
