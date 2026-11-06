@@ -24,16 +24,21 @@ fn error_codes(r: &CheckResult) -> Vec<String> {
         .collect()
 }
 
-fn rejects_e1002(src: &str) {
+fn rejects_reject(src: &str, expected_code: &str) {
     let r = check(src);
     let cs = error_codes(&r);
     assert!(
-        cs.iter().any(|c| c == "HYB-E1002"),
-        "expected HYB-E1002 for {:?}, got {:?}",
+        cs.iter().any(|c| c == expected_code),
+        "expected {} for {:?}, got {:?}",
+        expected_code,
         src,
         cs
     );
     assert_eq!(r.verdict, Verdict::Reject, "verdict for {:?}", src);
+}
+
+fn rejects_e1002(src: &str) {
+    rejects_reject(src, "HYB-E1002");
 }
 
 fn accepts(src: &str) {
@@ -64,13 +69,13 @@ fn test_httptest_get_with_local_http_rejects() {
 #[test]
 fn test_e11_handler_try_with_local_http_shadow_rejects() {
     let src = "import \"errors\"\nimport \"net/http\"\n\nfn step() error {\n    return errors.new(\"boom\")\n}\n\nfn main() {\n    h := http.handler(fn(w http.response_writer, r *http.request) {\n        http := 1\n        _ = http\n        step()?\n    })\n    _ = h\n}\n";
-    rejects_e1002(src);
+    rejects_reject(src, "HYB-E2011");
 }
 
 #[test]
 fn test_e11_handler_try_with_writer_param_shadow_rejects() {
     let src = "import \"errors\"\nimport \"net/http\"\n\nfn step() error {\n    return errors.new(\"boom\")\n}\n\nfn main() {\n    h := http.handler(fn(w http.response_writer, r *http.request) {\n        if true {\n            w := 1\n            _ = w\n            step()?\n        }\n    })\n    _ = h\n}\n";
-    rejects_e1002(src);
+    rejects_reject(src, "HYB-E2011");
 }
 
 #[test]
