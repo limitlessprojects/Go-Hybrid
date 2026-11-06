@@ -361,7 +361,7 @@ impl<'a> CompFamily<'a> {
 }
 
 /// #1031 — the exact Go spelling of a predeclared numeric type, after the
-/// emitter's SPEC→Go primitive mapping (`shapes::go_primitive_name`) and Go's
+/// emitter's SPEC?Go primitive mapping (`shapes::go_primitive_name`) and Go's
 /// own identities (`byte` = `uint8`, `rune` = `int32`).
 ///
 /// `OpKind` collapses every integer width into `Int` and both float widths
@@ -736,7 +736,7 @@ struct Collector<'a> {
     fn_results: Vec<OpKind>,
     fn_result_type_names: Vec<String>,
     /// Type-parameter names of the function whose body is currently walked
-    /// (`fn new[k comparable, v any]` → {k, v}). A composite literal inside a
+    /// (`fn new[k comparable, v any]` ? {k, v}). A composite literal inside a
     /// generic signature may spell those parameters (`map[k]v{}`, zero-value
     /// instantiations) — Go compiles them; bare `k` must NOT hit the
     /// value-position undeclared-type net. Swapped per body like `fn_results`.
@@ -4277,7 +4277,7 @@ impl<'a> Collector<'a> {
             // declaration-site checker uses.
             || self.ck.pkg_names.get(name) == Some(&"struct")
             // Type parameters of the enclosing generic signature are legal
-            // composite-literal spellings inside it (`fn new[k, v any]` →
+            // composite-literal spellings inside it (`fn new[k, v any]` ?
             // `map[k]v{}`; Go generic signatures scope those names locally).
             || self.fn_type_params.contains(name)
         {
@@ -4430,7 +4430,7 @@ impl<'a> Collector<'a> {
     /// resolves to `Unknown`, so builtins keep their own arity rules
     /// (`builtins.rs`, `HYB-E2005`) and user functions keep `check_user_fn_arity`.
     /// #2811 — the element spelling of a slice TYPE NAME (alias resolution
-    /// included), e.g. `my_int64_slice` → `int64`. `None` when the name does
+    /// included), e.g. `my_int64_slice` ? `int64`. `None` when the name does
     /// not resolve to a slice type, which fails open.
     fn named_slice_element_name(&self, name: &str) -> Option<String> {
         let base = Checker::base_named_type_str(name);
@@ -4441,7 +4441,7 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #2811 — a `string`↔slice conversion whose element is a KNOWN numeric
+    /// #2811 — a `string`?slice conversion whose element is a KNOWN numeric
     /// type other than `byte`/`rune`. Go's conversion rules admit only
     /// `[]byte`/`[]uint8` and `[]rune`/`[]int32`; `OpKind::Int` collapses every
     /// integer width, so `string([]int64)` and `my_int64_slice(s)` passed the
@@ -4548,7 +4548,7 @@ impl<'a> Collector<'a> {
         }
 
         let arg_k = self.kind_of_expr(arg);
-        // #2811: `string`↔slice conversions are restricted to byte/rune
+        // #2811: `string`?slice conversions are restricted to byte/rune
         // elements; `OpKind::Int` cannot tell `int64` from `uint8`.
         let element_mismatch = self.string_slice_conversion_element_mismatch(name, &k, arg, &arg_k);
         if conversion_kinds_conflict(&k, &arg_k) || element_mismatch {
@@ -5371,7 +5371,7 @@ impl<'a> Collector<'a> {
     }
 
     /// #1031 — a TYPED numeric value returned into a result of a different
-    /// numeric type (`int` → `float64`, `int` → `int64`, `float32` →
+    /// numeric type (`int` ? `float64`, `int` ? `int64`, `float32` ?
     /// `float64`, ...). `kinds_conflict` cannot see these: `OpKind` collapses
     /// the widths, and `(Float, Int)` must stay legal for untyped constants.
     /// Go has no implicit numeric conversion for typed values, so the emitted
@@ -5466,8 +5466,8 @@ impl<'a> Collector<'a> {
     /// Fail-open: an `Unknown` first argument or an `Unknown` element kind
     /// carries no claim, so only a proven mismatch is reported.
     /// #2796 — the destination element type of `append`'s first argument,
-    /// canonicalised to its Go numeric name (`i64` → `int64`, `f32` →
-    /// `float32`, `byte` → `uint8`) so it can be compared against
+    /// canonicalised to its Go numeric name (`i64` ? `int64`, `f32` ?
+    /// `float32`, `byte` ? `uint8`) so it can be compared against
     /// `typed_value_scalar`. `None` when the spelling is not a predeclared
     /// numeric type, so user types and unknown shapes fail open.
     fn append_dest_scalar(&self, first: &Expr) -> Option<&'static str> {
@@ -5642,7 +5642,7 @@ impl<'a> Collector<'a> {
     /// assignable to the channel's element type". `sendability.rs` treats every
     /// numeric kind as one coarse `Primitive`, and `Stmt::Send` only ran the
     /// #887 single-value check, so `ch <- f` with `f float64` on a `chan int`
-    /// (or `int32` → `chan int64`, `float64` → `chan float32`) passed
+    /// (or `int32` ? `chan int64`, `float64` ? `chan float32`) passed
     /// `hy-check` and failed `go build` with
     /// `cannot use f (variable of type float64) as int value in send` —
     /// a Row 13 BUILDABLE violation.
@@ -7711,6 +7711,31 @@ impl<'a> Collector<'a> {
                             }
                         }
                     }
+                    if pkg == "httptest"
+                        && self.lookup_kind(pkg).is_none()
+                        && matches!(name.as_str(), "get" | "post")
+                    {
+                        if self.is_pkg_symbol_shadowed("strings") {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot call `httptest.{}` because `strings` is shadowed by an in-scope declaration (HYB-E1002)",
+                                    name
+                                ),
+                                "`httptest.get` and `httptest.post` lower to `strings.TrimSuffix`; rename the shadowing `strings` declaration so the standard `strings` package is accessible",
+                            );
+                        }
+                        if self.is_pkg_symbol_shadowed("http") {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot call `httptest.{}` because `http` is shadowed by an in-scope declaration (HYB-E1002)",
+                                    name
+                                ),
+                                "`httptest.get` and `httptest.post` lower to `http.NewRequest`; rename the shadowing `http` declaration so `net/http` is accessible",
+                            );
+                        }
+                    }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -9524,3 +9549,4 @@ fn expr_has_try(e: &Expr) -> bool {
         Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => false,
     }
 }
+
