@@ -244,20 +244,32 @@ impl<'a> Checker<'a> {
                     || self.shape_holds_unproven_type_param(v, seen)
             }
             TypeShape::Struct(Some(sname)) => {
+                if !self.structs.contains_key("set") {
+                    if let Some(("set", args)) = Self::parse_generic_type_args(sname) {
+                        if let Some(arg) = args.first() {
+                            return !matches!(arg, hy_syntax::TypeExpr::Named { name, .. } if name == "any")
+                                && self.shape_holds_unproven_type_param(&self.shape_of_type(arg), seen);
+                        }
+                    }
+                }
                 if seen.iter().any(|s| s == sname) {
                     return false;
                 }
                 seen.push(sname.clone());
                 if self.struct_has_unresolved_type_param(sname) {
+                    seen.pop();
                     return true;
                 }
-                let Some(fields) = self.struct_fields_for_sname(sname) else {
-                    return false;
+                let res = if let Some(fields) = self.struct_fields_for_sname(sname) {
+                    fields.iter().any(|(_, ty)| {
+                        !matches!(ty, hy_syntax::TypeExpr::Named { name, .. } if name == "any")
+                            && self.shape_holds_unproven_type_param(&self.shape_of_type(ty), seen)
+                    })
+                } else {
+                    false
                 };
-                fields.iter().any(|(_, ty)| {
-                    !matches!(ty, hy_syntax::TypeExpr::Named { name, .. } if name == "any")
-                        && self.shape_holds_unproven_type_param(&self.shape_of_type(ty), seen)
-                })
+                seen.pop();
+                res
             }
             _ => false,
         }
@@ -278,16 +290,26 @@ impl<'a> Checker<'a> {
                 self.shape_holds_closure(k, seen) || self.shape_holds_closure(v, seen)
             }
             TypeShape::Struct(Some(sname)) => {
+                if !self.structs.contains_key("set") {
+                    if let Some(("set", args)) = Self::parse_generic_type_args(sname) {
+                        if let Some(arg) = args.first() {
+                            return self.shape_holds_closure(&self.shape_of_type(arg), seen);
+                        }
+                    }
+                }
                 if seen.iter().any(|s| s == sname) {
                     return false;
                 }
                 seen.push(sname.clone());
-                let Some(fields) = self.struct_fields_for_sname(sname) else {
-                    return false;
+                let res = if let Some(fields) = self.struct_fields_for_sname(sname) {
+                    fields
+                        .iter()
+                        .any(|(_, ty)| self.shape_holds_closure(&self.shape_of_type(ty), seen))
+                } else {
+                    false
                 };
-                fields
-                    .iter()
-                    .any(|(_, ty)| self.shape_holds_closure(&self.shape_of_type(ty), seen))
+                seen.pop();
+                res
             }
             _ => false,
         }
@@ -310,16 +332,26 @@ impl<'a> Checker<'a> {
                     || self.shape_holds_unmovable_leaf(v, seen)
             }
             TypeShape::Struct(Some(sname)) => {
+                if !self.structs.contains_key("set") {
+                    if let Some(("set", args)) = Self::parse_generic_type_args(sname) {
+                        if let Some(arg) = args.first() {
+                            return self.shape_holds_unmovable_leaf(&self.shape_of_type(arg), seen);
+                        }
+                    }
+                }
                 if seen.iter().any(|s| s == sname) {
                     return false;
                 }
                 seen.push(sname.clone());
-                let Some(fields) = self.struct_fields_for_sname(sname) else {
-                    return false;
+                let res = if let Some(fields) = self.struct_fields_for_sname(sname) {
+                    fields
+                        .iter()
+                        .any(|(_, ty)| self.shape_holds_unmovable_leaf(&self.shape_of_type(ty), seen))
+                } else {
+                    false
                 };
-                fields
-                    .iter()
-                    .any(|(_, ty)| self.shape_holds_unmovable_leaf(&self.shape_of_type(ty), seen))
+                seen.pop();
+                res
             }
             _ => false,
         }
@@ -422,14 +454,33 @@ impl<'a> Checker<'a> {
                 }
                 seen.push(sname.clone());
                 if self.struct_has_unresolved_type_param(sname) {
+                    seen.pop();
                     return false;
                 }
-                let Some(fields) = self.struct_fields_for_sname(sname) else {
-                    return false;
+                let res = if let Some(fields) = self.struct_fields_for_sname(sname) {
+                    fields.iter().all(|(_, ty)| {
+                        let mut fshape = self.shape_of_type(ty);
+                        if matches!(fshape, TypeShape::Unknown) {
+                            if let hy_syntax::TypeExpr::Named { name, .. } = self.resolve_type_alias(ty) {
+                                let base = Self::base_named_type_str(&name);
+                                if self.pkg_names.get(base) == Some(&"struct")
+                                    && !self.type_aliases.contains_key(base)
+                                {
+                                    fshape = TypeShape::Struct(Some(name));
+                                }
+                            }
+                        }
+                        self.shape_is_const_sendable(&fshape, seen)
+                    })
+                } else {
+                    let base = Self::base_named_type_str(sname);
+                    base != "set"
+                        && self.pkg_names.get(base) == Some(&"struct")
+                        && !self.type_aliases.contains_key(base)
+                        && !self.struct_has_unresolved_type_param(sname)
                 };
-                fields
-                    .iter()
-                    .all(|(_, ty)| self.shape_is_const_sendable(&self.shape_of_type(ty), seen))
+                seen.pop();
+                res
             }
             _ => false,
         }
