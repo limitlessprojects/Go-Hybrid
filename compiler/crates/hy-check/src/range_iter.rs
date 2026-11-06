@@ -446,11 +446,16 @@ impl<'a> Checker<'a> {
                             && !self.type_aliases.contains_key(name.as_str())
                             && match self.shape_of_expr(st, &args[0].value) {
                                 TypeShape::Slice(_) | TypeShape::Map(_, _) | TypeShape::Chan(_) => true,
-                                TypeShape::Str => name == "len" && match unwrap_parens_and_move(&args[0].value) {
-                                    Expr::Ident { name: s, .. } => st.env_lookup(s).is_some_and(|b| !b.immutable),
-                                    Expr::Index { .. } | Expr::Field { .. } | Expr::Call { .. } | Expr::Receive { .. } => true,
-                                    _ => false,
-                                },
+                                TypeShape::Array(_) => {
+                                    Self::expr_has_call_or_recv(&args[0].value)
+                                }
+                                TypeShape::Pointer(inner) if matches!(*inner, TypeShape::Array(_)) => {
+                                    Self::expr_has_call_or_recv(&args[0].value)
+                                }
+                                TypeShape::Str => {
+                                    name == "len"
+                                        && !self.is_const_str_len_operand(st, &args[0].value)
+                                }
                                 TypeShape::Struct(Some(ref n)) => {
                                     name == "len"
                                         && !self.structs.contains_key("set")
@@ -491,6 +496,52 @@ impl<'a> Checker<'a> {
             }
         }
         None
+    }
+
+    fn is_const_str_len_operand(&self, st: &FnState, expr: &Expr) -> bool {
+        match unwrap_parens_and_move(expr) {
+            Expr::Lit {
+                kind: LitKind::Str(_) | LitKind::RawStr(_),
+                ..
+            } => true,
+            Expr::Binary {
+                op: hy_syntax::BinOp::Add,
+                lhs,
+                rhs,
+                ..
+            } => self.is_const_str_len_operand(st, lhs) && self.is_const_str_len_operand(st, rhs),
+            Expr::Ident { name, .. } => match st.env_lookup(name) {
+                Some(b) => b.immutable,
+                None => self.consts.contains_key(name.as_str()),
+            },
+            _ => false,
+        }
+    }
+
+    fn expr_has_call_or_recv(expr: &Expr) -> bool {
+        match unwrap_parens_and_move(expr) {
+            Expr::Call { .. } | Expr::Receive { .. } => true,
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Field { base: operand, .. } => Self::expr_has_call_or_recv(operand),
+            Expr::Binary { lhs, rhs, .. } | Expr::Index { base: lhs, index: rhs, .. } => {
+                Self::expr_has_call_or_recv(lhs) || Self::expr_has_call_or_recv(rhs)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::expr_has_call_or_recv(base)
+                    || lo.as_ref().is_some_and(|x| Self::expr_has_call_or_recv(x))
+                    || hi.as_ref().is_some_and(|x| Self::expr_has_call_or_recv(x))
+            }
+            Expr::StructLit { fields, .. } => {
+                fields.iter().any(|f| Self::expr_has_call_or_recv(&f.value))
+            }
+            Expr::SliceLit { items, .. } => items.iter().any(Self::expr_has_call_or_recv),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                Self::expr_has_call_or_recv(k) || Self::expr_has_call_or_recv(v)
+            }),
+            _ => false,
+        }
     }
 
     /// Classify a range's ITERABLE — the mirror of `check_send_target`
