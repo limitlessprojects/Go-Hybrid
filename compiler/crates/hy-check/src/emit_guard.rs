@@ -1234,23 +1234,51 @@ impl<'a> Checker<'a> {
         slot_ty: &TypeExpr,
         item: &Expr,
     ) {
-        let Expr::SliceLit {
-            elem: None,
-            items: sub_items,
-            span: sub_span,
-        } = unwrap_parens(item)
-        else {
-            return;
-        };
-        let resolved_slot = self.resolve_type_alias(slot_ty);
-        match &resolved_slot {
-            TypeExpr::Array { .. } => {
-                self.check_array_lit_emit_guard(st, &resolved_slot, sub_items, *sub_span);
+        match unwrap_parens(item) {
+            Expr::SliceLit {
+                elem: None,
+                items: sub_items,
+                span: sub_span,
+            } => {
+                let resolved_slot = self.resolve_type_alias(slot_ty);
+                match &resolved_slot {
+                    TypeExpr::Array { .. } => {
+                        self.check_array_lit_emit_guard(st, &resolved_slot, sub_items, *sub_span);
+                    }
+                    TypeExpr::Slice { elem: sub_elem, .. } => {
+                        for sub_i in sub_items {
+                            self.check_const_overflow_init("slice literal element", sub_elem, sub_i, st);
+                            self.check_elided_slice_slot_emit_guard(st, sub_elem, sub_i);
+                        }
+                    }
+                    _ => {}
+                }
             }
-            TypeExpr::Slice { elem: sub_elem, .. } => {
-                for sub_i in sub_items {
-                    self.check_const_overflow_init("slice literal element", sub_elem, sub_i, st);
-                    self.check_elided_slice_slot_emit_guard(st, sub_elem, sub_i);
+            Expr::StructLit {
+                ty: None,
+                fields,
+                ..
+            } => {
+                let mut resolved_slot = self.resolve_type_alias(slot_ty);
+                if let TypeExpr::Pointer { to, .. } = resolved_slot {
+                    resolved_slot = self.resolve_type_alias(&to);
+                }
+                if let TypeExpr::Named { name: sname, .. } = resolved_slot {
+                    let base_sname = Self::base_named_type_str(&sname);
+                    if let Some(struct_fields) = self.struct_fields_for_sname(&sname) {
+                        for f in fields {
+                            if let Some((_, f_ty)) =
+                                struct_fields.iter().find(|(fname, _)| fname == &f.name)
+                            {
+                                self.check_const_overflow_init(
+                                    &format!("{}.{}", base_sname, f.name),
+                                    f_ty,
+                                    &f.value,
+                                    st,
+                                );
+                            }
+                        }
+                    }
                 }
             }
             _ => {}
