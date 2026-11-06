@@ -203,3 +203,47 @@ fn prefixed_base_literal_with_fraction_fails_closed() {
     }
 }
 
+#[test]
+fn utf8_byte_escapes_in_strings_preserve_utf8_bytes_issue_1199() {
+    // Hex and octal byte escapes in interpreted strings denote raw UTF-8 bytes
+    // (LX7 / T3), not Latin-1 code points re-encoded as UTF-8.
+    let cases = [
+        (r#"fn main() { s := "\xc3\xa9" }"#, "é"),
+        (r#"fn main() { s := "\303\251" }"#, "é"),
+        (r#"fn main() { s := "\xc3\251" }"#, "é"),
+        (r#"fn main() { s := "\xe4\xb8\xad" }"#, "中"),
+        (r#"fn main() { s := "\xf0\x9f\x99\x82" }"#, "🙂"),
+        (r#"fn main() { s := "\x41" }"#, "A"),
+        (r#"fn main() { s := "\u00e9" }"#, "é"),
+        (r#"fn main() { s := "\U0001f642" }"#, "🙂"),
+    ];
+    for (src, expected) in cases {
+        let toks = lex("test.hy", src).unwrap_or_else(|e| panic!("lex failed for {src}: {e:?}"));
+        assert!(
+            toks.iter().any(|t| t.tok == Tok::StrChunk(expected.into())),
+            "expected StrChunk({expected:?}) for {src}, got: {toks:?}"
+        );
+    }
+
+    // Interpolated string with UTF-8 byte escapes before {expr} boundary:
+    let interp_toks = lex("test.hy", r#"fn main() { s := "prefix:\xc3\xa9:{value}" }"#)
+        .expect("interpolated byte escapes");
+    assert!(
+        interp_toks
+            .iter()
+            .any(|t| t.tok == Tok::StrChunk("prefix:é:".into())),
+        "expected StrChunk(\"prefix:é:\") before interpolation, got: {interp_toks:?}"
+    );
+
+    // Rune literals keep code-point semantics ('\xe9' == '\u{e9}' and '\351' == '\u{e9}').
+    let rune_toks = lex("test.hy", "fn main() { a := '\\xe9' b := '\\351' c := '\\u{e9}' }")
+        .expect("rune escapes");
+    let chars: Vec<char> = rune_toks
+        .into_iter()
+        .filter_map(|t| match t.tok {
+            Tok::CharLit(ch) => Some(ch),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chars, vec!['é', 'é', 'é']);
+}

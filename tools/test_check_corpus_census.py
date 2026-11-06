@@ -124,6 +124,35 @@ class DriftTests(_ProblemsMixin, unittest.TestCase):
         self.assertEqual(len(hits), 1)
         self.assertIn("says 99", hits[0])
 
+    def test_stale_second_number_in_dual_count_surfaces_is_named(self):
+        """A drifted denominator or message count on a dual-number surface must fail."""
+        for rel, content, stale in (
+            (
+                "compiler/crates/hy-syntax/tests/parse_all.rs",
+                '    assert_eq!(files.len(), 3, "expected exactly 2 corpus programs",);\n',
+                "says 2",
+            ),
+            (
+                ".github/workflows/ci.yml",
+                "      - name: x (verdict agreement (3/2 + tripwire)\n",
+                "says 2",
+            ),
+            (
+                "Makefile",
+                '\t@echo "make corpus           — Tier-0 corpus verdicts (3/2)"\n',
+                "says 2",
+            ),
+            (
+                "README.md",
+                "| x | y | z [checker corpus 3/2](tests/checker-corpus/) |\n",
+                "says 2",
+            ),
+        ):
+            with self.subTest(rel=rel):
+                hits = self._problems_with(rel, content)
+                self.assertEqual(len(hits), 1)
+                self.assertIn(stale, hits[0])
+
     def test_spike6_assertion_is_not_mistaken_for_the_corpus(self):
         """parse_all.rs asserts the spike-6 count with the same shape."""
         hits = self._problems_with(
@@ -179,6 +208,35 @@ class FailClosedTests(_ProblemsMixin, unittest.TestCase):
         hits = self._problems_with("Makefile", "# the corpus line moved away\n")
         self.assertEqual(len(hits), 1)
         self.assertIn("no corpus count found", hits[0])
+
+
+class MultipleCurrentBreakdownTests(_ProblemsMixin, unittest.TestCase):
+    clean = "**Current registered corpus: 3 programs** — ACCEPT 1 · ACCEPT-MANAGED 0 · REJECT 2\n"
+    bad_total = "**Current registered corpus: 4 programs** — ACCEPT 1 · ACCEPT-MANAGED 0 · REJECT 2\n"
+    bad_counts = "**Current registered corpus: 3 programs** — ACCEPT 2 · ACCEPT-MANAGED 0 · REJECT 1\n"
+
+    def _hits(self, rows):
+        return self._problems_with("tests/checker-corpus/README.md", "\n".join(rows))
+
+    def test_clean_then_stale_total(self):
+        self.assertTrue(self._hits([self.clean, self.bad_total]))
+
+    def test_stale_total_then_clean(self):
+        self.assertTrue(self._hits([self.bad_total, self.clean]))
+
+    def test_clean_then_stale_counts(self):
+        self.assertTrue(self._hits([self.clean, self.bad_counts]))
+
+    def test_stale_counts_then_clean(self):
+        self.assertTrue(self._hits([self.bad_counts, self.clean]))
+
+    def test_two_consistent_breakdowns(self):
+        self.assertEqual(self._hits([self.clean, self.clean]), [])
+
+    def test_two_later_stale_breakdowns_are_both_reported(self):
+        hits = self._hits([self.clean, self.bad_total, self.bad_counts])
+        self.assertEqual(len(hits), 2)
+        self.assertTrue(all("line " in hit for hit in hits))
 
 
 if __name__ == "__main__":
