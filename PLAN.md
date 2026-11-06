@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — Markdown angle destinations (2026-11-06)
+
+- On base `c3c78c0`, angle-delimited CommonMark destinations in `GUARANTEES.md` evidence were not recognized when they contained spaces; `.hy` paths also retained the delimiters and failed resolution. Regression tests fail on baseline and now cover spaces, parentheses, fragments, titles, external/empty targets, missing paths, and corpus verdicts. Focused suite: 11/11; claims check: 20 rows / 14 links / 0 issues; registration, conflict-marker, and diff checks pass. Tooling-only change; compiler suite not run. Hosted CI, review, and any bounty award remain pending.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.
