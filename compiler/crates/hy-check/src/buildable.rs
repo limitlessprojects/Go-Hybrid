@@ -7650,16 +7650,24 @@ impl<'a> Collector<'a> {
                     if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
-                        && args.len() != 2
                     {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "`errors.wrap` takes 2 arguments `(err, message)`, got {} (HYB-E1002)",
-                                args.len()
-                            ),
-                            "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
-                        );
+                        if args.len() != 2 {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`errors.wrap` takes 2 arguments `(err, message)`, got {} (HYB-E1002)",
+                                    args.len()
+                                ),
+                                "write `errors.wrap(err, \"context\")` (SPEC-LANGUAGE E2)",
+                            );
+                        }
+                        if self.is_fmt_shadowed() {
+                            self.emit_e1002(
+                                span,
+                                "cannot call `errors.wrap` because `fmt` is shadowed by an in-scope declaration (HYB-E1002)".to_string(),
+                                "`errors.wrap` lowers to `fmt.Errorf`; rename the shadowing `fmt` declaration so the standard `fmt` package is accessible",
+                            );
+                        }
                     }
                     // #3598: `fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to
                     // `fmt.Fprint*(os.Stderr, ...)` in `hy-emit`. When `os` is shadowed by
