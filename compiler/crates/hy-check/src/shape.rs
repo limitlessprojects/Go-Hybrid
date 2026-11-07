@@ -845,12 +845,25 @@ impl<'a> Checker<'a> {
                                 });
                             }
                         }
+                        let head = Self::base_named_type_str(name);
+                        let full = format!("{}.{}", root, head);
+                        if let Some(decl) = self
+                            .fns
+                            .get(format!("{}.{}", root, name).as_str())
+                            .or_else(|| self.fns.get(full.as_str()))
+                        {
+                            return Some(TypeExpr::Fn {
+                                params: decl.params.clone(),
+                                results: decl.results.iter().map(|r| r.ty.clone()).collect(),
+                                span: *span,
+                            });
+                        }
                     }
                 }
-                let base_ty = self.ty_of_expr(st, base)?;
-                let resolved = self.resolve_type_alias(&base_ty);
+                let base_ty = self.ty_of_expr(st, base);
+                let resolved = base_ty.as_ref().map(|t| self.resolve_type_alias(t));
                 if name == "pop" {
-                    if let TypeExpr::Slice { elem, .. } = &resolved {
+                    if let Some(TypeExpr::Slice { elem, .. }) = &resolved {
                         return Some(TypeExpr::Fn {
                             params: Vec::new(),
                             results: vec![(**elem).clone()],
@@ -858,7 +871,40 @@ impl<'a> Checker<'a> {
                         });
                     }
                 }
-                self.struct_fields_for_type(&resolved)?.into_iter().find(|(n, _)| n == name).map(|(_, t)| t)
+                if let Some(res) = &resolved {
+                    if let Some(fty) = self
+                        .struct_fields_for_type(res)
+                        .and_then(|fs| fs.into_iter().find(|(n, _)| n == name).map(|(_, t)| t))
+                    {
+                        return Some(fty);
+                    }
+                }
+                let head = Self::base_named_type_str(name);
+                let recv_base = resolved
+                    .as_ref()
+                    .and_then(|t| Self::base_named_type(t))
+                    .or_else(|| match self.shape_of_expr(st, base) {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(&s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match *inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(&s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                if let Some(rb) = recv_base {
+                    if let Some(decl) = self.method_decls.get(&(rb, head.to_string())) {
+                        return Some(TypeExpr::Fn {
+                            params: decl.params.clone(),
+                            results: decl.results.iter().map(|r| r.ty.clone()).collect(),
+                            span: *span,
+                        });
+                    }
+                }
+                None
             }
             Expr::Index { base, .. } => {
                 let base_ty = self.ty_of_expr(st, base)?;
