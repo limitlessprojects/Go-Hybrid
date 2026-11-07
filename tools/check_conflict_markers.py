@@ -27,6 +27,11 @@ later by a `>>>>>>>` line. A lone `=======` on its own is NOT reported,
 because a setext heading underline or a horizontal rule is legitimate
 Markdown and this repository uses them.
 
+Every token checked here is ASCII, so an unrelated undecodable byte must not
+hide it: both scanners decode with errors="replace" instead of abandoning the
+whole file. This is deliberately not an encoding validator -- an invalid byte
+on its own is not reported -- and file selection is unchanged.
+
 Stdlib only. Exit codes: 0 = clean, 1 = problems found, 2 = misuse.
 """
 import argparse
@@ -77,7 +82,7 @@ def scan_file(path):
     hits = []
     open_start = None
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             for n, line in enumerate(f, 1):
                 stripped = line.rstrip("\n")
                 if START_RE.match(stripped):
@@ -104,7 +109,7 @@ def scan_workflow_file(path):
     """
     hits = []
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             for n, line in enumerate(f, 1):
                 stripped = line.rstrip("\n")
                 if not stripped.strip():
