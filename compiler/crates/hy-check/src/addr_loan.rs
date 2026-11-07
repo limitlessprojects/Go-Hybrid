@@ -28,7 +28,32 @@ use hy_syntax::{
 };
 
 fn is_slot_loan_expr(ck: &Checker<'_>, st: &FnState, e: &Expr) -> bool {
-    let _ = as_addr_of;
+    let mut cur = unwrap_parens_and_move(e);
+    cur = match cur {
+        Expr::AddrOf { operand, .. }
+        | Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        } => unwrap_parens_and_move(operand),
+        _ => return false,
+    };
+    if matches!(cur, Expr::Index { .. } | Expr::Field { .. }) {
+        if let Some(root) = cur.root_ident() {
+            if ck.lookup_binding(st, root).is_some_and(|b| {
+                matches!(
+                    b.shape,
+                    TypeShape::Map(..)
+                        | TypeShape::Slice(_)
+                        | TypeShape::Array(_)
+                        | TypeShape::Struct(_)
+                        | TypeShape::Pointer(_)
+                )
+            }) {
+                return true;
+            }
+        }
+    }
     walk::addr_of_index_base_path(e).is_some_and(|p| {
         ck.lookup_binding(st, p.split('.').next().unwrap_or(&p)).is_some_and(|b| {
             matches!(b.shape, TypeShape::Map(..) | TypeShape::Slice(_) | TypeShape::Array(_) | TypeShape::Struct(_) | TypeShape::Pointer(_))
@@ -134,7 +159,7 @@ impl<'a> Checker<'a> {
                             continue;
                         };
                         if !b.slot_loan
-                            || (allow_addr_root && walk::addr_of_index_base_path(v).is_some())
+                            || (allow_addr_root && is_slot_loan_expr(self, st, v))
                             || !self.is_general_pointer_value(st, v)
                         {
                             continue;
@@ -164,7 +189,7 @@ impl<'a> Checker<'a> {
                             continue;
                         };
                         if !b.slot_loan
-                            || walk::addr_of_index_base_path(v).is_some()
+                            || is_slot_loan_expr(self, st, v)
                             || !self.is_general_pointer_value(st, v)
                         {
                             continue;
@@ -310,8 +335,28 @@ impl<'a> Checker<'a> {
                 self.check_expr_addr_of_loan_projections(st, chan, include_direct_ident);
                 self.check_expr_addr_of_loan_projections(st, value, include_direct_ident);
             }
-            Stmt::If { cond, .. } => {
-                self.check_expr_addr_of_loan_projections(st, cond, include_direct_ident);
+            Stmt::If { init, cond, .. } => {
+                let mut if_st = st.clone();
+                if let Some(i) = init {
+                    if !include_direct_ident {
+                        self.check_slot_loan_rebind(&if_st, i);
+                        self.check_stmt_addr_of_loan_projections(&if_st, i, false);
+                    }
+                    match i.as_ref() {
+                        Stmt::Local(l) => {
+                            self.bind_shadow_locals_only(&mut if_st, l);
+                            self.mark_slot_loans_local(&mut if_st, l);
+                        }
+                        Stmt::Assign {
+                            targets,
+                            op,
+                            values,
+                            ..
+                        } => self.mark_slot_loans_assign(&mut if_st, targets, *op, values),
+                        _ => {}
+                    }
+                }
+                self.check_expr_addr_of_loan_projections(&if_st, cond, true);
             }
             Stmt::For { kind, body, .. } => {
                 match kind {
@@ -745,9 +790,14 @@ impl<'a> Checker<'a> {
         if !matches!(l.kind, LocalKind::Define | LocalKind::Let | LocalKind::Var) {
             return;
         }
+        let shape = l
+            .ty
+            .as_ref()
+            .map(|t| self.shape_of_type(t))
+            .unwrap_or(TypeShape::Struct(None));
         for name in &l.names {
             if Self::current_scope_binding(st, name).is_none() {
-                self.define_binding(st, name, TypeShape::Unknown, None, false, false, false);
+                self.define_binding(st, name, shape.clone(), l.ty.clone(), false, false, false);
             }
         }
     }
@@ -1074,6 +1124,62 @@ fn main() {
             loop_codes.contains(&"HYB-E3104".to_string()),
             "got {:?}",
             loop_codes
+        );
+    }
+
+    #[test]
+    fn struct_field_slot_loan_and_if_init_slot_loan_reject_e3104() {
+        let field_loan = error_codes(
+            r#"struct acct { bal int }
+fn main() {
+    a := acct{bal: 1}
+    f := &a.bal
+    p := &f
+    fmt.println(p)
+}
+"#,
+        );
+        assert!(
+            field_loan.contains(&"HYB-E3104".to_string()),
+            "got {:?}",
+            field_loan
+        );
+
+        let if_init_cond = error_codes(
+            r#"struct acct { bal int }
+fn check_ptr(p *acct) bool { return p != nil }
+fn main() {
+    m := map[string]acct{"a": acct{bal: 1}}
+    if n := &m["a"]; check_ptr(&n) {
+        fmt.println(n.bal)
+    }
+}
+"#,
+        );
+        assert!(
+            if_init_cond.contains(&"HYB-E3104".to_string()),
+            "got {:?}",
+            if_init_cond
+        );
+
+        let if_init_rebind = error_codes(
+            r#"struct acct { bal int }
+fn main() {
+    f := fn() {
+        m := map[string]acct{"a": acct{bal: 1}}
+        if n := &m["a"]; true {
+            p := &n.bal
+            fmt.println(p)
+        }
+    }
+    f()
+}
+"#,
+        );
+        assert!(
+            if_init_rebind.contains(&"HYB-E3104".to_string()),
+            "got {:?}",
+            if_init_rebind
         );
     }
 }
