@@ -496,3 +496,12 @@
 - Count correction: integration-file counts in the #3811/#3813 commits (472/473) understated by one each — actual 473/474 (arithmetic drift, zero coverage gaps; all suites ran all ticks). Today verified 474 .rs on disk == 474 binaries in log == all green. Disclosed in #3860 landing reply.
 - Two transient env faults this tick: first #3860 battery exited 101 with dropped stderr (clean re-run green); both remote-asserted; replies 201 x2; zero silent closes.
 - Next queue: #3861 (dextermos-dev range_iter shadows), #3864/#3897 (buildable member lowerings — possible dup pair, check), #3867 (const_init type-param shadows), #3883-#3899 band, then #4015+ flood.
+
+## Session 143 — 2026-11-08 02:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef6979); toolchains restored; approve 5/5 (4991 left); scan skipped (quota doctrine).
+- **2 landed**:
+  - **#3861** -> `057c711e` (dextermos-dev, fixes #3853): range_iter const bounds under file-scope FnState (caller-local shadows blocked), untyped-const initializer recursion, alias-resolved conversion callees, typed_int_bound depth cap (>32 -> None, const-cycle termination), enum/type-param set-iterable guards. New suite (2 tests) -> 475 integration files; corpus 135; differential FULL.
+  - **#3864** -> `914700f5` (bradwue313, fixes #3863): MemberSpecial arity/operand validation — time.milliseconds/seconds/minutes/hours (1 numeric arg), os.args/stdout/stderr/stdin (0 args), hex.encode (1 slice arg), all shadow-guarded. New suite (6 tests) -> 476 integration files; corpus 135; differential FULL. First-to-land vs #3897 (dextermos-dev, same title) noted in reply — hall-of-fame candidate after residue review.
+- **ENOSPC incident (2nd in 3 ticks)**: first #3864 battery died "No space left on device" — target dir 94% (accumulates across ticks under /home/z); trimmed incremental/examples/stale rlibs to 83% (1.7G free), full battery re-run clean. TODO-next-tick: post-battery trim discipline (rm incremental + examples after each battery) to stop recurrence.
+- Both pushes remote-asserted; replies 201 x2; zero silent closes.
+- Next queue: #3867 (dextermos-dev const_init type-param shadows), #3883 (Burapa-J E3011), #3885/#3886 (gorky117), #3890 (ryder777777 --race tooling), #3892/#3894 (Burapa-J), #3897 (dup-pair residue review vs landed #3864).
