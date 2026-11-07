@@ -349,21 +349,31 @@ const GO_BUILTIN_TYPES: &[&str] = &[
 fn go_initialism(seg: &str) -> Option<&'static str> {
     Some(match seg {
         "acl" => "ACL",
+        "ansic" => "ANSIC",
         "api" => "API",
         "ascii" => "ASCII",
+        "cidr" => "CIDR",
+        "cname" => "CNAME",
         "cpu" => "CPU",
         "crlf" => "CRLF",
         "css" => "CSS",
         "dns" => "DNS",
         "eof" => "EOF",
+        "fs" => "FS",
         "guid" => "GUID",
         "html" => "HTML",
         "http" => "HTTP",
+        "http2" => "HTTP2",
         "https" => "HTTPS",
         "id" => "ID",
         "ip" => "IP",
         "ipv4" => "IPv4",
+        "ipv4len" => "IPv4len",
         "ipv6" => "IPv6",
+        "ipv6len" => "IPv6len",
+        "mac" => "MAC",
+        "mx" => "MX",
+        "ns" => "NS",
         "json" => "JSON",
         "lhs" => "LHS",
         "ok" => "OK",
@@ -388,15 +398,18 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "sla" => "SLA",
         "smtp" => "SMTP",
         "sql" => "SQL",
+        "srv" => "SRV",
         "ssh" => "SSH",
         "tcp" => "TCP",
         "tls" => "TLS",
         "ttl" => "TTL",
+        "txt" => "TXT",
         "udp" => "UDP",
         "ui" => "UI",
         "uid" => "UID",
         "uri" => "URI",
         "url" => "URL",
+        "utc" => "UTC",
         "utf8" => "UTF8",
         "utf16" => "UTF16",
         "utf32" => "UTF32",
@@ -414,6 +427,17 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
 /// snake_case → Go exported name (`read_all` → `ReadAll`, `args` → `Args`,
 /// `eof` → `EOF`, `status_ok` → `StatusOK`).
 pub(crate) fn to_go_name(name: &str) -> String {
+    match name {
+        "o_rdonly" => return "O_RDONLY".to_string(),
+        "o_wronly" => return "O_WRONLY".to_string(),
+        "o_rdwr" => return "O_RDWR".to_string(),
+        "o_append" => return "O_APPEND".to_string(),
+        "o_create" => return "O_CREATE".to_string(),
+        "o_excl" => return "O_EXCL".to_string(),
+        "o_sync" => return "O_SYNC".to_string(),
+        "o_trunc" => return "O_TRUNC".to_string(),
+        _ => {}
+    }
     name.split('_')
         .filter(|p| !p.is_empty())
         .map(|p| {
