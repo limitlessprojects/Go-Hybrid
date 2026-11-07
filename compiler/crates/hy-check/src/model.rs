@@ -40,6 +40,8 @@ pub(crate) enum TypeShape {
     Array(Box<TypeShape>),
     /// a struct (local decl name if known) — mutable GC composite.
     Struct(Option<String>),
+    /// a declared enum (enum name if known).
+    Enum(Option<String>),
     /// `*T` — pointer; sendable only when the pointee is atomic (OQ6).
     Pointer(Box<TypeShape>),
     /// an L3 own handle, e.g. `serde_json.value`, `flate2.writer` (O13).
@@ -103,6 +105,7 @@ impl TypeShape {
             TypeShape::OwnHandle(_) | TypeShape::BorrowHandle(_) => "boundary handle",
             TypeShape::ForeignOpaque(_) => "foreign value",
             TypeShape::Closure => "closure",
+            TypeShape::Enum(_) => "enum",
             TypeShape::Unknown => "value",
         }
     }
@@ -125,6 +128,8 @@ impl TypeShape {
                 t.clone()
             }
             TypeShape::Closure => "fn".to_string(),
+            TypeShape::Enum(Some(n)) => n.clone(),
+            TypeShape::Enum(None) => "enum".to_string(),
             TypeShape::Unknown => "value of unresolvable type".to_string(),
         }
     }
@@ -695,6 +700,8 @@ pub(crate) struct Checker<'a> {
     pub enums: HashMap<String, Vec<String>>,
     /// enum name -> whether the first variant is payload-free (N3 HYB-E4002).
     pub enum_has_zero_value: HashMap<String, bool>,
+    /// enum name -> whether all variants are payload-free (T16 unit-only enum equality).
+    pub enum_is_unit_only: HashMap<String, bool>,
     /// type alias name -> target TypeExpr.
     pub type_aliases: HashMap<String, TypeExpr>,
     /// fn name -> decl (return-type inference for single-value defines).
@@ -759,6 +766,7 @@ impl<'a> Checker<'a> {
             struct_type_params: HashMap::new(),
             enums: HashMap::new(),
             enum_has_zero_value: HashMap::new(),
+            enum_is_unit_only: HashMap::new(),
             type_aliases: HashMap::new(),
             fns: HashMap::new(),
             zd_defined: std::collections::HashSet::new(),
