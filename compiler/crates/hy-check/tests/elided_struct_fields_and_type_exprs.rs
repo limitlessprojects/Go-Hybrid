@@ -114,6 +114,27 @@ fn elided_struct_literals_in_non_struct_foreign_slots_reject() {
         "import \"time\"\nfn main() {\n    xs := []*time.duration{{}}\n    _ = xs\n}\n",
         "import \"os\"\nfn main() {\n    xs := []os.file_mode{{}}\n    _ = xs\n}\n",
         "import \"net\"\nfn main() {\n    xs := []net.conn{{}}\n    _ = xs\n}\n",
+        "import \"context\"\nfn main() {\n    xs := []context.context{{}}\n    _ = xs\n}\n",
+        "import \"context\"\nfn main() {\n    xs := []context.cancel_func{{}}\n    _ = xs\n}\n",
+        "import \"sync\"\nfn main() {\n    xs := []sync.locker{{}}\n    _ = xs\n}\n",
+        "import \"net/http\"\nfn main() {\n    xs := []http.handler_func{{}}\n    _ = xs\n}\n",
+        "import \"hash\"\nfn main() {\n    xs := []hash.hash{{}}\n    _ = xs\n}\n",
+        "import \"database/sql\"\nfn main() {\n    xs := []sql.scanner{{}}\n    _ = xs\n}\n",
+    ] {
+        assert_rejects_e1002(src, "type-elided struct literal");
+    }
+}
+
+#[test]
+fn elided_struct_literals_reject_foreign_duplicate_fields_and_type_param_shadows() {
+    assert_rejects_e1002(
+        "import \"net/http\"\nfn main() {\n    xs := []http.request{{host: \"a\", host: \"b\"}}\n    _ = xs\n}\n",
+        "duplicate field `host` in `http.request` literal",
+    );
+    for src in [
+        "struct point { x int }\nfn f[point]() {\n    xs := []point{{x: 1}}\n    _ = xs\n}\nfn main() {}\n",
+        "struct point { x int }\ntype pt = point\nfn f[pt]() {\n    xs := []pt{{x: 1}}\n    _ = xs\n}\nfn main() {}\n",
+        "struct point { x int }\nstruct box[t] { v t }\nfn (b box[point]) m() {\n    xs := []point{{x: 1}}\n    _ = xs\n}\nfn main() {}\n",
     ] {
         assert_rejects_e1002(src, "type-elided struct literal");
     }
