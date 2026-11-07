@@ -3119,3 +3119,51 @@ fn utf8_byte_escapes_emit_exact_utf8_strings_issue_1199() {
         go
     );
 }
+
+// ---------------------------------------------------------------------------
+// #2209 - a MethodZero member called with no args must not double its parens
+// ---------------------------------------------------------------------------
+
+fn emit2209(src: &str) -> String {
+    let file = parse_file("t.hy", src).expect("parse");
+    emit_go(&file).expect("emit")
+}
+
+/// The Go a MethodZero call must produce: exactly ONE pair of parens.
+fn assert_single_paren_call(go: &str, member: &str, what: &str) {
+    let doubled = format!("{}()()", member);
+    assert!(
+        !go.contains(&doubled),
+        "{}: emitted a doubled call {:?} in: {}",
+        what,
+        doubled,
+        go
+    );
+    assert!(
+        go.contains(&format!("{}()", member)),
+        "{}: missing the single-paren call {}() in: {}",
+        what,
+        member,
+        go
+    );
+}
+
+#[test]
+fn issue2209_memberzero_call_emits_one_paren_pair() {
+    let go = emit2209("import \"time\"\n\nfn main() {\n    var d time.duration\n    d = time.milliseconds(5)\n    fmt.println(d.milliseconds())\n}\n");
+    assert_single_paren_call(&go, ".Milliseconds", "call position");
+}
+
+#[test]
+fn issue2209_memberzero_call_inside_interpolation() {
+    let go = emit2209("import \"time\"\n\nfn main() {\n    var d time.duration\n    d = time.milliseconds(5)\n    fmt.println(\"v={d.milliseconds()}\")\n}\n");
+    assert_single_paren_call(&go, ".Milliseconds", "interpolation");
+}
+
+#[test]
+fn issue2209_memberzero_property_form_unchanged() {
+    // The property form is the positive control: `m := d.milliseconds` has
+    // always emitted `d.Milliseconds()` and must keep doing so.
+    let go = emit2209("import \"time\"\n\nfn main() {\n    var d time.duration\n    d = time.milliseconds(5)\n    m := d.milliseconds\n    _ = m\n}\n");
+    assert_single_paren_call(&go, ".Milliseconds", "property position");
+}
