@@ -489,8 +489,20 @@ impl<'a> Checker<'a> {
                 }
                 // 2. Direct call to a file-local top-level function
                 let head = Self::base_named_type_str(name);
-                let decl = self.fns.get(name.as_str()).or_else(|| self.fns.get(head))?;
-                Some((name.clone(), decl.results.len()))
+                if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                    return Some((name.clone(), decl.results.len()));
+                }
+                // 3. Built-in functions and type conversions yielding exactly 1 value:
+                if crate::const_init::is_conversion_type_name(name)
+                    || crate::resolve::is_predeclared_type_name(name)
+                    || matches!(
+                        name.as_str(),
+                        "len" | "cap" | "make" | "new" | "copy" | "min" | "max" | "complex" | "real" | "imag"
+                    )
+                {
+                    return Some((name.clone(), 1));
+                }
+                None
             }
             Expr::FnLit { results, .. } => Some(("fn".to_string(), results.len())),
             Expr::Field {
