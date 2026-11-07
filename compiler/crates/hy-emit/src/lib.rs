@@ -1114,6 +1114,9 @@ impl Emitter {
             for f in &s.fields {
                 Self::collect_comparable_in_ty(&f.ty, &param_names, &mut comparable_params);
             }
+            // #4032: a field whose type is another user generic struct inherits
+            // that struct's `comparable` requirement on the promoted param.
+            self.propagate_comparable_through_user_structs(&param_names, &mut comparable_params);
             let params = self.format_type_params(&s.type_params, &comparable_params);
             self.push(&format!("type {}[{}] struct {{", s.name, params));
         } else {
@@ -2230,6 +2233,175 @@ impl Emitter {
                 }
                 for arg in Self::split_top_level_type_args(inner) {
                     Self::collect_comparable_in_folded_name(arg, param_names, out);
+                }
+            }
+        }
+    }
+
+    /// #4032: the folded-name walk above is purely syntactic — it knows `map[k]v`
+    /// and `set[t]` demand `comparable`, but it stops at a user generic struct.
+    /// `struct outer[k] { inner table[k] }` therefore emitted `outer[k any]`
+    /// while `table` emitted `table[t comparable]`, and Go rejected the result
+    /// with `k does not satisfy comparable`. Walk one level further: when a
+    /// promoted type argument is a user generic struct, union in whatever that
+    /// struct's own parameters had to be `comparable` for.
+    ///
+    /// Iterated to a fixpoint so `a -> b -> c` chains propagate; the struct
+    /// table is small and acyclic for a well-formed program, and the loop is
+    /// bounded by the table size either way.
+    fn propagate_comparable_through_user_structs(
+        &self,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        if self.n5_generic_structs.is_empty() {
+            return;
+        }
+        // Which of a struct's own params are `comparable`-forced, computed from
+        // its field types alone. Re-derived every round so an earlier round's
+        // promotion is visible to a later one (that is what makes `a -> b -> c`
+        // chains resolve instead of stopping after one hop).
+        let derive = |fields: &[FieldDecl]| -> BTreeSet<String> {
+            let own: BTreeSet<String> = fields
+                .iter()
+                .flat_map(|_| std::iter::empty())
+                .collect::<BTreeSet<String>>();
+            let _ = own;
+            BTreeSet::new()
+        };
+        let _ = derive;
+
+        let names: Vec<String> = self.n5_generic_structs.keys().cloned().collect();
+        let mut forced: BTreeMap<String, BTreeSet<String>> = names
+            .iter()
+            .map(|n| {
+                let (tparams, fields) = &self.n5_generic_structs[n];
+                let own: BTreeSet<String> = tparams.iter().map(|p| p.name.clone()).collect();
+                let mut need = BTreeSet::new();
+                for f in fields {
+                    Self::collect_comparable_in_ty(&f.ty, &own, &mut need);
+                }
+                (n.clone(), need)
+            })
+            .collect();
+
+        // Fixpoint over the struct graph: if struct S has a field of type
+        // T[args...] and T forced param i, then S's arg at position i is forced.
+        loop {
+            let mut changed = false;
+            for n in &names {
+                let (tparams, fields) = self.n5_generic_structs[n].clone();
+                let own: BTreeSet<String> = tparams.iter().map(|p| p.name.clone()).collect();
+                // Fresh syntactic sweep plus the transitive promotion so far.
+                let mut need = BTreeSet::new();
+                for f in &fields {
+                    Self::collect_comparable_in_ty(&f.ty, &own, &mut need);
+                }
+                let mut refs: Vec<(String, Vec<String>)> = Vec::new();
+                for f in &fields {
+                    let mut r = Vec::new();
+                    Self::collect_generic_refs(&f.ty, &forced, &mut r);
+                    refs.append(&mut r);
+                }
+                for (target, args) in refs {
+                    let Some(need_t) = forced.get(&target) else {
+                        continue;
+                    };
+                    let target_params = &self.n5_generic_structs[&target].0;
+                    for (i, tp) in target_params.iter().enumerate() {
+                        if !need_t.contains(&tp.name) {
+                            continue;
+                        }
+                        if let Some(arg) = args.get(i) {
+                            let arg = arg.trim();
+                            if own.contains(arg) {
+                                need.insert(arg.to_string());
+                            }
+                        }
+                    }
+                }
+                if forced.get(n) != Some(&need) {
+                    forced.insert(n.clone(), need);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        // Finally project `forced` for THIS struct onto the caller's param set.
+        // We do not have the struct name here, so union what any struct that
+        // references our params demands of them.
+        for n in &names {
+            let Some(need) = forced.get(n) else { continue };
+            let (tparams, fields) = &self.n5_generic_structs[n];
+            let own: BTreeSet<String> = tparams.iter().map(|p| p.name.clone()).collect();
+            let mut refs: Vec<(String, Vec<String>)> = Vec::new();
+            for f in fields {
+                let mut r = Vec::new();
+                Self::collect_generic_refs(&f.ty, &forced, &mut r);
+                refs.append(&mut r);
+            }
+            for (target, args) in refs {
+                let Some(need_t) = forced.get(&target) else { continue };
+                let target_params = &self.n5_generic_structs[&target].0;
+                for (i, tp) in target_params.iter().enumerate() {
+                    if !need_t.contains(&tp.name) {
+                        continue;
+                    }
+                    if let Some(arg) = args.get(i) {
+                        let arg = arg.trim();
+                        if param_names.contains(arg) && !out.contains(arg) {
+                            out.insert(arg.to_string());
+                        }
+                    }
+                }
+            }
+            let _ = (&own, need);
+        }
+    }
+
+    /// Collect `(struct_name, ["arg", ...])` for every reference to a generic
+    /// struct named in `demands` inside `ty`. Args are the folded text of each
+    /// type argument so a bare param name can be matched.
+    fn collect_generic_refs(
+        ty: &TypeExpr,
+        demands: &BTreeMap<String, BTreeSet<String>>,
+        out: &mut Vec<(String, Vec<String>)>,
+    ) {
+        match ty {
+            TypeExpr::Map { key, value, .. } => {
+                Self::collect_generic_refs(key, demands, out);
+                Self::collect_generic_refs(value, demands, out);
+            }
+            TypeExpr::Named { name, .. } => {
+                let folded = name.trim();
+                if let Some(open) = folded.find('[') {
+                    if open > 0 && folded.ends_with(']') {
+                        let head = folded[..open].trim().to_string();
+                        if demands.contains_key(&head) {
+                            let inner = &folded[open + 1..folded.len() - 1];
+                            let args = Self::split_top_level_type_args(inner)
+                                .into_iter()
+                                .map(|a| a.trim().to_string())
+                                .collect();
+                            out.push((head, args));
+                        }
+                    }
+                }
+            }
+            TypeExpr::Pointer { to, .. } => Self::collect_generic_refs(to, demands, out),
+            TypeExpr::Array { elem, .. } | TypeExpr::Slice { elem, .. }
+            | TypeExpr::Chan { elem, .. } | TypeExpr::Option { elem, .. } => {
+                Self::collect_generic_refs(elem, demands, out)
+            }
+            TypeExpr::Fn { params, results, .. } => {
+                for p in params {
+                    Self::collect_generic_refs(&p.ty, demands, out);
+                }
+                for r in results {
+                    Self::collect_generic_refs(r, demands, out);
                 }
             }
         }
