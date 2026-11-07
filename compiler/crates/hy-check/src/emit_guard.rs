@@ -772,6 +772,7 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------------
 
     fn check_equality(&mut self, st: &FnState, lhs: &Expr, rhs: &Expr, span: Span) {
+        self.check_field_array_length_equality(st, lhs, rhs, span);
         // `x == nil` is the nil-comparison surface (E4001/N1 own its
         // validity) — every nilable type is comparable to nil in Go.
         if Checker::is_nil_literal(lhs) || Checker::is_nil_literal(rhs) {
@@ -3015,6 +3016,64 @@ impl<'a> Checker<'a> {
             }
             _ => None,
         }
+    }
+}
+
+    fn check_field_array_length_equality(&mut self, st: &FnState, lhs: &Expr, rhs: &Expr, span: Span) {
+        let l_ty = self.expr_field_or_ident_type_name(st, lhs);
+        let r_ty = self.expr_field_or_ident_type_name(st, rhs);
+        if let (Some(l_str), Some(r_str)) = (l_ty, r_ty) {
+            if l_str != r_str && self.is_sized_array_len_str(&l_str) && self.is_sized_array_len_str(&r_str) {
+                let msg = format!(
+                    "invalid operation {}: operator == requires comparable operands of matching type, found {} and {} (HYB-E1002)",
+                    format!("{} == {}", lhs.render(), rhs.render()),
+                    l_str,
+                    r_str
+                );
+                self.diags.push(
+                    Diagnostic::error("HYB-E1002", self.path.clone(), span, msg).with_notes(vec![
+                        "why: Go rejects equality comparison between arrays of different lengths (mismatched types) (Row 13 BUILDABLE)".to_string(),
+                        "fix: ensure compared array operands have matching lengths or compare elements individually".to_string(),
+                    ]),
+                );
+            }
+        }
+    }
+
+    fn expr_field_or_ident_type_name(&self, st: &FnState, e: &Expr) -> Option<String> {
+        match crate::model::unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                self.lookup_binding(st, name).and_then(|b| b.ty.as_ref()).map(|t| t.render())
+            }
+            Expr::Field { base, name, .. } => {
+                let base_shape = self.shape_of_expr(st, base);
+                let sname = match base_shape {
+                    TypeShape::Struct(Some(s)) => Some(s),
+                    TypeShape::Pointer(inner) => match *inner {
+                        TypeShape::Struct(Some(s)) => Some(s),
+                        _ => None,
+                    },
+                    _ => None,
+                }?;
+                self.structs
+                    .get(&sname)
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == name))
+                    .map(|(_, t)| t.render())
+            }
+            _ => None,
+        }
+    }
+
+    fn is_sized_array_len_str(&self, s: &str) -> bool {
+        let t = s.trim();
+        if !t.starts_with('[') {
+            return false;
+        }
+        let Some(close) = t.find(']') else {
+            return false;
+        };
+        let head = &t[1..close];
+        !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
     }
 }
 
