@@ -8219,13 +8219,29 @@ impl<'a> Collector<'a> {
     /// Family E1–E5 (#425): extend `HYB-E2005` (`BUILTIN-ARGS`) from literals
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
-        // #2701: among the built-ins only `append` is variadic; every other
+        // #2701 / #3114: among the built-ins only `append` is variadic; every other
         // built-in rejects the `...` spread form (`invalid use of ... with
         // built-in <name>`). `append` is handled in its own arm below, where a
         // spread argument is legal.
         if matches!(
             name,
-            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
+            "len"
+                | "cap"
+                | "close"
+                | "delete"
+                | "min"
+                | "max"
+                | "clear"
+                | "copy"
+                | "make"
+                | "new"
+                | "panic"
+                | "print"
+                | "println"
+                | "real"
+                | "imag"
+                | "complex"
+                | "recover"
         ) && args.iter().any(|a| a.spread)
         {
             self.emit_e1002(
