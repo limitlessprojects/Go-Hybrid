@@ -1792,9 +1792,14 @@ impl<'a> Checker<'a> {
                 if let Some((base, args)) = Self::split_generic_type_args(name) {
                     if self.struct_type_params.contains_key(base) {
                         for a in &args {
-                            let a_ty = Self::parse_type_arg_str(a);
-                            let a_sh = self.shape_of_type_with_subst(&a_ty, subst, depth + 1);
-                            if self.shape_may_share(&a_sh) || self.shape_holds_closure(&a_sh) {
+                            let a_sh = if let Some(sh) = subst.get(a.as_str()) {
+                                sh.clone()
+                            } else {
+                                self.shape_of_type_arg_str(a, depth + 1)
+                            };
+                            if self.shape_may_share(&a_sh)
+                                || self.shape_holds_closure(&a_sh, &mut Vec::new())
+                            {
                                 let rendered_args: Vec<String> = args
                                     .iter()
                                     .map(|arg| {

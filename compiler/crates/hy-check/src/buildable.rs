@@ -5244,9 +5244,17 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            let int_for_float = int_to_float_conflict(&want, &got, &a.value);
-            let width_mismatch = self.scalar_mismatch(&p.ty, &a.value);
-            let array_len_mismatch = self.sized_array_names_differ(Some(&p.ty), &a.value);
+            let int_for_float = want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            let width_mismatch = matches!(
+                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (Some(w), Some(g)) if w != g
+            );
+            let array_len_mismatch = self.sized_array_names_differ(
+                Some(p.ty.render().as_str()),
+                self.typed_value_type_name(&a.value).as_deref(),
+            );
             if kinds_conflict(&want, &got) || int_for_float || width_mismatch || array_len_mismatch {
                 self.emit_e1002(
                     a.value.span(),
@@ -5299,7 +5307,9 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            let int_for_float = int_to_float_conflict(want, &got, &a.value);
+            let int_for_float = *want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
             if kinds_conflict(want, &got) || int_for_float {
                 self.emit_e1002(
                     a.value.span(),
