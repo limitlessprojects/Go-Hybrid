@@ -70,11 +70,31 @@ fn main() -> ExitCode {
 }
 
 fn cmd_explain(args: &[String]) -> ExitCode {
-    let Some(code) = args.first() else {
-        eprintln!("usage: hyb explain <code>");
+    const USAGE: &str = "usage: hyb explain <code>";
+    let mut code: Option<String> = None;
+    let mut end_of_options = false;
+    for arg in args {
+        if !end_of_options {
+            if arg == "--" {
+                end_of_options = true;
+                continue;
+            }
+            if arg.starts_with('-') {
+                eprintln!("unknown option: {arg}\n{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+        if code.is_some() {
+            eprintln!("explain expects exactly one code; unexpected argument: {arg}\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        code = Some(arg.clone());
+    }
+    let Some(code) = code else {
+        eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
-    match hy_diag::Registry::global().explain(code) {
+    match hy_diag::Registry::global().explain(&code) {
         Some(page) => {
             print!("{}", page);
             ExitCode::SUCCESS
@@ -329,11 +349,41 @@ fn cmd_generate(args: &[String]) -> ExitCode {
     }
 
     // Collect .hy files (dirs walk recursively — go:generate ./... shape).
+    let normalize_rel = |p: std::path::PathBuf| -> std::path::PathBuf {
+        let stripped: std::path::PathBuf = p
+            .components()
+            .filter(|c| !matches!(c, std::path::Component::CurDir))
+            .collect();
+        if stripped.as_os_str().is_empty() {
+            p
+        } else {
+            stripped
+        }
+    };
     let mut hy_files: Vec<std::path::PathBuf> = Vec::new();
     for p in &paths {
-        let path = std::path::Path::new(p);
+        let raw_path = std::path::Path::new(p);
+        let resolved = if !raw_path.exists() {
+            if p == "..." {
+                std::path::PathBuf::from(".")
+            } else if let Some(prefix) = p.strip_suffix("/...").or_else(|| p.strip_suffix("\\..."))
+            {
+                let base = if prefix.is_empty() { "." } else { prefix };
+                let candidate = std::path::PathBuf::from(base);
+                if candidate.is_dir() {
+                    candidate
+                } else {
+                    raw_path.to_path_buf()
+                }
+            } else {
+                raw_path.to_path_buf()
+            }
+        } else {
+            raw_path.to_path_buf()
+        };
+        let path = resolved.as_path();
         if path.is_file() && path.extension().map(|e| e == "hy").unwrap_or(false) {
-            hy_files.push(path.to_path_buf());
+            hy_files.push(normalize_rel(path.to_path_buf()));
         } else if path.is_dir() {
             let mut stack = vec![path.to_path_buf()];
             while let Some(d) = stack.pop() {
@@ -360,7 +410,7 @@ fn cmd_generate(args: &[String]) -> ExitCode {
                         }
                         stack.push(p);
                     } else if p.extension().map(|x| x == "hy").unwrap_or(false) {
-                        hy_files.push(p);
+                        hy_files.push(normalize_rel(p));
                     }
                 }
             }
@@ -374,6 +424,7 @@ fn cmd_generate(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     }
     hy_files.sort();
+    hy_files.dedup();
 
     let mut drifted: Vec<String> = Vec::new();
     let mut written: usize = 0;
@@ -714,12 +765,31 @@ fn generate_one(
 ///   replace hybrid.program => ./hybridrt
 /// and emitted imports resolve as ordinary local packages. Idempotent.
 fn cmd_vendor_runtime(args: &[String]) -> ExitCode {
-    let dir = match args.iter().find(|a| !a.starts_with("--")) {
-        Some(d) => std::path::PathBuf::from(d),
-        None => {
-            eprintln!("usage: hyb vendor-runtime <dir>  (creates <dir>/hybridrt)");
+    const USAGE: &str = "usage: hyb vendor-runtime <dir>  (creates <dir>/hybridrt)";
+    let mut dir: Option<std::path::PathBuf> = None;
+    let mut end_of_options = false;
+    for arg in args {
+        if !end_of_options {
+            if arg == "--" {
+                end_of_options = true;
+                continue;
+            }
+            if arg.starts_with('-') {
+                eprintln!("unknown option: {arg}\n{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+        if dir.is_some() {
+            eprintln!(
+                "vendor-runtime expects exactly one target directory; unexpected argument: {arg}\n{USAGE}"
+            );
             return ExitCode::from(2);
         }
+        dir = Some(std::path::PathBuf::from(arg));
+    }
+    let Some(dir) = dir else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
     };
     let rt = match runtime_dir() {
         Ok(r) => r,
@@ -839,6 +909,22 @@ fn cmd_build(args: &[String]) -> ExitCode {
                         return ExitCode::from(2);
                     }
                     match arg.as_str() {
+                        "-o" if out_path.is_some() => {
+                            eprintln!("error: -o may only be supplied once\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
+                        "--package" if pkg_name.is_some() => {
+                            eprintln!("error: --package may only be supplied once\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
+                        "--out-dir" if out_dir.is_some() => {
+                            eprintln!("error: --out-dir may only be supplied once\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
+                        "--binding-prefix" if binding_prefix.is_some() => {
+                            eprintln!("error: --binding-prefix may only be supplied once\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
                         "-o" => out_path = Some(value.clone()),
                         "--package" => pkg_name = Some(value.clone()),
                         "--out-dir" => out_dir = Some(value.clone()),
@@ -872,6 +958,16 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
     if pkg_name.is_some() != out_dir.is_some() {
         eprintln!("error: --package and --out-dir must be supplied together\n{USAGE}");
+        return ExitCode::from(2);
+    }
+    if pkg_name.is_some() && (out_path.is_some() || emit_go_only) {
+        eprintln!(
+            "error: -o and --emit-go cannot be combined with --package/--out-dir\n{USAGE}"
+        );
+        return ExitCode::from(2);
+    }
+    if binding_prefix.is_some() && pkg_name.is_none() {
+        eprintln!("error: --binding-prefix requires --package and --out-dir\n{USAGE}");
         return ExitCode::from(2);
     }
     let out_path = out_path.unwrap_or_else(|| "a.out".to_string());
