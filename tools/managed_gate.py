@@ -12,6 +12,7 @@ Baseline shape: {"version": 1, "blocks": {"<file>:<line>": {"reason": ...,
 "category": ..., "tickets": [...]}}} — keyed by file:line so moved blocks
 count as new (deliberate: moving a hatch is a review event too).
 """
+import contextlib
 import json
 import os
 import re
@@ -149,6 +150,33 @@ def audit(hyb, prog):
     return keyed
 
 
+@contextlib.contextmanager
+def rebaseline_lock(baseline_path):
+    """Serialize baseline read/audit/replace, including symlink aliases.
+
+    Atomic replacement protects bytes, but cannot protect against a second
+    writer publishing a stale snapshot and dropping an unaudited program.
+    Fail closed on contention; a caller can retry after the active run exits.
+    An interrupted process may leave the lock directory for manual recovery.
+    """
+    target = os.path.realpath(baseline_path)
+    lock = os.path.join(os.path.dirname(target),
+                        "." + os.path.basename(target) + ".rebaseline.lock")
+    try:
+        os.mkdir(lock, mode=0o700)
+    except FileExistsError:
+        print(f"GATE ERROR: rebaseline already in progress (or stale lock): {lock}; "
+              "retry after it finishes; remove a stale lock only after verifying no writer is active")
+        sys.exit(2)
+    except OSError as error:
+        print(f"GATE ERROR: cannot lock baseline {baseline_path}: {error}")
+        sys.exit(2)
+    try:
+        yield
+    finally:
+        os.rmdir(lock)
+
+
 def main():
     args = sys.argv[1:]
     rebaseline = False
@@ -167,6 +195,14 @@ def main():
         sys.exit(2)
     hyb, baseline_path, progs = args[0], args[1], args[2:]
 
+    # Hold the lock before loading the snapshot, not just around os.replace.
+    # Readers do not modify the baseline and need no writer lock.
+    lock = rebaseline_lock(baseline_path) if rebaseline else contextlib.nullcontext()
+    with lock:
+        run_gate(hyb, baseline_path, progs, rebaseline)
+
+
+def run_gate(hyb, baseline_path, progs, rebaseline):
     try:
         with open(baseline_path, encoding="utf-8") as f:
             baseline = json.load(f)
