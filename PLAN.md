@@ -295,6 +295,28 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 - Three new offline tests: original two failures/one pass; patched all 11 job-test methods pass. Real temporary Git repositories cover unborn and committed HEAD; a mocked upload boundary verifies no push, payload mutation or submission record after lookup failure. git diff --check passes. No real Kaggle submission or compiler/Rust/Go suite run; maintainer CI remains required, including repair of existing workflow conflict markers (#339).
 
 
+## 2026-10-28 — N1 map-key validation amendment (#2036)
+
+Latest main `1f0ff978f4deff78c77bca96db0e3e46f32de71b` accepted
+`map[int]int{nil: 1}` with zero diagnostics. The existing composite-nil
+sweep checked value slots, and a binding-only repair would still miss
+ordinary call arguments. Validate keys in the existing recursive typed
+expression walk instead; reuse the N1 shape predicate and HYB-E4001
+emitter without changing the foreign-Go perimeter. Key and value checks
+remain independent, including nested keys when an outer value is invalid.
+
+Regression pin: `map_literal_nil_keys.rs` (eight tests): Hybrid key shapes,
+parentheses, simultaneous key/value errors, nested keys, argument/return/
+managed contexts, and valid-key/existing nil-value controls. Six tests
+fail on unmodified main; all eight pass with the repair. Error/alias and
+foreign nil homes remain accepted; a Hybrid struct shadowing `error` does not
+inherit that exception. The 127 registered
+corpus verdicts are unchanged. SPEC-LANGUAGE N1 now spells out map keys.
+Prior validation on the original PR base: 1808 workspace tests passed;
+checker corpus 127/127, differential 41 accepted / 86 rejected, and ten
+examples passed. This refreshed merge requires new upstream CI and review.
+
+
 ## Contributor follow-up: repro rejection evidence (2026-10-24)
 - Extend PR #1598 to the specialized smoke gate: exit 2 or a signal is an infrastructure failure, not checker rejection; require exit 1 and an exact diagnostic token, matching the author-stage gate. This is internal gate evidence, not a newly demonstrated compiler soundness bug. The outer author gate remains independently checked.
 - Eight new real-process fixture tests: four fail on the previously submitted head `3c9670d`; all eight pass after the fix. The combined author/specialized suite passes 16 tests. Cargo, corpus and census boundaries in the new tests are explicit stubs; no compiler execution is claimed by these tests. Full tooling and new-head compiler CI must be verified separately.
