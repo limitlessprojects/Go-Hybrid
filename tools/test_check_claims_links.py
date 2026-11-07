@@ -138,6 +138,42 @@ class CheckClaimsLinksTest(unittest.TestCase):
         kinds = [i["kind"] for i in report["issues"]]
         self.assertIn("missing-corpus-number", kinds)
 
+    def test_accept_marker_rejects_accept_managed(self):
+        fixture = self.root / "tests" / "checker-corpus" / "03-managed.hy"
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        fixture.write_text("// EXPECTED-VERDICT: ACCEPT-MANAGED\nfn main() {}\n", encoding="utf-8")
+        table = (
+            "## The claims table\n\n"
+            "| # | Surface | Checker | Claim | Evidence |\n"
+            "|---|---------|---------|-------|----------|\n"
+            "| 1 | foo | hyb | claim | [03](tests/checker-corpus/03-managed.hy) (accept) |\n"
+        )
+        (self.root / "GUARANTEES.md").write_text(table, encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertFalse(report["ok"])
+        kinds = [i["kind"] for i in report["issues"]]
+        self.assertIn("verdict-mismatch", kinds)
+
+    def test_unmarked_hy_citation_requires_verdict_header(self):
+        fixture = self.root / "tests" / "checker-corpus" / "04-unmarked.hy"
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        fixture.write_text("fn main() {}\n", encoding="utf-8")
+        table = (
+            "## The claims table\n\n"
+            "| # | Surface | Checker | Claim | Evidence |\n"
+            "|---|---------|---------|-------|----------|\n"
+            "| 1 | foo | hyb | claim | [04](tests/checker-corpus/04-unmarked.hy) |\n"
+        )
+        (self.root / "GUARANTEES.md").write_text(table, encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertFalse(report["ok"])
+        kinds = [i["kind"] for i in report["issues"]]
+        self.assertIn("no-verdict-header", kinds)
+
     def test_missing_claims_file_is_reported(self):
         (self.root / "GUARANTEES.md").unlink()
         result = self.run_tool()
