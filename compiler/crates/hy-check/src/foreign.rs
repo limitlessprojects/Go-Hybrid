@@ -372,11 +372,23 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
     const SYNC_WAIT_GROUP: &[&str] = &["add", "done", "wait"];
     const SYNC_ONCE: &[&str] = &["do"];
+    const BYTES_BUFFER: &[&str] = &[
+        "write", "write_byte", "write_rune", "write_string", "write_to",
+        "read", "read_byte", "read_bytes", "read_from", "read_rune", "read_string",
+        "next", "grow", "reset", "string", "bytes", "len", "cap", "truncate",
+        "unread_byte", "unread_rune",
+    ];
+    const STRINGS_BUILDER: &[&str] = &[
+        "write", "write_byte", "write_rune", "write_string",
+        "grow", "reset", "string", "len", "cap",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
         "sync.once" | "sync.Once" => Some(SYNC_ONCE),
+        "bytes.buffer" | "bytes.Buffer" => Some(BYTES_BUFFER),
+        "strings.builder" | "strings.Builder" => Some(STRINGS_BUILDER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -451,6 +463,7 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "sync"
             | "sync/atomic"
             | "atomic"
+            | "bytes"
             | "bufio"
             | "net"
             | "net/http"
@@ -527,6 +540,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "errors"
             | "sync"
             | "atomic"
+            | "bytes"
             | "bufio"
             | "net"
             | "http"
@@ -1045,6 +1059,49 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "swap_uint64"
                 | "swap_uintptr"
                 | "swap_pointer"
+        ),
+        "bytes" => matches!(
+            m,
+            "new_buffer"
+                | "new_buffer_string"
+                | "new_reader"
+                | "compare"
+                | "contains"
+                | "contains_any"
+                | "contains_rune"
+                | "count"
+                | "cut"
+                | "equal"
+                | "equal_fold"
+                | "fields"
+                | "has_prefix"
+                | "has_suffix"
+                | "index"
+                | "index_any"
+                | "index_byte"
+                | "index_rune"
+                | "join"
+                | "last_index"
+                | "last_index_any"
+                | "last_index_byte"
+                | "repeat"
+                | "replace"
+                | "replace_all"
+                | "runes"
+                | "split"
+                | "split_after"
+                | "split_after_n"
+                | "split_n"
+                | "title"
+                | "to_lower"
+                | "to_title"
+                | "to_upper"
+                | "trim"
+                | "trim_left"
+                | "trim_prefix"
+                | "trim_right"
+                | "trim_space"
+                | "trim_suffix"
         ),
         "bufio" => matches!(
             m,
