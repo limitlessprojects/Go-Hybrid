@@ -54,4 +54,17 @@ fn shadowed_conversions_and_closure_shadowed_dividends_stay_accepted() {
     assert_ok("fn main() {\n    float64 := fn(x int) float64 { return 2.0 }\n    _ = 1.0 / float64(0)\n}\n");
     assert_ok("fn main() {\n    int := fn(x int) int { return 2 }\n    _ = 10 / int(0)\n}\n");
     assert_ok("const zero = 0\n\nfn main() {\n    outer := fn() int {\n        return 1 + (fn() int {\n            zero := 2\n            return 10 / zero\n        })()\n    }\n    _ = outer()\n}\n");
+    assert_ok("const zero = 0\n\nfn main() {\n    outer := fn(zero int) int {\n        inner := fn() int {\n            return 10 / zero\n        }\n        return inner() + (10 / zero)\n    }\n    _ = outer(2)\n}\n");
+    assert_ok("const zero = 0\n\nenum opt {\n    some(int)\n    none\n}\n\nfn main() {\n    f := fn(x opt) int {\n        match x {\n            opt.some(zero) => {\n                return 10 / zero\n            }\n            opt.none => {\n                return 0\n            }\n        }\n    }\n    _ = f(opt.some(2))\n}\n");
+    assert_ok("const zero = 0\n\nfn fill(p *int) {\n    _ = p\n}\n\nfn main() {\n    f := fn() (zero int) {\n        fill(&zero)\n        return 10 / zero\n    }\n    _ = f()\n}\n");
+}
+
+#[test]
+fn int_conversion_of_float_const_zero_divisors_reject() {
+    assert_code("fn main() {\n    _ = 10 / int(0.0)\n}\n", "HYB-E6001");
+    assert_code("const zf = 0.0\n\nfn main() {\n    _ = 10 % int64(zf)\n}\n", "HYB-E6001");
+    assert_code("fn main() {\n    _ = 10 / int(1.5 - 1.5)\n}\n", "HYB-E6001");
+    assert_code("fn main() {\n    _ = 10 / u8(-0.0)\n}\n", "HYB-E6001");
+    assert_code("const iz = int(0.0)\n\nfn main() {\n    _ = 10 / iz\n}\n", "HYB-E6001");
+    assert!(codes("fn main() {\n    _ = 10 / u8(256.0)\n}\n").contains(&"HYB-E6001".to_string()));
 }
