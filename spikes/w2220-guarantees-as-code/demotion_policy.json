@@ -1,0 +1,178 @@
+{
+  "version": 2,
+  "owner_default": "@gamethao92",
+  "rows": {
+    "1": {
+      "status": "executable",
+      "verifier": { "kind": "corpus_pair" },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "Existing corpus pair: reject (01/52) + accept (15) pins the spawn-site claim."
+    },
+    "2": {
+      "status": "executable",
+      "verifier": { "kind": "corpus_pair" },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "Existing corpus pair: send/select accept controls (16/17/33) + shared-map reject (32)."
+    },
+    "3": {
+      "status": "executable",
+      "verifier": { "kind": "corpus_pair" },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "Existing corpus pair: deep-composite rejects (03/45) + fresh-control accept."
+    },
+    "4": {
+      "status": "executable",
+      "verifier": { "kind": "corpus_pair" },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "Existing fail-closed rejects (34 + atomic-pointer control); no accept is claimed."
+    },
+    "5": {
+      "status": "executable",
+      "verifier": { "kind": "corpus_pair" },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "Existing corpus pair: A5 boundary accept (10) + closure capture rejects (36 + chan-of-closure)."
+    },
+    "6": {
+      "status": "executable",
+      "verifier": { "kind": "corpus_pair" },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "Existing corpus pair: move-send accept (16) + use-after-move/freeze rejects (43 + deep-composite)."
+    },
+    "7": {
+      "status": "executable",
+      "verifier": { "kind": "corpus_pair" },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "Existing loan corpus: two accepts + four reject shapes (E31xx family)."
+    },
+    "8": {
+      "status": "executable",
+      "verifier": {
+        "kind": "run_gate",
+        "gate": "managed_gate",
+        "baseline": "gates/managed-baseline.json"
+      },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "tools/managed_gate.py passes the baseline and rejects an injected new managed block."
+    },
+    "9": {
+      "status": "prose-only",
+      "verifier": { "kind": "argument" },
+      "owner": "@gamethao92",
+      "expires": "2026-12-31",
+      "debt": "W2220-DEBT-009",
+      "reason": "A5 is accepted by design; the negative falsifier is a -race race through a Go callback, which M2 did not build (the existing handler smoke client is sequential)."
+    },
+    "10": {
+      "status": "executable",
+      "verifier": { "kind": "corpus_pair" },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "Existing corpus: unguarded/mutex pool rejects + managed accept (fail-closed shape)."
+    },
+    "11": {
+      "status": "executable",
+      "verifier": { "kind": "corpus_pair" },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "Existing corpus: atomic-pointer fail-closed reject + atomic-channel accept."
+    },
+    "12": {
+      "status": "prose-only",
+      "verifier": { "kind": "argument" },
+      "owner": "@gamethao92",
+      "expires": "2026-12-31",
+      "debt": "W2220-DEBT-012",
+      "reason": "context cancellation is not modeled; a falsifier would need to observe cancellation semantics the checker has no surface for."
+    },
+    "13": {
+      "status": "prose-only",
+      "verifier": { "kind": "argument" },
+      "owner": "@gamethao92",
+      "expires": "2026-12-31",
+      "debt": "W2220-DEBT-013",
+      "reason": "Finalizers have no .hy surface; there is nothing for a checker verifier to execute."
+    },
+    "14": {
+      "status": "executable",
+      "verifier": { "kind": "corpus_pair" },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "Spike-local negative falsifier: the reserved `unsafe` escape is rejected, so no memory-unsafe escape exists in safe mode."
+    },
+    "15": {
+      "status": "executable",
+      "verifier": { "kind": "corpus_pair" },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "Spike-local negative falsifier: `import \"C\"` is rejected by the curated allowlist, so cgo is not part of `.hy`."
+    },
+    "16": {
+      "status": "executable",
+      "verifier": {
+        "kind": "runtime_pin",
+        "language": "go",
+        "runtime": "go run -race",
+        "expect": "panic: send on closed channel"
+      },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "The checker accepts the program; the emitted Go panics under -race, making the absence of a protocol claim observable."
+    },
+    "17": {
+      "status": "prose-only",
+      "verifier": { "kind": "argument" },
+      "owner": "@gamethao92",
+      "expires": "2026-12-31",
+      "debt": "W2220-DEBT-017",
+      "reason": "Inherited from Go; there is no Hybrid claim to falsify. Go's own toolchain and race detector are the evidence."
+    },
+    "18": {
+      "status": "executable",
+      "verifier": {
+        "kind": "test_suite",
+        "command": ["cargo", "test", "--manifest-path", "runtime/rust/hyrt/Cargo.toml", "--quiet"],
+        "timeout": 600,
+        "expect_output": "test result: ok",
+        "requires": [
+          { "path": "runtime/rust/hyrt/Cargo.toml", "contains": "panic = \"abort\"" }
+        ]
+      },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "The Rust runtime suite passes and the release profile keeps panic=abort at the boundary; language-level memory safety itself is inherited from rustc."
+    },
+    "19": {
+      "status": "executable",
+      "verifier": {
+        "kind": "test_suite",
+        "command": ["cargo", "test", "--manifest-path", "runtime/rust/hyrt/Cargo.toml", "--quiet"],
+        "timeout": 600,
+        "expect_output": "test result: ok"
+      },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "The hyrt handle-table tests exercise generation tags, stale handles, and the short-buffer copy protocol."
+    },
+    "20": {
+      "status": "executable",
+      "verifier": {
+        "kind": "benchmark",
+        "command": ["{hyb}", "bench-overhead"],
+        "timeout": 600,
+        "expect": "VERDICT: PASS",
+        "max_ns": 5.0
+      },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31",
+      "reason": "`hyb bench-overhead` emits its own PASS/FAIL against the 5 ns budget; the gate requires the verdict and the measured fast-path number."
+    }
+  }
+}
