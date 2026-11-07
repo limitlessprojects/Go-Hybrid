@@ -627,6 +627,30 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "unread_rune",
         "write_to",
     ];
+    const NET_IP: &[&str] = &[
+        "default_mask",
+        "equal",
+        "is_global_unicast",
+        "is_interface_local_multicast",
+        "is_link_local_multicast",
+        "is_link_local_unicast",
+        "is_loopback",
+        "is_multicast",
+        "is_private",
+        "is_unspecified",
+        "marshal_text",
+        "mask",
+        "string",
+        "to16",
+        "to4",
+        "unmarshal_text",
+    ];
+    const NET_IP_NET: &[&str] = &["contains", "network", "string"];
+    const NET_IP_MASK: &[&str] = &["size", "string"];
+    const NET_TCP_ADDR: &[&str] = &["addr_port", "network", "string"];
+    const NET_UDP_ADDR: &[&str] = &["addr_port", "network", "string"];
+    const NET_UNIX_ADDR: &[&str] = &["network", "string"];
+    const NET_IP_ADDR: &[&str] = &["network", "string"];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -664,6 +688,13 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "os.process" | "os.Process" => Some(OS_PROCESS),
         "os.process_state" | "os.processstate" | "os.ProcessState" => Some(OS_PROCESS_STATE),
         "strings.reader" | "strings.Reader" => Some(STRINGS_READER),
+        "net.ip" | "net.IP" => Some(NET_IP),
+        "net.ip_net" | "net.ipnet" | "net.IPNet" => Some(NET_IP_NET),
+        "net.ip_mask" | "net.ipmask" | "net.IPMask" => Some(NET_IP_MASK),
+        "net.tcp_addr" | "net.tcpaddr" | "net.TCPAddr" => Some(NET_TCP_ADDR),
+        "net.udp_addr" | "net.udpaddr" | "net.UDPAddr" => Some(NET_UDP_ADDR),
+        "net.unix_addr" | "net.unixaddr" | "net.UnixAddr" => Some(NET_UNIX_ADDR),
+        "net.ip_addr" | "net.ipaddr" | "net.IPAddr" => Some(NET_IP_ADDR),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
