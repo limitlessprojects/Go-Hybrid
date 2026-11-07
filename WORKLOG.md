@@ -424,3 +424,25 @@
 - **Union-hazard hardening (procedure change)**: after union_resolve.py, now (1) bracket-balance gate on stripped-strings content, (2) `cargo check` fast gate BEFORE merge commit, (3) optional `git merge-file --union` ground-truth diff for high-risk hunks. Root cause: git conflict hunks can cut inside multi-line const arrays / match arms; naive verbatim concat then welds or drops delimiters. Three consecutive PRs hit it (#3929 arity weld, #3932 `];` drop, #3935 `];` drop).
 - Suites 468 -> 473 (+5). Incremental dir trimmed post-batteries per S135 hygiene note; rootfs 76% used
 - Next queue: last family sibling #3944 (net.ip/address), then non-family #3902/#3904/#3905/#3912/#3913/#3914/#3907/#3925/#3938/#3942/#3946/#3949/#3950; #3918 awaits author fix (net.dialer registration).
+
+## Session 137 — 2026-11-07 17:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aeeeae9, repo at S136 head 9bdde9aa); rust 1.99.0 + go1.26.9 restored; approve 4/4 (4984 left); scan skipped.
+- **3 landed — surface wave closed + first non-family pair**:
+  - **#3944** -> `23924015` (bradwue313, fixes #3943): net.ip/net.ip_mask/net.ipnet/net.addr surfaces (4 tables, 27 methods). Union 2 conflicts, both new gates (bracket-balance + cargo check) clean pre-commit. **Surface sibling wave CLOSED: 11/12 landed; #3918 still awaiting author's net.dialer registration fix.** 474 suites.
+  - **#3902** -> `7d0d5bb9` (Aurore, fixes #3901): hy-emit elided struct field literals in nested/n5 positions + const-length array padding (hyIdx loop closure) + unwrap_parens/constconv::parse_int route. Auto-merge clean. 475 suites.
+  - **#3904** -> `8d96c727` (Aurore, fixes #3903): const float + aliased-conversion overflow checks (alias transparency). Auto-merge clean. 476 suites.
+- **SANDBOX LESSON (tool-layer)**: bash stdout layer garbled file-content output this tick — grep -n displayed a phantom `hyArryIdx]` typo in #3902's emitted-Go template that does NOT exist in the file (grep -c contradicted grep -n; python find() contradicted its own repr in the same run). Bypass: python writes analysis to /tmp file, Read tool reads it — actual content is correct `hyArr[hyIdx]` (0 occurrences of the phantom). Procedure going forward: content-verdict decisions (typos, fixups) MUST go through write-to-file + Read, never through trust of stdout display. No in-merge fixup was needed on #3902; had I trusted stdout I would have "fixed" a non-existent bug.
+- All batteries on merged main: corpus 135/135 tripwire-not-fired, differential FULL AGREEMENT, remote asserted after each push, landing replies 201 x3. Zero dup replies, zero silent closes.
+- Suites 473 -> 476 (+3). Incremental trimmed post-batteries; rootfs 75% used.
+- Next queue: #3905 (false E3005), #3912/#3913 (gorky117 nil/option), #3914, #3907, #3925 (triage board validation), #3938, #3942/#3949 (CrowAleksito may_share/closure moves), #3946 (installer mv PATH fix), #3950 (IR --emit-proof, fixes #3930).
+
+## Session 138 — 2026-11-07 18:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aeef8f9, repo at S137 head 67365d19); rust 1.99.0 + go1.26.9 restored; approve 4/4 (4993 left); scan skipped.
+- **3 landed** (#3913 is the companion bullet in the list, not a 4th):
+  - **#3905** -> `b3c9501f` (PuchyG, fixes #3839): false E3005 fix — shape_of_expr Pointer(Array(e)) arms for Index (-> element) and Slice (-> Slice(e)), Str index -> byte; regression test ptr-array hops w/ HYB-E2010 rejections. Auto-merge clean.
+  - **#3912** -> `ecbbeb90` (gorky117-cell): is_non_nilable += OpKind::Option(_) — untyped nil equality/match vs option (struct-hyOption) now rejects.
+  - **#3913** -> `76195f8a` (gorky117-cell): conversion-target guard — option[T] and curated foreign handles refuse scalar/non-struct conversions (anti-laundering). Companion to #3912.
+  - All auto-merged clean, all batteries ALL-GREEN (corpus tripwire not fired, differential FULL), remote asserted per push, replies 201 x4.
+- **SUITE-COUNT FORENSIC**: #3905 battery showed 476 'ok' lines instead of expected 477; full forensic (grep -c vs grep -n contradictions, python find() vs repr mismatch in same run — stdout-layer garble again) resolved via write-to-file+Read: run was GREEN exit 0, all 466 integration files ran, new suite passed. Breakdown: 466 integration + 5 unittests + 4 doctests = 475 accounted; +1 doctest-line noise across fresh-toolchain rebuilds (last tick's 476 included one line this run doesn't emit). Count metric has ±1 noise in unit/doctest section; integration-file count (465->466->467->468) is the stable metric. #3912/#3913 batteries confirmed 477/478 consistent with +1 file each.
+- Suites 476 -> 478 (+1 integration file per landing: 466->467->468 for #3905/#3912/#3913; count-noise lesson). Incremental trimmed; rootfs 76% used.
+- Next queue: #3914, #3907, #3925 (triage board validation), #3938, #3942/#3949 (CrowAleksito may_share/closure moves), #3946 (installer mv PATH fix), #3950 (IR --emit-proof, fixes #3930).

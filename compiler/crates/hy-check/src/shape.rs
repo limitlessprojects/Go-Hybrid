@@ -266,10 +266,23 @@ impl<'a> Checker<'a> {
             Expr::Index { base, .. } => match self.shape_of_expr(st, base) {
                 TypeShape::Map(_, v) => *v,
                 TypeShape::Slice(e) | TypeShape::Array(e) => *e,
+                // Go indexes through a pointer to array (`p[i]` on `*[N]T`),
+                // and indexing a string yields a byte.
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Array(e) => *e,
+                    _ => TypeShape::Unknown,
+                },
+                TypeShape::Str => TypeShape::Primitive,
                 _ => TypeShape::Unknown,
             },
             Expr::Slice { base, .. } => match self.shape_of_expr(st, base) {
                 TypeShape::Slice(e) | TypeShape::Array(e) => TypeShape::Slice(e),
+                // Slicing through a pointer to array (`p[lo:hi]` on `*[N]T`)
+                // yields a slice of the element type.
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Array(e) => TypeShape::Slice(e),
+                    _ => TypeShape::Unknown,
+                },
                 TypeShape::Str => TypeShape::Str,
                 _ => TypeShape::Unknown,
             },
