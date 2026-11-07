@@ -651,6 +651,21 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const NET_UDP_ADDR: &[&str] = &["addr_port", "network", "string"];
     const NET_UNIX_ADDR: &[&str] = &["network", "string"];
     const NET_IP_ADDR: &[&str] = &["network", "string"];
+    const OS_FILE_INFO: &[&str] = &["is_dir", "mod_time", "mode", "name", "size", "sys"];
+    const OS_FILE_MODE: &[&str] = &["is_dir", "is_regular", "perm", "string", "type"];
+    const OS_DIR_ENTRY: &[&str] = &["info", "is_dir", "name", "type"];
+    const OS_SIGNAL: &[&str] = &["signal", "string"];
+    const BUFIO_READ_WRITER: &[&str] = &["available", "available_buffer", "discard", "flush", "peek", "read", "read_byte", "read_bytes", "read_from", "read_line", "read_rune", "read_slice", "read_string", "unread_byte", "unread_rune", "write", "write_byte", "write_rune", "write_string", "write_to"];
+    const FMT_STRINGER: &[&str] = &["string"];
+    const FMT_GO_STRINGER: &[&str] = &["go_string"];
+    const FMT_STATE: &[&str] = &["flag", "precision", "width", "write"];
+    const FMT_FORMATTER: &[&str] = &["format"];
+    const FMT_SCANNER: &[&str] = &["scan"];
+    const FMT_SCAN_STATE: &[&str] = &["read", "read_rune", "skip_space", "token", "unread_rune", "width"];
+    const SYNC_LOCKER: &[&str] = &["lock", "unlock"];
+    const SORT_INTERFACE: &[&str] = &["len", "less", "swap"];
+    const TIME_MONTH: &[&str] = &["string"];
+    const TIME_WEEKDAY: &[&str] = &["string"];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -695,6 +710,21 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "net.udp_addr" | "net.udpaddr" | "net.UDPAddr" => Some(NET_UDP_ADDR),
         "net.unix_addr" | "net.unixaddr" | "net.UnixAddr" => Some(NET_UNIX_ADDR),
         "net.ip_addr" | "net.ipaddr" | "net.IPAddr" => Some(NET_IP_ADDR),
+        "os.file_info" | "os.fileinfo" | "os.FileInfo" => Some(OS_FILE_INFO),
+        "os.file_mode" | "os.filemode" | "os.FileMode" => Some(OS_FILE_MODE),
+        "os.dir_entry" | "os.direntry" | "os.DirEntry" => Some(OS_DIR_ENTRY),
+        "os.signal" | "os.Signal" => Some(OS_SIGNAL),
+        "bufio.read_writer" | "bufio.readwriter" | "bufio.ReadWriter" => Some(BUFIO_READ_WRITER),
+        "fmt.stringer" | "fmt.Stringer" => Some(FMT_STRINGER),
+        "fmt.go_stringer" | "fmt.gostringer" | "fmt.GoStringer" => Some(FMT_GO_STRINGER),
+        "fmt.state" | "fmt.State" => Some(FMT_STATE),
+        "fmt.formatter" | "fmt.Formatter" => Some(FMT_FORMATTER),
+        "fmt.scanner" | "fmt.Scanner" => Some(FMT_SCANNER),
+        "fmt.scan_state" | "fmt.scanstate" | "fmt.ScanState" => Some(FMT_SCAN_STATE),
+        "sync.locker" | "sync.Locker" => Some(SYNC_LOCKER),
+        "sort.interface" | "sort.Interface" => Some(SORT_INTERFACE),
+        "time.month" | "time.Month" => Some(TIME_MONTH),
+        "time.weekday" | "time.Weekday" => Some(TIME_WEEKDAY),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -745,6 +775,12 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("http.request" | "http.Request", "cookie") => TypeShape::ForeignOpaque("http.cookie".into()),
         ("http.response" | "http.Response", "location") => TypeShape::ForeignOpaque("url.url".into()),
         ("strings.reader" | "strings.Reader", "len" | "size") => TypeShape::Primitive,
+        ("os.dir_entry" | "os.direntry" | "os.DirEntry", "info") => TypeShape::ForeignOpaque("os.file_info".into()),
+        ("os.file_info" | "os.fileinfo" | "os.FileInfo", "mode") | ("os.dir_entry" | "os.direntry" | "os.DirEntry", "type") | ("os.file_mode" | "os.filemode" | "os.FileMode", "perm" | "type") => TypeShape::ForeignOpaque("os.file_mode".into()),
+        ("os.file_info" | "os.fileinfo" | "os.FileInfo", "mod_time") => TypeShape::ForeignOpaque("time.time".into()),
+        ("os.file_info" | "os.fileinfo" | "os.FileInfo", "name") | ("os.dir_entry" | "os.direntry" | "os.DirEntry", "name") | ("os.file_mode" | "os.filemode" | "os.FileMode", "string") | ("os.signal" | "os.Signal", "string") | ("fmt.stringer" | "fmt.Stringer", "string") | ("time.month" | "time.Month" | "time.weekday" | "time.Weekday", "string") | ("fmt.go_stringer" | "fmt.gostringer" | "fmt.GoStringer", "go_string") => TypeShape::Str,
+        ("os.file_info" | "os.fileinfo" | "os.FileInfo", "size" | "is_dir") | ("os.dir_entry" | "os.direntry" | "os.DirEntry", "is_dir") | ("os.file_mode" | "os.filemode" | "os.FileMode", "is_dir" | "is_regular") | ("fmt.state" | "fmt.State", "flag") | ("sort.interface" | "sort.Interface", "len" | "less") | ("bufio.read_writer" | "bufio.readwriter" | "bufio.ReadWriter", "available") => TypeShape::Primitive,
+        ("bufio.read_writer" | "bufio.readwriter" | "bufio.ReadWriter", "available_buffer") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
