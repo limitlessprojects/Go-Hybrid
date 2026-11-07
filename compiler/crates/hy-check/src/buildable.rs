@@ -854,6 +854,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             }
         }
         c.check_imports(file);
+        c.check_recursive_type_constructors(file);
         c.finish();
         c.diags
     };
@@ -8912,6 +8913,83 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// Issue #3252: reject recursive value types whose cycle runs through a
+    /// type constructor — a generic instantiation (`struct node { b
+    /// box[node] }`), the prelude generic `option[T]` (`struct node { o
+    /// option[node] }`), or a type alias (`type bad = [3]bad`). These were
+    /// accepted with zero diagnostics even though the types have infinite
+    /// size and the emitted Go can never build.
+    ///
+    /// The direct named-field graph (`struct node { next node }`) is
+    /// #1566/#2590's check; this pass expands constructors, and the two
+    /// compose: for a struct root a cycle is reported here only when its
+    /// path instantiates a generic or crosses an `option[T]` payload
+    /// (aliases are transparent in both passes), so a plain cycle is left
+    /// to #2590 and never double-reported. An alias root is different: an
+    /// alias denotes its target and the emitted Go alias cannot refer to
+    /// itself at all, so for an alias ANY self-reference — even under a
+    /// slice, map, or pointer — is a cycle.
+    fn check_recursive_type_constructors(&mut self, file: &File) {
+        let mut reported: HashSet<String> = HashSet::new();
+        for decl in &file.decls {
+            match decl {
+                Decl::Struct(s) => {
+                    if reported.contains(&s.name) {
+                        continue;
+                    }
+                    let root_params: Option<String> = if s.type_params.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            s.type_params
+                                .iter()
+                                .map(|tp| tp.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        )
+                    };
+                    let start: Vec<TypeExpr> = s.fields.iter().map(|f| f.ty.clone()).collect();
+                    if let Some(hit) =
+                        find_ctor_value_cycle(self.ck, &s.name, root_params.as_deref(), &start)
+                    {
+                        self.emit_e1002(
+                            hit.closing_span,
+                            format!(
+                                "invalid recursive type: {} refers to itself (HYB-E1002)",
+                                s.name
+                            ),
+                            &format!(
+                                "cycle: {} — a struct cannot contain itself by value; break the cycle with an indirection (slice `[]T`, map, or channel)",
+                                hit.path.join(" -> ")
+                            ),
+                        );
+                        reported.extend(hit.members);
+                    }
+                }
+                Decl::TypeAlias(t) => {
+                    if reported.contains(&t.name) {
+                        continue;
+                    }
+                    if let Some(hit) = find_alias_self_reference(self.ck, &t.name, &t.ty) {
+                        self.emit_e1002(
+                            hit.closing_span,
+                            format!(
+                                "invalid recursive type: {} refers to itself (HYB-E1002)",
+                                t.name
+                            ),
+                            &format!(
+                                "cycle: {} — an alias denotes its target and must expand to a finite type; name the recursive shape with a struct instead",
+                                hit.path.join(" -> ")
+                            ),
+                        );
+                        reported.extend(hit.members);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// All fn-local declarations have the same Go unused-binding rule.
     fn finish(&mut self) {
         for d in &self.defines {
@@ -9116,6 +9194,349 @@ fn collect_comparable_type_params<'a>(
             for r in results {
                 collect_comparable_type_params(r, param_names, out);
             }
+        }
+    }
+}
+
+/// A cycle found by the #3252 constructor-expansion walks: the span of the
+/// type occurrence that closes it, the rendered expansion path
+/// (`node -> box[node] -> node`), and the declared names the path passes
+/// through (used to report each cycle once, like #2590).
+struct CtorCycleHit {
+    closing_span: Span,
+    path: Vec<String>,
+    members: Vec<String>,
+}
+
+/// Bound on the constructor-expansion walks below, per root type.
+/// Instantiation arguments are substituted textually, so adversarial
+/// nesting (`box[box[box[...]]]`) grows the rendered type at every level
+/// and neither the path guard nor the cycle check alone terminates the
+/// walk; past this many struct/alias expansions the walk stops descending.
+/// Every realistic decl resolves in a handful of expansions — the bound
+/// only bites on deliberately pathological nesting, and a cycle that
+/// closes within the bound is still reported.
+const MAX_CTOR_EXPANSIONS: usize = 1024;
+
+/// Shared DFS state for the two #3252 walks.
+struct CtorSearch<'a> {
+    ck: &'a Checker<'a>,
+    root: &'a str,
+    /// Instantiation keys currently open on this DFS path (`box[node]`,
+    /// `alias:bad`): re-entering one adds no fresh structure, so the
+    /// descent stops there.
+    on_path: HashSet<String>,
+    /// Rendered steps from the root to the type currently being walked.
+    path: Vec<String>,
+    /// Declared names expanded along `path` (the root first).
+    members: Vec<String>,
+    expansions: usize,
+}
+
+impl<'a> CtorSearch<'a> {
+    fn new(ck: &'a Checker<'a>, root: &'a str, root_rendered: String) -> Self {
+        CtorSearch {
+            ck,
+            root,
+            on_path: HashSet::new(),
+            path: vec![root_rendered],
+            members: vec![root.to_string()],
+            expansions: 0,
+        }
+    }
+
+    fn spend(&mut self) -> bool {
+        self.expansions += 1;
+        self.expansions <= MAX_CTOR_EXPANSIONS
+    }
+
+    fn hit(&self, closing_span: Span, closing_rendered: &str) -> CtorCycleHit {
+        let mut path = self.path.clone();
+        path.push(closing_rendered.to_string());
+        CtorCycleHit {
+            closing_span,
+            path,
+            members: self.members.clone(),
+        }
+    }
+
+    /// Expand the named struct `name` (an instantiation string like
+    /// `box[node]`, or a plain name) and walk its substituted fields with
+    /// `walk`. Returns None without walking when the name is not a declared
+    /// struct, the arity does not fit the declaration (another diagnostic
+    /// owns that), the instantiation is already open on this path, or the
+    /// expansion budget is spent.
+    fn expand_struct(
+        &mut self,
+        name: &str,
+        base: &str,
+        args: &[TypeExpr],
+        mut walk: impl FnMut(&mut Self, &TypeExpr) -> Option<CtorCycleHit>,
+    ) -> Option<CtorCycleHit> {
+        if !self.ck.structs.contains_key(base) {
+            return None;
+        }
+        let generic = self
+            .ck
+            .struct_type_params
+            .get(base)
+            .map_or(false, |p| !p.is_empty());
+        if generic != !args.is_empty() {
+            return None;
+        }
+        let key = format!("struct:{}", name);
+        if !self.on_path.insert(key.clone()) {
+            return None;
+        }
+        if !self.spend() {
+            self.on_path.remove(&key);
+            return None;
+        }
+        let fields = self
+            .ck
+            .struct_fields_for_sname(name)
+            .unwrap_or_else(|| self.ck.structs.get(base).cloned().unwrap_or_default());
+        self.path.push(name.to_string());
+        self.members.push(base.to_string());
+        let mut hit = None;
+        for (_, fty) in &fields {
+            if let Some(h) = walk(self, fty) {
+                hit = Some(h);
+                break;
+            }
+        }
+        if hit.is_none() {
+            self.path.pop();
+            self.members.pop();
+        }
+        self.on_path.remove(&key);
+        hit
+    }
+
+    /// Expand the alias `base` and walk its target with `walk`. Aliases are
+    /// transparent: the target denotes the same type.
+    fn expand_alias(
+        &mut self,
+        name: &str,
+        base: &str,
+        mut walk: impl FnMut(&mut Self, &TypeExpr) -> Option<CtorCycleHit>,
+    ) -> Option<CtorCycleHit> {
+        let target = self.ck.type_aliases.get(base)?;
+        let key = format!("alias:{}", base);
+        if !self.on_path.insert(key.clone()) {
+            return None;
+        }
+        if !self.spend() {
+            self.on_path.remove(&key);
+            return None;
+        }
+        self.path.push(name.to_string());
+        self.members.push(base.to_string());
+        let hit = walk(self, target);
+        if hit.is_none() {
+            self.path.pop();
+            self.members.pop();
+        }
+        self.on_path.remove(&key);
+        hit
+    }
+}
+
+/// Split a written named type into its base name and parsed type arguments
+/// (`box[node]` -> (`box`, [node]); plain names have no arguments).
+/// Dotted foreign names keep their dots and never match a local decl.
+fn split_named_type(name: &str) -> (String, Vec<TypeExpr>) {
+    match Checker::parse_generic_type_args(name) {
+        Some((base, args)) => (base.to_string(), args),
+        None => (Checker::base_named_type_str(name).to_string(), Vec::new()),
+    }
+}
+
+/// Issue #3252, struct roots: does the by-value containment expansion of
+/// `start` (the root struct's field types) reach the root again through at
+/// least one type constructor — a generic instantiation or an `option[T]`
+/// payload? Slices, maps, channels, fn types, and pointers are
+/// indirections and stop the descent; aliases are transparent.
+/// `root_params` is the root's own parameter list rendered (`"t"`), so a
+/// generic root only closes the cycle at its own instantiation
+/// (`box[t]` inside `box[t]`), not at a different one (`box[int]`).
+/// A cycle that closes with NO constructor step is a plain named-field
+/// cycle — #1566/#2590's graph owns it, so it is pruned, not reported.
+fn find_ctor_value_cycle(
+    ck: &Checker,
+    root: &str,
+    root_params: Option<&str>,
+    start: &[TypeExpr],
+) -> Option<CtorCycleHit> {
+    let root_rendered = match root_params {
+        Some(params) => format!("{}[{}]", root, params),
+        None => root.to_string(),
+    };
+    let mut search = CtorSearch::new(ck, root, root_rendered);
+    for ty in start {
+        if let Some(hit) = ctor_value_walk(&mut search, ty, root_params, false) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn ctor_value_walk(
+    search: &mut CtorSearch,
+    ty: &TypeExpr,
+    root_params: Option<&str>,
+    ctor: bool,
+) -> Option<CtorCycleHit> {
+    match ty {
+        TypeExpr::Named { name, span } => {
+            let (base, args) = split_named_type(name);
+            if base == search.root {
+                let args_match = match root_params {
+                    None => args.is_empty(),
+                    Some(params) => {
+                        args.iter()
+                            .map(|a| a.render())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                            == params
+                    }
+                };
+                if args_match {
+                    // The root again. Only a constructor-mediated cycle is
+                    // ours; a plain one is pruned (#2590 reports it). The
+                    // closing occurrence itself counts when it is an
+                    // instantiation (`box[t]` as a field of `box[t]`).
+                    return if ctor || !args.is_empty() {
+                        Some(search.hit(*span, name))
+                    } else {
+                        None
+                    };
+                }
+                // The root at a DIFFERENT instantiation (e.g. `box[int]`
+                // inside `box[t]`'s decl) is a distinct finite type:
+                // expand it like any other struct below.
+            }
+            if args.is_empty() && search.ck.type_aliases.contains_key(&base) {
+                return search.expand_alias(name, &base, |s, target| {
+                    ctor_value_walk(s, target, root_params, ctor)
+                });
+            }
+            search.expand_struct(name, &base, &args, |s, fty| {
+                ctor_value_walk(s, fty, root_params, ctor || !args.is_empty())
+            })
+        }
+        TypeExpr::Array { elem, .. } => {
+            search.path.push(ty.render());
+            let hit = ctor_value_walk(search, elem, root_params, ctor);
+            if hit.is_none() {
+                search.path.pop();
+            }
+            hit
+        }
+        TypeExpr::Option { elem, .. } => {
+            search.path.push(ty.render());
+            let hit = ctor_value_walk(search, elem, root_params, true);
+            if hit.is_none() {
+                search.path.pop();
+            }
+            hit
+        }
+        // Pointer / Slice / Map / Chan / Fn: indirections — the value does
+        // not contain the element type, so the cycle is broken here.
+        _ => None,
+    }
+}
+
+/// Issue #3252, alias roots: does the alias `root` occur anywhere in its
+/// target, expanding only aliases? An alias denotes its target and the
+/// emitted Go alias must expand to a finite type, so — unlike a struct —
+/// an indirection does NOT break the cycle: `type ns = []ns` is
+/// `invalid recursive type alias` in Go. The walk therefore descends
+/// through every constructor of the target (slices, maps, channels, fn
+/// types, pointers) and into instantiation arguments (`type a = box[a]`
+/// cannot expand either). A named defined type in the target is an atom:
+/// the walk does NOT descend into a struct's fields — `type ns = []node`
+/// stays legal even when `node` has an `ns` field, because the alias
+/// expands to the finite type `[]node`.
+fn find_alias_self_reference(ck: &Checker, root: &str, target: &TypeExpr) -> Option<CtorCycleHit> {
+    let mut search = CtorSearch::new(ck, root, root.to_string());
+    alias_ref_walk(&mut search, target)
+}
+
+fn alias_ref_walk(search: &mut CtorSearch, ty: &TypeExpr) -> Option<CtorCycleHit> {
+    match ty {
+        TypeExpr::Named { name, span } => {
+            let (base, args) = split_named_type(name);
+            if base == search.root {
+                return Some(search.hit(*span, name));
+            }
+            if args.is_empty() && search.ck.type_aliases.contains_key(&base) {
+                return search.expand_alias(name, &base, alias_ref_walk);
+            }
+            if args.is_empty() {
+                // A plain named type (struct, enum, builtin, foreign) is a
+                // complete atom in the alias's expansion.
+                return None;
+            }
+            // An instantiation: the alias occurs if it occurs in any of
+            // the type arguments (the substituted fields would contain
+            // it by construction).
+            search.path.push(name.clone());
+            let mut hit = None;
+            for arg in &args {
+                if let Some(h) = alias_ref_walk(search, arg) {
+                    hit = Some(h);
+                    break;
+                }
+            }
+            if hit.is_none() {
+                search.path.pop();
+            }
+            hit
+        }
+        TypeExpr::Pointer { to, .. }
+        | TypeExpr::Slice { elem: to, .. }
+        | TypeExpr::Array { elem: to, .. }
+        | TypeExpr::Chan { elem: to, .. }
+        | TypeExpr::Option { elem: to, .. } => {
+            search.path.push(ty.render());
+            let hit = alias_ref_walk(search, to);
+            if hit.is_none() {
+                search.path.pop();
+            }
+            hit
+        }
+        TypeExpr::Map { key, value, .. } => {
+            search.path.push(ty.render());
+            let hit = alias_ref_walk(search, key).or_else(|| alias_ref_walk(search, value));
+            if hit.is_none() {
+                search.path.pop();
+            }
+            hit
+        }
+        TypeExpr::Fn {
+            params, results, ..
+        } => {
+            search.path.push(ty.render());
+            let mut hit = None;
+            for p in params {
+                if let Some(h) = alias_ref_walk(search, &p.ty) {
+                    hit = Some(h);
+                    break;
+                }
+            }
+            if hit.is_none() {
+                for r in results {
+                    if let Some(h) = alias_ref_walk(search, r) {
+                        hit = Some(h);
+                        break;
+                    }
+                }
+            }
+            if hit.is_none() {
+                search.path.pop();
+            }
+            hit
         }
     }
 }
