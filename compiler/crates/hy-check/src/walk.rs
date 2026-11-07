@@ -52,6 +52,8 @@ pub(crate) struct FlatInfo<'a> {
     pub infinite_loop_end: HashMap<usize, usize>,
     /// managed-block index -> last index inside its body
     pub managed_end: HashMap<usize, usize>,
+    /// scope-block index -> last index inside its body (#1669 single authority)
+    pub scope_end: HashMap<usize, usize>,
     /// binding name -> last statement index referencing it
     pub last_use: HashMap<String, usize>,
     /// Scope events keyed by statement index (issue #14): applied BEFORE
@@ -81,6 +83,20 @@ impl<'a> FlatInfo<'a> {
     /// Is statement `idx` lexically inside a `managed` block (O6.1)?
     pub(crate) fn in_managed(&self, idx: usize) -> bool {
         self.managed_end.iter().any(|(&k, &v)| k < idx && idx <= v)
+    }
+
+    /// Is statement `idx` lexically inside a `scope` block (#1669)?
+    pub(crate) fn in_scope(&self, idx: usize) -> bool {
+        self.scope_end.iter().any(|(&k, &v)| k < idx && idx <= v)
+    }
+
+    /// Return the innermost `(scope_start, scope_end)` enclosing `idx` (#1669).
+    pub(crate) fn enclosing_scope(&self, idx: usize) -> Option<(usize, usize)> {
+        self.scope_end
+            .iter()
+            .filter(|(&k, &v)| k < idx && idx <= v)
+            .max_by_key(|(&k, _)| k)
+            .map(|(&k, &v)| (k, v))
     }
 
     /// Is statement `idx` lexically inside a `for`/`loop` body?
@@ -227,7 +243,12 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt, named_results: &[String]
                 }
             }
         }
-        Stmt::Block { block, .. } => scoped_block(out, block, named_results),
+        Stmt::Block { block, span } => {
+            scoped_block(out, block, named_results);
+            if span.start != block.span.start {
+                out.scope_end.insert(idx, out.next.saturating_sub(1));
+            }
+        }
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 let first = out.next;
