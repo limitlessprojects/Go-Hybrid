@@ -98,7 +98,6 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
         "serde_json.value" => Some(TypeShape::OwnHandle("serde_json.value".into())),
         "serde_json.view" => Some(TypeShape::BorrowHandle("serde_json.view".into())),
         "flate2.writer" => Some(TypeShape::OwnHandle("flate2.writer".into())),
-        "url.values" | "url.Values" => Some(TypeShape::Map(Box::new(TypeShape::Str), Box::new(TypeShape::Slice(Box::new(TypeShape::Str))))),
         "json.raw_message" | "json.RawMessage" => Some(TypeShape::Slice(Box::new(TypeShape::Primitive))),
         _ => {
             let root = name.split('.').next().unwrap_or("");
@@ -185,7 +184,7 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
-        ("url", "parse_query" | "ParseQuery") => TypeShape::Map(Box::new(TypeShape::Str), Box::new(TypeShape::Slice(Box::new(TypeShape::Str)))),
+        ("url", "parse_query" | "ParseQuery") => TypeShape::ForeignOpaque("url.values".into()),
         ("url", "parse" | "parse_request_uri" | "Parse" | "ParseRequestURI") => TypeShape::ForeignOpaque("url.url".into()),
         ("url", "query_escape" | "query_unescape" | "path_escape" | "path_unescape" | "join_path" | "QueryEscape" | "QueryUnescape" | "PathEscape" | "PathUnescape" | "JoinPath") => TypeShape::Str,
         ("json", "marshal" | "marshal_indent" | "Marshal" | "MarshalIndent") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
