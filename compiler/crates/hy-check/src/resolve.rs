@@ -53,6 +53,8 @@ const PREDECLARED: &[&str] = &[
     "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "usize", "isize",
     // option surface (example 07: `return some(v)` / `return none`)
     "some", "none",
+    // structured task scope & affine JoinHandle primitives (#1669)
+    "__hy_task_spawn", "join", "cancel", "drain",
     // wildcard binding target (`_ = x` is a Place::Ident, not a Lit)
     "_",
 ];
@@ -382,6 +384,14 @@ impl<'a> Scan<'a> {
                 }
             }
             Expr::Field { base, name, span } => {
+                if matches!(name.as_str(), "join" | "cancel" | "drain") {
+                    if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                        if self.local_decls.contains(root) {
+                            self.run_expr(base);
+                        }
+                        return;
+                    }
+                }
                 let unwrapped = crate::model::unwrap_parens(base);
                 if let Expr::Ident { name: root, .. } = unwrapped {
                     if !self.local_decls.contains(root) {

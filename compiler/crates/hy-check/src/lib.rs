@@ -67,6 +67,7 @@ mod walk;
 mod builtins;
 mod range_iter;
 mod recv;
+mod task_scope;
 mod try_context;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
@@ -958,6 +959,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     while !st.scopes.is_empty() {
         st.scope_pop();
     }
+    task_scope::check_fn_task_scopes(ck, body, &flat);
 
     // #123: closure bodies sit outside Pass B (A5), so process_assign and
     // process_call never see their writes — scan every FnLit for assign
