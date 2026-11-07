@@ -153,6 +153,15 @@ def run_checker(bin_path, hy_path, report_managed=False):
         not isinstance(d, dict) for d in diags
     ):
         raise RuntimeError(f"checker JSON envelope invalid for {hy_path}: summary/diagnostics")
+    # Match hy_diag::Severity's serialized variants before filtering/counting.
+    # Otherwise an unknown or missing severity silently disappears from both
+    # the error count and the acceptance decision.
+    for index, diagnostic in enumerate(diags):
+        if diagnostic.get("severity") not in ("error", "warning", "note"):
+            raise RuntimeError(
+                f"checker diagnostic severity invalid for {hy_path}: "
+                f"diagnostics[{index}] must have severity error, warning, or note"
+            )
     # Older fixtures may omit counts. When supplied, they must be integer
     # counts of the actual diagnostics, not contradictory evidence of a pass.
     for field, severity in (("errors", "error"), ("warnings", "warning")):
