@@ -126,17 +126,6 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
         | (
             "json" | "encoding/json",
             "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder",
-        )
-        | (
-            "httptest" | "net/http/httptest",
-            "new_server"
-                | "new_tls_server"
-                | "new_unstarted_server"
-                | "new_recorder"
-                | "NewServer"
-                | "NewTLSServer"
-                | "NewUnstartedServer"
-                | "NewRecorder",
         ) => {
             CallMode::Produce
         }
@@ -204,19 +193,6 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("json" | "encoding/json", "new_encoder" | "NewEncoder") => {
             TypeShape::ForeignOpaque("json.encoder".into())
         }
-        (
-            "httptest" | "net/http/httptest",
-            "new_server"
-                | "new_tls_server"
-                | "new_unstarted_server"
-                | "NewServer"
-                | "NewTLSServer"
-                | "NewUnstartedServer",
-        ) => TypeShape::ForeignOpaque("httptest.server".into()),
-        (
-            "httptest" | "net/http/httptest",
-            "new_recorder" | "NewRecorder",
-        ) => TypeShape::ForeignOpaque("httptest.response_recorder".into()),
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -582,20 +558,31 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     ];
     const JSON_ENCODER: &[&str] = &["encode", "set_escape_html", "set_indent"];
     const JSON_RAW_MESSAGE: &[&str] = &["marshal_json", "unmarshal_json"];
-    const HTTPTEST_SERVER: &[&str] = &[
-        "client",
-        "close",
-        "close_client_connections",
-        "start",
-        "start_tls",
-    ];
-    const HTTPTEST_RESPONSE_RECORDER: &[&str] = &[
-        "flush",
-        "header",
-        "result",
+    const HTTP_HANDLER: &[&str] = &["serve_http"];
+    const HTTP_RESPONSE_WRITER: &[&str] = &["header", "write", "write_header"];
+    const HTTP_SERVE_MUX: &[&str] = &["handle", "handle_func", "serve_http"];
+    const HTTP_HEADER: &[&str] = &[
+        "get",
+        "set",
+        "add",
+        "del",
+        "values",
+        "clone",
         "write",
-        "write_header",
-        "write_string",
+        "write_subset",
+    ];
+    const URL_VALUES: &[&str] = &["get", "set", "add", "del", "has", "encode"];
+    const TIME_DURATION: &[&str] = &[
+        "milliseconds",
+        "microseconds",
+        "nanoseconds",
+        "seconds",
+        "minutes",
+        "hours",
+        "string",
+        "truncate",
+        "round",
+        "abs",
     ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
@@ -627,10 +614,12 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "json.decoder" | "json.Decoder" => Some(JSON_DECODER),
         "json.encoder" | "json.Encoder" => Some(JSON_ENCODER),
         "json.raw_message" | "json.rawmessage" | "json.RawMessage" => Some(JSON_RAW_MESSAGE),
-        "httptest.server" | "httptest.Server" => Some(HTTPTEST_SERVER),
-        "httptest.response_recorder"
-        | "httptest.responserecorder"
-        | "httptest.ResponseRecorder" => Some(HTTPTEST_RESPONSE_RECORDER),
+        "http.handler" | "http.Handler" => Some(HTTP_HANDLER),
+        "http.response_writer" | "http.ResponseWriter" => Some(HTTP_RESPONSE_WRITER),
+        "http.serve_mux" | "http.ServeMux" => Some(HTTP_SERVE_MUX),
+        "http.header" | "http.Header" => Some(HTTP_HEADER),
+        "url.values" | "url.Values" => Some(URL_VALUES),
+        "time.duration" | "time.Duration" => Some(TIME_DURATION),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -683,6 +672,9 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
+        }
+        ("http.response_writer" | "http.ResponseWriter", "header") => {
+            TypeShape::ForeignOpaque("http.header".into())
         }
         // scalar atomics only ("atomic.int" is receiver_type_name's key for
         // TypeShape::Atomic): load/swap/add yield the scalar. A non-scalar
