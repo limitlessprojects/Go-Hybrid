@@ -7653,6 +7653,39 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    // #3598: `fmt.eprintln(...)`, `fmt.eprint(...)`, and
+                    // `fmt.eprintf(...)` lower to `fmt.Fprintln(os.Stderr, ...)`,
+                    // `fmt.Fprint(os.Stderr, ...)`, and `fmt.Fprintf(os.Stderr, ...)`.
+                    // When `os` is shadowed by an in-scope parameter, local binding,
+                    // package-level const, struct, enum, type alias, or fn, emitted Go
+                    // resolves `os.Stderr` to that local binding instead of the `os`
+                    // package, causing `os.Stderr undefined` (Row 13 BUILDABLE).
+                    if pkg == "fmt"
+                        && self.lookup_kind(pkg).is_none()
+                        && matches!(name.as_str(), "eprint" | "eprintln" | "eprintf")
+                        && (self.scopes.iter().any(|s| s.contains_key("os"))
+                            || self.lookup_kind("os").is_some()
+                            || self.ck.consts.contains_key("os")
+                            || self.ck.structs.contains_key("os")
+                            || self.ck.enums.contains_key("os")
+                            || self.ck.type_aliases.contains_key("os")
+                            || self.ck.fns.contains_key("os")
+                            || self.ck.file.decls.iter().any(|d| match d {
+                                hy_syntax::Decl::Import { path, .. } => {
+                                    path != "os" && path.rsplit('/').next() == Some("os")
+                                }
+                                _ => false,
+                            }))
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`fmt.{}` cannot be used when `os` is shadowed — emitted Go resolves `os.Stderr` to the in-scope binding (HYB-E1002)",
+                                name
+                            ),
+                            "rename the shadowing `os` binding or write directly to a stream without shadowing the `os` package",
+                        );
+                    }
                     if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
