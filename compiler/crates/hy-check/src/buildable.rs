@@ -1090,36 +1090,69 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #2915: `opt.or(default)` on an `option[T]` needs `default` of type `T`.
-    fn check_option_method_arg(&mut self, callee: &Expr, args: &[CallArg]) {
+    /// #2915, #3164: `opt.or(default)` on an `option[T]` needs exactly 1 arg of type `T`,
+    /// while `unwrap()`, `is_some()`, and `is_none()` accept 0 arguments.
+    fn check_option_method_arg(&mut self, callee: &Expr, args: &[CallArg], call_span: Span) {
         let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
             return;
         };
-        if name != "or" || args.len() != 1 {
-            return;
-        }
         let bk = self.kind_of_expr(base);
         let OpKind::Option(elem) = bk else {
             return;
         };
-        let want = *elem;
-        let got = self.kind_of_expr(&args[0].value);
-        let int_to_float_conflict = want == OpKind::Float
-            && got == OpKind::Int
-            && !self.is_untyped_int_const(&args[0].value);
-        if kinds_conflict(&want, &got) || int_to_float_conflict {
-            self.emit_e1002(
-                args[0].value.span(),
-                format!(
-                    "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.or` on `option[{}]` (HYB-E1002)",
-                    args[0].value.render(),
-                    got.label(),
-                    want.label(),
-                    base.render(),
-                    want.label()
-                ),
-                "argument to `option.or` must match the option payload type",
-            );
+        match name.as_str() {
+            "unwrap" | "is_some" | "is_none" => {
+                if !args.is_empty() {
+                    self.emit_e1002(
+                        call_span,
+                        format!(
+                            "too many arguments in call to `{}.{}` on `option[{}]` (expected 0, got {}) (HYB-E1002)",
+                            base.render(),
+                            name,
+                            elem.label(),
+                            args.len()
+                        ),
+                        format!("`option.{}` takes no arguments", name).as_str(),
+                    );
+                }
+            }
+            "or" => {
+                if args.len() != 1 {
+                    let word = if args.is_empty() { "not enough" } else { "too many" };
+                    self.emit_e1002(
+                        call_span,
+                        format!(
+                            "{} arguments in call to `{}.or` on `option[{}]` (expected 1, got {}) (HYB-E1002)",
+                            word,
+                            base.render(),
+                            elem.label(),
+                            args.len()
+                        ),
+                        "`option.or` takes exactly 1 argument (the default fallback value)",
+                    );
+                    return;
+                }
+                let want = *elem;
+                let got = self.kind_of_expr(&args[0].value);
+                let int_to_float_conflict = want == OpKind::Float
+                    && got == OpKind::Int
+                    && !self.is_untyped_int_const(&args[0].value);
+                if kinds_conflict(&want, &got) || int_to_float_conflict {
+                    self.emit_e1002(
+                        args[0].value.span(),
+                        format!(
+                            "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.or` on `option[{}]` (HYB-E1002)",
+                            args[0].value.render(),
+                            got.label(),
+                            want.label(),
+                            base.render(),
+                            want.label()
+                        ),
+                        "argument to `option.or` must match the option payload type",
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
@@ -3003,7 +3036,7 @@ impl<'a> Collector<'a> {
                 }
                 self.check_call_operands(callee, args, *span);
                 self.check_set_method_arg(callee, args);
-                self.check_option_method_arg(callee, args);
+                self.check_option_method_arg(callee, args, *span);
             }
             Expr::StructLit { ty, fields, span } => {
                 if let Some(t) = ty {
