@@ -382,6 +382,62 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "write", "write_byte", "write_rune", "write_string",
         "grow", "reset", "string", "len", "cap",
     ];
+    const SYNC_COND: &[&str] = &["wait", "signal", "broadcast"];
+    const SYNC_POOL: &[&str] = &["get", "put"];
+    const SYNC_MAP: &[&str] = &[
+        "load",
+        "store",
+        "delete",
+        "load_or_store",
+        "load_and_delete",
+        "range",
+        "compare_and_swap",
+        "compare_and_delete",
+        "swap",
+    ];
+    const TIME_TICKER: &[&str] = &["stop", "reset"];
+    const TIME_TIMER: &[&str] = &["stop", "reset"];
+    /// `bufio.Reader` — Go standard library buffered reader methods.
+    const BUFIO_READER: &[&str] = &[
+        "buffered",
+        "discard",
+        "peek",
+        "read",
+        "read_byte",
+        "read_bytes",
+        "read_line",
+        "read_rune",
+        "read_slice",
+        "read_string",
+        "reset",
+        "size",
+        "unread_byte",
+        "unread_rune",
+        "write_to",
+    ];
+    /// `bufio.Writer` — Go standard library buffered writer methods.
+    const BUFIO_WRITER: &[&str] = &[
+        "available",
+        "available_buffer",
+        "buffered",
+        "flush",
+        "read_from",
+        "reset",
+        "size",
+        "write",
+        "write_byte",
+        "write_rune",
+        "write_string",
+    ];
+    /// `bufio.Scanner` — Go standard library buffered scanner methods.
+    const BUFIO_SCANNER: &[&str] = &[
+        "buffer",
+        "bytes",
+        "err",
+        "scan",
+        "split",
+        "text",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -389,6 +445,14 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "sync.once" | "sync.Once" => Some(SYNC_ONCE),
         "bytes.buffer" | "bytes.Buffer" => Some(BYTES_BUFFER),
         "strings.builder" | "strings.Builder" => Some(STRINGS_BUILDER),
+        "sync.cond" | "sync.Cond" => Some(SYNC_COND),
+        "sync.pool" | "sync.Pool" => Some(SYNC_POOL),
+        "sync.map" | "sync.Map" => Some(SYNC_MAP),
+        "time.ticker" | "time.Ticker" => Some(TIME_TICKER),
+        "time.timer" | "time.Timer" => Some(TIME_TIMER),
+        "bufio.reader" | "bufio.Reader" => Some(BUFIO_READER),
+        "bufio.writer" | "bufio.Writer" => Some(BUFIO_WRITER),
+        "bufio.scanner" | "bufio.Scanner" => Some(BUFIO_SCANNER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
