@@ -614,6 +614,19 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "system_time",
         "user_time",
     ];
+    const STRINGS_READER: &[&str] = &[
+        "len",
+        "read",
+        "read_at",
+        "read_byte",
+        "read_rune",
+        "reset",
+        "seek",
+        "size",
+        "unread_byte",
+        "unread_rune",
+        "write_to",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -650,6 +663,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         | "httptest.ResponseRecorder" => Some(HTTPTEST_RESPONSE_RECORDER),
         "os.process" | "os.Process" => Some(OS_PROCESS),
         "os.process_state" | "os.processstate" | "os.ProcessState" => Some(OS_PROCESS_STATE),
+        "strings.reader" | "strings.Reader" => Some(STRINGS_READER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -699,6 +713,7 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         }
         ("http.request" | "http.Request", "cookie") => TypeShape::ForeignOpaque("http.cookie".into()),
         ("http.response" | "http.Response", "location") => TypeShape::ForeignOpaque("url.url".into()),
+        ("strings.reader" | "strings.Reader", "len" | "size") => TypeShape::Primitive,
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
