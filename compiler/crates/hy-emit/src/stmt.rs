@@ -1682,6 +1682,7 @@ impl Emitter {
         }
     }
 
+
     pub fn type_of_place(&self, p: &Place) -> Option<&'static str> {
         match &p.kind {
             PlaceKind::Ident(name) => {
@@ -1708,7 +1709,14 @@ impl Emitter {
                 }
             }
             PlaceKind::AddrOf { base } => self.type_of_place(base),
-            PlaceKind::Index { .. } => None,
+            PlaceKind::Index { base, .. } => {
+                if let Some(bt) = self.type_of_place(base) {
+                    if let Some(m) = super::shapes::lookup_member(bt, "index") {
+                        return m.result;
+                    }
+                }
+                None
+            }
         }
     }
 
