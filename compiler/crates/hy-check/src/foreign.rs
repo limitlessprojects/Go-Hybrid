@@ -372,11 +372,28 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
     const SYNC_WAIT_GROUP: &[&str] = &["add", "done", "wait"];
     const SYNC_ONCE: &[&str] = &["do"];
+    /// `os.FileInfo` — standard library file metadata interface.
+    const OS_FILE_INFO: &[&str] = &[
+        "name",
+        "size",
+        "mode",
+        "mod_time",
+        "is_dir",
+        "sys",
+    ];
+    /// `os.DirEntry` — standard library directory entry interface.
+    const OS_DIR_ENTRY: &[&str] = &[
+        "name",
+        "is_dir",
+        "info",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
         "sync.once" | "sync.Once" => Some(SYNC_ONCE),
+        "os.file_info" | "os.fileinfo" | "os.FileInfo" => Some(OS_FILE_INFO),
+        "os.dir_entry" | "os.direntry" | "os.DirEntry" => Some(OS_DIR_ENTRY),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -420,6 +437,19 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        ("os.file_info" | "os.fileinfo" | "os.FileInfo", "name") => TypeShape::Str,
+        ("os.file_info" | "os.fileinfo" | "os.FileInfo", "size" | "is_dir") => TypeShape::Primitive,
+        ("os.file_info" | "os.fileinfo" | "os.FileInfo", "mod_time") => {
+            TypeShape::ForeignOpaque("time.time".into())
+        }
+        ("os.file_info" | "os.fileinfo" | "os.FileInfo", "mode") => {
+            TypeShape::ForeignOpaque("os.file_mode".into())
+        }
+        ("os.dir_entry" | "os.direntry" | "os.DirEntry", "name") => TypeShape::Str,
+        ("os.dir_entry" | "os.direntry" | "os.DirEntry", "is_dir") => TypeShape::Primitive,
+        ("os.dir_entry" | "os.direntry" | "os.DirEntry", "type") => {
+            TypeShape::ForeignOpaque("os.file_mode".into())
+        },
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
