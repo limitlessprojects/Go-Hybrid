@@ -457,3 +457,14 @@
 - All batteries ALL-GREEN (exit 0, 0 failed; corpus tripwire not fired; differential FULL); remote asserted per push; replies 201 x3. Zero dup replies, zero silent closes.
 - Suites 478 -> 480 (+2 integration: vendor_runtime_target_dir, build_output expansions; 3925 adds python-side tests only).
 - Next queue: #3938, #3942/#3949 (CrowAleksito may_share/closure moves), #3946 (installer mv PATH fix), #3950 (IR --emit-proof, fixes #3930), #3947/#3948 if open.
+
+## Session 140 — 2026-11-07 21:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef2329, repo at S139 head a5e55781); rust 1.99.0 + go1.26.9 restored; approve 6/6 (4994 left); scan skipped.
+- **1 landed, 2 gate-fails (both author-fixture defects), 1 dup**:
+  - **#3938** -> `7b8b7d24` (Burapa-J, fixes #3937): addressable.rs — &arr[i:j]/[]T, *pa/[N]T inference, PlaceKind::AddrOf recursion, closure const_names seeding. Auto-merge clean. 480 suites (tests extend existing suite), corpus 135, differential FULL. Reply 201.
+  - **#3942 GATE FAIL** (CrowAleksito, fixes #3939/#3940): source changes plausible but its own new test file fails to PARSE — fixtures use uppercase type params (`[T ...]`, `WorkerID`) rejected by LX2 identifier-case (HYB-E0001, 9 diagnostics); 3/4 tests panic at must-parse. Battery stopped at cargo. Reset to 7b8b7d24 (never pushed). Evidence reply with recipe (lowercase like existing fixtures: box[t any], fn id[t any]).
+  - **#3949 GATE FAIL** (CrowAleksito/Alejandro Auquilla, fixes #3947/#3948): its new test file doesn't COMPILE — multi-line Hybrid fixtures inside Rust `"` strings with unescaped inner quotes (6x suffix-errors, 12x expected-operator, first at m["worker"]). Same fixture-habit class as #3942, called out in the reply. Reset. Evidence reply with recipe (escaped \" or r#"..."# raw strings).
+  - **#3946 DUP** (Yumihariii, fixes #3945): one-line add of mv to required_tools — main already landed it via `558435fc` ("fix installer runtime fixture missing mv command"); harness test 14/14 OK on main. Hall-of-fame reply, PR stays open per no-silent-close.
+- Two rollbacks exercised cleanly (reset --hard to pre-merge, remote untouched, evidence replies 201). Zero silent closes. Trial-merge battery caught both author-side defects exactly as designed — source changes in both PRs may be fine; only fixtures block.
+- Suites 480 unchanged this tick (+0: 3938 extends existing suite file; 3942/3949 never landed).
+- Next queue: #3950 (IR --emit-proof, fixes #3930), then sweep for new PRs; watch for #3942/#3949 fixture fixes; #3918 still awaiting author's net.dialer registration fix.
