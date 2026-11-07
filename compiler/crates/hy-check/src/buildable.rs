@@ -544,6 +544,12 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Interface, _) => false,
         (a, b) if a == b => false,
 
+        // #2482: An interface (`any`) value cannot be converted to a concrete
+        // type in Go without a type assertion `x.(T)` (`cannot convert ... to type ...: need type assertion`).
+        // Hybrid has no type assertion syntax, so converting `any` to any concrete
+        // type is always invalid. The reverse direction (`any(concrete)`) is handled above.
+        (other, Interface) if !matches!(other, Unknown | Interface) => true,
+
         // An `option[T]` value lowers to the generic prelude struct
         // `option[T]`; Go converts it to nothing but itself or an interface
         // (`u8(op)`, `float64(op)`, `string(op)` fail `go build` with
@@ -612,7 +618,6 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
                 a != b
             }
         }
-        (Pointer(_), Interface) => false,
         (Pointer(_), _) | (_, Pointer(_)) => true,
 
         _ => false,
@@ -4090,6 +4095,7 @@ impl<'a> Collector<'a> {
                 }
                 match name.as_str() {
                     "len" | "cap" | "copy" => return Some(vec![OpKind::Int]),
+                    "real" | "imag" => return Some(vec![OpKind::Float]),
                     "append" => {
                         let first = args
                             .first()
@@ -7773,6 +7779,73 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+                    if pkg == "time"
+                        && self.lookup_kind(pkg).is_none()
+                        && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
+                    {
+                        if args.len() != 1 {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`time.{}` takes exactly 1 argument `(n)`, got {} (HYB-E1002)",
+                                    name,
+                                    args.len()
+                                ),
+                                &format!("write `time.{}(10)` (SPEC duration constructor)", name),
+                            );
+                        } else {
+                            let bare = unwrap_parens(&args[0].value);
+                            if matches!(
+                                bare,
+                                Expr::Lit {
+                                    kind: LitKind::Str(_)
+                                        | LitKind::RawStr(_)
+                                        | LitKind::Bool(_)
+                                        | LitKind::Char(_)
+                                        | LitKind::Nil,
+                                    ..
+                                }
+                            ) {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`time.{}` requires a numeric argument, found non-numeric literal (HYB-E1002)",
+                                        name
+                                    ),
+                                    &format!("pass an integer or numeric expression to `time.{}`", name),
+                                );
+                            }
+                        }
+                    }
+                    if pkg == "os"
+                        && self.lookup_kind(pkg).is_none()
+                        && matches!(name.as_str(), "args" | "stdout" | "stderr" | "stdin")
+                        && !args.is_empty()
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`os.{}` takes no arguments, got {} (HYB-E1002)",
+                                name,
+                                args.len()
+                            ),
+                            &format!("write `os.{}` (package variable, not a function)", name),
+                        );
+                    }
+                    if pkg == "hex"
+                        && self.lookup_kind(pkg).is_none()
+                        && name == "encode"
+                        && args.len() != 1
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.encode` takes exactly 1 slice argument `(src)`, got {} (HYB-E1002)",
+                                args.len()
+                            ),
+                            "write `hex.encode(data)` (SPEC M5 hex encoding)",
+                        );
+                    }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -8256,6 +8329,7 @@ impl<'a> Collector<'a> {
         if matches!(
             name,
             "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
+                | "real" | "imag" | "complex"
         ) && args.iter().any(|a| a.spread)
         {
             self.emit_e1002(
@@ -8732,6 +8806,69 @@ impl<'a> Collector<'a> {
                 }
             }
 
+            "real" | "imag" => {
+                if args.len() != 1 {
+                    return; // arity handled by builtins.rs
+                }
+                let op = &args[0].value;
+                let ak = self.kind_of_expr(op);
+                if matches!(
+                    ak,
+                    OpKind::Str
+                        | OpKind::Bool
+                        | OpKind::Slice(_)
+                        | OpKind::Array(_)
+                        | OpKind::Map(_, _)
+                        | OpKind::Chan(_)
+                        | OpKind::Struct(_)
+                        | OpKind::Pointer(_)
+                        | OpKind::Fn(..)
+                        | OpKind::Interface
+                ) {
+                    self.emit_e1002(
+                        op.span(),
+                        format!(
+                            "invalid argument `{}` (type `{}`) for built-in `{name}` — Go refuses `invalid argument: {} (must be complex)` (HYB-E1002)",
+                            op.render(),
+                            ak.label(),
+                            op.render()
+                        ),
+                        "argument to `real` or `imag` must be a complex number (`complex64` or `complex128`)",
+                    );
+                }
+            }
+            "complex" => {
+                if args.len() != 2 {
+                    return; // arity handled by builtins.rs
+                }
+                for arg in args {
+                    let ak = self.kind_of_expr(&arg.value);
+                    if matches!(
+                        ak,
+                        OpKind::Str
+                            | OpKind::Bool
+                            | OpKind::Slice(_)
+                            | OpKind::Array(_)
+                            | OpKind::Map(_, _)
+                            | OpKind::Chan(_)
+                            | OpKind::Struct(_)
+                            | OpKind::Pointer(_)
+                            | OpKind::Fn(..)
+                            | OpKind::Interface
+                    ) {
+                        self.emit_e1002(
+                            arg.value.span(),
+                            format!(
+                                "invalid argument `{}` (type `{}`) in `complex` — Go refuses `invalid argument: {} (must be float)` (HYB-E1002)",
+                                arg.value.render(),
+                                ak.label(),
+                                arg.value.render()
+                            ),
+                            "arguments to `complex` must be floating-point numbers (`float32` or `float64`)",
+                        );
+                    }
+                }
+            }
             "new" => {
                 if args.len() != 1 {
                     return; // arity handled by builtins.rs
