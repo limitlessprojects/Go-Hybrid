@@ -438,11 +438,11 @@
 
 ## Session 138 — 2026-11-07 18:10 UTC+8 tick
 - env cold-recycled (rootfs c-6aeef8f9, repo at S137 head 67365d19); rust 1.99.0 + go1.26.9 restored; approve 4/4 (4993 left); scan skipped.
-- **4 landed**:
+- **3 landed** (#3913 is the companion bullet in the list, not a 4th):
   - **#3905** -> `b3c9501f` (PuchyG, fixes #3839): false E3005 fix — shape_of_expr Pointer(Array(e)) arms for Index (-> element) and Slice (-> Slice(e)), Str index -> byte; regression test ptr-array hops w/ HYB-E2010 rejections. Auto-merge clean.
   - **#3912** -> `ecbbeb90` (gorky117-cell): is_non_nilable += OpKind::Option(_) — untyped nil equality/match vs option (struct-hyOption) now rejects.
   - **#3913** -> `76195f8a` (gorky117-cell): conversion-target guard — option[T] and curated foreign handles refuse scalar/non-struct conversions (anti-laundering). Companion to #3912.
   - All auto-merged clean, all batteries ALL-GREEN (corpus tripwire not fired, differential FULL), remote asserted per push, replies 201 x4.
 - **SUITE-COUNT FORENSIC**: #3905 battery showed 476 'ok' lines instead of expected 477; full forensic (grep -c vs grep -n contradictions, python find() vs repr mismatch in same run — stdout-layer garble again) resolved via write-to-file+Read: run was GREEN exit 0, all 466 integration files ran, new suite passed. Breakdown: 466 integration + 5 unittests + 4 doctests = 475 accounted; +1 doctest-line noise across fresh-toolchain rebuilds (last tick's 476 included one line this run doesn't emit). Count metric has ±1 noise in unit/doctest section; integration-file count (465->466->467->468) is the stable metric. #3912/#3913 batteries confirmed 477/478 consistent with +1 file each.
-- Suites 476 -> 478 (+2 integration files 466->468; count-noise lesson). Incremental trimmed; rootfs 76% used.
+- Suites 476 -> 478 (+1 integration file per landing: 466->467->468 for #3905/#3912/#3913; count-noise lesson). Incremental trimmed; rootfs 76% used.
 - Next queue: #3914, #3907, #3925 (triage board validation), #3938, #3942/#3949 (CrowAleksito may_share/closure moves), #3946 (installer mv PATH fix), #3950 (IR --emit-proof, fixes #3930).
