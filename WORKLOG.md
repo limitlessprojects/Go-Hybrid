@@ -424,3 +424,65 @@
 - **Union-hazard hardening (procedure change)**: after union_resolve.py, now (1) bracket-balance gate on stripped-strings content, (2) `cargo check` fast gate BEFORE merge commit, (3) optional `git merge-file --union` ground-truth diff for high-risk hunks. Root cause: git conflict hunks can cut inside multi-line const arrays / match arms; naive verbatim concat then welds or drops delimiters. Three consecutive PRs hit it (#3929 arity weld, #3932 `];` drop, #3935 `];` drop).
 - Suites 468 -> 473 (+5). Incremental dir trimmed post-batteries per S135 hygiene note; rootfs 76% used
 - Next queue: last family sibling #3944 (net.ip/address), then non-family #3902/#3904/#3905/#3912/#3913/#3914/#3907/#3925/#3938/#3942/#3946/#3949/#3950; #3918 awaits author fix (net.dialer registration).
+
+## Session 137 — 2026-11-07 17:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aeeeae9, repo at S136 head 9bdde9aa); rust 1.99.0 + go1.26.9 restored; approve 4/4 (4984 left); scan skipped.
+- **3 landed — surface wave closed + first non-family pair**:
+  - **#3944** -> `23924015` (bradwue313, fixes #3943): net.ip/net.ip_mask/net.ipnet/net.addr surfaces (4 tables, 27 methods). Union 2 conflicts, both new gates (bracket-balance + cargo check) clean pre-commit. **Surface sibling wave CLOSED: 11/12 landed; #3918 still awaiting author's net.dialer registration fix.** 474 suites.
+  - **#3902** -> `7d0d5bb9` (Aurore, fixes #3901): hy-emit elided struct field literals in nested/n5 positions + const-length array padding (hyIdx loop closure) + unwrap_parens/constconv::parse_int route. Auto-merge clean. 475 suites.
+  - **#3904** -> `8d96c727` (Aurore, fixes #3903): const float + aliased-conversion overflow checks (alias transparency). Auto-merge clean. 476 suites.
+- **SANDBOX LESSON (tool-layer)**: bash stdout layer garbled file-content output this tick — grep -n displayed a phantom `hyArryIdx]` typo in #3902's emitted-Go template that does NOT exist in the file (grep -c contradicted grep -n; python find() contradicted its own repr in the same run). Bypass: python writes analysis to /tmp file, Read tool reads it — actual content is correct `hyArr[hyIdx]` (0 occurrences of the phantom). Procedure going forward: content-verdict decisions (typos, fixups) MUST go through write-to-file + Read, never through trust of stdout display. No in-merge fixup was needed on #3902; had I trusted stdout I would have "fixed" a non-existent bug.
+- All batteries on merged main: corpus 135/135 tripwire-not-fired, differential FULL AGREEMENT, remote asserted after each push, landing replies 201 x3. Zero dup replies, zero silent closes.
+- Suites 473 -> 476 (+3). Incremental trimmed post-batteries; rootfs 75% used.
+- Next queue: #3905 (false E3005), #3912/#3913 (gorky117 nil/option), #3914, #3907, #3925 (triage board validation), #3938, #3942/#3949 (CrowAleksito may_share/closure moves), #3946 (installer mv PATH fix), #3950 (IR --emit-proof, fixes #3930).
+
+## Session 138 — 2026-11-07 18:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aeef8f9, repo at S137 head 67365d19); rust 1.99.0 + go1.26.9 restored; approve 4/4 (4993 left); scan skipped.
+- **3 landed** (#3913 is the companion bullet in the list, not a 4th):
+  - **#3905** -> `b3c9501f` (PuchyG, fixes #3839): false E3005 fix — shape_of_expr Pointer(Array(e)) arms for Index (-> element) and Slice (-> Slice(e)), Str index -> byte; regression test ptr-array hops w/ HYB-E2010 rejections. Auto-merge clean.
+  - **#3912** -> `ecbbeb90` (gorky117-cell): is_non_nilable += OpKind::Option(_) — untyped nil equality/match vs option (struct-hyOption) now rejects.
+  - **#3913** -> `76195f8a` (gorky117-cell): conversion-target guard — option[T] and curated foreign handles refuse scalar/non-struct conversions (anti-laundering). Companion to #3912.
+  - All auto-merged clean, all batteries ALL-GREEN (corpus tripwire not fired, differential FULL), remote asserted per push, replies 201 x4.
+- **SUITE-COUNT FORENSIC**: #3905 battery showed 476 'ok' lines instead of expected 477; full forensic (grep -c vs grep -n contradictions, python find() vs repr mismatch in same run — stdout-layer garble again) resolved via write-to-file+Read: run was GREEN exit 0, all 466 integration files ran, new suite passed. Breakdown: 466 integration + 5 unittests + 4 doctests = 475 accounted; +1 doctest-line noise across fresh-toolchain rebuilds (last tick's 476 included one line this run doesn't emit). Count metric has ±1 noise in unit/doctest section; integration-file count (465->466->467->468) is the stable metric. #3912/#3913 batteries confirmed 477/478 consistent with +1 file each.
+- Suites 476 -> 478 (+1 integration file per landing: 466->467->468 for #3905/#3912/#3913; count-noise lesson). Incremental trimmed; rootfs 76% used.
+- Next queue: #3914, #3907, #3925 (triage board validation), #3938, #3942/#3949 (CrowAleksito may_share/closure moves), #3946 (installer mv PATH fix), #3950 (IR --emit-proof, fixes #3930).
+
+## Session 139 — 2026-11-07 20:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef1519, repo at S138 head 21b2fee8); rust 1.99.0 + go1.26.9 restored; approve 5/5 (4995 left); scan skipped.
+- **3 landed**:
+  - **#3914** -> `54d2ede5` (ZiJW): hyb vendor-runtime resolves relative CARGO_TARGET_DIR from caller cwd (cwd-split bug); PLAN.md union-resolved. 479 suites.
+  - **#3907** -> `9f84b38e` (ZiJW): hyb build refuses to clobber user-owned Go sidecars (unmarked -> refuse, marked -> keep); PLAN.md+STATUS.md union-resolved. 480 suites.
+  - **#3925** -> `c6270b73` (samman555): triage_bot board --post validates target before body replace (is_board_issue trust ladder + board_target fail-closed + board_issue 940 pinned); STATUS.md union-resolved. Offline repro 12 tests OK. 480 suites (python-side tests).
+- One env hiccup: first 3925 merge state vanished between calls (working tree reverted to HEAD, no MERGE_HEAD) — re-ran the merge fresh (conflict set differed: only STATUS.md this time), union-resolved, committed; content verified identical intent.
+- All batteries ALL-GREEN (exit 0, 0 failed; corpus tripwire not fired; differential FULL); remote asserted per push; replies 201 x3. Zero dup replies, zero silent closes.
+- Suites 478 -> 480 (+2 integration: vendor_runtime_target_dir, build_output expansions; 3925 adds python-side tests only).
+- Next queue: #3938, #3942/#3949 (CrowAleksito may_share/closure moves), #3946 (installer mv PATH fix), #3950 (IR --emit-proof, fixes #3930), #3947/#3948 if open.
+
+## Session 140 — 2026-11-07 21:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef2329, repo at S139 head a5e55781); rust 1.99.0 + go1.26.9 restored; approve 6/6 (4994 left); scan skipped.
+- **1 landed, 2 gate-fails (both author-fixture defects), 1 dup**:
+  - **#3938** -> `7b8b7d24` (Burapa-J, fixes #3937): addressable.rs — &arr[i:j]/[]T, *pa/[N]T inference, PlaceKind::AddrOf recursion, closure const_names seeding. Auto-merge clean. 480 suites (tests extend existing suite), corpus 135, differential FULL. Reply 201.
+  - **#3942 GATE FAIL** (CrowAleksito, fixes #3939/#3940): source changes plausible but its own new test file fails to PARSE — fixtures use uppercase type params (`[T ...]`, `WorkerID`) rejected by LX2 identifier-case (HYB-E0001, 9 diagnostics); 3/4 tests panic at must-parse. Battery stopped at cargo. Reset to 7b8b7d24 (never pushed). Evidence reply with recipe (lowercase like existing fixtures: box[t any], fn id[t any]).
+  - **#3949 GATE FAIL** (CrowAleksito/Alejandro Auquilla, fixes #3947/#3948): its new test file doesn't COMPILE — multi-line Hybrid fixtures inside Rust `"` strings with unescaped inner quotes (6x suffix-errors, 12x expected-operator, first at m["worker"]). Same fixture-habit class as #3942, called out in the reply. Reset. Evidence reply with recipe (escaped \" or r#"..."# raw strings).
+  - **#3946 DUP** (Yumihariii, fixes #3945): one-line add of mv to required_tools — main already landed it via `558435fc` ("fix installer runtime fixture missing mv command"); harness test 14/14 OK on main. Hall-of-fame reply, PR stays open per no-silent-close.
+- Two rollbacks exercised cleanly (reset --hard to pre-merge, remote untouched, evidence replies 201). Zero silent closes. Trial-merge battery caught both author-side defects exactly as designed — source changes in both PRs may be fine; only fixtures block.
+- Suites 480 unchanged this tick (+0: 3938 extends existing suite file; 3942/3949 never landed).
+- Next queue: #3950 (IR --emit-proof, fixes #3930), then sweep for new PRs; watch for #3942/#3949 fixture fixes; #3918 still awaiting author's net.dialer registration fix.
+
+## Session 140b — 2026-11-07 23:10 UTC+8 tick
+- env cold-recycled again (rootfs c-6aef3f49, rust/go both absent); full toolchain restore; approve 6/6 (4994 left); scan timed out at 150s (1114 items) — skipped per quota doctrine, swept open PRs via API instead.
+- **2 landed this tick**:
+  - **#3950** -> `54b73340` (maximk99911-hue, fixes #3930): hy-emit witness table — Witness{site,span,FNV-1a-64 of printed sub-AST} per task/send site, `emit_go_with_proof` -> proof.json; `hyb build --emit-proof` fail-closed verifier (re-read+re-parse+re-emit+recompare); package mode rejects --emit-proof. Auto-merge clean (6 files). suites +0 (no new test file; 471 integration files), corpus 135, differential FULL. Two stdout-garble suspects (witness_task signature, `proof2 != *proof` typing) disproven via committed-blob Read — S137 protocol saved the review twice. Reply 201.
+  - **#3808** -> `dc6c14b5` (bradwue313, fixes #3806): iterate_var_tys extracted to shape.rs as single source of truth, threaded through Pass B + emit_guard + closures; For-Range (typed_int_bound) and Select-Recv (chan_elem_ty/bool) binder types now reach define_binding; closure binder HYB-E2009/E6002 checks restored. Auto-merge clean (5 files). New test file -> 472 integration files, all green; corpus 135; differential FULL. First battery attempt died `ld signal 7 Bus error` = disk 93% — trimmed target/incremental to 82%, re-ran clean (env fault, not code). Reply 201.
+- Dup-court sweep on old band: #3785 and #3794 already hold maintainer hall-of-fame comments (independent-implementation credit, fixes landed earlier) — left untouched. #3785/#3841 same-family confirmed; first-to-land already settled.
+- Queue triage: #3942/#3949/#3918 still no author movement (updated_at == our evidence-reply timestamps). Next queue: #3811 (dextermos-dev, fixes #3568) and the 11-06/11-07 hy-check band (#3813..#3831, #3838..#3899), then the #4015+ flood; Track-3 spikes excluded per ledger.
+- Suites 471 -> 472 integration files (+1: closure_loop_and_select_binder_tys_3806; #3950 adds CLI/lib surface only). Both pushes remote-asserted; zero silent closes.
+
+## Session 141 — 2026-11-08 00:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef4d59); rust 1.99.0 + go1.26.9 restored; approve 2/2 (4990 left); scan skipped (quota doctrine).
+- **2 landed**:
+  - **#3811** -> `11e3af55` (dextermos-dev, fixes #3568): HYB-E1002 on string interpolation with expression parts when fmt shadowed (is_fmt_shadowed over is_pkg_symbol_shadowed, mirrors is_filepath_shadowed); receiver type-arg hardening (`fn (b box[fmt])` args into fn_type_params via split_top_level_type_args). New suite 10 tests; 472 integration files; corpus 135; differential FULL. Note posted: receiver-tp territory overlaps #3825 (bradwue313) — #3811 predates (07:18 vs 07:49), first-to-land respected in reply.
+  - **#3813** -> `71d90d57` (Burapa-J, fixes #3812): closure_writes_captured taint arm extended to PlaceKind::Index (alias-free) — `rows[0] = shared` no longer leaves closure-local containers un-tainted. One-line fix + 2 tests; 473 integration files; corpus 135; differential FULL. Both batteries warm-cache, full cycle ~35 min for the pair.
+- Stalled-watch: #3942/#3949/#3918 zero author movement (updated_at == our replies).
+- Next queue: #3815/#3817/#3819 (aswadi), #3814 (Burapa-J arith fold), #3820/#3831/#3841-#3849 band, then #4015+ flood; watch #3825 for post-#3811 residue.
+- Suites 472 -> 473 integration files (+2 new suites this tick, one per PR). Both pushes remote-asserted; replies 201 x2; zero silent closes.

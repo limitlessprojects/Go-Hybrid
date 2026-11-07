@@ -35,6 +35,7 @@ jobs:
           # link that does not resolve, or a doc edited out of step with the table.
           python3 tools/check_guarantees.py
           python3 -m unittest discover -s tools -p test_check_guarantees.py -v
+          python3 -m unittest discover -s tools -p test_triage_board_target.py -v
           python3 -m unittest discover -s tools -p test_author_repro_verdict.py -v
           python3 -m unittest discover -s tools -p test_shepherd_gate.py -v
           python3 -m unittest discover -s tools -p test_shepherd_verify_assert.py -v
