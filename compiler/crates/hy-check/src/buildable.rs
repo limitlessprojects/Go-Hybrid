@@ -2012,10 +2012,19 @@ impl<'a> Collector<'a> {
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
-        let outer_tp = std::mem::replace(
-            &mut self.fn_type_params,
-            f.type_params.iter().map(|p| p.name.clone()).collect(),
-        );
+        let mut tp: HashSet<String> = f.type_params.iter().map(|p| p.name.clone()).collect();
+        if let Some(r) = &f.receiver {
+            if let TypeExpr::Named { name, .. } = &r.ty {
+                if let Some(open) = name.find('[') {
+                    if name.ends_with(']') {
+                        for arg in split_top_level_type_args(&name[open + 1..name.len() - 1]) {
+                            tp.insert(arg.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let outer_tp = std::mem::replace(&mut self.fn_type_params, tp);
         let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
         let outer_select = std::mem::replace(&mut self.select_depth, 0);
         self.block_stmts(body);
@@ -2868,11 +2877,23 @@ impl<'a> Collector<'a> {
                 self.check_type_name_in_value_position(name, *span);
             }
             Expr::Lit { .. } => {}
-            Expr::Interp { parts, .. } => {
+            Expr::Interp { parts, span, .. } => {
                 for p in parts {
                     if let InterpPart::Expr(x) = p {
                         self.expr(x);
                     }
+                }
+                // #3568 — an interpolation with an expression part lowers to
+                // `fmt.Sprintf(...)` (with implicit `import "fmt"`). If `fmt` is bound
+                // in an enclosing lexical/generic scope or declared at package scope,
+                // Go captures or collides with `fmt` (`fmt.Sprintf undefined` or
+                // `fmt redeclared in this block`).
+                if parts.iter().any(|p| matches!(p, InterpPart::Expr(_))) && self.is_fmt_shadowed() {
+                    self.emit_e1002(
+                        *span,
+                        "string interpolation requires package `fmt`, which is shadowed by an in-scope `fmt` declaration — Go refuses `fmt.Sprintf` (HYB-E1002)".to_string(),
+                        "rename the `fmt` binding or declaration so emitter-generated `fmt.Sprintf(...)` resolves to Go's `fmt` package",
+                    );
                 }
             }
             Expr::Binary {
