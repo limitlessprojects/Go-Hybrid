@@ -1407,7 +1407,9 @@ impl<'a> Collector<'a> {
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
     fn scalar_of_type_name(&self, name: &str) -> Option<&'static str> {
+        let base = Checker::base_named_type_str(name);
         if self.ck.structs.contains_key(name)
+            || self.ck.struct_type_params.contains_key(base)
             || self.ck.enums.contains_key(name)
             || self.ck.type_aliases.contains_key(name)
         {
@@ -1510,6 +1512,7 @@ impl<'a> Collector<'a> {
         }
         if args.len() == 1
             && !self.ck.structs.contains_key(name.as_str())
+            && !self.ck.struct_type_params.contains_key(name.as_str())
             && !self.ck.enums.contains_key(name.as_str())
             && !self.ck.type_aliases.contains_key(name.as_str())
         {
@@ -3171,7 +3174,18 @@ impl<'a> Collector<'a> {
                 self.ty(value);
             }
             TypeExpr::Chan { elem, .. } => self.ty(elem),
-            TypeExpr::Option { elem, .. } => self.ty(elem),
+            TypeExpr::Option { elem, span } => {
+                if self.ck.struct_type_params.contains_key("option")
+                    || self.scopes.iter().rev().any(|layer| layer.contains_key("option"))
+                {
+                    self.check_named_type_instantiation(
+                        &format!("option[{}]", elem.render()),
+                        *span,
+                    );
+                } else {
+                    self.ty(elem);
+                }
+            }
             TypeExpr::Fn {
                 params, results, ..
             } => {
@@ -3456,7 +3470,7 @@ impl<'a> Collector<'a> {
                 return;
             }
         }
-        if head == "set" {
+        if head == "set" && !self.ck.struct_type_params.contains_key("set") {
             if let Some(inner) = inner_opt {
                 let args = split_top_level_type_args(inner);
                 if args.len() == 1 {
@@ -3475,7 +3489,9 @@ impl<'a> Collector<'a> {
             }
             return;
         }
-        if head == "option" || head == "map" {
+        if (head == "option" && !self.ck.struct_type_params.contains_key("option"))
+            || head == "map"
+        {
             return;
         }
         let Some(tparams) = self.ck.struct_type_params.get(head) else {
@@ -4192,6 +4208,7 @@ impl<'a> Collector<'a> {
                         let head = Checker::base_named_type_str(name);
                         if self.ck.structs.contains_key(name.as_str())
                             || self.ck.structs.contains_key(head)
+                            || self.ck.struct_type_params.contains_key(head)
                         {
                             OpKind::Struct(Some(head.to_string()))
                         } else {
@@ -4318,8 +4335,14 @@ impl<'a> Collector<'a> {
         };
         let sname = Checker::base_named_type_str(&full_name).to_string();
         // Clone: the diagnostics below need `&mut self` while the declaration
-        // table is borrowed from it.
-        let Some(declared) = self.ck.structs.get(&sname).cloned() else {
+        // table is borrowed from it. Zero-field structs (`struct unit {}`) are
+        // recorded in `struct_type_params` rather than `structs`, so treat them
+        // as having an empty field list (`Vec::new()`).
+        let declared = if let Some(d) = self.ck.structs.get(&sname).cloned() {
+            d
+        } else if self.ck.struct_type_params.contains_key(&sname) {
+            Vec::new()
+        } else {
             return;
         };
         let subst = self.struct_type_arg_map(&full_name);
