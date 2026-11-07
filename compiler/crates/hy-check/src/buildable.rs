@@ -2502,18 +2502,94 @@ impl<'a> Collector<'a> {
                 }
                 match unwrap_parens(callee) {
                     Expr::Ident { name, .. } => {
-                        self.check_user_fn_arity(name, args, *span);
-                        self.check_user_fn_arg_types(name, args);
+                        if let Some(k) = self.lookup_kind(name) {
+                            match k {
+                                OpKind::Fn(_, Some(ref want)) => {
+                                    if want.len() != args.len() {
+                                        self.report_local_arity(name, want.len(), args.len(), *span);
+                                    } else {
+                                        self.check_fn_val_arg_types(name, want, args);
+                                    }
+                                }
+                                OpKind::Fn(..) | OpKind::Unknown => {}
+                                _ => {
+                                    self.emit_e1002(
+                                        *span,
+                                        format!(
+                                            "cannot call `{}` (variable of type `{}`): `{}` is not a function (HYB-E1002)",
+                                            name,
+                                            k.label(),
+                                            k.label()
+                                        ),
+                                        "only functions, methods, closures, and type conversions can be called",
+                                    );
+                                }
+                            }
+                        } else {
+                            self.check_user_fn_arity(name, args, *span);
+                            self.check_user_fn_arg_types(name, args);
+                        }
                     }
                     Expr::Field { base, name, .. } => {
                         let bk = self.kind_of_expr(base);
-                        self.check_method_arity(&bk, name, args, *span);
-                        self.check_method_arg_types(&bk, name, args);
+                        let has_method = self
+                            .struct_base_name(&bk)
+                            .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn, name.clone())));
+                        if has_method {
+                            self.check_method_arity(&bk, name, args, *span);
+                            self.check_method_arg_types(&bk, name, args);
+                        } else if let Some(fk) = self.struct_field_kind(&bk, name) {
+                            match fk {
+                                OpKind::Fn(_, Some(ref want)) => {
+                                    if want.len() != args.len() {
+                                        self.report_local_arity(&callee.render(), want.len(), args.len(), *span);
+                                    } else {
+                                        self.check_fn_val_arg_types(&callee.render(), want, args);
+                                    }
+                                }
+                                OpKind::Fn(..) | OpKind::Unknown => {}
+                                _ => {
+                                    self.emit_e1002(
+                                        *span,
+                                        format!(
+                                            "cannot call `{}` (field of type `{}`): `{}` is not a function (HYB-E1002)",
+                                            callee.render(),
+                                            fk.label(),
+                                            fk.label()
+                                        ),
+                                        "only function-typed struct fields or declared methods can be called",
+                                    );
+                                }
+                            }
+                        } else {
+                            self.check_method_arity(&bk, name, args, *span);
+                            self.check_method_arg_types(&bk, name, args);
+                        }
                     }
                     Expr::FnLit { params, .. } => {
                         self.check_fn_lit_call(params, args, callee, *span);
                     }
-                    _ => {}
+                    _ => {
+                        let ck = self.kind_of_expr(callee);
+                        if let OpKind::Fn(_, Some(ref want)) = ck {
+                            if want.len() != args.len() {
+                                self.report_local_arity(&callee.render(), want.len(), args.len(), *span);
+                            } else {
+                                self.check_fn_val_arg_types(&callee.render(), want, args);
+                            }
+                        } else if !matches!(ck, OpKind::Unknown | OpKind::Fn(..)) {
+                            self.emit_e1002(
+                                *span,
+                                format!(
+                                    "cannot call `{}` (type `{}`): `{}` is not a function (HYB-E1002)",
+                                    callee.render(),
+                                    ck.label(),
+                                    ck.label()
+                                ),
+                                "only functions, methods, closures, and type conversions can be called",
+                            );
+                        }
+                    }
                 }
             }
             Stmt::Managed { body, .. } => {
@@ -5245,6 +5321,54 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #3940: Validates argument operand kinds against declared parameter
+    /// types for callable function-typed values (local closure bindings,
+    /// `fn`-typed variables, and `fn`-typed struct fields).
+    fn check_fn_val_arg_types(&mut self, callee_name: &str, want: &[OpKind], args: &[CallArg]) {
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        if want.len() != args.len() {
+            return;
+        }
+        for (w, a) in want.iter().zip(args.iter()) {
+            if Checker::is_nil_literal(&a.value) && is_non_nilable(w) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use nil as `{}` value in argument to `{}` (HYB-E1002)",
+                        w.label(),
+                        callee_name
+                    ),
+                    "argument types must match function parameter types",
+                );
+                continue;
+            }
+            let got = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = w {
+                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            let int_to_float_conflict = *w == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            if kinds_conflict(w, &got) || int_to_float_conflict {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` (HYB-E1002)",
+                        a.value.render(),
+                        got.label(),
+                        w.label(),
+                        callee_name
+                    ),
+                    "argument types must match function parameter types",
+                );
+            }
+        }
+    }
+
     /// #577 C10 — a `return` must supply the enclosing function's result
     /// list: the same number of values, each assignable to its result type.
     /// Go refuses the emitted statement otherwise (Row 13).
@@ -7635,6 +7759,9 @@ impl<'a> Collector<'a> {
                         OpKind::Fn(_, Some(ref want)) if want.len() != args.len() => {
                             self.report_local_arity(name, want.len(), args.len(), span)
                         }
+                        OpKind::Fn(_, Some(ref want)) => {
+                            self.check_fn_val_arg_types(name, want, args);
+                        }
                         OpKind::Fn(..) | OpKind::Unknown => {}
                         _ => self.emit_e1002(
                             span,
@@ -7792,6 +7919,8 @@ impl<'a> Collector<'a> {
                         if let OpKind::Fn(_, Some(ref want)) = fk {
                             if want.len() != args.len() {
                                 self.report_local_arity(&callee.render(), want.len(), args.len(), span);
+                            } else {
+                                self.check_fn_val_arg_types(&callee.render(), want, args);
                             }
                         }
                     }
