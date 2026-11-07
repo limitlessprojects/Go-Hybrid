@@ -795,13 +795,14 @@ fn render_build_error(e: &BuildError) -> String {
 }
 
 fn cmd_build(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--deny-managed] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
+    const USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--emit-proof] [--deny-managed] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
     // Validate the entire invocation before touching the filesystem or the
     // toolchain, mirroring cmd_check/cmd_generate: a mistyped option or a
     // missing value must not fall back to a default and build something else.
     let mut file: Option<String> = None;
     let mut out_path: Option<String> = None;
     let mut emit_go_only = false;
+    let mut emit_proof = false;
     let mut deny_managed = false;
     // Package mode (example 09): emit an importable Go package + the
     // runtime pieces, instead of building a binary.
@@ -821,6 +822,11 @@ fn cmd_build(args: &[String]) -> ExitCode {
                 }
                 "--emit-go" => {
                     emit_go_only = true;
+                    i += 1;
+                    continue;
+                }
+                "--emit-proof" => {
+                    emit_proof = true;
                     i += 1;
                     continue;
                 }
@@ -872,6 +878,10 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
     if pkg_name.is_some() != out_dir.is_some() {
         eprintln!("error: --package and --out-dir must be supplied together\n{USAGE}");
+        return ExitCode::from(2);
+    }
+    if emit_proof && pkg_name.is_some() {
+        eprintln!("error: --emit-proof is not supported with --package (single-file builds only)\n{USAGE}");
         return ExitCode::from(2);
     }
     let out_path = out_path.unwrap_or_else(|| "a.out".to_string());
@@ -958,9 +968,23 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
 
     // --- 4. Emit Go ---
+    // --emit-proof (issue #3930): emit Go together with the witness proof
+    // and fail closed unless a fresh parse+emit reproduces every hash.
+    let mut proof_src: Option<String> = None;
     let go_src = if let Some(pn) = &pkg_name {
         match hy_emit::emit_go_package(&ast, pn, &binding_prefix) {
             Ok(g) => g,
+            Err(e) => {
+                eprintln!("error [emit]: {}", e.message);
+                return ExitCode::from(2);
+            }
+        }
+    } else if emit_proof {
+        match hy_emit::emit_go_with_proof(&ast) {
+            Ok((g, proof)) => {
+                proof_src = Some(proof);
+                g
+            }
             Err(e) => {
                 eprintln!("error [emit]: {}", e.message);
                 return ExitCode::from(2);
@@ -1009,6 +1033,34 @@ fn cmd_build(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     }
     println!("emitted {}", go_path);
+    if let Some(proof) = &proof_src {
+        let proof_path = format!("{}.proof.json", out_path);
+        if let Err(e) = std::fs::write(&proof_path, proof) {
+            eprintln!("error writing {}: {}", proof_path, e);
+            return ExitCode::from(2);
+        }
+        println!("emitted {}", proof_path);
+        // Fail-closed verifier (issue #3930): re-read the source from disk,
+        // re-parse, re-emit, recompute every witness hash. Any drift between
+        // what was checked and what was emitted is a hard error.
+        let verify = (|| -> Result<(), String> {
+            let src2 = std::fs::read_to_string(&file)
+                .map_err(|e| format!("re-read failed: {}", e))?;
+            let ast2 = hy_syntax::parse_file(&file, &src2)
+                .map_err(|_| "re-parse failed".to_string())?;
+            let (_, proof2) = hy_emit::emit_go_with_proof(&ast2)
+                .map_err(|e| format!("re-emit failed: {}", e.message))?;
+            if proof2 != *proof {
+                return Err("witness mismatch: emitted Go does not correspond to the checked IR".to_string());
+            }
+            Ok(())
+        })();
+        if let Err(msg) = verify {
+            eprintln!("emit-proof: {}", msg);
+            return ExitCode::FAILURE;
+        }
+        println!("emit-proof: verified (fail-closed)");
+    }
     if emit_go_only {
         return ExitCode::SUCCESS;
     }
