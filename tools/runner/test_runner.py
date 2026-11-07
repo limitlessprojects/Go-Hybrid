@@ -23,6 +23,107 @@ def step(name, code, hard=False, timeout=10):
             'hard': hard, 'timeout': timeout}
 
 
+class RunnerProgressEncodingTests(unittest.TestCase):
+    def exercise(self, encoding, name, phase='cmd', exit_code=0, hard=False,
+                 errors='strict'):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            results = root / 'results'
+            job_path = root / 'job.json'
+            # Use exact UTF-8 bytes so child output is independent of its locale.
+            output = '\u8a08\u6e2c-output'
+            first = step(name, 'import os; os.write(1, %r); raise SystemExit(%d)' %
+                         (output.encode('utf-8'), exit_code), hard)
+            marker_code = ("import os,pathlib; pathlib.Path(os.environ['RESULTS_DIR'], "
+                           "%r).write_text('ran', encoding='utf-8')")
+            later_setup = step('later-setup', marker_code % 'setup.ran')
+            later_command = step('later-command', marker_code % 'command.ran')
+            setup = [first, later_setup] if phase == 'setup' else []
+            commands = [later_command] if phase == 'setup' else [first, later_command]
+            job = {'job': '\u30b8\u30e7\u30d6', 'tier': '\u8a08\u6e2c-tier',
+                   'setup': setup, 'commands': commands,
+                   'expected_results': ['results/summary.json']}
+            job_path.write_text(json.dumps(job, ensure_ascii=False), encoding='utf-8')
+            argv = ['runner.py', str(job_path), '--results-dir', str(results),
+                    '--repo-dir', str(root / 'no-checkout')]
+            raw = io.BytesIO()
+            with io.TextIOWrapper(raw, encoding=encoding, errors=errors,
+                                  newline='\n') as console:
+                with patch.object(sys, 'argv', argv), patch.dict(os.environ), \
+                        patch.object(runner, 'env_report', return_value={'test': output}), \
+                        patch.object(runner, 'UTC', return_value='fixed'), \
+                        contextlib.redirect_stdout(console):
+                    with self.assertRaises(SystemExit) as stopped:
+                        runner.main()
+                console.flush()
+                log = raw.getvalue().decode(encoding)
+                self.assertEqual(console.errors, errors)
+            summary = json.loads((results / 'summary.json').read_text(encoding='utf-8'))
+            self.assertEqual(stopped.exception.code, int(exit_code != 0))
+            self.assertEqual(summary['ok'], exit_code == 0)
+            self.assertEqual(summary['schema'], 'go-hybrid-job-summary/1')
+            self.assertEqual(summary['job'], job['job'])
+            self.assertEqual(summary['tier'], job['tier'])
+            self.assertIsNone(summary['sha'])
+            self.assertEqual(summary['hardware'], {'test': output})
+            self.assertEqual(summary['started'], 'fixed')
+            self.assertEqual(summary['finished'], 'fixed')
+            self.assertGreaterEqual(summary['wall_clock_s'], 0)
+            expected = [(name, phase, exit_code)]
+            stopped_early = hard and exit_code != 0
+            if not stopped_early:
+                if phase == 'setup':
+                    expected.append(('later-setup', 'setup', 0))
+                expected.append(('later-command', 'cmd', 0))
+            self.assertEqual([(s['name'], s['kind'], s['exit']) for s in summary['steps']],
+                             expected)
+            self.assertEqual(summary['steps'][0]['out_tail'], output)
+            for result in summary['steps']:
+                self.assertEqual(set(result), {'name', 'kind', 'exit', 'dur_s', 'out_tail'})
+                self.assertGreaterEqual(result['dur_s'], 0)
+            for marker, should_run in [('setup.ran', phase == 'setup' and not stopped_early),
+                                       ('command.ran', not stopped_early)]:
+                self.assertEqual((results / marker).exists(), should_run)
+                if should_run:
+                    self.assertEqual((results / marker).read_text('utf-8'), 'ran')
+            displayed = name.encode(encoding, errors if errors != 'strict' else
+                                    'backslashreplace').decode(encoding)
+            duration = summary['steps'][0]['dur_s']
+            self.assertIn('[fixed] {} {}: exit={} {:.1f}s\n'.format(
+                phase, displayed, exit_code, duration), log)
+            self.assertTrue(log.endswith('\n=== summary.json written to {} (ok={}) ===\n'.format(
+                results / 'summary.json', exit_code == 0)))
+
+    def test_unencodable_success_continues(self):
+        for encoding in ('ascii', 'cp1252'):
+            for phase in ('setup', 'cmd'):
+                with self.subTest(encoding=encoding, phase=phase):
+                    self.exercise(encoding, '\u8a08\u6e2c', phase)
+
+    def test_unencodable_soft_failure_continues(self):
+        for encoding in ('ascii', 'cp1252'):
+            for phase in ('setup', 'cmd'):
+                with self.subTest(encoding=encoding, phase=phase):
+                    self.exercise(encoding, '\u8a08\u6e2c', phase, exit_code=7)
+
+    def test_unencodable_hard_failure_stops(self):
+        for encoding in ('ascii', 'cp1252'):
+            for phase in ('setup', 'cmd'):
+                with self.subTest(encoding=encoding, phase=phase):
+                    self.exercise(encoding, '\u8a08\u6e2c', phase, exit_code=7, hard=True)
+
+    def test_ascii_stdout_preserves_ascii_log(self):
+        self.exercise('ascii', 'measure')
+
+    def test_utf8_stdout_preserves_unicode_log(self):
+        self.exercise('utf-8', '\u8a08\u6e2c')
+
+    def test_existing_stdout_error_policy_is_preserved(self):
+        for errors in ('replace', 'backslashreplace'):
+            with self.subTest(errors=errors):
+                self.exercise('ascii', '\u8a08\u6e2c', errors=errors)
+
+
 class RunnerFailureTests(unittest.TestCase):
     def run_job(self, setup, commands, expected_results=None):
         with tempfile.TemporaryDirectory() as directory:
@@ -276,7 +377,18 @@ class RunnerOutputTests(unittest.TestCase):
                 code, _, tail = runner.run_cmd(
                     [sys.executable, '-c', 'print("completed"); raise SystemExit(%d)' % expected], 10)
                 self.assertEqual(code, expected)
-                self.assertEqual(tail, 'completed\n')
+                self.assertEqual(tail, 'completed' + os.linesep)
+            # Byte writes bypass the child's platform newline translation.
+            # Keep exact comparisons so normalization or trimming cannot pass.
+            for output in (b'completed\n', b'completed\r\n',
+                           b' first \r\nsecond\nthird\rtail \t'):
+                with self.subTest(exit=expected, output=output):
+                    code, _, tail = runner.run_cmd(
+                        [sys.executable, '-c',
+                         'import os; os.write(1, %r); raise SystemExit(%d)' %
+                         (output, expected)], 10)
+                    self.assertEqual(code, expected)
+                    self.assertEqual(tail, output.decode('utf-8'))
 
     def test_job_summary_keeps_timeout_diagnostic(self):
         code, summary = RunnerFailureTests.run_job(self, [], [step(

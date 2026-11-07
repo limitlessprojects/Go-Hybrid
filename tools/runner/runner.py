@@ -151,7 +151,13 @@ def main():
         summary["steps"].append(
             {"name": name, "kind": kind, "exit": code, "dur_s": dur, "out_tail": out[-1500:]}
         )
-        print("[{}] {} {}: exit={} {:.1f}s".format(UTC(), kind, name, code, dur), flush=True)
+        message = "[{}] {} {}: exit={} {:.1f}s".format(UTC(), kind, name, code, dur)
+        try:
+            print(message, flush=True)
+        except UnicodeEncodeError:
+            # Escape only the console display; keep the original name in summary.
+            encoding = sys.stdout.encoding or "utf-8"
+            print(message.encode(encoding, "backslashreplace").decode(encoding), flush=True)
 
     def write_summary_and_exit():
         summary["wall_clock_s"] = round(time.monotonic() - t0, 2)
