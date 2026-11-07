@@ -47,13 +47,17 @@ impl<'a> Checker<'a> {
     /// per statement.
     pub(crate) fn check_stmt_multi_value(&mut self, st: &FnState, stmt: &Stmt) {
         match stmt {
-            Stmt::Local(l) if l.values.len() == 1 => {
-                self.check_multi_value_bind(st, &l.values[0], l.names.len(), l.span);
-                self.check_subexprs_single_value(st, &l.values[0]);
-            }
-            Stmt::Local(l) if l.values.len() > 1 => {
-                for v in &l.values {
-                    self.check_expr_single_value(st, v, l.span);
+            Stmt::Local(l) => {
+                if let Some(ty) = &l.ty {
+                    self.check_type_expr_single_value(st, ty);
+                }
+                if l.values.len() == 1 {
+                    self.check_multi_value_bind(st, &l.values[0], l.names.len(), l.span);
+                    self.check_subexprs_single_value(st, &l.values[0]);
+                } else {
+                    for v in &l.values {
+                        self.check_expr_single_value(st, v, l.span);
+                    }
                 }
             }
             Stmt::Assign {
@@ -158,7 +162,7 @@ impl<'a> Checker<'a> {
                             if segments == &["some"] {
                                 arm_st.scope_push();
                                 self.bind_match_arm(&mut arm_st, b, subject, false);
-                                if let Some(TypeExpr::Option { elem, .. }) = self.ty_of_expr(st, subject).map(|t| self.resolve_type_alias(&t)) {
+                                if let Some(TypeExpr::Option { elem, .. }) = self.composite_type_expr(st, subject).map(|t| self.resolve_type_alias(&t)) {
                                     if let Some(bind) = arm_st.env_lookup_mut(b) {
                                         bind.ty = Some(*elem);
                                     }
@@ -277,17 +281,25 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::StructLit { fields, .. } => {
+            Expr::StructLit { ty, fields, .. } => {
+                if let Some(t) = ty {
+                    self.check_type_expr_single_value(st, t);
+                }
                 for f in fields {
                     self.check_expr_single_value(st, &f.value, f.span);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some(t) = elem {
+                    self.check_type_expr_single_value(st, t);
+                }
                 for item in items {
                     self.check_expr_single_value(st, item, item.span());
                 }
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit { key, value, entries, .. } => {
+                self.check_type_expr_single_value(st, key);
+                self.check_type_expr_single_value(st, value);
                 for (k, v) in entries {
                     self.check_expr_single_value(st, k, k.span());
                     self.check_expr_single_value(st, v, v.span());
@@ -303,6 +315,26 @@ impl<'a> Checker<'a> {
             Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => {
                 self.check_subexprs_single_value(st, inner);
             }
+        }
+    }
+
+    fn check_type_expr_single_value(&mut self, st: &FnState, ty: &TypeExpr) {
+        match ty {
+            TypeExpr::Array { len, elem, .. } => {
+                if let Some(l) = len {
+                    self.check_expr_single_value(st, l, l.span());
+                }
+                self.check_type_expr_single_value(st, elem);
+            }
+            TypeExpr::Pointer { to: inner, .. }
+            | TypeExpr::Slice { elem: inner, .. }
+            | TypeExpr::Chan { elem: inner, .. }
+            | TypeExpr::Option { elem: inner, .. } => self.check_type_expr_single_value(st, inner),
+            TypeExpr::Map { key, value, .. } => {
+                self.check_type_expr_single_value(st, key);
+                self.check_type_expr_single_value(st, value);
+            }
+            _ => {}
         }
     }
 
