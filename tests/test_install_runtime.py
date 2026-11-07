@@ -44,7 +44,7 @@ class LauncherRuntimeTests(unittest.TestCase):
         supported_arch = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
         if platform.system() not in supported_os or platform.machine() not in supported_arch:
             self.skipTest("install.sh supports Linux/macOS on amd64/arm64")
-        required_tools = ("sh", "uname", "mktemp", "mkdir", "rm", "tar", "gzip", "cp", "chmod", "cat", "sed", "head")
+        required_tools = ("sh", "uname", "mktemp", "mkdir", "rm", "tar", "gzip", "cp", "chmod", "cat", "sed", "head", "mv")
         system_tools = {
             name: shutil.which(name, path=os.defpath)
             for name in (*required_tools, "sha256sum", "shasum")
@@ -56,7 +56,7 @@ class LauncherRuntimeTests(unittest.TestCase):
 
         temporary = tempfile.TemporaryDirectory(prefix="hybrid-installer-test-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.install = self.root / "installed hybrid"
         self.bin_dir = self.root / "launcher bin"
         release = self.root / "release"
