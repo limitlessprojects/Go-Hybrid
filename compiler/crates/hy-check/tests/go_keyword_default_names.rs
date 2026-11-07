@@ -54,6 +54,17 @@ fn every_declaration_site_named_default_is_rejected() {
         ("select receive binding", "fn main() {\n    ch := make(chan int, 1)\n    ch <- 1\n    select {\n        default := <-ch: fmt.println(\"{default}\")\n    }\n}\n"),
         ("match binding", "fn main() {\n    o := some(1)\n    match o {\n        some(default) => fmt.println(\"{default}\")\n        none => fmt.println(\"n\")\n    }\n}\n"),
         ("local", "fn main() {\n    f := fn() int {\n        if true {\n            default := 1\n            return default\n        }\n        return 0\n    }\n    fmt.println(\"{f()}\")\n}\n"),
+        ("parameter", "type cb = fn(default int) int\nfn main() {\n    var f cb = fn(x int) int { return x }\n    fmt.println(\"{f(1)}\")\n}\n"),
+        ("parameter", "struct holder { cb fn(default int) int }\nfn main() {\n    h := holder{cb: fn(x int) int { return x }}\n    fmt.println(\"{h.cb(1)}\")\n}\n"),
+        ("parameter", "fn run(cb fn(default int) int) int { return cb(1) }\nfn main() {\n    fmt.println(\"{run(fn(x int) int { return x })}\")\n}\n"),
+        ("parameter", "fn make_cb() fn(default int) int {\n    return fn(x int) int { return x }\n}\nfn main() {\n    f := make_cb()\n    fmt.println(\"{f(1)}\")\n}\n"),
+        ("parameter", "fn main() {\n    var f fn(default int) int = fn(x int) int { return x }\n    fmt.println(\"{f(1)}\")\n}\n"),
+        ("parameter", "fn main() {\n    fs := []fn(default int) int{fn(x int) int { return x }}\n    fmt.println(\"{fs[0](1)}\")\n}\n"),
+        ("parameter", "fn main() {\n    m := map[string]fn(default int) int{\"k\": fn(x int) int { return x }}\n    fmt.println(\"{m[\"k\"](1)}\")\n}\n"),
+        ("parameter", "fn main() {\n    ch := make(chan fn(default int) int, 1)\n    ch <- fn(x int) int { return x }\n    f := <-ch\n    fmt.println(\"{f(1)}\")\n}\n"),
+        ("parameter", "fn main() {\n    var f fn(int) fn(default int) int = fn(a int) fn(x int) int {\n        return fn(x int) int { return a + x }\n    }\n    fmt.println(\"{f(1)(2)}\")\n}\n"),
+        ("parameter", "fn main() {\n    var a [len([1]int{fn(default int) int { return default }(0)})]int\n    fmt.println(\"{len(a)}\")\n}\n"),
+        ("local", "fn main() {\n    a := [len([1]int{fn() int { default := 1\n        return default }()})]int{0}\n    fmt.println(\"{a[0]}\")\n}\n"),
     ];
     for (what, src) in cases {
         assert_rejects(src, what);
