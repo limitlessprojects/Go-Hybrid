@@ -2227,7 +2227,15 @@ impl<'a> Collector<'a> {
                 self.set_container_elem_scalar(name, container_elem_scalar);
             }
             self.bind_set_elem(name, set_elem);
-            if !track_read {
+            if !track_read
+                || l.values.first().is_some_and(|v| {
+                    matches!(
+                        unwrap_parens(v),
+                        Expr::Call { callee, .. }
+                            if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if name == "__hy_task_spawn")
+                    )
+                })
+            {
                 self.exempt(name);
                 continue;
             }
