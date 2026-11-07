@@ -475,6 +475,72 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const IO_LIMITED_READER: &[&str] = &["read"];
     /// `io.OffsetWriter`.
     const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
+    const NET_UNIX_CONN: &[&str] = &[
+        "close",
+        "close_read",
+        "close_write",
+        "file",
+        "local_addr",
+        "read",
+        "read_from",
+        "read_from_unix",
+        "read_msg_unix",
+        "remote_addr",
+        "set_deadline",
+        "set_read_buffer",
+        "set_read_deadline",
+        "set_write_buffer",
+        "set_write_deadline",
+        "syscall_conn",
+        "write",
+        "write_msg_unix",
+        "write_to",
+        "write_to_unix",
+    ];
+    const NET_IP_CONN: &[&str] = &[
+        "close",
+        "file",
+        "local_addr",
+        "read",
+        "read_from",
+        "read_from_ip",
+        "read_msg_ip",
+        "remote_addr",
+        "set_deadline",
+        "set_read_buffer",
+        "set_read_deadline",
+        "set_write_buffer",
+        "set_write_deadline",
+        "syscall_conn",
+        "write",
+        "write_msg_ip",
+        "write_to",
+        "write_to_ip",
+    ];
+    const NET_UNIX_LISTENER: &[&str] = &[
+        "accept",
+        "accept_unix",
+        "addr",
+        "close",
+        "file",
+        "set_deadline",
+        "set_unlink_on_close",
+        "syscall_conn",
+    ];
+    const NET_RESOLVER: &[&str] = &[
+        "lookup_addr",
+        "lookup_cname",
+        "lookup_host",
+        "lookup_ip",
+        "lookup_ip_addr",
+        "lookup_mx",
+        "lookup_net_ip",
+        "lookup_ns",
+        "lookup_port",
+        "lookup_srv",
+        "lookup_txt",
+    ];
+    const NET_BUFFERS: &[&str] = &["read", "write_to"];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -496,6 +562,11 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
         "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
         "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
+        "net.unix_conn" | "net.unixconn" | "net.UnixConn" => Some(NET_UNIX_CONN),
+        "net.ip_conn" | "net.ipconn" | "net.IPConn" => Some(NET_IP_CONN),
+        "net.unix_listener" | "net.unixlistener" | "net.UnixListener" => Some(NET_UNIX_LISTENER),
+        "net.resolver" | "net.Resolver" => Some(NET_RESOLVER),
+        "net.buffers" | "net.Buffers" => Some(NET_BUFFERS),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
