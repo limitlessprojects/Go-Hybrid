@@ -121,7 +121,23 @@ pub(crate) fn is_iterable_handle(name: &str) -> bool {
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
-        ("serde_json", "parse" | "new_object" | "new_array") | ("flate2", "new_writer") => {
+        ("serde_json", "parse" | "new_object" | "new_array")
+        | ("flate2", "new_writer")
+        | (
+            "json" | "encoding/json",
+            "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder",
+        )
+        | (
+            "httptest" | "net/http/httptest",
+            "new_server"
+                | "new_tls_server"
+                | "new_unstarted_server"
+                | "new_recorder"
+                | "NewServer"
+                | "NewTLSServer"
+                | "NewUnstartedServer"
+                | "NewRecorder",
+        ) => {
             CallMode::Produce
         }
         ("serde_json", "to_string_pretty")
@@ -182,6 +198,25 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
+        ("json" | "encoding/json", "new_decoder" | "NewDecoder") => {
+            TypeShape::ForeignOpaque("json.decoder".into())
+        }
+        ("json" | "encoding/json", "new_encoder" | "NewEncoder") => {
+            TypeShape::ForeignOpaque("json.encoder".into())
+        }
+        (
+            "httptest" | "net/http/httptest",
+            "new_server"
+                | "new_tls_server"
+                | "new_unstarted_server"
+                | "NewServer"
+                | "NewTLSServer"
+                | "NewUnstartedServer",
+        ) => TypeShape::ForeignOpaque("httptest.server".into()),
+        (
+            "httptest" | "net/http/httptest",
+            "new_recorder" | "NewRecorder",
+        ) => TypeShape::ForeignOpaque("httptest.response_recorder".into()),
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -438,6 +473,160 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "split",
         "text",
     ];
+    /// `os.File` — standard library file handle. Go defines 24 methods on `*os.File`.
+    const OS_FILE: &[&str] = &[
+        "chdir",
+        "chmod",
+        "chown",
+        "close",
+        "fd",
+        "name",
+        "read",
+        "read_at",
+        "read_dir",
+        "read_from",
+        "readdir",
+        "readdirnames",
+        "seek",
+        "set_deadline",
+        "set_read_deadline",
+        "set_write_deadline",
+        "stat",
+        "sync",
+        "syscall_conn",
+        "truncate",
+        "write",
+        "write_at",
+        "write_string",
+        "write_to",
+    ];
+    /// `io.PipeReader`.
+    const IO_PIPE_READER: &[&str] = &["close", "close_with_error", "read"];
+    /// `io.PipeWriter`.
+    const IO_PIPE_WRITER: &[&str] = &["close", "close_with_error", "write"];
+    /// `io.SectionReader`.
+    const IO_SECTION_READER: &[&str] = &["outer", "read", "read_at", "seek", "size"];
+    /// `io.LimitedReader`.
+    const IO_LIMITED_READER: &[&str] = &["read"];
+    /// `io.OffsetWriter`.
+    const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
+    const HTTP_CLIENT: &[&str] = &[
+        "close_idle_connections",
+        "do",
+        "get",
+        "head",
+        "post",
+        "post_form",
+    ];
+    const HTTP_REQUEST: &[&str] = &[
+        "add_cookie",
+        "clone",
+        "context",
+        "cookie",
+        "cookies",
+        "form_file",
+        "form_value",
+        "multipart_reader",
+        "parse_form",
+        "parse_multipart_form",
+        "path_value",
+        "post_form_value",
+        "proto_at_least",
+        "referer",
+        "set_path_value",
+        "user_agent",
+        "with_context",
+        "write",
+        "write_proxy",
+    ];
+    const HTTP_RESPONSE: &[&str] = &[
+        "cookies",
+        "location",
+        "proto_at_least",
+        "write",
+    ];
+    const HTTP_SERVER: &[&str] = &[
+        "close",
+        "listen_and_serve",
+        "listen_and_serve_tls",
+        "register_on_shutdown",
+        "serve",
+        "serve_tls",
+        "set_keep_alives_enabled",
+        "shutdown",
+    ];
+    const HTTP_COOKIE: &[&str] = &["string", "valid"];
+    const URL_URL: &[&str] = &[
+        "escaped_fragment",
+        "escaped_path",
+        "hostname",
+        "is_abs",
+        "join_path",
+        "marshal_binary",
+        "port",
+        "query",
+        "redacted",
+        "request_uri",
+        "resolve_reference",
+        "string",
+        "unmarshal_binary",
+    ];
+    const JSON_DECODER: &[&str] = &[
+        "buffered",
+        "decode",
+        "disallow_unknown_fields",
+        "input_offset",
+        "more",
+        "token",
+        "use_number",
+    ];
+    const JSON_ENCODER: &[&str] = &["encode", "set_escape_html", "set_indent"];
+    const JSON_RAW_MESSAGE: &[&str] = &["marshal_json", "unmarshal_json"];
+    const HTTPTEST_SERVER: &[&str] = &[
+        "client",
+        "close",
+        "close_client_connections",
+        "start",
+        "start_tls",
+    ];
+    const HTTPTEST_RESPONSE_RECORDER: &[&str] = &[
+        "flush",
+        "header",
+        "result",
+        "write",
+        "write_header",
+        "write_string",
+    ];
+    const OS_PROCESS: &[&str] = &[
+        "kill",
+        "release",
+        "signal",
+        "wait",
+    ];
+    const OS_PROCESS_STATE: &[&str] = &[
+        "exit_code",
+        "exited",
+        "pid",
+        "string",
+        "success",
+        "sys",
+        "sys_usage",
+        "system_time",
+        "user_time",
+    ];
+    const STRINGS_READER: &[&str] = &[
+        "len",
+        "read",
+        "read_at",
+        "read_byte",
+        "read_rune",
+        "reset",
+        "seek",
+        "size",
+        "unread_byte",
+        "unread_rune",
+        "write_to",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -453,6 +642,28 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "bufio.reader" | "bufio.Reader" => Some(BUFIO_READER),
         "bufio.writer" | "bufio.Writer" => Some(BUFIO_WRITER),
         "bufio.scanner" | "bufio.Scanner" => Some(BUFIO_SCANNER),
+        "os.file" | "os.File" => Some(OS_FILE),
+        "io.pipe_reader" | "io.PipeReader" => Some(IO_PIPE_READER),
+        "io.pipe_writer" | "io.PipeWriter" => Some(IO_PIPE_WRITER),
+        "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
+        "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
+        "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
+        "http.client" | "http.Client" => Some(HTTP_CLIENT),
+        "http.request" | "http.Request" => Some(HTTP_REQUEST),
+        "http.response" | "http.Response" => Some(HTTP_RESPONSE),
+        "http.server" | "http.Server" => Some(HTTP_SERVER),
+        "http.cookie" | "http.Cookie" => Some(HTTP_COOKIE),
+        "url.url" | "url.URL" => Some(URL_URL),
+        "json.decoder" | "json.Decoder" => Some(JSON_DECODER),
+        "json.encoder" | "json.Encoder" => Some(JSON_ENCODER),
+        "json.raw_message" | "json.rawmessage" | "json.RawMessage" => Some(JSON_RAW_MESSAGE),
+        "httptest.server" | "httptest.Server" => Some(HTTPTEST_SERVER),
+        "httptest.response_recorder"
+        | "httptest.responserecorder"
+        | "httptest.ResponseRecorder" => Some(HTTPTEST_RESPONSE_RECORDER),
+        "os.process" | "os.Process" => Some(OS_PROCESS),
+        "os.process_state" | "os.processstate" | "os.ProcessState" => Some(OS_PROCESS_STATE),
+        "strings.reader" | "strings.Reader" => Some(STRINGS_READER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -496,6 +707,13 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        ("url.url" | "url.URL", "query") => TypeShape::ForeignOpaque("url.values".into()),
+        ("http.request" | "http.Request", "cookies") | ("http.response" | "http.Response", "cookies") => {
+            TypeShape::Slice(Box::new(TypeShape::ForeignOpaque("http.cookie".into())))
+        }
+        ("http.request" | "http.Request", "cookie") => TypeShape::ForeignOpaque("http.cookie".into()),
+        ("http.response" | "http.Response", "location") => TypeShape::ForeignOpaque("url.url".into()),
+        ("strings.reader" | "strings.Reader", "len" | "size") => TypeShape::Primitive,
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
