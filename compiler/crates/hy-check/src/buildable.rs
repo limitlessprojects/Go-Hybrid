@@ -716,6 +716,8 @@ struct Collector<'a> {
     kind_scopes: Vec<HashMap<String, OpKind>>,
     /// Parallel lexical scope stack tracking declared concrete type names (#2738).
     type_name_scopes: Vec<HashMap<String, String>>,
+    /// Full declared types for identifier arguments, including composite members.
+    type_expr_scopes: Vec<HashMap<String, TypeExpr>>,
     /// `set[T]` bindings -> their element type text (`"int"`), scoped like
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
@@ -796,6 +798,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
             type_name_scopes: Vec::new(),
+            type_expr_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
@@ -867,6 +870,7 @@ impl<'a> Collector<'a> {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
         self.type_name_scopes.push(HashMap::new());
+        self.type_expr_scopes.push(HashMap::new());
         self.scalar_scopes.push(HashMap::new());
         self.container_elem_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
@@ -877,6 +881,7 @@ impl<'a> Collector<'a> {
         self.scopes.pop();
         self.kind_scopes.pop();
         self.type_name_scopes.pop();
+        self.type_expr_scopes.pop();
         self.scalar_scopes.pop();
         self.container_elem_scopes.pop();
         self.set_elem_scopes.pop();
@@ -895,6 +900,23 @@ impl<'a> Collector<'a> {
         for layer in self.type_name_scopes.iter().rev() {
             if let Some(t) = layer.get(name) {
                 return Some(t.clone());
+            }
+        }
+        None
+    }
+
+    fn bind_type_expr(&mut self, name: &str, ty: &TypeExpr) {
+        if name != "_" {
+            if let Some(top) = self.type_expr_scopes.last_mut() {
+                top.insert(name.to_string(), ty.clone());
+            }
+        }
+    }
+
+    fn lookup_type_expr(&self, name: &str) -> Option<TypeExpr> {
+        for layer in self.type_expr_scopes.iter().rev() {
+            if let Some(ty) = layer.get(name) {
+                return Some(ty.clone());
             }
         }
         None
@@ -1246,6 +1268,112 @@ impl<'a> Collector<'a> {
                 None
             }
             _ => None,
+        }
+    }
+
+    fn typed_value_type_expr(&self, e: &Expr) -> Option<TypeExpr> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.lookup_type_expr(name),
+            _ => None,
+        }
+    }
+
+    /// Compare known argument types structurally after expanding aliases.
+    /// `OpKind` intentionally erases numeric widths and array lengths, so it
+    /// cannot establish Go assignability for composite types.
+    fn argument_type_conflict(&self, want: &TypeExpr, got: &TypeExpr) -> bool {
+        if matches!(
+            self.kind_of_ty(want, 0),
+            OpKind::Unknown | OpKind::Interface
+        ) || matches!(self.kind_of_ty(got, 0), OpKind::Unknown | OpKind::Interface)
+        {
+            return false;
+        }
+        self.type_exprs_conflict(want, got, 0)
+    }
+
+    fn type_exprs_conflict(
+        &self,
+        want: &TypeExpr,
+        got: &TypeExpr,
+        depth: usize,
+    ) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        let want = self.ck.resolve_type_alias(want);
+        let got = self.ck.resolve_type_alias(got);
+        match (&want, &got) {
+            (TypeExpr::Named { name: w, .. }, TypeExpr::Named { name: g, .. }) => {
+                if w == g {
+                    false
+                } else {
+                    match (canonical_numeric_name(w), canonical_numeric_name(g)) {
+                        (Some(w), Some(g)) => w != g,
+                        _ => true,
+                    }
+                }
+            }
+            (TypeExpr::Pointer { to: w, .. }, TypeExpr::Pointer { to: g, .. })
+            | (TypeExpr::Slice { elem: w, .. }, TypeExpr::Slice { elem: g, .. })
+            | (TypeExpr::Option { elem: w, .. }, TypeExpr::Option { elem: g, .. }) => {
+                self.type_exprs_conflict(w, g, depth + 1)
+            }
+            (
+                TypeExpr::Array {
+                    len: want_len,
+                    elem: w,
+                    ..
+                },
+                TypeExpr::Array {
+                    len: got_len,
+                    elem: g,
+                    ..
+                },
+            ) => {
+                let lengths_differ = want_len
+                    .as_deref()
+                    .and_then(|len| len.render().parse::<u128>().ok())
+                    .zip(
+                        got_len
+                            .as_deref()
+                            .and_then(|len| len.render().parse::<u128>().ok()),
+                    )
+                    .is_some_and(|(w, g)| w != g);
+                lengths_differ || self.type_exprs_conflict(w, g, depth + 1)
+            }
+            (
+                TypeExpr::Map {
+                    key: want_key,
+                    value: want_value,
+                    ..
+                },
+                TypeExpr::Map {
+                    key: got_key,
+                    value: got_value,
+                    ..
+                },
+            ) => {
+                self.type_exprs_conflict(want_key, got_key, depth + 1)
+                    || self.type_exprs_conflict(want_value, got_value, depth + 1)
+            }
+            (
+                TypeExpr::Chan {
+                    dir: want_dir,
+                    elem: w,
+                    ..
+                },
+                TypeExpr::Chan {
+                    dir: got_dir,
+                    elem: g,
+                    ..
+                },
+            ) => {
+                let nested_direction_conflict = depth > 0 && want_dir != got_dir;
+                nested_direction_conflict || self.type_exprs_conflict(w, g, depth + 1)
+            }
+            (TypeExpr::Fn { .. }, TypeExpr::Fn { .. }) => false,
+            _ => true,
         }
     }
 
@@ -1968,6 +2096,7 @@ impl<'a> Collector<'a> {
             self.set_container_elem_scalar(&p.name, ces);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
             self.bind_type_name(&p.name, p.ty.render());
+            self.bind_type_expr(&p.name, &p.ty);
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -1979,6 +2108,7 @@ impl<'a> Collector<'a> {
                 let ces = self.container_elem_scalar_of_ty(&r.ty);
                 self.set_container_elem_scalar(rname, ces);
                 self.bind_type_name(rname, r.ty.render());
+                self.bind_type_expr(rname, &r.ty);
             }
         }
         for r in &f.results {
@@ -2188,6 +2318,7 @@ impl<'a> Collector<'a> {
             let tname = t.render();
             for name in &l.names {
                 self.bind_type_name(name, tname.clone());
+                self.bind_type_expr(name, t);
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
@@ -3083,6 +3214,7 @@ impl<'a> Collector<'a> {
                     self.set_container_elem_scalar(&p.name, ces);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
                     self.bind_type_name(&p.name, p.ty.render());
+                    self.bind_type_expr(&p.name, &p.ty);
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -3094,6 +3226,7 @@ impl<'a> Collector<'a> {
                         let ces = self.container_elem_scalar_of_ty(&r.ty);
                         self.set_container_elem_scalar(rname, ces);
                         self.bind_type_name(rname, r.ty.render());
+                        self.bind_type_expr(rname, &r.ty);
                     }
                 }
                 for r in results {
@@ -5107,6 +5240,9 @@ impl<'a> Collector<'a> {
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
                 )
+                || self
+                    .typed_value_type_expr(&a.value)
+                    .is_some_and(|got| self.argument_type_conflict(&p.ty, &got))
             {
                 self.emit_e1002(
                     a.value.span(),
@@ -5175,6 +5311,9 @@ impl<'a> Collector<'a> {
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
                 )
+                || self
+                    .typed_value_type_expr(&a.value)
+                    .is_some_and(|got| self.argument_type_conflict(&p.ty, &got))
             {
                 self.emit_e1002(
                     a.value.span(),
@@ -5221,7 +5360,11 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            if kinds_conflict(&want, &got)
+                || self
+                    .typed_value_type_expr(&a.value)
+                    .is_some_and(|got| self.argument_type_conflict(&p.ty, &got))
+            {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
