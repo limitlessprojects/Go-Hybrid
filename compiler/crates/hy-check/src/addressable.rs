@@ -17,9 +17,9 @@
 //! hop between it and the store must resolve to a struct value or an
 //! array value. A pointer-typed or unresolved hop stays legal (Go
 //! auto-dereferences pointers, and the checker has no full type system).
-//! Inside closure bodies, names the closure rebinds (parameters, locals,
-//! loop/match/select binders) are skipped: the enclosing `FnState` does
-//! not know their shapes, so an outer binding's shape would be wrong.
+//! Inside closure bodies, `emit_guard.rs` walks with a closure-scoped
+//! `FnState` (`cst`) so closure parameters, local declarations, and
+//! loop/match/select binders resolve to their closure-local shapes.
 
 use std::collections::HashSet;
 
