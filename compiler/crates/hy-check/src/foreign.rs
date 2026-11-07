@@ -475,6 +475,87 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const IO_LIMITED_READER: &[&str] = &["read"];
     /// `io.OffsetWriter`.
     const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
+    const NET_CONN: &[&str] = &[
+        "close",
+        "local_addr",
+        "read",
+        "remote_addr",
+        "set_deadline",
+        "set_read_deadline",
+        "set_write_deadline",
+        "write",
+    ];
+    const NET_LISTENER: &[&str] = &["accept", "addr", "close"];
+    const NET_PACKET_CONN: &[&str] = &[
+        "close",
+        "local_addr",
+        "read_from",
+        "set_deadline",
+        "set_read_deadline",
+        "set_write_deadline",
+        "write_to",
+    ];
+    const NET_TCP_CONN: &[&str] = &[
+        "close",
+        "close_read",
+        "close_write",
+        "file",
+        "local_addr",
+        "read",
+        "read_from",
+        "remote_addr",
+        "set_deadline",
+        "set_keep_alive",
+        "set_keep_alive_period",
+        "set_linger",
+        "set_no_delay",
+        "set_read_buffer",
+        "set_read_deadline",
+        "set_write_buffer",
+        "set_write_deadline",
+        "syscall_conn",
+        "write",
+        "write_to",
+    ];
+    const NET_UDP_CONN: &[&str] = &[
+        "close",
+        "file",
+        "local_addr",
+        "read",
+        "read_from",
+        "read_from_udp",
+        "read_from_udp_addr_port",
+        "read_msg_udp",
+        "read_msg_udp_addr_port",
+        "remote_addr",
+        "set_deadline",
+        "set_read_buffer",
+        "set_read_deadline",
+        "set_write_buffer",
+        "set_write_deadline",
+        "syscall_conn",
+        "write",
+        "write_msg_udp",
+        "write_msg_udp_addr_port",
+        "write_to",
+        "write_to_udp",
+        "write_to_udp_addr_port",
+    ];
+    const NET_TCP_LISTENER: &[&str] = &[
+        "accept",
+        "accept_tcp",
+        "addr",
+        "close",
+        "file",
+        "set_deadline",
+        "syscall_conn",
+    ];
+    const NET_DIALER: &[&str] = &[
+        "dial",
+        "dial_context",
+        "multipath_tcp",
+        "set_multipath_tcp",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -496,6 +577,13 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
         "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
         "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
+        "net.conn" | "net.Conn" => Some(NET_CONN),
+        "net.listener" | "net.Listener" => Some(NET_LISTENER),
+        "net.packet_conn" | "net.packetconn" | "net.PacketConn" => Some(NET_PACKET_CONN),
+        "net.tcp_conn" | "net.tcpconn" | "net.TCPConn" => Some(NET_TCP_CONN),
+        "net.udp_conn" | "net.udpconn" | "net.UDPConn" => Some(NET_UDP_CONN),
+        "net.tcp_listener" | "net.tcplistener" | "net.TCPListener" => Some(NET_TCP_LISTENER),
+        "net.dialer" | "net.Dialer" => Some(NET_DIALER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
