@@ -475,6 +475,67 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const IO_LIMITED_READER: &[&str] = &["read"];
     /// `io.OffsetWriter`.
     const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
+    const HTTP_CLIENT: &[&str] = &[
+        "close_idle_connections",
+        "do",
+        "get",
+        "head",
+        "post",
+        "post_form",
+    ];
+    const HTTP_REQUEST: &[&str] = &[
+        "add_cookie",
+        "clone",
+        "context",
+        "cookie",
+        "cookies",
+        "form_file",
+        "form_value",
+        "multipart_reader",
+        "parse_form",
+        "parse_multipart_form",
+        "path_value",
+        "post_form_value",
+        "proto_at_least",
+        "referer",
+        "set_path_value",
+        "user_agent",
+        "with_context",
+        "write",
+        "write_proxy",
+    ];
+    const HTTP_RESPONSE: &[&str] = &[
+        "cookies",
+        "location",
+        "proto_at_least",
+        "write",
+    ];
+    const HTTP_SERVER: &[&str] = &[
+        "close",
+        "listen_and_serve",
+        "listen_and_serve_tls",
+        "register_on_shutdown",
+        "serve",
+        "serve_tls",
+        "set_keep_alives_enabled",
+        "shutdown",
+    ];
+    const HTTP_COOKIE: &[&str] = &["string", "valid"];
+    const URL_URL: &[&str] = &[
+        "escaped_fragment",
+        "escaped_path",
+        "hostname",
+        "is_abs",
+        "join_path",
+        "marshal_binary",
+        "port",
+        "query",
+        "redacted",
+        "request_uri",
+        "resolve_reference",
+        "string",
+        "unmarshal_binary",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -496,6 +557,12 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
         "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
         "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
+        "http.client" | "http.Client" => Some(HTTP_CLIENT),
+        "http.request" | "http.Request" => Some(HTTP_REQUEST),
+        "http.response" | "http.Response" => Some(HTTP_RESPONSE),
+        "http.server" | "http.Server" => Some(HTTP_SERVER),
+        "http.cookie" | "http.Cookie" => Some(HTTP_COOKIE),
+        "url.url" | "url.URL" => Some(URL_URL),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -539,6 +606,12 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        ("url.url" | "url.URL", "query") => TypeShape::ForeignOpaque("url.values".into()),
+        ("http.request" | "http.Request", "cookies") | ("http.response" | "http.Response", "cookies") => {
+            TypeShape::Slice(Box::new(TypeShape::ForeignOpaque("http.cookie".into())))
+        }
+        ("http.request" | "http.Request", "cookie") => TypeShape::ForeignOpaque("http.cookie".into()),
+        ("http.response" | "http.Response", "location") => TypeShape::ForeignOpaque("url.url".into()),
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
