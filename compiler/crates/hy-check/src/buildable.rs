@@ -2493,8 +2493,31 @@ impl<'a> Collector<'a> {
                 }
                 match unwrap_parens(callee) {
                     Expr::Ident { name, .. } => {
-                        self.check_user_fn_arity(name, args, *span);
-                        self.check_user_fn_arg_types(name, args);
+                        if let Some(k) = self.lookup_kind(name) {
+                            match k {
+                                OpKind::Fn(_, Some(ref want)) => {
+                                    if want.len() != args.len() {
+                                        self.report_local_arity(name, want.len(), args.len(), *span);
+                                    } else {
+                                        self.check_fn_kind_arg_types(name, want, args);
+                                    }
+                                }
+                                OpKind::Fn(..) | OpKind::Unknown => {}
+                                _ => self.emit_e1002(
+                                    *span,
+                                    format!(
+                                        "cannot call `{}` (variable of type `{}`): `{}` is not a function (HYB-E1002)",
+                                        name,
+                                        k.label(),
+                                        k.label()
+                                    ),
+                                    "only functions, methods, and closures can be spawned with `task`",
+                                ),
+                            }
+                        } else {
+                            self.check_user_fn_arity(name, args, *span);
+                            self.check_user_fn_arg_types(name, args);
+                        }
                     }
                     Expr::Field { base, name, .. } => {
                         let bk = self.kind_of_expr(base);
@@ -5221,7 +5244,18 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let int_for_float = want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            let width_mismatch = matches!(
+                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (Some(w), Some(g)) if w != g
+            );
+            let array_len_mismatch = self.sized_array_names_differ(
+                Some(p.ty.render().as_str()),
+                self.typed_value_type_name(&a.value).as_deref(),
+            );
+            if kinds_conflict(&want, &got) || int_for_float || width_mismatch || array_len_mismatch {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -5231,6 +5265,62 @@ impl<'a> Collector<'a> {
                         want.label()
                     ),
                     "argument types must match closure parameter types",
+                );
+            }
+        }
+    }
+
+    fn check_fn_kind_arg_types(&mut self, callee_label: &str, want_params: &[OpKind], args: &[CallArg]) {
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        if want_params.len() != args.len() {
+            return;
+        }
+        for (want, a) in want_params.iter().zip(args.iter()) {
+            if a.spread {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `...` in call to non-variadic `{}` (HYB-E1002)",
+                        callee_label
+                    ),
+                    "only variadic parameters (`...T`) accept a `xs...` slice spread",
+                );
+                continue;
+            }
+            if Checker::is_nil_literal(&a.value) && is_non_nilable(want) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use nil as `{}` value in argument to `{}` (HYB-E1002)",
+                        want.label(),
+                        callee_label
+                    ),
+                    "argument types must match function parameter types",
+                );
+                continue;
+            }
+            let got = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = want {
+                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            let int_for_float = *want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            if kinds_conflict(want, &got) || int_for_float {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` (HYB-E1002)",
+                        a.value.render(),
+                        got.label(),
+                        want.label(),
+                        callee_label
+                    ),
+                    "argument types must match function parameter types",
                 );
             }
         }
@@ -7621,10 +7711,14 @@ impl<'a> Collector<'a> {
                 if let Some(k) = self.lookup_kind(name) {
                     match k {
                         // A local bound to a closure or fn-typed value carries
-                        // its declared parameter count, so the call's arity is
-                        // checkable (#577 C9).
-                        OpKind::Fn(_, Some(ref want)) if want.len() != args.len() => {
-                            self.report_local_arity(name, want.len(), args.len(), span)
+                        // its declared parameter types, so both arity and argument
+                        // types are checkable (#577 C9).
+                        OpKind::Fn(_, Some(ref want)) => {
+                            if want.len() != args.len() {
+                                self.report_local_arity(name, want.len(), args.len(), span);
+                            } else {
+                                self.check_fn_kind_arg_types(name, want, args);
+                            }
                         }
                         OpKind::Fn(..) | OpKind::Unknown => {}
                         _ => self.emit_e1002(

@@ -1789,6 +1789,41 @@ impl<'a> Checker<'a> {
                 if let Some(target) = self.type_aliases.get(base) {
                     return self.shape_of_type_with_subst(target, subst, depth + 1);
                 }
+                if let Some((base, args)) = Self::split_generic_type_args(name) {
+                    if self.struct_type_params.contains_key(base) {
+                        for a in &args {
+                            let a_sh = if let Some(sh) = subst.get(a.as_str()) {
+                                sh.clone()
+                            } else {
+                                self.shape_of_type_arg_str(a, depth + 1)
+                            };
+                            if self.shape_may_share(&a_sh)
+                                || self.shape_holds_closure(&a_sh, &mut Vec::new())
+                            {
+                                let rendered_args: Vec<String> = args
+                                    .iter()
+                                    .map(|arg| {
+                                        if let Some(sh) = subst.get(arg.as_str()) {
+                                            match sh {
+                                                TypeShape::Map(_, _) => "map[string]int".to_string(),
+                                                TypeShape::Slice(_) => "[]int".to_string(),
+                                                TypeShape::Pointer(_) => "*int".to_string(),
+                                                TypeShape::Chan(_) => "chan int".to_string(),
+                                                TypeShape::Closure => "fn()".to_string(),
+                                                TypeShape::Struct(Some(sn)) => sn.clone(),
+                                                _ => arg.clone(),
+                                            }
+                                        } else {
+                                            arg.clone()
+                                        }
+                                    })
+                                    .collect();
+                                let subst_name = format!("{}[{}]", base, rendered_args.join(", "));
+                                return TypeShape::Struct(Some(subst_name));
+                            }
+                        }
+                    }
+                }
                 self.named_shape_depth(name, depth)
             }
             TypeExpr::Pointer { to, .. } => {

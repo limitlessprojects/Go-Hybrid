@@ -3363,7 +3363,11 @@ impl<'a> Checker<'a> {
                     self.append_outer_binding_slots(st, &mut bound, true, &mut slots);
                     return Some((slots, std::borrow::Cow::Owned(body.clone())));
                 }
-                let decl = *self.fns.get(name.as_str())?;
+                let base_name = Self::base_named_type_str(name);
+                let decl = *self
+                    .fns
+                    .get(name.as_str())
+                    .or_else(|| self.fns.get(base_name))?;
                 let body = decl.body.as_ref()?;
                 let mut slots = Vec::new();
                 let mut bound: HashSet<String> =
@@ -3378,9 +3382,13 @@ impl<'a> Checker<'a> {
                         }
                     });
                     if let Some(arg) = arg_opt {
+                        let mut slot_shape = self.shape_of_type(&p.ty);
+                        if matches!(slot_shape, TypeShape::Unknown) {
+                            slot_shape = self.shape_of_expr(st, &arg.value);
+                        }
                         slots.push((
                             p.name.clone(),
-                            self.shape_of_type(&p.ty),
+                            slot_shape,
                             Some(p.ty.clone()),
                             CalleeSlotSource::Arg(&arg.value),
                         ));
@@ -3394,9 +3402,37 @@ impl<'a> Checker<'a> {
                 name: method_name,
                 ..
             } => {
+                let mbase = Self::base_named_type_str(method_name).to_string();
                 if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
-                    if self.lookup_binding(st, pkg).is_none() && self.known_package(pkg) {
-                        return None;
+                    if self.lookup_binding(st, pkg).is_none() {
+                        if self.known_package(pkg) {
+                            return None;
+                        }
+                        let tbase = Self::base_named_type_str(pkg);
+                        let assoc = format!("{}.{}", tbase, mbase);
+                        if let Some(decl) = self.fns.get(assoc.as_str()).copied() {
+                            let body = decl.body.as_ref()?;
+                            let mut slots = Vec::new();
+                            let mut bound: HashSet<String> =
+                                decl.params.iter().map(|p| p.name.clone()).collect();
+                            bound.extend(decl.results.iter().filter_map(|r| r.name.clone()));
+                            for (i, p) in decl.params.iter().enumerate() {
+                                if let Some(arg) = cr.args.get(i) {
+                                    let mut slot_shape = self.shape_of_type(&p.ty);
+                                    if matches!(slot_shape, TypeShape::Unknown) {
+                                        slot_shape = self.shape_of_expr(st, &arg.value);
+                                    }
+                                    slots.push((
+                                        p.name.clone(),
+                                        slot_shape,
+                                        Some(p.ty.clone()),
+                                        CalleeSlotSource::Arg(&arg.value),
+                                    ));
+                                }
+                            }
+                            self.append_outer_binding_slots(st, &mut bound, false, &mut slots);
+                            return Some((slots, std::borrow::Cow::Borrowed(body)));
+                        }
                     }
                 }
                 let recv_struct = match self.shape_of_expr(st, base) {
@@ -3413,13 +3449,13 @@ impl<'a> Checker<'a> {
                 };
                 let decl = if let Some(s) = recv_struct {
                     self.method_decls
-                        .get(&(s, method_name.clone()))
+                        .get(&(s, mbase))
                         .copied()
                 } else {
                     let mut matching = self
                         .method_decls
                         .iter()
-                        .filter(|((_, m), _)| m == method_name)
+                        .filter(|((_, m), _)| m == &mbase)
                         .map(|(_, d)| *d);
                     let first = matching.next()?;
                     if matching.next().is_some() {
