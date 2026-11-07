@@ -526,3 +526,13 @@
 - Zero silent closes; 3 replies 201; both pushes remote-asserted (daf32dd4, 2ad4d1e2 == ls-remote).
 - Next queue: #3886 (gorky117 real/imag Float kind — fetched, not started, next tick lead), #3890 (ryder777777 --race tooling), #3892/#3894 (Burapa-J), then #4015+ flood. Stalled-watch unchanged: #3942/#3949/#3918.
 - Suites 477 -> 478 integration files (+1: any_conversion_soundness_2482).
+
+## Session 146 — 2026-11-08 05:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef93a9, 6th consecutive); toolchains restored; approve 5/5 (4973 left); scan skipped (quota doctrine).
+- **2 landed**:
+  - **#3886** -> `979c472a` (gorky117-cell, fixes #3072/#3061/#3077): real/imag -> OpKind::Float result kind; real/imag/complex spread blacklist; operand validation (Str/Bool/Slice/Array/Map/Chan/Struct/Pointer/Fn/Interface rejected, Unknown/Int fail-open). New suite 11 tests -> 479 files; workspace 488/3125/0; corpus 135; differential FULL. Reply 201.
+  - **#3890** -> `93e4625f` (ryder777777): hyb build --race (-race + CGO_ENABLED=1, bridge param, bench-overhead pinned false) + differential --race (DATA RACE check before exit-code branch, documented_race frame-narrow matching, default-off byte-identical) + 8 python tests. In-merge fixup disclosed: USAGE string conflict with #3950's --emit-proof union-resolved inside merge commit. Full battery incl. first real --race end-to-end run (45/45 cgo race build FULL). Reply 201.
+- #3890 merge conflict handled per union doctrine (single hunk, USAGE only); python suite 29/29 after resolve.
+- Zero silent closes; 2 replies 201; both pushes remote-asserted (979c472a, 93e4625f == ls-remote); post-battery trim kept disk healthy (no ENOSPC this tick).
+- Next queue: #3892/#3894 (Burapa-J loans/sendability), then #4015+ flood. Stalled-watch unchanged: #3942/#3949/#3918.
+- Suites 479 integration files (+1: builtin_complex_soundness_3072; #3890 python-side only).
