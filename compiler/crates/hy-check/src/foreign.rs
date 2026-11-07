@@ -475,6 +475,11 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const IO_LIMITED_READER: &[&str] = &["read"];
     /// `io.OffsetWriter`.
     const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
+    const JSON_NUMBER: &[&str] = &["float64", "int64", "string"];
+    const JSON_DELIM: &[&str] = &["string"];
+    const JSON_MARSHALER_ERROR: &[&str] = &["error", "unwrap"];
+    const URL_ERROR: &[&str] = &["error", "temporary", "timeout", "unwrap"];
+    const STDLIB_ERROR_ONLY: &[&str] = &["error"];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -496,6 +501,33 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
         "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
         "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
+        "json.number" | "json.Number" => Some(JSON_NUMBER),
+        "json.delim" | "json.Delim" => Some(JSON_DELIM),
+        "json.marshaler_error" | "json.marshalererror" | "json.MarshalerError" => {
+            Some(JSON_MARSHALER_ERROR)
+        }
+        "url.error" | "url.Error" => Some(URL_ERROR),
+        "json.syntax_error"
+        | "json.syntaxerror"
+        | "json.SyntaxError"
+        | "json.unmarshal_type_error"
+        | "json.unmarshaltypeerror"
+        | "json.UnmarshalTypeError"
+        | "json.unsupported_type_error"
+        | "json.unsupportedtypeerror"
+        | "json.UnsupportedTypeError"
+        | "json.unsupported_value_error"
+        | "json.unsupportedvalueerror"
+        | "json.UnsupportedValueError"
+        | "url.escape_error"
+        | "url.escapeerror"
+        | "url.EscapeError"
+        | "url.invalid_host_error"
+        | "url.invalidhosterror"
+        | "url.InvalidHostError"
+        | "hex.invalid_byte_error"
+        | "hex.invalidbyteerror"
+        | "hex.InvalidByteError" => Some(STDLIB_ERROR_ONLY),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -539,6 +571,48 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        (
+            "json.number"
+                | "json.Number"
+                | "json.delim"
+                | "json.Delim"
+                | "json.marshaler_error"
+                | "json.marshalererror"
+                | "json.MarshalerError"
+                | "url.error"
+                | "url.Error"
+                | "json.syntax_error"
+                | "json.syntaxerror"
+                | "json.SyntaxError"
+                | "json.unmarshal_type_error"
+                | "json.unmarshaltypeerror"
+                | "json.UnmarshalTypeError"
+                | "json.unsupported_type_error"
+                | "json.unsupportedtypeerror"
+                | "json.UnsupportedTypeError"
+                | "json.unsupported_value_error"
+                | "json.unsupportedvalueerror"
+                | "json.UnsupportedValueError"
+                | "url.escape_error"
+                | "url.escapeerror"
+                | "url.EscapeError"
+                | "url.invalid_host_error"
+                | "url.invalidhosterror"
+                | "url.InvalidHostError"
+                | "hex.invalid_byte_error"
+                | "hex.invalidbyteerror"
+                | "hex.InvalidByteError",
+            "string" | "error",
+        ) => TypeShape::Str,
+        ("url.error" | "url.Error", "temporary" | "timeout") => TypeShape::Primitive,
+        (
+            "json.marshaler_error"
+                | "json.marshalererror"
+                | "json.MarshalerError"
+                | "url.error"
+                | "url.Error",
+            "unwrap",
+        ) => TypeShape::ForeignOpaque("error".into()),
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
