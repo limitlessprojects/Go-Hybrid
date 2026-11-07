@@ -372,11 +372,57 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
     const SYNC_WAIT_GROUP: &[&str] = &["add", "done", "wait"];
     const SYNC_ONCE: &[&str] = &["do"];
+    /// `time.Time` — Go standard library time handle.
+    const TIME_TIME: &[&str] = &[
+        "add",
+        "add_date",
+        "after",
+        "append_binary",
+        "append_format",
+        "append_text",
+        "before",
+        "compare",
+        "day",
+        "equal",
+        "format",
+        "go_string",
+        "gob_decode",
+        "gob_encode",
+        "hour",
+        "in",
+        "is_dst",
+        "is_zero",
+        "local",
+        "location",
+        "marshal_binary",
+        "marshal_json",
+        "marshal_text",
+        "minute",
+        "month",
+        "nanosecond",
+        "round",
+        "second",
+        "string",
+        "sub",
+        "truncate",
+        "unmarshal_binary",
+        "unmarshal_json",
+        "unmarshal_text",
+        "utc",
+        "unix",
+        "unix_micro",
+        "unix_milli",
+        "unix_nano",
+        "weekday",
+        "year",
+        "year_day",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
         "sync.once" | "sync.Once" => Some(SYNC_ONCE),
+        "time.time" | "time.Time" => Some(TIME_TIME),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
