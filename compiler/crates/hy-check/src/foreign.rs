@@ -372,11 +372,25 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
     const SYNC_WAIT_GROUP: &[&str] = &["add", "done", "wait"];
     const SYNC_ONCE: &[&str] = &["do"];
+    /// `time.Duration` — Go standard library duration methods.
+    const TIME_DURATION: &[&str] = &[
+        "hours",
+        "microseconds",
+        "milliseconds",
+        "minutes",
+        "nanoseconds",
+        "seconds",
+        "string",
+        "truncate",
+        "round",
+        "abs",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
         "sync.once" | "sync.Once" => Some(SYNC_ONCE),
+        "time.duration" | "time.Duration" => Some(TIME_DURATION),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -420,6 +434,14 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        (
+            "time.duration" | "time.Duration",
+            "hours" | "microseconds" | "milliseconds" | "minutes" | "nanoseconds" | "seconds",
+        ) => TypeShape::Primitive,
+        ("time.duration" | "time.Duration", "string") => TypeShape::Str,
+        ("time.duration" | "time.Duration", "truncate" | "round" | "abs") => {
+            TypeShape::ForeignOpaque("time.duration".into())
+        },
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
