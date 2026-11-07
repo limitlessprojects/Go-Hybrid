@@ -3098,6 +3098,16 @@ impl<'a> Checker<'a> {
                                         .collect(),
                                 );
                             }
+                            if root == "time" && (head == "after" || head == "tick" || head == "After" || head == "Tick") {
+                                return Some(vec![TypeExpr::Chan {
+                                    dir: hy_syntax::ChanDir::Recv,
+                                    elem: Box::new(TypeExpr::Named {
+                                        name: "time.time".to_string(),
+                                        span: callee.span(),
+                                    }),
+                                    span: callee.span(),
+                                }]);
+                            }
                         }
                     }
                     let base_ty = self.dir_ty_of_expr(base, env)?;
@@ -3209,11 +3219,48 @@ impl<'a> Checker<'a> {
                 }
                 None
             }
-            Expr::Field { base, name, .. } => {
+            Expr::Field { base, name, span, .. } => {
                 let base_ty = self.dir_ty_of_expr(base, env)?;
-                self.struct_fields_for_type(&base_ty)
+                if let Some(t) = self
+                    .struct_fields_for_type(&base_ty)
                     .and_then(|fs| fs.into_iter().find(|(n, _)| n == name))
                     .map(|(_, t)| t)
+                {
+                    return Some(t);
+                }
+                let head = Self::base_named_type_str(name);
+                let resolved_base = self.resolve_type_alias(&base_ty);
+                let recv_base = Self::base_named_type(&resolved_base)
+                    .or_else(|| Self::base_named_type(&base_ty));
+                if let Some(recv_base) = &recv_base {
+                    if let Some(m) = self
+                        .method_decls
+                        .get(&(recv_base.clone(), head.to_string()))
+                        .or_else(|| {
+                            Self::base_named_type(&base_ty)
+                                .and_then(|raw| self.method_decls.get(&(raw, head.to_string())))
+                        })
+                    {
+                        return Some(TypeExpr::Fn {
+                            params: m.params.clone(),
+                            results: m.results.iter().map(|r| r.ty.clone()).collect(),
+                            span: *span,
+                        });
+                    }
+                    if (recv_base == "time.ticker" || recv_base == "time.Ticker" || recv_base == "time.timer" || recv_base == "time.Timer")
+                        && (head == "c" || head == "C")
+                    {
+                        return Some(TypeExpr::Chan {
+                            dir: hy_syntax::ChanDir::Recv,
+                            elem: Box::new(TypeExpr::Named {
+                                name: "time.time".to_string(),
+                                span: *span,
+                            }),
+                            span: *span,
+                        });
+                    }
+                }
+                None
             }
             Expr::Index { base, .. } => {
                 let base_ty = self.dir_ty_of_expr(base, env)?;
@@ -3389,6 +3436,16 @@ impl<'a> Checker<'a> {
                                     .results
                                     .first()
                                     .map(|r| Self::substitute_type_params(&r.ty, &subst));
+                            }
+                            if root == "time" && (head == "after" || head == "tick" || head == "After" || head == "Tick") {
+                                return Some(TypeExpr::Chan {
+                                    dir: hy_syntax::ChanDir::Recv,
+                                    elem: Box::new(TypeExpr::Named {
+                                        name: "time.time".to_string(),
+                                        span: *span,
+                                    }),
+                                    span: *span,
+                                });
                             }
                         }
                     }
