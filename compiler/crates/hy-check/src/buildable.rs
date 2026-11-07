@@ -7716,6 +7716,31 @@ impl<'a> Collector<'a> {
                             }
                         }
                     }
+                    if pkg == "httptest"
+                        && self.lookup_kind(pkg).is_none()
+                        && matches!(name.as_str(), "get" | "post")
+                    {
+                        if self.is_pkg_symbol_shadowed("strings") {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot call `httptest.{}` because `strings` is shadowed by an in-scope declaration (HYB-E1002)",
+                                    name
+                                ),
+                                "`httptest.get` and `httptest.post` lower to `strings.TrimSuffix`; rename the shadowing `strings` declaration so the standard `strings` package is accessible",
+                            );
+                        }
+                        if self.is_pkg_symbol_shadowed("http") {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot call `httptest.{}` because `http` is shadowed by an in-scope declaration (HYB-E1002)",
+                                    name
+                                ),
+                                "`httptest.get` and `httptest.post` lower to `http.NewRequest`; rename the shadowing `http` declaration so `net/http` is accessible",
+                            );
+                        }
+                    }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
