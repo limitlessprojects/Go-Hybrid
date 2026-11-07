@@ -411,3 +411,16 @@
 - DISK: rootfs at 98% after three battery runs — incremental dir (1014M) removed post-batteries. Consider trimming incremental after each tick's last battery as standard hygiene.
 - Next queue: surface siblings #3924 (http.*) -> #3927 (json.*) -> #3929 (httptest.*) -> #3932 (os.process) -> #3935 (strings.reader) -> #3944 (net.ip/address) — same union pipeline; #3918 awaits author fix; then non-family #3902/#3904/#3905/#3912/#3913/#3914/#3907/#3925/#3938/#3942/#3946/#3949/#3950.
 - Worklog: this commit.
+
+## Session 136 — 2026-11-07 16:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aeedcd8, repo at S135 head e229ea7b); rust 1.99.0 + go1.26.9 restored; approve 7/7 (4993 left); scan skipped.
+- **5 landed, all surface family (bradwue313 wave)**:
+  - **#3924** -> `7df8c817` (fixes #3923): http.client/request/response/server/cookie + url.url surfaces (6 tables, 52 methods) + method_result shapes. Auto-merged clean. 469 suites.
+  - **#3927** -> `55a30458` (fixes #3926): json.decoder/encoder/raw_message surfaces (3 tables, 16 methods). Union-resolved 2 conflicts. 470 suites.
+  - **#3929** -> `eab3665d` (fixes #3928): httptest.server + response_recorder surfaces. Union-resolved 4 conflicts; **caught naive-union arity weld in package_mode** (json 2-tuple arm fused with httptest 2-tuple into a 4-tuple, E0308) — split back into two arms manually; verified against git merge-file --union ground truth (same defect there, confirming manual fix was the only divergence). 471 suites.
+  - **#3932** -> `9cc5796a` (fixes #3931): os.process + os.process_state surfaces. Union dropped `];` of HTTPTEST_RESPONSE_RECORDER (conflict cut inside const region) — restored in-merge, credited in commit msg. 472 suites.
+  - **#3935** -> `05624584` (fixes #3934): strings.reader surface (9 methods). Union dropped `];` of OS_PROCESS_STATE — **new post-union bracket-balance gate** (python strip-strings count) caught it before compile; restored in-merge. 473 suites.
+- All batteries on merged main: corpus 135/135 tripwire-not-fired, differential 45/45+90/90 FULL AGREEMENT, remote asserted (`git ls-remote` == HEAD) after each push, landing replies 201 x5 with disclosed in-merge fixups. Zero dup replies, zero silent closes.
+- **Union-hazard hardening (procedure change)**: after union_resolve.py, now (1) bracket-balance gate on stripped-strings content, (2) `cargo check` fast gate BEFORE merge commit, (3) optional `git merge-file --union` ground-truth diff for high-risk hunks. Root cause: git conflict hunks can cut inside multi-line const arrays / match arms; naive verbatim concat then welds or drops delimiters. Three consecutive PRs hit it (#3929 arity weld, #3932 `];` drop, #3935 `];` drop).
+- Suites 468 -> 473 (+5). Incremental dir trimmed post-batteries per S135 hygiene note; rootfs 76% used
+- Next queue: last family sibling #3944 (net.ip/address), then non-family #3902/#3904/#3905/#3912/#3913/#3914/#3907/#3925/#3938/#3942/#3946/#3949/#3950; #3918 awaits author fix (net.dialer registration).
