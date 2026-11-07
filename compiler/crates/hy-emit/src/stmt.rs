@@ -776,8 +776,10 @@ impl Emitter {
     pub(crate) fn expr_has_call_or_recv(e: &Expr) -> bool {
         match e {
             Expr::Call { .. } | Expr::Receive { .. } | Expr::Try { .. } => true,
-            Expr::Binary { lhs, rhs, .. } => {
-                Self::expr_has_call_or_recv(lhs) || Self::expr_has_call_or_recv(rhs)
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(op, BinOp::And | BinOp::Or)
+                    || Self::expr_has_call_or_recv(lhs)
+                    || Self::expr_has_call_or_recv(rhs)
             }
             Expr::Unary { operand, .. }
             | Expr::AddrOf { operand, .. }
