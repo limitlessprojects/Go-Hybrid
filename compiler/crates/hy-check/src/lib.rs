@@ -55,6 +55,7 @@ mod elided_literal;
 mod go_keyword_names;
 mod emit_guard;
 mod foreign;
+mod foreign_field;
 mod freeze;
 mod loans;
 mod const_init;
@@ -581,6 +582,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
 
         // Issue #201: expression/type guards (incomparable `==`,
         // constant negative shifts, local array-length ascriptions).
+        ck.check_stmt_foreign_field(&st, stmt);
         ck.check_stmt_emit_guard(&st, stmt);
         // T23: a multi-value call bound to the wrong number of names
         // (`p := minmax(3, 9)`) — Go refuses the emitted binding.
