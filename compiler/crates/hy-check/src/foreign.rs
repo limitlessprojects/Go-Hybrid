@@ -556,6 +556,28 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "shutdown",
     ];
     const HTTP_COOKIE: &[&str] = &["string", "valid"];
+    /// `http.ServeMux` — Go standard library HTTP request multiplexer methods.
+    const HTTP_SERVE_MUX: &[&str] = &["handle", "handle_func", "handler", "serve_http"];
+    /// `http.Header` — Go standard library HTTP header map methods.
+    const HTTP_HEADER: &[&str] = &[
+        "add",
+        "clone",
+        "del",
+        "get",
+        "set",
+        "values",
+        "write",
+        "write_subset",
+    ];
+    /// `http.Transport` — Go standard library HTTP transport methods.
+    const HTTP_TRANSPORT: &[&str] = &[
+        "cancel_request",
+        "clone",
+        "close_idle_connections",
+        "register_protocol",
+        "round_trip",
+    ];
+
     const URL_URL: &[&str] = &[
         "escaped_fragment",
         "escaped_path",
@@ -677,6 +699,9 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "http.response" | "http.Response" => Some(HTTP_RESPONSE),
         "http.server" | "http.Server" => Some(HTTP_SERVER),
         "http.cookie" | "http.Cookie" => Some(HTTP_COOKIE),
+        "http.serve_mux" | "http.ServeMux" => Some(HTTP_SERVE_MUX),
+        "http.header" | "http.Header" => Some(HTTP_HEADER),
+        "http.transport" | "http.Transport" => Some(HTTP_TRANSPORT),
         "url.url" | "url.URL" => Some(URL_URL),
         "json.decoder" | "json.Decoder" => Some(JSON_DECODER),
         "json.encoder" | "json.Encoder" => Some(JSON_ENCODER),
@@ -744,6 +769,9 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         }
         ("http.request" | "http.Request", "cookie") => TypeShape::ForeignOpaque("http.cookie".into()),
         ("http.response" | "http.Response", "location") => TypeShape::ForeignOpaque("url.url".into()),
+        ("http.header" | "http.Header", "get") => TypeShape::Str,
+        ("http.header" | "http.Header", "clone") => TypeShape::ForeignOpaque("http.header".into()),
+        ("http.transport" | "http.Transport", "clone") => TypeShape::ForeignOpaque("http.transport".into()),
         ("strings.reader" | "strings.Reader", "len" | "size") => TypeShape::Primitive,
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
