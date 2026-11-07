@@ -6,9 +6,9 @@ contact_links:
   - name: Platform requests (prebuilt binaries)
     url: https://github.com/limitlessprojects/Go-Hybrid/discussions/2
     about: Vote for which platform the release matrix builds next.
-  - name: go.mod integration design
+  - name: go.mod integration feedback
     url: https://github.com/limitlessprojects/Go-Hybrid/discussions/3
-    about: How should `hyb` hook into an existing Go module? Public design discussion before it lands.
+    about: Discuss the shipped `hyb generate` / `vendor-runtime` workflow and the working sample in examples/gomod-integration.
   - name: Bounty program (ladder + Wildcard Track)
     url: https://github.com/limitlessprojects/Go-Hybrid/blob/main/BOUNTY.md
     about: $500/cycle ladder for soundness bugs and improvements; another $500 Wildcard Track for revolutionary/contrarian ideas (no prototype required) — ledger in MOONSHOT.md.
