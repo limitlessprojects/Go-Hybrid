@@ -1,3 +1,4 @@
+- Draft contributor validation (2026-10-29, #1944): Windows descendant-timeout cleanup and pre-spawn deadline validation checked; Linux and upstream CI pending. Original report credit remains with @linkinsider-work.
 # STATUS (for the human — 15 lines max)
 
 - Contributor (2026-11-05): default Actions watch selects the heavy workflow before pagination; three focused regressions pass (two failed before). The full Linux job suite passes 95/95 with no skips; earlier Windows environment limitations remain recorded in PLAN.md. Hosted CI/review pending.
