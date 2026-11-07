@@ -7736,6 +7736,73 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+                    if pkg == "time"
+                        && self.lookup_kind(pkg).is_none()
+                        && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
+                    {
+                        if args.len() != 1 {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`time.{}` takes exactly 1 argument `(n)`, got {} (HYB-E1002)",
+                                    name,
+                                    args.len()
+                                ),
+                                &format!("write `time.{}(10)` (SPEC duration constructor)", name),
+                            );
+                        } else {
+                            let bare = unwrap_parens(&args[0].value);
+                            if matches!(
+                                bare,
+                                Expr::Lit {
+                                    kind: LitKind::Str(_)
+                                        | LitKind::RawStr(_)
+                                        | LitKind::Bool(_)
+                                        | LitKind::Char(_)
+                                        | LitKind::Nil,
+                                    ..
+                                }
+                            ) {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`time.{}` requires a numeric argument, found non-numeric literal (HYB-E1002)",
+                                        name
+                                    ),
+                                    &format!("pass an integer or numeric expression to `time.{}`", name),
+                                );
+                            }
+                        }
+                    }
+                    if pkg == "os"
+                        && self.lookup_kind(pkg).is_none()
+                        && matches!(name.as_str(), "args" | "stdout" | "stderr" | "stdin")
+                        && !args.is_empty()
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`os.{}` takes no arguments, got {} (HYB-E1002)",
+                                name,
+                                args.len()
+                            ),
+                            &format!("write `os.{}` (package variable, not a function)", name),
+                        );
+                    }
+                    if pkg == "hex"
+                        && self.lookup_kind(pkg).is_none()
+                        && name == "encode"
+                        && args.len() != 1
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.encode` takes exactly 1 slice argument `(src)`, got {} (HYB-E1002)",
+                                args.len()
+                            ),
+                            "write `hex.encode(data)` (SPEC M5 hex encoding)",
+                        );
+                    }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
