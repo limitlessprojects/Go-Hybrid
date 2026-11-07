@@ -905,6 +905,9 @@ impl<'a> Collector<'a> {
         match bare {
             Expr::Ident { name, .. } => {
                 if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(elem) = self.named_slice_element_name(&tname) {
+                        return Some(elem);
+                    }
                     if let Some(elem) = tname.strip_prefix("[]") {
                         return Some(elem.to_string());
                     }
@@ -914,7 +917,7 @@ impl<'a> Collector<'a> {
                         }
                     }
                 }
-                None
+                self.named_slice_element_name(name)
             }
             Expr::SliceLit { elem: Some(t), .. } => {
                 match t.as_ref() {
@@ -2108,22 +2111,29 @@ impl<'a> Collector<'a> {
                     (Some(w), Some(v)) if w != v
                 );
                 // #2771: `var c [4]int = a` where `a` is a `[3]int`.
+                // #3448: container element, key, value, base, and array alias soundness.
+                let container_mismatch = self.var_decl_value_conflict(t, &l.values[0]);
                 if kinds_conflict(&want, &vk)
                     || int_float_conflict
                     || scalar_mismatch
+                    || container_mismatch
                     || self.sized_array_names_differ(
                         Some(t.render().as_str()),
                         self.typed_value_type_name(&l.values[0]).as_deref(),
                     )
                 {
+                    let target_label = t.render();
+                    let got_label = self
+                        .typed_value_type_name(&l.values[0])
+                        .unwrap_or_else(|| vk.label().to_string());
                     self.emit_e1002(
                         l.span,
                         format!(
                             "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
                             l.names[0],
-                            want.label(),
-                            vk.label(),
-                            want.label()
+                            target_label,
+                            got_label,
+                            target_label
                         ),
                         "the declared type is fixed; write an explicit conversion when a conversion is intended",
                     );
@@ -2140,22 +2150,29 @@ impl<'a> Collector<'a> {
                         (Some(w), Some(g)) if w != g
                     );
                     // #2771: sized-array length must match the declared type.
+                    // #3448: container element, key, value, base, and array alias soundness.
+                    let container_mismatch = self.var_decl_value_conflict(t, v);
                     if kinds_conflict(&want, &vk)
                         || int_float_conflict
                         || scalar_mismatch
+                        || container_mismatch
                         || self.sized_array_names_differ(
                             Some(t.render().as_str()),
                             self.typed_value_type_name(v).as_deref(),
                         )
                     {
+                        let target_label = t.render();
+                        let got_label = self
+                            .typed_value_type_name(v)
+                            .unwrap_or_else(|| vk.label().to_string());
                         self.emit_e1002(
                             l.span,
                             format!(
                                 "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
                                 name,
-                                want.label(),
-                                vk.label(),
-                                want.label()
+                                target_label,
+                                got_label,
+                                target_label
                             ),
                             "the declared type is fixed; write an explicit conversion when a conversion is intended",
                         );
@@ -4429,6 +4446,193 @@ impl<'a> Collector<'a> {
     /// while a builtin name (`len`, `append`, `make`, ...) is not a type and
     /// resolves to `Unknown`, so builtins keep their own arity rules
     /// (`builtins.rs`, `HYB-E2005`) and user functions keep `check_user_fn_arity`.
+    /// #3448 — compares two type string representations for container element, key, value, base, or array length incompatibility.
+    fn var_decl_type_str_conflict(&self, target_t: &str, arg_t: &str) -> bool {
+        let t_trim = target_t.trim();
+        let a_trim = arg_t.trim();
+        if t_trim == a_trim {
+            return false;
+        }
+        if let (Some(t_num), Some(a_num)) = (
+            canonical_numeric_name(t_trim),
+            canonical_numeric_name(a_trim),
+        ) {
+            return t_num != a_num;
+        }
+        let t_chan = if let Some(r) = t_trim.strip_prefix("chan ") {
+            Some(r)
+        } else if let Some(r) = t_trim.strip_prefix("<-chan ") {
+            Some(r)
+        } else if let Some(r) = t_trim.strip_prefix("chan<- ") {
+            Some(r)
+        } else {
+            None
+        };
+        let a_chan = if let Some(r) = a_trim.strip_prefix("chan ") {
+            Some(r)
+        } else if let Some(r) = a_trim.strip_prefix("<-chan ") {
+            Some(r)
+        } else if let Some(r) = a_trim.strip_prefix("chan<- ") {
+            Some(r)
+        } else {
+            None
+        };
+        if let (Some(t_elem), Some(a_elem)) = (t_chan, a_chan) {
+            return self.var_decl_type_str_conflict(t_elem, a_elem);
+        }
+        if let (Some(t_base), Some(a_base)) = (
+            t_trim.strip_prefix('*'),
+            a_trim.strip_prefix('*'),
+        ) {
+            return self.var_decl_type_str_conflict(t_base, a_base);
+        }
+        if let (Some(t_elem), Some(a_elem)) = (
+            t_trim.strip_prefix("[]"),
+            a_trim.strip_prefix("[]"),
+        ) {
+            return self.var_decl_type_str_conflict(t_elem, a_elem);
+        }
+        if t_trim.starts_with('[') && a_trim.starts_with('[') {
+            let t_end = t_trim.find(']');
+            let a_end = a_trim.find(']');
+            if let (Some(te), Some(ae)) = (t_end, a_end) {
+                let t_len = &t_trim[1..te];
+                let a_len = &a_trim[1..ae];
+                if t_len != a_len {
+                    return true;
+                }
+                let t_el = &t_trim[te + 1..];
+                let a_el = &a_trim[ae + 1..];
+                return self.var_decl_type_str_conflict(t_el, a_el);
+            }
+            return true;
+        }
+        if let (Some(t_rest), Some(a_rest)) = (
+            t_trim.strip_prefix("map["),
+            a_trim.strip_prefix("map["),
+        ) {
+            let find_match = |s: &str| -> Option<usize> {
+                let mut depth = 0;
+                for (i, c) in s.char_indices() {
+                    if c == '[' {
+                        depth += 1;
+                    } else if c == ']' {
+                        if depth == 0 {
+                            return Some(i);
+                        }
+                        depth -= 1;
+                    }
+                }
+                None
+            };
+            if let (Some(tk_end), Some(ak_end)) = (find_match(t_rest), find_match(a_rest)) {
+                let tk = &t_rest[..tk_end];
+                let tv = &t_rest[tk_end + 1..];
+                let ak = &a_rest[..ak_end];
+                let av = &a_rest[ak_end + 1..];
+                return self.var_decl_type_str_conflict(tk, ak) || self.var_decl_type_str_conflict(tv, av);
+            }
+            return true;
+        }
+
+        let t_resolved = self.resolve_type_name_str(t_trim);
+        let a_resolved = self.resolve_type_name_str(a_trim);
+        if t_resolved != t_trim || a_resolved != a_trim {
+            return self.var_decl_type_str_conflict(&t_resolved, &a_resolved);
+        }
+
+        if t_trim != a_trim {
+            return true;
+        }
+        false
+    }
+
+    /// Resolves a type name string through aliases.
+    fn resolve_type_name_str(&self, name: &str) -> String {
+        let trimmed = name.trim();
+        let base = Checker::base_named_type_str(trimmed);
+        if let Some(alias) = self.ck.type_aliases.get(base) {
+            self.ck.resolve_type_alias(alias).render()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    /// #3448 — checks whether the declared type of a variable conflicts with the initializer value.
+    fn var_decl_value_conflict(&self, declared_ty: &TypeExpr, val: &Expr) -> bool {
+        let target_str = self.ck.resolve_type_alias(declared_ty).render();
+        let bare = unwrap_parens(val);
+        if let Some((len_expr, elem_ty, array_ty)) = bare.as_array_lit() {
+            let lit_type_str = if len_expr.is_none() {
+                if let Expr::SliceLit { items, .. } = bare {
+                    format!("[{}]{}", items.len(), self.ck.resolve_type_alias(elem_ty).render())
+                } else {
+                    self.ck.resolve_type_alias(array_ty).render()
+                }
+            } else {
+                self.ck.resolve_type_alias(array_ty).render()
+            };
+            return self.var_decl_type_str_conflict(&target_str, &lit_type_str);
+        }
+        let val_str = match bare {
+            Expr::Ident { name, .. } => {
+                let tn = match self.lookup_type_name(name) {
+                    Some(tn) => tn,
+                    None => return false,
+                };
+                self.resolve_type_name_str(&tn)
+            }
+            Expr::SliceLit { elem: Some(el), .. } => {
+                format!("[]{}", self.ck.resolve_type_alias(el).render())
+            }
+            Expr::Slice { base, .. } => {
+                let el = match self.slice_element_type_name(base) {
+                    Some(el) => el,
+                    None => return false,
+                };
+                format!("[]{}", el)
+            }
+            Expr::MapLit { key, value, .. } => {
+                format!(
+                    "map[{}]{}",
+                    self.ck.resolve_type_alias(key).render(),
+                    self.ck.resolve_type_alias(value).render()
+                )
+            }
+            Expr::AddrOf { operand, .. } => {
+                let inner = unwrap_parens(operand);
+                if let Expr::Ident { name, .. } = inner {
+                    let tn = match self.lookup_type_name(name) {
+                        Some(tn) => tn,
+                        None => return false,
+                    };
+                    format!("*{}", self.resolve_type_name_str(&tn))
+                } else if let Some((_, _, arr_ty)) = inner.as_array_lit() {
+                    format!("*{}", self.ck.resolve_type_alias(arr_ty).render())
+                } else {
+                    return false;
+                }
+            }
+            Expr::Unary { op: hy_syntax::UnOp::Addr, operand, .. } => {
+                let inner = unwrap_parens(operand);
+                if let Expr::Ident { name, .. } = inner {
+                    let tn = match self.lookup_type_name(name) {
+                        Some(tn) => tn,
+                        None => return false,
+                    };
+                    format!("*{}", self.resolve_type_name_str(&tn))
+                } else if let Some((_, _, arr_ty)) = inner.as_array_lit() {
+                    format!("*{}", self.ck.resolve_type_alias(arr_ty).render())
+                } else {
+                    return false;
+                }
+            }
+            _ => return false,
+        };
+
+        self.var_decl_type_str_conflict(&target_str, &val_str)
+    }
+
     /// #2811 — the element spelling of a slice TYPE NAME (alias resolution
     /// included), e.g. `my_int64_slice` → `int64`. `None` when the name does
     /// not resolve to a slice type, which fails open.
