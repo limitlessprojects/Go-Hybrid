@@ -382,6 +382,21 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "write", "write_byte", "write_rune", "write_string",
         "grow", "reset", "string", "len", "cap",
     ];
+    const SYNC_COND: &[&str] = &["wait", "signal", "broadcast"];
+    const SYNC_POOL: &[&str] = &["get", "put"];
+    const SYNC_MAP: &[&str] = &[
+        "load",
+        "store",
+        "delete",
+        "load_or_store",
+        "load_and_delete",
+        "range",
+        "compare_and_swap",
+        "compare_and_delete",
+        "swap",
+    ];
+    const TIME_TICKER: &[&str] = &["stop", "reset"];
+    const TIME_TIMER: &[&str] = &["stop", "reset"];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -389,6 +404,11 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "sync.once" | "sync.Once" => Some(SYNC_ONCE),
         "bytes.buffer" | "bytes.Buffer" => Some(BYTES_BUFFER),
         "strings.builder" | "strings.Builder" => Some(STRINGS_BUILDER),
+        "sync.cond" | "sync.Cond" => Some(SYNC_COND),
+        "sync.pool" | "sync.Pool" => Some(SYNC_POOL),
+        "sync.map" | "sync.Map" => Some(SYNC_MAP),
+        "time.ticker" | "time.Ticker" => Some(TIME_TICKER),
+        "time.timer" | "time.Timer" => Some(TIME_TIMER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
