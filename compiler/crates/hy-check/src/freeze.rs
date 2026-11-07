@@ -350,8 +350,8 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        for (outer_name, depth) in shadow_targets {
-            if let Some(b) = st.binding_at_depth_mut(&outer_name, depth) {
+        for (outer_name, depth) in &shadow_targets {
+            if let Some(b) = st.binding_at_depth_mut(outer_name, *depth) {
                 if b.moved.is_none() {
                     b.moved = Some(MoveInfo {
                         span,
@@ -359,6 +359,25 @@ impl<'a> Checker<'a> {
                         desc: desc.clone(),
                         moved_name: name.to_string(),
                     });
+                }
+            }
+        }
+        for (pos, (s_env, _, _)) in &mut st.closure_scoped_envs {
+            let shadowed = st.shadowed_closure_vars.get(pos);
+            for target in members
+                .iter()
+                .filter(|m| !shadowed.map_or(false, |s| s.contains(*m)))
+                .chain(shadow_targets.iter().map(|(n, _)| n))
+            {
+                if let Some(b) = s_env.get_mut(target) {
+                    if b.moved.is_none() {
+                        b.moved = Some(MoveInfo {
+                            span,
+                            kind,
+                            desc: desc.clone(),
+                            moved_name: name.to_string(),
+                        });
+                    }
                 }
             }
         }
