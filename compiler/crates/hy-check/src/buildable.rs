@@ -7693,6 +7693,13 @@ impl<'a> Collector<'a> {
                         } else {
                             self.check_errors_wrap_operands(args);
                         }
+                        if self.is_fmt_shadowed() {
+                            self.emit_e1002(
+                                span,
+                                "cannot call `errors.wrap` because `fmt` is shadowed by an in-scope declaration (HYB-E1002)".to_string(),
+                                "`errors.wrap` lowers to `fmt.Errorf`; rename the shadowing `fmt` declaration so the standard `fmt` package is accessible",
+                            );
+                        }
                     }
                     // #3598: `fmt.eprintln`, `fmt.eprint`, and `fmt.eprintf` lower to
                     // `fmt.Fprint*(os.Stderr, ...)` in `hy-emit`. When `os` is shadowed by
