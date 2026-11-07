@@ -12,6 +12,8 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,6 +23,13 @@ SPEC = importlib.util.spec_from_file_location(
     "check_test_registration", Path(__file__).with_name("check_test_registration.py"))
 guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
+
+# A suite whose failure must reach CI; used by the masking probes below.
+FAILING_SUITE = (
+    "import unittest\n"
+    "class Broken(unittest.TestCase):\n"
+    "    def test_failure(self): self.fail('failure must reach CI')\n"
+    "if __name__ == '__main__': unittest.main()\n")
 
 
 class PatternExtractionTests(unittest.TestCase):
@@ -84,14 +93,18 @@ class PatternExtractionTests(unittest.TestCase):
             "tests/test_live.py", "  run: python3 tests/test_live.py\n"))
 
     def test_later_shell_command_does_not_supply_discovery_patterns(self):
-        for separator in (" && ", "&&", ";"):
-            with self.subTest(separator=separator):
-                self.assertEqual(guard.registered_patterns(
-                    "python3 -m unittest discover -s tools -p test_live.py"
-                    + separator + "echo -p test_disabled.py\n"), ["test_live.py"])
+        # A `;` list does not mask a failure: the earlier command still ends
+        # the step, so its pattern is registered and only its own arguments
+        # are read (a following echo's -p never becomes another pattern).
+        self.assertEqual(guard.registered_patterns(
+            "python3 -m unittest discover -s tools -p test_live.py"
+            "; echo -p test_disabled.py\n"), ["test_live.py"])
+        self.assertTrue(guard.is_registered_direct(
+            "tests/test_live.py",
+            "python3 tests/test_live.py; echo tests/test_disabled.py\n"))
 
     def test_exit_masking_operators_do_not_register_tests(self):
-        for separator in (" || ", "||", " | ", "|", " & ", "&"):
+        for separator in (" || ", "||", " | ", "|", " & ", "&", " && ", "&&"):
             with self.subTest(separator=separator):
                 self.assertEqual(guard.registered_patterns(
                     "python3 -m unittest discover -s tools -p test_failing.py"
@@ -106,6 +119,29 @@ class PatternExtractionTests(unittest.TestCase):
         self.assertFalse(guard.is_registered_direct(
             "tests/test_direct.py",
             "python3 tests/test_direct.py && echo ok || true\n"))
+
+    def test_and_list_alone_is_not_registration(self):
+        # Issue #3095: bash exempts every command of an `&&`/`||` list except
+        # the one after the final operator from errexit, so in
+        # `python3 tests/test_broken.py && :` the failing suite neither stops
+        # the step nor fails it — a later successful line hides it.
+        for tail in (" && :", "&&:", " && echo ok", "&&echo ok", " && true"):
+            with self.subTest(tail=tail):
+                self.assertEqual(guard.registered_patterns(
+                    "python3 -m unittest discover -s tools -p test_broken.py"
+                    + tail + "\n"), [])
+                self.assertFalse(guard.is_registered_direct(
+                    "tests/test_broken.py", "python3 tests/test_broken.py" + tail + "\n"))
+        # Controls: the same suites register through their own unmasked line
+        # (before or after the masked one), and a `;` list stays accepted.
+        self.assertEqual(guard.registered_patterns(
+            "python3 -m unittest discover -s tools -p test_broken.py && :\n"
+            "python3 -m unittest discover -s tools -p test_broken.py\n"), ["test_broken.py"])
+        self.assertTrue(guard.is_registered_direct(
+            "tests/test_broken.py",
+            "python3 tests/test_broken.py && :\npython3 tests/test_broken.py\n"))
+        self.assertTrue(guard.is_registered_direct(
+            "tests/test_broken.py", "python3 tests/test_broken.py; true\n"))
 
     def test_interpreter_flags_preserve_real_invocations(self):
         self.assertEqual(guard.registered_patterns(
@@ -286,13 +322,43 @@ class RegistrationTests(unittest.TestCase):
     def test_or_list_and_pipeline_masked_failures_are_rejected(self):
         fixtures = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
         or_workflow = (fixtures / "workflow_or_list_reject.yml").read_text(encoding="utf-8")
-        and_workflow = (fixtures / "workflow_and_list_accept.yml").read_text(encoding="utf-8")
+        and_workflow = (fixtures / "workflow_and_list_reject.yml").read_text(encoding="utf-8")
         root, _ = self.build(
             or_workflow, ["tools/test_failing.py", "tests/test_direct.py"])
         self.assertEqual(
             [rel for rel, _ in guard.unregistered(root, or_workflow)],
             ["tools/test_failing.py", "tests/test_direct.py"])
-        self.assertEqual(guard.unregistered(root, and_workflow), [])
+        # Issue #3095: the AND-list fixture masks the same way, and the third
+        # suite in the fixture still registers through its own unmasked line.
+        root, _ = self.build(
+            and_workflow,
+            ["tools/test_failing.py", "tests/test_direct.py", "tests/test_control.py"])
+        self.assertEqual(
+            [rel for rel, _ in guard.unregistered(root, and_workflow)],
+            ["tools/test_failing.py", "tests/test_direct.py"])
+        self.assertTrue(guard.is_registered_direct("tests/test_control.py", and_workflow))
+
+    def test_and_list_masks_a_failing_suite_in_a_real_shell(self):
+        # Issue #3095, end to end: `python tests/test_broken.py && :` executes
+        # the suite, the suite fails, and the step still exits 0 — so the
+        # guard must not accept the masked invocation as registration.
+        commands = "set -e\npython tests/test_broken.py && :\n:\n"
+        root, text = self.build(commands, ["tests/test_broken.py"])
+        (root / "tests/test_broken.py").write_text(FAILING_SUITE, encoding="utf-8")
+        if os.name != "nt":
+            real = ("set -e\n" + shlex.quote(sys.executable)
+                    + " -B tests/test_broken.py && :\n:\n")
+            for shell_name, flags in (("/bin/sh", ["-e", "-c"]),
+                                      ("bash", ["-e", "-o", "pipefail", "-c"])):
+                if shutil.which(shell_name) is None:
+                    continue
+                shell = subprocess.run([shell_name] + flags + [real], cwd=root,
+                                       capture_output=True, text=True, timeout=30)
+                with self.subTest(shell=shell_name):
+                    self.assertEqual(shell.returncode, 0, shell.stderr)
+                    self.assertIn("FAILED (failures=1)", shell.stderr)
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tests/test_broken.py"])
 
 
 
