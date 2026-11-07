@@ -1203,3 +1203,514 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 281 -> 290. Final main 18c8d3b9, tree clean.
 - NOTE: approve step (CI unblock) deferred — core limit 0 until 13:11:32 UTC; comments endpoint worked throughout (different bucket), so replies all landed.
 - NEXT TICK QUEUE: #2836 (capture move-freeze) -> #2723 (mixed int types) -> #2824 (behind, superseded by #2838 — redirect reply) -> #2815 (W-2475 spike) -> approve carry-over if still pending -> #2830 (await rebase) -> #2831 (await rework) -> wave tail #2670/#2593/#2677/#2517/#2581/#2622 -> #1811.
+
+## Session 46 — 2026-11-01 night IV (tick 487193: 5 landed, incl. #2831 rework; hex-audit false-alarm documented)
+
+- No recycle (toolchain + warm target survived). Baseline b3f9d61e (own session-45). Core rate window refreshed at 13:11:32 UTC after the session-45 exhaustion; scan OK, approve 12/12 (4902 remaining). Fresh wave: 12 score-9 candidates (carelessdept x3, aswadi x2, nyxlabs29-cyber x2, Dimany4 x3, ket4min-susan) + #2831 rework at Pareto #4.
+- LANDED (rework first, then Pareto top-down):
+  cd649532 Merge PR #2831 rework (aswadi, fixes #1991) — all gate-fail shapes closed: Index-shape typeargs re-associated via assoc_index_type_arg ((box.new[int])(v) mangles correctly), stmt.rs hoist_tries_call peel_parens (root cause 5), compiled tests. 292 suites.
+  6393055e Merge PR #2814 (carelessdept, fixes #2809) — shepherd cmd_probe NameError (free 'r' on unmatched diff) + TypeError (CompletedProcess subscript); pytest 17 in worktree. 292 suites.
+  68611af0 Merge PR #2888 (carelessdept, fixes #1103) — triage collect(): thread-safe mb_cache for shared merge_base compares + head==main_sha short-circuit; pytest 4. 292 suites. Directly cuts scan API burn.
+  f2d7301e Merge PR #2850 (carelessdept, fixes #2848) — nil in len/cap/delete/min/max + non-numeric literals in real/imag/complex reject HYB-E2005. 294 suites.
+  43030723 Merge PR #2893 (aswadi, fixes #1343) — string-index, paren map-projection, call-rvalue loans reject HYB-E2010 (unwrap_parens + Map/Str shapes). 296 suites.
+- FALSE-ALARM FORENSICS (documented): #2888's mb_cache[merge_base] lines APPEARED mangled in tool output (rg/repr/cat-v/ast-segment all showed mb_cacheerge_base]; only od -c showed the [). Byte-level hex audit (6d 62 5f ... 5b 6d 65) proved the file correct — the rendering layer eats literal [m sequences in contiguous output; od's per-byte spacing survives it. Rule reaffirmed: never gate-fail on suspicious brackets without a hex audit. AST + pytest were authoritative.
+- All five: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted.
+- Suite trajectory: 290 -> 296. Final main 43030723, tree clean.
+- NEXT TICK QUEUE: #2868 (typed int width through reads) -> #2846 (closure/fn-param call args) -> #2871 (const conversion matrix) -> #2878 (slice conversion element scalars) -> #2882 (shadowed E11/E4/E6 try contexts) -> #2864 (field/index assignment widths) -> #2786 (transitive multi-return pairs) -> #2836/#2723 (carry-over) -> #2824 (superseded by #2838, redirect reply owed) -> #2815 (W-2475 spike) -> #2830 (await rebase) -> wave tail.
+
+## Session 47 — 2026-11-01 night V (tick 487193 rerun: 2 landed + 1 supersede-redirect; full env recycle rebuilt)
+
+- Full recycle (rustc/go/target all gone): rustup 1.99.0 + go1.26.9 restored; go tarball now cached at /home/z/my-project/go1.26.9.tar.gz for next time. Cold target rebuilt in ONE 560s slice (jobs=1, cargo test --workspace --no-run).
+- Baseline on start: d2917dcb (session 46 landed 5 — #2831 rework, #2814, #2888, #2850, #2893; suites 296). NOTE for next tick: verify_pr.sh needs NO outer timeout wrapper — it has internal budgets (cargo 1200/corpus 900/diff 1800); the outer 560s wrapper killed the first #2909 attempt mid-build. Pre-warm target from main repo instead when cold.
+- scan OK (4998 core on entry), approve 4/4 (4996 remaining).
+- LANDED:
+  6c694e91 Merge PR #2909 (ket4min-susan, fixes #2880) — check_test_registration rejects OR-list/pipeline/background masked test invocations; guard skips python cmds whose tail holds | or bare &; unit tests over separator shapes + accept/reject YAML fixtures. 296 suites.
+  2f19c4ab Merge PR #2123 (martiindev710, fixes #1363) — HYB-E3006 via indirect_callee_effect routed through Field/Index/Call/Unary + catch-all callee arms; aliased/indirect calls (arr[0](v), obj.field(v), get_fn()(v)) now reject const->pointer-param writes; new indirect_call_const_write.rs suite. 297 suites. (Branch predated #2909; 3-way merge kept both — battery ran the combined tree.)
+- REDIRECT SENT: #2824 → superseded by #2838 (da28e526), written reply posted (rebase-or-close guidance, no silent close). Session-45-era queue debt cleared.
+- All landed: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies posted (protocol summary + bounty rail pointer).
+- Suite trajectory: 296 -> 297. Final main 2f19c4ab, tree clean.
+- NEXT TICK QUEUE (Pareto order): #2593 (make non-int size args, +143 1-file, cheap) -> #2917 (option match payload bindings) -> #2677 (variadic spread append) -> #2836 (capture move-freeze; NOTE same title as gttps #2614 — likely dup, land one, redirect other) -> #2895 -> #2882 -> #2910 -> #2914 -> #2661 -> land-candidate tail (#2807/#2907/#2911/#2798...) -> #2815 (W-2475 spike) -> #2830 (await rebase).
+
+## Session 48 — 2026-11-01 night VI (3 landed; recycled env again, cold build 1 slice)
+
+- Full recycle again (rust/go/target gone; go tarball cache ALSO gone from my-project — re-downloaded, re-cached as gotoolchain-1.26.9.tar; watch for whatever prunes large files here). Cold rebuild again in one 560s slice.
+- Baseline 75444b0f (own session-47). scan OK, approve 1/1 (4992 remaining).
+- LANDED:
+  3c6db0bb Merge PR #2931 (aswadi, fixes #831) — peel_slot_loan_index unwraps Paren/Move/Field chains; field-projected map slot loans (&m[k].f, move(&...), reborrow) register as O8 loans -> live insert/delete rejects HYB-E3102. New issue_831 suite. 298 suites.
+  c2a2550d Merge PR #2928 (Dimank92, fixes #2892) — min/max: result scalar inference + result-kind propagation + mixed-scalar HYB-E1002 + uint as Int. New issue_2542 suite (115L). Branch predated #2931: 3-way merge kept both; issue_831 re-run 4 passed post-merge. 298 suites.
+  b56f04d7 Merge PR #2919 (3y3y3y-huaiji, fixes #2915) — some(v) match bindings inherit option[T] element kind; check_option_method_arg validates option[T].or(default) kinds (incl typed int->float) HYB-E1002. New option_match_and_or_payload_2915.rs (140L). Branch predated #2928/#2931: 3-way merge kept both (verified: issue_2542 green, issue_831 4 passed, uint kept, min/max block at buildable.rs:929, sole deletion is the intended bind_kind replacement). 299 suites.
+- All three: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
+- Suite trajectory: 297 -> 298 -> 299. Final main b56f04d7, tree clean.
+- NOTE: #2917/#2677/#2836/#2895/#2910 dropped out of Pareto NOW between ticks (authors may have closed/rebased them) — verify status before re-queuing.
+- NEXT TICK QUEUE: #2882 (shadowed E11/E4/E6 try contexts, +253) -> #2914 (receiver methods out of file tables) -> #2614 (capture move-freeze; check dup vs closed #2836) -> #2661 (N5 array zero-init emit) -> #2925 (folded index callees) -> #2807 (N5 pointer/partial zero-init; check overlap w/ #2661) -> #2935 (copy() element types) -> #2934 (builtin range bounds) -> #2907 (nested len fold) -> land-candidate tail (#2911/#2937/#2798/#2926/#2741/#2756/#2781/#2905/#2785/#2923/#2855/#2938) -> #2593 (behind 5, still open) -> #2815 (W-2475 spike).
+
+## Session 49 — 2026-11-02 night I (3 landed; recycle #N, cold build 1 slice; go tarball cache keeps evaporating — re-cached as "go-1.26.9")
+
+- Recycle again: rust 1.99.0 + go1.26.9 reinstalled (tarball cache gone AGAIN — saved under extensionless name this time). Cold rebuild in one 560s slice.
+- Baseline 55c9ac60 (own session-48). scan OK, approve 0/0 (nothing pending; 3864 remaining after scan burn — core burn higher this window).
+- LANDED:
+  34276234 Merge PR #2836 (aswadi, fixes #2613) — closure captures propagate captured ident's moved-state onto the closure binding (post-move closure binds inherit freeze); multi-value rebinds re-establish closure-peer share edges; closure_mutates/closure_defs dropped on rebind. REBASED by author from +218/3f to +63/2f since last tick. New closure_multi_rebind_freeze_2613.rs. 300 suites.
+  d0670d3b Merge PR #2895 (aswadi, fixes #822+#821+#867) — scoped closure envs preserve moved/non_owned_origin (no downgrade) + pull moved from share peers/aliases; self-reading rebinds keep shadow links/outer-depth/shares, skip mark_nested_overwritten. Branch predated #2836 — kept both, both suites re-run green (1+2 passed). New issue_822 suite. 301 suites.
+  9a2b6f21 Merge PR #2951 (nyxlabs29-cyber, fixes #2945, SPEC LX13) — BindingKind::Map in hy-emit; single-var for-in over map emits key-range loop; buildable map-literal classification matches. New for_in_map_binds_key_2945.rs + range_element_mutation_1480 LX13 update. Branch predated #2836/#2895 — kept both (2 sanity suites green). 302 suites.
+- All three: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
+- Suite trajectory: 299 -> 300 -> 301 -> 302. Final main 9a2b6f21, tree clean.
+- OPEN DEDUPE: #2614 (gttps) same title as landed #2836 (aswadi, fixes #2613) — verify overlap next tick before landing; likely redirect reply if #2836 covers it.
+- NEXT TICK QUEUE: #2958 (option/fn .pop() reject + option method arity, 3y3y3y-huaiji) -> #2960 (method/generic-fn equality guards) -> #2947 (T24 O8 field loans) -> #2959 (foreign const-write args) -> #2882 (shadowed try contexts) -> #2925 (folded index callees) -> #2807/#2661 (N5 zero-init — CHECK OVERLAP, both emit-side) -> #2963 (set[T] typing) -> #2961 (scalar types on field/index assign) -> #2911 -> #2907 -> #2935 -> #2934 -> tail (#2798/#2926/#2741/#2756/#2781/#2905/#2785/#2923/#2855/#2938) -> #2593 -> #2815.
+
+## Session 51 — 2026-11-02 day I (3 landed: 2993 recovery + 3044 + 2985; recycle + cold build)
+
+- Session-50 note: tool layer died mid-tick after verifying #2993 but BEFORE merge — recovered cleanly here (main/PR head both unchanged, battery evidence still valid, landed without re-verify).
+- Recycle + full restore (tarball cache evaporated AGAIN — re-cached). Cold rebuild one slice. scan + approve 10/10 (4982 remaining).
+- LANDED:
+  8ae84869 Merge PR #2993 (00Desa00, fixes #2992) — conversion_kinds_conflict (_, Option(_)) => true: option[T] values reject u8/int/float64/string conversions (prelude struct lowering), option-to-option allowed. New option_value_conversion.rs. 303 suites. (Evidence from session-50 battery.)
+  37edfda6 Merge PR #3044 (ket4min-susan, fixes #3041) — regexbinding: UTF-8 validity before deep crossing, status decode strictly 0/1, FnAbiWord via Cross1S. New regex_edge_test.go. Branch predated #2993 — kept both (option-conversion suite 2 passed post-merge). 303 suites.
+  d293c312 Merge PR #2985 (00Desa00, fixes #2984) — typed_value_scalar maps Char literals (incl. negated) to int32 (Go default type for untyped rune const): r := 'x' + i and var n int = r reject HYB-E1002. New rune_literal_binding_width.rs. Branch predated #2993/#3044 — kept both (2 passed). 304 suites.
+- All three: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
+- Suite trajectory: 302 -> 303 -> 304. Final main d293c312, tree clean.
+- NEXT TICK QUEUE: #3069 (string for-in element as rune, fixes #3065) -> #3045 (none as option kind) -> #3038 (hybench histogram clamp/overflow) -> #3048 (tools path bounds/anchors) -> #3023 (hy-syntax fn-type render + Paren peel) -> #3043 (managed_ report schemas) -> #2988 (set[T] index/slice/cap reject) -> #3039 (type use shadowed by local value) -> #2923 (loop backedge replay) -> then re-scan for the wave tail.
+
+## Session 52 — 2026-11-02 midday (3 landed; recycle + cold build; scan slow, needed 2nd run)
+
+- Recycle + restore (tarball cache gone again). scan 1st run hit 280s cap mid-scan; re-ran at 400s cap OK. approve 21/21 (4979 remaining).
+- LANDED:
+  133dcb51 Merge PR #2994 (aswadi, fixes #1184) — post-defer watch: dead targets removed (+rebound_self on deferred-name rebind), For/Iterate after defer binds iterate vars via handle_bind with may-share shapes, stmt_moves_watched_binding uses root_ident() so field move-sends caught HYB-E3003. New defer_move_soundness_1184.rs. 305 suites.
+  d3042c3f Merge PR #3097 (gttps, fixes #3096) — addressable.rs: closure_rebinds early-returns DELETED (closure-bound roots no longer bypass addressability), StructLit/SliceLit/Receive struct/array-shaped rvalues unassignable. Branch predated #2994 — kept (defer suite 1 passed). New addressable_rvalue_and_closure_slot.rs. 306 suites.
+  02557ca8 Merge PR #3002 (aswadi, fixes #1178) — loans.rs: forwarded multi-return call results propagate const-mutation, out-param params, slot-loan origins to bound vars. Branch predated #2994/#3097 — kept both (suites 2+1 passed, closure_rebinds still gone). New multi_return_call_forwarding_loans.rs. 307 suites.
+- All three: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
+- Suite trajectory: 304 -> 305 -> 306 -> 307. Final main 02557ca8, tree clean.
+- NEXT TICK QUEUE: #3034 (multi-value assign E1002) -> #3099 (complex const ascriptions) -> #3101 (elided struct lit in interface/non-slice slots) -> #2978 (any as concrete type, fixes #2962) -> #2970 (fn-lit error-tail zero-fill) -> #2934 (builtin range bounds) -> #2942 (foreign shapes multi-return) -> #3069 (string for-in rune, fixes #3065) -> #3103 (AND-list registration) -> #3038/#3048/#3023/#3043/#2988/#3039.
+
+## Session 53 — 2026-11-02 noon (2 landed; rate-limit 149 forced git-only queue from worklog; scan crashed once on network, once on RateGuard)
+
+- Recycle + restore. scan 1st run died (RemoteDisconnected mid-scan, burned core), 2nd run RateGuard-aborted at 149 remaining. approve 19/19 before the burn-out (4981 remaining at that point). Fell back to git-only workflow: worklog queue + verify_pr.sh (git-only) + comments endpoint for replies. Worked.
+- LANDED:
+  33ef8242 Merge PR #3034 (aswadi, fixes #1186) — multi_value_kinds completeness: n>=2 resize, non-map index bases stop claiming Bool, call results return all kinds, forwarded multi-value call args checked per-param HYB-E1002. New buildable_multi_value_1186.rs. 308 suites.
+  38166b7a Merge PR #3099 (gttps, fixes #3098) — const_init.rs: complex64/128 const ascriptions + chained local consts resolve. Branch predated #2994/#3097/#3002/#3034 — all four kept (4/4 sanity suites green). New const_init_complex_and_rust_conv.rs. 309 suites.
+- Both: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
+- Suite trajectory: 307 -> 308 -> 309. Final main 38166b7a, tree clean.
+- NEXT TICK QUEUE: #3101 (elided struct lit in interface/non-slice slots) -> #2978 (any as concrete, fixes #2962) -> #2970 (fn-lit error-tail zero-fill) -> #2934 (builtin range bounds) -> #2942 (foreign shapes multi-return) -> #3069 (string for-in rune, fixes #3065) -> #3103 (AND-list registration) -> #3038/#3048/#3023/#3043/#2988/#3039 + re-scan for new wave.
+
+## Session 54 — 2026-11-02 afternoon (3 landed incl. 6.7d-old #1884; prior tick lost to sandbox-start failure)
+
+- NOTE: 13:10 tick (session 54 attempt 1) never ran — sandbox failed to start; clean recovery, no lost state.
+- Recycle + restore (tarball cache gone again). scan + approve 24/24 (4976 remaining). New wave of 12 Pareto candidates.
+- LANDED:
+  c013aa82 Merge PR #3144 (Dimank92, fixes #3142) — T.m method expressions with pointer receiver *T reject HYB-E1002 (Go §Method expressions). New issue_3142 suite (71L). 310 suites.
+  cbe14ea9 Merge PR #3141 (phatloi0010, fixes #3140) — emit_guard overflow checks state-aware: return-stmt overflow threads FnState, struct-lit field checks resolve via state (shadowed consts, generic structs, aliased fn types). Branch predated #3144 — kept (4 passed). New emit_guard_overflow suite (82L). 311 suites.
+  7e2cb776 Merge PR #1884 (Dimank92, fixes #1877) — check_fn_lit_call: inline closure calls + task spawns arity + per-arg kind checks HYB-E1002, pointer-param addressable exemption. Branch predated #3144/#3141 — kept both (2/2 sanity). New closure_call_arity_soundness.rs (65L). 312 suites. (6.7d old — oldest open land-candidate now cleared.)
+- All three: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
+- Suite trajectory: 309 -> 310 -> 311 -> 312. Final main 7e2cb776, tree clean.
+- NEXT TICK QUEUE: #3156 (untyped nil conditions) -> #3143 (nil match patterns / out-of-range int patterns) -> #3145 (copy() scalar mismatches) -> #3153 (copy() non-byte string, CHECK DUP vs #3145 — both gorky/Dimank92 same shape) -> #2948 (out-of-range const conversions) -> #2977 (typed const short defines) -> #1811 (complex builtins in const init, 7.1d old) -> #3133 (variadic spread position/count) -> #2868 (typed int width through reads, 0.8d) -> re-scan for tail.
+
+## Session 55 — 2026-11-02 16:10 tick (1 landed, 1 gate-fail w/ evidence; full-rate window, fresh scan)
+
+- Recycle + restore (rust/go reinstalled; tarball re-cached as go-1.26.9.tar.gz). scan OK (4980 remaining), approve 20/20. New aswadi wave at Pareto top.
+- LANDED:
+  d30ea65c Merge PR #3178 (aswadi, fixes #3029) — emit_guard Named-type tokens checked vs in-scope local bindings via env_lookup → HYB-E1002 (shadowed builtin int/bool, param named int, struct shadowed by own value). New shadowed_type_name_3029 suite. 313 suites.
+  9951544e Merge PR #3167 (aswadi, fixes #1682+#1707+#1770+#1828) — const_overflow: array-lit conv of const args emits conv-kind error directly; c64/c128/complex64/complex128 join float arms (f32 range); bool only from Bool consts. All 8 fixtures cross-validated vs real go1.26.9 (const string->array NEVER legal, even len==N). New const_conv_targets_1682 suite. 314 suites.
+- GATE FAIL (evidence posted, not landed):
+  #3187 (aswadi, fixes #3019) — render/root_ident/as_array_lit changes are good, but PR's own test r1 expects HYB-E3012 while pipeline correctly emits HYB-E1002 (struct-level instantiation mismatch; sendability doesn't descend into fn-type param channels inside generic type args). Suggested: point assertion at E1002 (1-line) or extend sendability. Reply: issuecomment-6572529764.
+- All landed PRs: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT.
+- Suite trajectory: 312 -> 313 -> 314. Final main 9951544e, tree clean.
+- NEXT TICK QUEUE: #3165 (buildable void/multi-value in single-value positions) -> #3173 (elided struct lit interface/non-slice; supersedes old #3101?) -> #3185 (TypeExpr array lengths in composite/fn lits) -> #3069 (string for-in rune, 0.6d) -> #2982 (any as concrete, fixes #2962; check vs #2976/#2978 dup) -> #3182 (some() arity/variadic spread) -> #3176 (option payload numeric width) -> #3184 (string byte names string not map) -> #2948 (out-of-range const conv) -> #2977 -> #1811 (7.2d old) -> #2868 -> tail.
+- DUP WATCH: #3050 vs landed #3178 (both fixes #3029, +245 vs +39) — review next tick, likely superseded reply. #3145 vs #3153 (copy() same shape). #2982 vs #2976 vs #2978 (any/concrete).
+
+## Session 56 — 2026-11-02 17:10 tick (1 landed w/ disclosed in-merge fixup; stale-worktree-paths trap diagnosed)
+
+- Recycle + restore (tarball evaporated again, re-cached). Cold build 1 slice. scan OK (4963 remaining), approve 14/14. New wave: #3204/#3196/#3207.
+- LANDED:
+  b67b22b0 Merge PR #3165 (aswadi, fixes #1852+#1854+#1860+#1862+#1863+#1922) — check_single_value_position walks multi-name binding/multi-target assign values (void always rejects; multi-value rejects outside binding pos, E2002 owns binding shapes), for-range exprs, receive operands, index/slice bases, short-return lists. Whole-call forwarding returns keep early branches (exact-count + error-tail), 'return g(), nil' mid-list multi-value correctly rejects. IN-MERGE FIXUP (disclosed in merge commit): last fixture used 'mut a := 1' — mut is not Hybrid grammar (HYB-E0002 parse error) → dropped 2 'mut ' tokens so intended assertion runs. Cargo on merged tree: 315 suites; corpus OK tripwire not fired; differential FULL 42/42+88/88. 315 suites.
+- NOTE #3187: author pushed ca40c619 (was 90e82efb) in response to session-55 gate-fail evidence — RE-VERIFY FIRST next tick.
+- TRAP DIAGNOSED: shared CARGO_TARGET_DIR reuses test bins compiled in the removed /tmp/verify-wt worktree → CARGO_MANIFEST_DIR-baked paths dangle → parse_all/corpus tests fail with 'cannot read /tmp/verify-wt/...' on the main checkout when the merge did NOT touch that crate's sources. Fix: `cargo clean -p hy-syntax -p hy-check` before rerun. Expect this whenever a merge touches no file in a crate whose tests read fixtures relative to the manifest dir.
+- Suite trajectory: 314 -> 315. Final main b67b22b0, tree clean.
+- NEXT TICK QUEUE: #3187 RE-VERIFY (updated head ca40c619) -> #3173 (elided struct lit) -> #3185 (TypeExpr array lengths) -> #3204 (emit closure slot-loan lifetime) -> #3196 (fn lit scalar widths) -> #3069 (string for-in rune) -> #2982 (any as concrete) -> #3182 (some() arity) -> #3176 (option payload width) -> #3184 (string byte naming) -> #2948 -> #2977 -> #1811 (7.3d) -> #2863 -> #3207 -> #2517 -> tail.
+- DUP WATCH: #3050 vs landed #3178; #3145 vs #3153; #2982 vs #2976 vs #2978.
+
+## Session 57 — 2026-11-02 19:10 tick (1 landed: #3187 round-2 after author fix; 1 gate-fail: #3173)
+
+- Recycle + restore (tarball cache survived this time). Cold build 1 slice. scan crashed (RemoteDisconnected mid-run, S53 pattern — did not retry); approve 18/18 (4982 remaining).
+- LANDED:
+  416d4ea5 Merge PR #3187 round-2 (aswadi, fixes #3019) — author re-pointed r1 assertion HYB-E3012 -> HYB-E1002 per session-55 evidence (head ca40c619 -> fadb2c0d). ast.rs: Fn::render full signature, Move in root_ident, as_array_lit Paren peel. ALL-GREEN battery vs dd3a9688 (315 suites). 316 suites.
+- GATE FAIL (evidence posted, not landed):
+  #3173 (aswadi, fixes #3100) — elided_literal rewrite (Slot enum -> expected-type threading) rejects elided {} elements of []map[string]int{{}, {}, {}}: is_elidable_struct_slot falls through 'let Named else return false' for non-Named composite heads (Map/Slice/Array). Regresses 2 ACCEPTANCE fixtures (loop_carried_param_store_2308: fresh_copy_per_iteration + inner_block_shadow). AUTHOR FORCE-PUSHED DURING EVIDENCE GATHERING (e2745a72 -> 1ca9f537): newer head DROPS the is_empty Map/Slice/Array early-true entirely — worse. Reply includes concrete predicate fix.
+- All landed: gate CLEAN, tripwire not fired, differential FULL 42/42+88/88, ls-remote==HEAD asserted, reply + CREDIT.
+- Suite trajectory: 315 -> 316. Final main 416d4ea5, tree clean.
+- NEXT TICK QUEUE: #3173 RE-VERIFY if author pushes composite-arm fix -> #3185 (TypeExpr array lengths) -> #3204 (emit closure slot-loan lifetime) -> #3196 (fn lit scalar widths) -> #3069 (string for-in rune) -> #2982 (any as concrete) -> #3182 (some() arity) -> #3176 (option payload width) -> #3184 (string byte naming) -> #2948 -> #2977 -> #1811 (7.4d) -> #2863 -> #3207 -> #2517 -> tail.
+- DUP WATCH: #3050 vs landed #3178; #3145 vs #3153; #2982 vs #2976 vs #2978.
+
+## Session 58 — 2026-11-02 20:10 tick (1 landed: #3173 round-2; #3050 superseded reply)
+
+- Recycle + restore. Cold build 1 slice. scan crashed AGAIN (RemoteDisconnected, 2nd tick running — do not retry mid-tick); approve 15/15 (4985 remaining).
+- LANDED:
+  a9430161 Merge PR #3173 round-2 (aswadi, fixes #3100) — head 4aeadf7d restored two-arg is_elidable_struct_slot(exp, is_empty) with is_empty && Map|Slice|Array early-true per session-57 evidence. loop_carried_param_store_2308 7/7 passes. ALL-GREEN battery vs 416d4ea5 (316 suites). 317 suites.
+- REPLIES:
+  #3050 (nyxlabs29-cyber) — superseded-by-#3178 redirect posted: #3029 closed by d30ea65c; offered re-scope-against-residual-surface or close; explicitly not a quality judgment. DUP WATCH #3050 CLOSED.
+- Suite trajectory: 316 -> 317. Final main a9430161, tree clean.
+- NEXT TICK QUEUE: #3185 (TypeExpr array lengths) -> #3204 (emit closure slot-loan lifetime) -> #3196 (fn lit scalar widths) -> #3069 (string for-in rune) -> #2982 (any as concrete) -> #3182 (some() arity) -> #3176 (option payload width) -> #3184 (string byte naming) -> #2948 -> #2977 -> #1811 (7.5d) -> #2863 -> #3207 -> #2517 -> tail.
+- DUP WATCH remaining: #3145 vs #3153 (copy() same shape); #2982 vs #2976 vs #2978 (any/concrete — note #3178 landed, so any remaining any-rejection PRs may also be superseded; check fixes-lines).
+
+## Session 59 — 2026-11-02 21:10 tick (1 landed: #3069; 1 gate-fail: #3185 expected-code mismatch)
+
+- Recycle + restore. Cold build 1 slice. scan crashed 3rd tick running (RemoteDisconnected — systemic now, not transient; note for future: scan may need retry/backoff tooling); approve 16/16 (4995 remaining).
+- LANDED:
+  eedf1512 Merge PR #3069 (nyxlabs29-cyber, fixes #3065) — string for-in element binds as rune (last var scalar int32, SPEC LX13; matches #2951 single-var-binds-element convention). New for_in_string_rune_3065 suite (84L). ALL-GREEN battery vs 284ab73e (317 suites). 318 suites.
+- GATE FAIL (evidence posted, not landed):
+  #3185 (aswadi, fixes #3089) — arith.rs TypeExpr array-length const-zero walk WORKS (4/4 E6001 fixtures pass) but r1 expects HYB-E3008 while recv.rs's established classification emits HYB-E2008 for receive-from-send-only inside [][<-tx]int{}. Registry says E3008 covers direction mismatch — pre-existing taxonomy inconsistency between registry and recv.rs. Offered: (a) point assertion at E2008, (b) sweep recv.rs to E3008 for direction mismatches. Reply: issuecomment-6578211845.
+- Suite trajectory: 317 -> 318. Final main eedf1512, tree clean.
+- NEXT TICK QUEUE: #3204 (emit closure slot-loan lifetime) -> #3196 (fn lit scalar widths) -> #2982 (any as concrete) -> #3182 (some() arity) -> #3176 (option payload width) -> #3184 (string byte naming) -> #2948 -> #2977 -> #1811 (7.6d) -> #2863 -> #3207 -> #2517 -> tail. #3185 re-verify if author re-points or sweeps.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978 (any rejection — #3178 landed for #3029, different issue; any-rejection is #2962).
+
+## Session 60 — 2026-11-02 22:10 tick (1 landed: #3185 round-2)
+
+- Recycle + restore. Cold build 1 slice. scan skipped this tick (3 consecutive RemoteDisconnected crashes — systemic; next tick: try once with shorter cap or skip outright). approve not run (queue empty per head-commit checks).
+- LANDED:
+  464a2022 Merge PR #3185 round-2 (aswadi, fixes #3089) — author re-pointed r1 E3008 -> E2008 per session-59 evidence, rebased onto 6de2bc7f. arith.rs type-walk (Array len/elem, Map k/v, Fn sigs, aliases, enum payloads, local types, composite lits) + recv.rs mirror walk. ALL-GREEN battery vs 6de2bc7f (318 suites). 319 suites.
+- Suite trajectory: 318 -> 319. Final main 464a2022, tree clean.
+- NEXT TICK QUEUE: #3204 (emit closure slot-loan lifetime) -> #3196 (fn lit scalar widths) -> #2982 (any as concrete) -> #3182 (some() arity) -> #3176 (option payload width) -> #3184 (string byte naming) -> #2948 -> #2977 -> #1811 (7.7d) -> #2863 -> #3207 -> #2517 -> tail.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978.
+
+## Session 61 — 2026-11-02 23:10 tick (2 landed: #3302, #3191; #1710 superseded reply; scan recovered)
+
+- Recycle + restore. Cold build 1 slice. scan OK this time (recovered from 3-tick crash streak); approve 22/22 (4978 remaining). Big new wave: Pareto head now #1710/#3302/#3191/#3190/#1818/#3303/#3300/#1663/#3299/#3296/#3291/#3169.
+- LANDED:
+  46059b6b Merge PR #3302 (urielit1313-creator, fixes #3301) — try_context: array-length slot walks with Ctx::NoErrorResult so [v?]T rejects HYB-E2011 in all 5 contexts; elem keeps outer ctx. New try_context_array_len_3301 suite. 320 suites.
+  77183364 Merge PR #3191 (aswadi, fixes #3021) — hyrt FFI hardening: sha3 isize::MAX guard + null/0 fast path, next_gen wrap MAX-1, HyStr isize cap + try_from clamp, json_get_array validates handle before key decode. New slice_and_handle_3021 suite. 321 suites.
+- REPLIES:
+  #1710 (gorky117-cell, fixes #1707) — superseded-by-#3167: verified its fixtures PASS on main by applying patch to scratch tree + running const_conversion (all green). Redirect posted. (8.1d-old land candidate cleared.)
+- Suite trajectory: 319 -> 320 -> 321. Final main 77183364, tree clean.
+- DUP WATCH: #3303 (james-kkc) also fixes #3301 — now overlaps landed #3302; review residual next tick. #3145 vs #3153; #2982 vs #2976 vs #2978.
+- NEXT TICK QUEUE: #3190 (hy-diag severity coherence) -> #3300 (error OpKind) -> #3299 (multi-value call arg widths) -> #3296 (map key width) -> #3291 (E1002 width messages) -> #3169 (hy-emit closure error-tail, 7 files) -> #1818 (pointer/array conversions, 7.4d) -> #1663 (install symlinks, 8.3d) -> #3204 (recheck head) -> old tail (#2982/#3182/#3176/#3184/#2948/#2977/#1811/#2863/#3207/#2517).
+
+## Session 62 — 2026-11-03 02:10 tick (1 landed: #3190; #3303 superseded; #3204 blocker reply; #3300 round-1 gate-fail)
+
+- Recycle + restore (go tarball cache EVAPORATED — re-downloaded go1.26.9 and backfilled cache; rustup fresh 1.99.0). scan: first attempt killed by my own 240s cap at 560/913 (exit code was pipe-masked — trap noted: check PIPESTATUS, not $?); honest re-run crashed RemoteDisconnected (4th crash in 6 ticks — cap-or-skip policy stands). approve 27/27 (4973 remaining).
+- LANDED:
+  c9aea77c Merge PR #3190 (aswadi, fixes #3024) — hy-diag: error/warning route through one build() so assert_severity_code_coherence covers warnings + bare "E8001" codes (canonicalized via Registry lookup); Registry::lookup stops stripping repeated "HYB-" (HYB-HYB-E3003 -> None), name match ASCII case-insensitive; Span::to min/max covers inverted spans; Pos derives Ord. In-merge fixup (credited, inside merge): trailing newline for coherence_lookup_span_3024.rs. ALL-GREEN vs 88e75e6d. NOTE: verify printed "320 suites ok" on PR head vs 321 recorded for main last tick — counter discrepancy flagged, not gate-relevant.
+- REPLIES:
+  #3204 (fixes #3194) — head ref GONE from remote (ls-remote + fetch both fail for refs/pull/3204/head); blocker reply: cannot verify what cannot be fetched; asked author to re-push fd4d2c18 or newer; stays open, no silent close. issuecomment-6584932466.
+  #3303 (fixes #3301) — superseded by landed #3302 (46059b6b): src hunk identical (Ctx::Ok -> NoErrorResult("array length") in walk_type Array arm; only guard-name differs); all 5 of its fixtures verified PASSING on main via probe suite (5/5). Redirect posted. DUP WATCH #3303 CLOSED. issuecomment-6584978002.
+  #3300 (fixes #3064) — round-1 GATE FAIL, two harness defects evidenced: (1) checker() = CARGO_MANIFEST_DIR/../../target/debug/hyb never exists under external CARGO_TARGET_DIR battery -> 4x NotFound at :27:72; (2) check() temp dir keyed by process::id() only -> parallel tests clobber same case.hy; PROOF: all-error control rejected with a diagnostic naming `take_int` — a program a different test wrote. Checker logic itself verified sound: with hyb present + --test-threads=1, 4/4 pass (OpKind::Error resolution + fail-open arms close the hole, no false rejects). Fix offered: (a) in-process check_file harness (preferred), (b) CARGO_TARGET_DIR fallback + unique per-call temp dir. issuecomment-6585159035.
+- Suite trajectory: 321 -> 322 nominal (verify printed 320 on PR head; discrepancy noted above). Final main c9aea77c, tree clean.
+- NEXT TICK QUEUE: #3300 round-2 if author fixes harness -> #3299 (multi-value call arg widths) -> #3296 (map key width) -> #3291 (E1002 width messages) -> #3169 (hy-emit closure error-tail, 7 files) -> #1818 (pointer/array conversions, 7.4d) -> #1663 (install symlinks, 8.3d) -> #3204 (recheck head) -> old tail (#2982/#3182/#3176/#3184/#2948/#2977/#1811/#2863/#3207/#2517).
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978.
+
+## Session 63/64 — 2026-11-03 03:10 tick (sandbox down, zero ops) + 04:10 tick (3 landed: #3325, #3204, #3340)
+
+- 03:10 tick: sandbox failed to start entirely — no env, no pull, no scan, no replies. Zero-ops tick, queue untouched.
+- 04:10: recycle + restore (go tarball re-downloaded + cache backfilled AGAIN; CARGO_TARGET_DIR gone -> cold rebuild in one call). scan OK (REAL_EXIT=0 this time); approve 32/32 (4968 remaining). New wave Pareto head: #3325/#3340/#3338/#3214/#3226/#3245/#3204-BACK/#3299/#3296/#3346/#3347/#3308. #3300 still behind 3 — author has not fixed the harness yet.
+- LANDED:
+  d5c80034 Merge PR #3325 (dextermos-dev, fixes #3323) — is_builtin_error_type resolves type alias before Named("error") match; `type failure = error` + deep chains satisfy E4 ?-propagation; alias-to-int still HYB-E2011. ALL-GREEN vs 421ae80f.
+  8006d368 Merge PR #3204 round-2 (nyxlabs29-cyber, fixes #3194) — author re-pushed fd4d2c18 -> 40ef60ef after the head-missing blocker reply. emit_local_in_seq registers closure-bound FnLits mentioning active slot loans in loan_aliases; store-back deferred past the closure's last call (for row 11 11). Real go run behavioral suite (for/if/block, slice/array/map, twice, direct control). ALL-GREEN vs d5c80034, 321 suites.
+  9bbb0825 Merge PR #3340 (Shokun123, fixes #3339) — specialized_brain fails closed: accept controls must exist+be non-empty at HEAD, nonpositive rounds abort, anchor-rot/smoke-fail propose no diff; new test_author_repro_verdict suite. ALL-GREEN vs 8006d368. MERGE-COMMIT TYPO DISCLOSED: message says "fixes #3319", correct reference is #3339 (PR reply carries the written correction; main never force-pushed).
+- Suite trajectory: 321 -> 322 (#3325) -> 323 (#3204) nominal (verify printed 320/321 on PR heads). Final main 9bbb0825, tree clean.
+- DUP WATCH NEW: #3346 vs #3347 (both fix #3330, untyped slice literal non-literal heads) — compare before landing either.
+- NEXT TICK QUEUE: #3338 (tools/job fail-closed twin) -> #3214 (chan directions) -> #3226 (TypeExpr array-len walks) -> #3245 (E3104 array lengths) -> #3299 -> #3296 -> #3346/#3347 dup-check -> #3308 -> #3169 -> #1818 -> #1663 -> old tail.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978.
+
+## Session 65 — 2026-11-03 06:10 tick (4 landed: #3338, #3214, #3226, #3245)
+
+- Recycle + restore (go tarball + cache re-downloaded AGAIN; CARGO_TARGET_DIR gone -> cold rebuild one call). scan OK (REAL_EXIT=0, 2nd tick running); approve 19/19 (4981 remaining). Pareto: #3169 first (deferred — 6 files, needs more budget), then Shokun123 tools flood (#3384/#3389/#3362/#3393 pending).
+- LANDED:
+  e5a7e9fd Merge PR #3338 (Shokun123, fixes #3337) — tools/job fail-closed: job.json object+non-empty "job" field, polling keeps going on CLI error text, artifact names reject path traversal + destination containment check. New test_job_cli suite. ALL-GREEN vs a28ea1e3.
+  9b98eefa Merge PR #3214 (phatloi0010, fixes #3213) — sendability: copy(dst,src) checks src vs dst slice elem (alias-resolved); Fn-Fn type-param inference recurses params/results; single-var map range binds KEY (Go semantics, was value); set[T] iteration binds elem. New sendability_copy_fn_infer_and_map_set_iter suite. ALL-GREEN vs e5a7e9fd, 322 suites.
+  fe58270b Merge PR #3226 (phatloi0010, fixes #3225) — walk.rs walk_type_len_exprs: expr_uses/expr_calls/expr_fnlits descend TypeExpr array-length positions of decls + struct/slice/map lits. New walk_type_expr_uses_calls_and_fnlits suite. ALL-GREEN vs 9b98eefa, 323 suites.
+  7e0a1688 Merge PR #3245 (phatloi0010, fixes #3244) — addr_loan loan-projection checks descend TypeExpr positions (decl types, return types, lit annotations, fnlit sigs); map slot-loan init/rebind only when rooted at place path. New addr_loan_type_return_and_rvalue_map suite. ALL-GREEN vs fe58270b, 324 suites.
+- Suite trajectory: 321 -> 322 -> 323 -> 324. Final main 7e0a1688, tree clean.
+- NEXT TICK QUEUE: #3169 (hy-emit closure error-tail, 6 files — budget it first) -> #3299 -> #3296 -> #3347 (dup-check vs #3346 which dropped off Pareto) -> #3308 -> #3384 -> #3389 -> #3362 -> #3393 -> old tail (#2982/#3182/#3176/#3184/#2948/#2977/#1811/#2863/#3207/#2517). #3300 still behind — awaiting harness fix.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
+
+## Session 66 — 2026-11-03 07:10 tick (1 landed: #1818; 1 gate-fail: #3409 double-report)
+
+- Recycle + restore (full evaporate again: go tarball re-downloaded + backfilled, CARGO_TARGET_DIR cold rebuild one call). scan OK (3rd tick running); approve 30/30 (4970 remaining).
+- LANDED:
+  16df42dc Merge PR #1818 (gorky117-cell, fixes #1813) — 7.7d-old test-only PR finally at Pareto top: 4 regression tests pin rejection of int(p)/string(p)/int(arr)/string(arr) with HYB-E1002 + "cannot convert" message. Checker behavior pre-existing on main. ALL-GREEN vs 186745ca, 324 suites.
+- GATE FAIL (evidence posted, not landed):
+  #3409 (alexrayyandev, fixes #3405) — chan_direction_coercion suite 16/18. E3012 fires correctly (repro_06 holder{ch: sc} send-only->recv-only field) but a SECONDARY E1002 is appended for the same operand: left [E3012, E1002] vs right [E3012]; repro_10 left [E3012, E3012, E1002] vs right [E3012, E3012]. Double-reporting: new container-elem check + pre-existing operand/width check both report. Offered (a) suppress secondary E1002 when E3012 already fired (preferred, dedup by span/expr), (b) relax to contains(). issuecomment-6591066318.
+- Suite trajectory: 324 (unchanged; #1818 test-only). Final main 16df42dc, tree clean.
+- NEXT TICK QUEUE: #3169 (hy-emit, 6 files) -> #3415 ([N]T(s) array conversions) -> #3299 -> #3296 -> #3347 (dup-check vs #3346) -> #3308 -> #3384 -> #3389 -> #3362 -> #3393 -> old tail. #3409 round-2 if author suppresses the double-report. #3300 still behind.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
+
+## Session 67 — 2026-11-03 08:10 tick (1 landed: #3169; #3409 round-2 still double-reporting)
+
+- Recycle + restore (full evaporate again; cold rebuild one call). scan OK (4th tick running); approve 26/26 (4974 remaining).
+- LANDED:
+  e8b717df Merge PR #3169 (aswadi, fixes #2969 + #2972) — hy-emit: FnLit frames save/restore cur_option_result + cur_fn_conv_result (closure `?` zero-fills error tail via own result ctx); fnlit_depth bypass+field removed; const_int_expr folds width convs, len("lit"), min/max; has_out_of_range_subexpr conservative on Calls. New constconv_int_fold_3084 suite. ALL-GREEN vs 23beca2e, 325 suites.
+- GATE FAIL round-2 (evidence posted):
+  #3409 (alexrayyandev, fixes #3405) — author force-pushed rewrite (r1 head 7a23523f GONE, single commit e5803870). Same 2 failures byte-identical: [E3012, E1002] vs [E3012] (repro_06), [E3012, E3012, E1002] vs [E3012, E3012] (repro_10). ROOT CAUSE LOCATED in r2 diff: container_or_alias_mismatch was fed into the conflict condition that emits E1002 — but E3012 already fires from the direction site. One-line fix given: drop `|| container_or_alias_mismatch` from the E1002 conflict arm (or emit E3012 there + dedup guard). issuecomment-6592000540.
+- Suite trajectory: 324 -> 325 (#3169). Final main e8b717df, tree clean.
+- NEXT TICK QUEUE: #3299 (multi-value call arg widths) -> #3296 -> #3347 (dup-check vs #3346) -> #3308 -> #3229 (slot loan via call) -> #3298 (append dims) -> #3196 (fn lit scalar widths) -> tools flood (#3384/#3389/#3362/#3393) -> old tail. #3409 round-3 if author applies the one-line fix.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
+
+## Session 68 — 2026-11-03 09:10 tick (1 landed: #3409 round-3; 1 conflict: #3308; 1 gate-fail: #3298 merged-state regression)
+
+- Recycle + restore (full evaporate; cold rebuild one call). scan OK (5th tick running); approve 17/17 (4955 remaining).
+- LANDED:
+  c6b6e31c Merge PR #3409 round-3 (alexrayyandev, fixes #3405) — container elem-type + sized-array dim mismatches reject E3012; round-3 dedup guard `already_diagnosed_e3012` (span match over ck.diags+diags) suppresses the secondary E1002 — the one-root-cause fix from round-1/2 evidence. ALL-GREEN vs 9aad9f84, 326 suites.
+- CONFLICT (rebase requested, reply posted):
+  #3308 (phatloi0010, fixes #3203) — buildable.rs changed both sides (PR branched before the #3165/#3069-era buildable work). Mechanical rebase expected; battery runs immediately on re-push. issuecomment-6592910254.
+- GATE FAIL (evidence posted, not landed):
+  #3298 (phatloi0010, fixes #3280) — MERGED-STATE-ONLY regression: pure PR head passes range_iter_target 14/14, pure main passes, merged tree emits spurious HYB-E1002 on user_method_call_iterable_stays_accepted (`for v in c.keys()`). Interaction between #3298's new append/slice-elem checks and landed #3409's container checks in buildable.rs. Fix offered: rebase + fail-open the elem check for unresolved/generic call results (method_decls convention). issuecomment-6592950416.
+- Suite trajectory: 325 -> 326 (#3409). Final main c6b6e31c, tree clean.
+- NEXT TICK QUEUE: #3299 -> #3296 -> #3347 (dup-check vs #3346) -> #3229 (slot loan via call) -> #3196 (fn lit widths) -> #2948 -> #2977 -> #2863 -> tools flood (#3384/#3389/#3362/#3393) -> old tail. #3308/#3298 round-2 on re-push.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3346 vs #3347.
+
+## Session 69 — 2026-11-03 10:10 tick (3 landed: #3299/#3296/#3347; 1 gate-fail: #3346; disk crisis + protocol fix)
+
+- Recycle + restore (full evaporate; go tarball re-downloaded + cache backfilled). scan SKIPPED: RateGuard at 149 remaining (reset ~11:00), queue carried from S68 worklog; approve skipped same reason.
+- DISK CRISIS: rootfs 9.9G hit 100% -> cc Bus error during link. Root cause: worktree path /tmp/verify-wt keys a SECOND full cargo artifact set (workspace-internal crate fingerprints bake the workspace root path) — main-set 3.2G + merged-set 3.1G + base 3.1G > 9.9G. Freed 2.1G stale /tmp/my-project copy + 1.2G browser caches + 6.3G target.
+- PROTOCOL FIX (binding for future ticks): drop per-PR worktrees. verify stages now run as in-repo trial merge at /home/z/my-project/hybrid: git merge --no-ff --no-commit <PR-head> -> battery -> corpus -> differential -> commit on green / merge --abort on fail. Stable path = one artifact set (2.7G with CARGO_INCREMENTAL=0), deps stay warm ACROSS PRs (~12 min/PR, was ~20+ cold). Also: drop RUSTFLAGS=-C link-arg=-Wl,--no-keep-memory (lld mmap SIGBUS suspect on overlay fs), keep jobs=1. 0/42 differential was self-inflicted: missing go PATH export in manual stage — always export PATH in every stage call.
+- LANDED:
+  767b5ca5 Merge PR #3299 (coast9x72, fixes #3293) — multi-value call arg scalar widths vs callee result scalars, fail-open on untyped; 327 suites.
+  648c136b Merge PR #3296 (coast9x72, fixes #3292) — map key width compared on index AND delete, fail-open; 328 suites.
+  2070f668 Merge PR #3347 (coast9x72, fixes #3330) — untyped slice non-literal head E1002, mirrors hy-emit infer_slice_head; 329 suites. DUP resolved vs #3346.
+- GATE FAIL (evidence + superseded follow-up posted):
+  #3346 (Dimank92, fixes #3330, opened 4 min before #3347) — over-broad: rejects named-constant heads the emitter accepts; spike6 08-graph-ownership.hy false-positive E1002. Battery stopped 233/329. issuecomment-6594407789 + 6594435430.
+- All remote asserts green: ls-remote == HEAD after each push (767b5ca5, 648c136b, 2070f668). Reply posted per PR incl. dup notes; no silent closes.
+- Suite trajectory: 326 -> 329 (#3299, #3296, #3347). Final main 2070f668, tree clean.
+- NEXT TICK QUEUE: #3229 (slot loan via call) -> #3196 (fn lit scalar widths) -> #2948 -> #2977 -> #2863 -> tools flood (#3384/#3389/#3362/#3393) -> old tail (#2982/#3182/#3176/#3184/#2977). #3346 round-2 on re-push. #3308/#3298 round-2 on re-push.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978. (3346 vs 3347 RESOLVED.)
+
+## Session 70 — 2026-11-03 11:10 tick (4 landed: #3229/#2948/#2977/#3384; 1 conflict: #3196; 1 gate-fail: #2863)
+
+- Recycle + restore (cache hits both toolchains; disk lighter at 5.6G avail). scan RateGuard AGAIN at 12 remaining (quota consumed externally post-reset) — scan + approve skipped 2nd tick running; queue from S69 worklog.
+- In-repo trial-merge protocol (S69 fix) holding: cold build 70s, ~12 min/PR warm, zero disk drama.
+- LANDED:
+  7730659a Merge PR #3229 (coast9x72, fixes #3227) — slot loan for closure reached through a call; loan_aliases second-order propagation; 330 suites.
+  8d44f84d Merge PR #2948 (Alex, fixes #2700) — const-conversion overflow falls back to const_eval_int (constant EXPRESSIONS, not just literals); 331 suites.
+  9bf8d427 Merge PR #2977 (Alex, fixes #2698) — typed const in short define keeps its width (Go §Variable declarations); fixed_width_int_ty_of pub(crate); 332 suites.
+  edfcd28e Merge PR #3384 (Shokun123) — workload shape canonical LF + fail-closed drift checks; tool self-test OK; 332 suites.
+- CONFLICT (rebase requested, reply posted): #3196 (Alex, fixes #3180) — buildable.rs vs the width wave; return-side fn-lit lattice still needed, not duplicated by #3299.
+- GATE FAIL (evidence posted, not landed): #2863 (Alex, fixes #2858) — spurious E1002 on IDENTICAL `chan int` field/value (chan_direction_coercion, battery stopped 44/332); pre-container-wave branch; fix shape = canonical-equal fail-open / chan non-scalar skip. issuecomment-6594600961.
+- Suite trajectory: 329 -> 332 (#3229, #2948, #2977). Final main edfcd28e, tree clean.
+- NEXT TICK QUEUE: tools flood rest (#3389/#3362/#3393) -> #2982 (dup-watch vs #2976/#2978 FIRST) -> #3182 -> #3176 -> #3184 -> #1811/#3207/#2517. Round-2 watch: #3308/#3298/#3196/#2863/#3346/#3300/#3409-done on re-push.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978.
+
+## Session 71 — 2026-11-03 12:10 tick (5 landed: #3431/#3433/#3308/#3439/#3219; 1 gate-fail: #3438; 1 rebase-again: #3298)
+
+- Recycle + restore (cache hits). SCAN RECOVERED (rate reset; scan+approve both back): approve 18/18, 4982 remaining. Fresh Pareto drove the tick.
+- LANDED (record day, all via in-repo trial-merge protocol):
+  03a533c7 Merge PR #3431 (aswadi, fixes #3430) — hy-diag Span normalize + code trim + pct clamp; 333 suites.
+  5396999e Merge PR #3433 (aswadi, fixes #3432) — as_array_lit peels Expr::Move + Decl::span; 334 suites.
+  cbd8a6d7 Merge PR #3308 round-2 (phatloi0010, fixes #3203) — struct-lit/assign fixed array lengths; author's rebase resolved round-1 conflict; 335 suites.
+  bf300820 Merge PR #3439 (adam123gale-byte, fixes #3437) — elided untyped slice in map/any slots E1002; DUP #3438 gate-failed (fixture won't compile, unescaped quotes) so this landed first; body had USDC-wallet settlement demand -> reply points payouts go through BOUNTY.md/#295 only; 336 suites.
+  9cca4923 Merge PR #3219 (dextermos-dev, fixes #3209) — store-back held past deferred-closure capture of slot loan; 337 suites.
+- GATE FAIL (evidence posted): #3438 (Shokun123, fixes #3437) — test file compile fail (plain "..." strings contain inner quotes at :49/:76/:117); fix = raw strings; re-push welcome on distinct test angle. issuecomment-6595454102.
+- STILL CONFLICTED (reply posted): #3298 round-2 (phatloi0010, fixes #3280) — branch predates today's buildable wave (#3299/#3296/#3347/#3308); third rebase requested; keep elem check fail-open for unresolved/generic call results. issuecomment-6595440391.
+- Suite trajectory: 332 -> 337 (#3431 #3433 #3308 #3439 #3219). Final main 9cca4923, tree clean.
+- NEXT TICK QUEUE: #3013 (escapes) -> #3200 (range_iter, fixes #3199) -> #2996 (task spawns, +305) -> #3271 (slice elem width call args/returns, +373) -> #3441 (map key widths inferred bindings, +384) -> #3435 (coast9x72 container signatures, behind 5) -> #3160. Round-2 watch: #3298/#3346/#3438/#2863/#3300/#3196/#1833 (stale 746).
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978. (3438 vs 3439 RESOLVED via 3439.)
+
+## Session 72 — 2026-11-03 13:10 tick (5 landed: #3452/#3445/#3446/#3298/#3200; 2-tick saga closed)
+
+- Recycle + restore (cache hits, 5.7G avail). scan + approve HEALTHY: approve 15/15, 4962 remaining.
+- LANDED (second record day in a row):
+  a4590081 Merge PR #3452 (aswadi, fixes #3451) — lexer rejects multi-dot float literals; 338 suites.
+  65163219 Merge PR #3445 (aswadi, fixes #3444) — E8nnn coherence case-insensitive + with_rule trim; 339 suites. (DUP #3449 "address #3444" unverified — next tick dup-check before any action.)
+  b3c043ba Merge PR #3446 (aswadi, fixes #3443) — zeroinit n5_new handles array types/aliases; 340 suites.
+  2b4d5fc2 Merge PR #3298 round-3 (phatloi0010, fixes #3280) — append elem type + nested dims, fail-open on unresolved/generic call results per round-1 evidence; author rebased twice, S68 gate-fail + S71 conflict both cleared; 341 suites.
+  a10b891b Merge PR #3200 (phatloi0010, fixes #3199) — range_iter strict iterable classification + per-form bound validation; 342 suites.
+- All remote asserts green; reply per PR; no silent closes.
+- Suite trajectory: 337 -> 342. Final main a10b891b, tree clean.
+- NEXT TICK QUEUE: #3441 (Shokun123 map key widths inferred bindings, +384) -> #1719 (ubelai A7/A2 use-after-consume, 8.7d, +344) -> #3013 (escapes, behind 11 -> check stale) -> #2996/#2867/#2940 (all behind 11) -> #3435 (behind 5) -> #3160. DUP CHECK FIRST: #3449 vs #3445(landed). Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978; #3449 vs landed #3445.
+
+## Session 73 — 2026-11-03 14:10 tick (4 landed: #3459/#3462/#3458/#3310; 2 dups resolved: #3449/#3466)
+
+- Recycle + restore (cache hits, 5.8G avail). scan + approve healthy: approve 21/21, 4974 remaining.
+- HYRT NOTE: runtime/rust/hyrt is a SEPARATE workspace — compiler cargo test --workspace does NOT run it. #3459's new suite only visible via `cd runtime/rust/hyrt && cargo test` (3 suites ok). Future runtime PRs: run both batteries.
+- LANDED:
+  cbd168e2 Merge PR #3459 (aswadi, fixes #3457) — hyrt rejects 0xFFFF_FFFF handle halves + deterministic array-helper error order; hyrt 3 suites.
+  5bc97bdc Merge PR #3462 (aswadi, fixes #3461) — lexer rejects float exponents without digits; 343 suites.
+  688649a8 Merge PR #3458 (aswadi, fixes #3456) — const_int_expr peels parenthesized callees; 344 suites. DUP #3466 superseded (replied).
+  e7fe187a Merge PR #3310 (chusmias258-dev, fixes #3309) — emit_expr_exp resolves type aliases, N5 array zero-init through aliases; 345 suites.
+- DUP RESOLVED: #3449 (adam123gale-byte, fixes #3444) superseded by landed #3445 — replied. #3466 superseded by landed #3458 — replied. No silent closes.
+- Suite trajectory: 342 -> 345 (#3462, #3458, #3310). Final main e7fe187a, tree clean.
+- NEXT TICK QUEUE: #3336 (chusmias258-dev folded array/fn type args, +233) -> #1740 (wminno int->float64 provenance, 8.5d, +294) -> #1718 (ubelai O8/A3, behind 3) -> #1719 (ubelai A7/A2, behind 11) -> #3441 (behind 11) -> #3428 (+682) -> #3435. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978. (3449, 3466 resolved.)
+
+## Session 74 — 2026-11-03 15:10 tick (4 landed: #3479/#3481/#3480/#3336/#3143 — five, recount below; dup #3485 noted superseded in 3481 reply)
+
+- Recycle + restore (cache hits, 5.7G avail). scan + approve healthy: approve 13/13, 4982 remaining.
+- LANDED:
+  9406637f Merge PR #3479 (aswadi, fixes #3476) — diag lookup accepts HYB-<digits>, blank notes filtered; 346 suites.
+  fe23c2a3 Merge PR #3481 (aswadi, fixes #3478) — lexer rejects 2.e+/- and trailing exponent letters; 347 suites. (#3485 superseded, noted in reply.)
+  12de9564 Merge PR #3480 (aswadi, fixes #3477) — WideInt 512-bit min/max precision kept; 348 suites.
+  7dd1f084 Merge PR #3336 (chusmias258-dev, fixes #3335) — folded array/fn type args expanded + composite keys declaration-ordered; 349 suites.
+  7c0dcafc Merge PR #3143 (gorky117-cell, fixes #3090) — nil patterns on non-nilable + out-of-range int match patterns rejected; 350 suites.
+- All remote asserts green; reply per PR; no silent closes. aswadi 3 more (total 11 ladder entries this cycle by himself — flag for maintainer in #295).
+- Suite trajectory: 345 -> 350. Final main 7c0dcafc, tree clean.
+- NEXT TICK QUEUE: #3145 (copy() scalar mismatches — DUP WATCH vs #3153 first!) -> #3154 (struct fields) -> #2874 (typed ints via index/map/field) -> #1740 (int->float64 provenance, 8.5d) -> #1718 (behind 3) -> #1719 (behind 11) -> #3441 (behind 11) -> #3428 (+682) -> #3435. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833. New dups to watch: #3485 (vs landed #3481), #3473 (behind 9, "address #3467").
+- DUP WATCH remaining: #3145 vs #3153; #2982 vs #2976 vs #2978. (3485 resolved-by-reply.)
+
+## Session 75 — 2026-11-03 16:10 tick (3 landed: #3145/#3154/#2874; dup #3153 superseded)
+
+- Recycle + full restore from scratch (go tarball re-downloaded, rustup 1.99.0 cold install, target dir rebuilt cold 2.9G, 6.7G avail pre-build).
+- GitHub API primary rate limit exhausted (0 remaining, reset 09:11 UTC): scan timed out twice (cap-or-skip, 780-800/984), approve 403'd. Worked from Session 74 queue; git-protocol fetches unaffected.
+- LANDED (all gauravatwork117 — 3 ladder entries, flag in #295):
+  e9ada4a3 Merge PR #3145 (fixes #3085) — copy() slice elem scalar mismatch + non-byte string copy; slice_element_type_name unpacks [N]T/typed SliceLit; complex64/128 canonical; stricter than #3153 (typed-Int unresolved rejected per Go). 351 suites.
+  26c8f90d Merge PR #3154 (fixes #3066) — non-existent fields / non-struct base selectors E1002; whitelist + same-span dedup fail-open. 352 suites.
+  a1713d8d Merge PR #2874 (fixes #2858, + #3065 interaction) — typed-int scalar provenance through index/map/field reads; for-in Str = rune scalar. 353 suites.
+- DUP RESOLVED: #3153 superseded by landed #3145 (superset, stricter unknown-Int); replied with reopen-on-repro offer.
+- Suite trajectory: 350 -> 353. Final main a1713d8d, tree clean. All remote asserts green; replies posted per PR.
+- NEXT TICK QUEUE: scan FIRST (fresh queue missing this tick) -> #1740 (wminno int->float64 provenance, 8.5d, +294) -> #1718 (ubelai O8/A3, behind 3) -> #1719 (behind 11) -> #3441 (behind 11) -> #3428 (+682) -> #3435 -> #3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978. (3145/3153 resolved.)
+- OPS NOTE: verify_pr.sh still carries the deprecated worktree protocol + --no-keep-memory RUSTFLAGS; kept using in-repo trial merge per S69 binding protocol. Consider updating the script or the cron text next tick.
+
+## Session 76 — 2026-11-03 17:10 tick (3 landed: #3491/#3490/#3501)
+
+- Recycle + restore (go from cache; rustup bg install hung on installer download again — foreground sync install is the reliable path, 2nd confirmation). scan healthy (REAL_EXIT=0), approve 21/21 (4974 remaining).
+- LANDED:
+  b3158063 Merge PR #3491 (aswadi, fixes #3488) — lexer float suffix check out of exponent branch + 3+ dot consumption; float hardening arc complete. 354 suites.
+  d6469bcd Merge PR #3490 (aswadi, fixes #3487) — diag lookup `_`->`-` normalization + HYB-8nnn coherence (`-8` arm); diag arc complete. 355 suites.
+  3d6aa6fd Merge PR #3501 (chusmias258-dev, fixes #3500) — is_unshadowed_builtin gates make/new/primitive-conversion fast paths. 356 suites.
+- Suite trajectory: 353 -> 356. Final main 3d6aa6fd, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #1740 (wminno int->float64 provenance, 8.5d, +294, approve shepherded) -> #937 (magomedta make/new/void validation, 14.5d, +449) -> #3499 (pedromino wildcard loan slices, +52, no tests — scrutinize) -> #1718 (behind 3) -> #1719 -> #3441 -> #3428 -> #3435 -> #3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
+- OPS NOTE (repeat): verify_pr.sh worktree protocol + --no-keep-memory deprecated since S69; cron text should point at in-repo trial merge. rustup-init.sh in nohup hangs ~50% of runs — run it foreground.
+
+## Session 77 — 2026-11-03 18:10 tick (3 landed: #3507/#3506/#3475; dup #3508 superseded)
+
+- Recycle + restore (go cache hit; rustup foreground — reliable). scan healthy (REAL_EXIT=0), approve 19/19 (4979 remaining).
+- LANDED:
+  3092b331 Merge PR #3507 (aswadi, fixes #3505) — diag lookup strips [ ] : ' " ` delimiters + with_notes trims after filter; diag arc complete. 357 suites.
+  9a4c0288 Merge PR #3506 (aswadi, fixes #3504) — integer-literal trailing suffix rejection + dotless hex exponent sign; literal hardening complete. 358 suites.
+  ca7fdaea Merge PR #3475 (seenorht, fixes #3467) — bare nil -> non-nilable param rejected in fn/method/func-literal calls. 359 suites.
+- DUP RESOLVED: #3508 (Dimank92, fixes #3498) superseded by landed #3506 (same integer-suffix scope + hex exponent superset; textual conflict in lex_number). Replied with reopen-on-repro offer.
+- Suite trajectory: 356 -> 359. Final main ca7fdaea, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #1740 (wminno int->float64 provenance, 8.5d, +294) -> #937 (magomedta make/new/void validation, 14.5d, +449) -> #3499 (pedromineo wildcard loan slices, +52, NO tests — scrutinize hard) -> #3503 (zc composite literal mismatch, +?) -> #1718 (behind 3) -> #1719 -> #3441 -> #3428 -> #3435 -> #3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 78 — 2026-11-03 19:10 tick (2 landed: #3515/#3514; 1 gate-fail: #3517)
+
+- Recycle + restore (cache hits). scan healthy, approve 17/17 (4983 remaining).
+- LANDED:
+  452fbd0a Merge PR #3515 (aswadi, fixes #3513) — sync.wait_group/once method surfaces + waitgroup alias. 360 suites.
+  d8f28577 Merge PR #3514 (aswadi, fixes #3512) — emit shapes add->Add/done->Done/wait->Wait/do->Do + DEDUP of duplicate "filepath"/"url" import_path_of arms (out-of-title scope, disclosed in reply; duplicate match arms were unreachable; url_and_filepath test green post-dedup). 361 suites.
+- GATE FAIL: #3517 (Oepjdihc2008, fixes #3516) — 8/8 own tests fail: fixtures use uppercase `T` generic param, violating LX2 snake_case (HYB-E0001), so `must parse` helper dies before the check is exercised. Evidence reply posted; round-2 = rename T -> elem/t in fixtures. Logic itself untouched.
+- Suite trajectory: 359 -> 361. Final main d8f28577, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #3511 (produckq-boop E3013 mutating method values, +390/-181 big) -> #1740 (wminno, 8.5d, +294) -> #937 (magomedta, 14.5d, +449) -> #3499 (NO tests — scrutinize) -> #3503 -> #2867/#2940 (resurfaced on Pareto) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833 + now #3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 79 — 2026-11-03 21:10 tick (2 landed: #3511/#1740)
+
+- Recycle + restore (cache hits). scan TIMED OUT again (cap-or-skip, REAL_EXIT=124); approve healthy 12/12 (4988 remaining). Worked from Session 78 queue.
+- LANDED:
+  9617f8a6 Merge PR #3511 (produckq-boop, fixes #3510) — escape analysis StateAt(span)-scoped; in_managed_at; closure_writes_captured (root,depth); expr_escape_root fallback; E3013 on mutating method values -> foreign calls. Deep refactor, full battery green. 363 suites.
+  f607dd50 Merge PR #1740 (wminno, fixes #1112; rebased by gamma-5) — check_send_elem on stmt+select arms (E1002 go-parity), typed-int->float64 surface, untyped-const exempt, O6.1 managed hatch (managed_depth). 8.5d saga closed. 364 suites.
+- PROTOCOL: #1740 body again carried a wallet address — replied with #3439-precedent rail reminder (bounty only via BOUNTY.md/discussion #295); address NOT propagated to repo text.
+- Suite trajectory: 361 -> 364. Final main f607dd50, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #937 (magomedta make/new/void validation, 14.5d, +449) -> #3499 (pedromineo wildcard loan slices, +52, NO tests — scrutinize hard) -> #3503 (zc composite literal) -> #2867 (channel send assignability — NOTE may overlap #1740's check_send_elem; DUP CHECK) -> #2940 (copy exact widths — may overlap landed #3145; DUP CHECK) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517 (T fixture rename).
+- DUP WATCH remaining: #2982 vs #2976 vs #2978. NEW: #2867 vs landed-#1740; #2940 vs landed-#3145.
+
+## Session 80 — 2026-11-03 22:10 tick (4 landed: #3524/#3522/#3497/#3526)
+
+- Recycle + restore (cache hits). scan healthy, approve 8/8 (4978 remaining). New wave of score-9 PRs (#3524/#3522/#3497/#3526/#591/#2285/#2284).
+- LANDED:
+  3edb5cff Merge PR #3524 (aswadi, fixes #3521) — foreign_named_type uses is_curated_package_root (sync.* -> ForeignOpaque). 365 suites.
+  5ba4c809 Merge PR #3522 (aswadi, fixes #3520) — Go-cased sync spellings normalize to canonical shapes; waitgroup->WaitGroup export. sync arc complete. 366 suites.
+  f305b802 Merge PR #3497 (chusmias258-dev, fixes #3496) — checker E11 return classification aligned with emit (main excluded; unshadowed http gate). 367 suites.
+  029c0e88 Merge PR #3526 (chusmias258-dev, fixes #3525) — addr-of receivers keep foreign shapes (both &x forms). 368 suites.
+- Suite trajectory: 364 -> 368. Final main 029c0e88, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #591 (score 9, constant-folding/type-alias/slice-index family) -> #2285 (match-arm nesting emit) -> #2284 (map key comparability, fixes #1565) -> #937 (magomedta, 14.5d, +449) -> #3499 (NO tests — scrutinize) -> #3503 -> DUP CHECKS: #2867 vs landed #1740 (chan-send), #2940 vs landed #3145 (copy widths) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978; #2867 vs #1740; #2940 vs #3145.
+
+## Session 82 — 2026-11-04 02:10 tick (4 landed: #2758/#2759/#3534/#3533) — covers missed 23:10 tick (tool-infra outage, nothing lost)
+
+- Recycle + restore (cache hits). scan healthy, approve 9/9 (4991 remaining).
+- LANDED:
+  1e3ee199 Merge PR #2758 (ryder777777, fixes #1123) — author_stage diff_paths deletion rows + `..`/absolute traversal guards; tools.test_runner_sha 9 OK. 368 suites (tools-layer).
+  71441398 Merge PR #2759 (ryder777777, fixes #1125) — autoland bundle pre-validation (NO-BUNDLE) + revert_on_failure in finally; env_report 8 OK. 368 suites (tools-layer).
+  207e6579 Merge PR #3534 (aswadi, fixes #3532) — no_zero_value_reason resolves generic-substituted struct fields. 369 suites.
+  2d4d33b6 Merge PR #3533 (aswadi, fixes #3531) — type_of_place sees through nested/addr-of chains (place-side twin of #3526). 370 suites.
+- OPS: one transient "origin not a repository" fetch error mid-tick — retry succeeded, remotes intact (many fork remotes exist in config from contributor automation; origin healthy).
+- Suite trajectory: 368 -> 370. Final main 2d4d33b6, tree clean. All remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #2757 (ryder, differential_loop fail-closed) -> #2760/#2761/#2766 (ryder batch) -> #591 (score 9) -> #2285 -> #2284 -> #937 -> #3499 (NO tests) -> #3503 -> DUP CHECKS: #2867 vs landed #1740; #2940 vs landed #3145. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978; #2867 vs #1740; #2940 vs #3145.
+
+## Session 83 — 2026-11-04 04:10 tick (4 landed: #2757/#2760/#2761/#2766) — ryder batch day
+
+- Full recycle; env restored (rust 1.99.0 foreground, go1.26.9 tarball re-downloaded, cache backfilled). scan timed out at 580/993 (cap-or-skip; worked from S82 queue). approve 17/17.
+- OPS: target dir had bloated to 5.5G (stale deps) -> ld Bus error at 681M free; wiped target, cold rebuild, disk back to ~6G free. Also: gh CLI missing in fresh sandbox — API via curl; assert harness cut-vs-tab artifact noted, asserts verified by printed SHA comparison (all green).
+- LANDED:
+  e8960367 Merge PR #2757 (ryder777777, fixes #582) — differential_loop fail-closed on OSError + corpus-dir validation; 2 inert scope notes disclosed in merge+reply (unreferenced {"issue":582} JSON markers; dead `if False` loop). 371 suites.
+  8f822d05 Merge PR #2760 (ryder777777, fixes #1046) — projected map-element borrows (&m[k].f / &m[k][i]) rejected in arg/expr positions; slice/pointer hops stay legal. 372 suites.
+  e0e479e6 Merge PR #2761 (ryder777777, fixes #1454) — select receive bindings carry channel elem TypeExpr + bool ok-binder (E6002 now fires). 373 suites.
+  1c0f56c0 Merge PR #2766 (ryder777777, fixes #1450) — bare return in named-result error fns stays naked (P0 silent wrong-code closed). 373 suites.
+- Suite trajectory: 370 -> 373 (+3 test files). Final main 1c0f56c0, tree clean, remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #591 (score 9, constant-folding/type-alias/slice-index family) -> #2285 -> #2284 (fixes #1565) -> #937 (magomedta, 14.5d) -> #3499 (NO tests) -> #3503 -> DUP CHECKS: #2867 vs landed #1740; #2940 vs landed #3145. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 84 — 2026-11-04 05:10 tick (2 landed: #591/#2285) — score-9 item cleared
+
+- Full recycle; env restored (rust 1.99.0 foreground, go1.26.9 re-downloaded, cache backfilled). scan timed out at 580/992 again (cap-or-skip; S83 queue). approve 15/15.
+- LANDED:
+  5dd1bd30 Merge PR #591 (Khanhtnq, fixes #586 + #576) — unified const_int_fold_at folder (depth-capped, self-ref-guarded, shadow-aware, checked_neg), ty_of_expr scalar propagation through unary/arith/conversions, type-alias resolution in assign targets + fn-typed callees, zd_defined seeded mutable-only. 374 suites. Scope note disclosed: body mentions model/closures/loans.rs but rebased diff rides on emit_guard BindingSight instead.
+  ef1f95c9 Merge PR #2285 (9xj89gzrtw-hue, fixes #1640) — redefining match-arm bodies wrapped in nested Go block so injected pattern binding stays legal; corpus 130->131 (ACCEPT 41). In-merge fixup: repaired README.md corpus-count lines the PR had glued/doubled (credited to author). 375 suites; differential accept now 43/43.
+- Suite trajectory: 373 -> 375 (+2 test files). Final main ef1f95c9, tree clean, remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #2284 (map key comparability, fixes #1565) -> #937 (magomedta, 14.5d, +449 — big; possibly split across ticks) -> #3499 (NO tests — scrutinize) -> #3503 -> DUP CHECKS: #2867 vs landed #1740; #2940 vs landed #3145. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 85 — 2026-11-04 06:10 tick (2 landed: #2284/#2867) + DUP CHECK #2867 cleared
+
+- Full recycle; env restored (rust 1.99.0, go1.26.9 from backfilled cache). scan timed out (cap-or-skip, S84 queue). approve 14/14.
+- LANDED:
+  52182214 Merge PR #2284 (9xj89gzrtw-hue, fixes #1565) — non-comparable map key types rejected (HYB-E1002 at TypeExpr::Map + MapLit sites, proven-incomparable only). PR was based on pre-#2285 main: 2 merge conflicts resolved in-merge + 5 census count surfaces reconciled 131->133 (ci.yml/Makefile/README/GUARANTEES/ast.rs, credited fixups); census 7/7 green. Corpus 133 (ACCEPT 42 · MANAGED 2 · REJECT 89); differential 44/44 + 89/89. 376 suites. Follow-up noted to author: VERDICTS.md rows missing (not census-enforced).
+  dd30466a Merge PR #2867 (Yumihariii, fixes #2817) — channel-send width-level assignability (int32->chan int64, float64->chan float32). DUP CHECK vs landed #1740 resolved NOT-A-DUP empirically (kind-level vs width-level gap confirmed on main pre-merge). 377 suites.
+- Suite trajectory: 375 -> 377 (+2 test files). Final main dd30466a, tree clean, remote asserts green; replies posted per PR; no silent closes.
+- NEXT TICK QUEUE: #937 (magomedta, 14.5d, +449 — big; budget a full tick or split) -> #3499 (NO tests — scrutinize) -> #3503 -> DUP CHECK: #2940 vs landed #3145 (copy widths) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 86 — 2026-11-04 10:10 tick (1 landed: #937 salvaged) — 14.5d saga item resolved
+
+- Full recycle; env restored. scan capped (cap-or-skip, S85 queue). approve 10/10.
+- LANDED:
+  99dd2ffa Merge PR #937 (magomedta, fixes #936) — new(T) type-operand validation (HYB-E2005) + new_kind named-type resolution + print/println void-value rejection (HYB-E1002) + legal acceptance pins. GATE FAIL on first battery (8 tests: expected E2005, got E1002): the PR's make-size arm was superseded while queued — 641a5514 (fixes #2693, Dimank92) landed non-integer make sizes under E1002 + classify_make_size E2005 covers negative-const/len>cap; all three verified empirically on pre-merge main; PR's second "make" arm was an unreachable duplicate. SALVAGE FIXUP (credited): dropped unreachable arm + 7 duplicate make tests, kept fresh new/print/println coverage. 378 suites.
+- Suite trajectory: 377 -> 378. Final main 99dd2ffa, tree clean, remote asserts green; reply posted with full supersession evidence; no silent closes.
+- NEXT TICK QUEUE: #3499 (NO tests — scrutinize hard, manual repro mandatory) -> #3503 -> DUP CHECK: #2940 vs landed #3145 (copy widths) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+- DUP WATCH remaining: #2982 vs #2976 vs #2978.
+
+## Session 87 — 2026-11-04 11:10 tick (0 landed; 1 GATE FAIL evidence, 1 DUP closed-out)
+
+- Full recycle; env restored. scan capped (cap-or-skip, S86 queue). approve 10/10.
+- GATE FAIL: #3499 (pedromineo, "fixes" #3429) — zero-copy Digest256Borrowed drops runtime.Pinner on the FALSE premise that Cross3S is NOSPLIT/safepoint-free. Evidence: Cross3S (bridge.go:216) has a deep path (needsDeep -> acquireDeep -> runtime.Gosched() at stack_linux.go:59 -> callDeep3 reusing the raw uintptr); stack growth in that window stales a stack-resident &data[0]. De-facto safe TODAY only because FnDigest256 is SMALL-class (fast-only) — a table fact the PR neither cites nor guards, and it would be the repo's first unpin crossing. Two acceptance paths offered (hybridge-side borrowed crossing w/ deep-leg fallback, or documented+asserted SMALL-class license + benchmarks). Triage "NO tests" flag was wrong: PR has a Go test; review-level failure, not test-level.
+- DUP CHECK: #2940 (fixes #2825) vs landed #3145 (fixes #3085) — CONFIRMED DUPLICATE. All repros empirically closed on main (int64/int32, float64/float32 width E1002; string-into-non-byte E1002; legal []byte<-string accepted). Evidence reply posted; author may close or open fresh issue for residual shapes; sweeper will handle.
+- #3503 DEFERRED (deliberate, budget): stale-base PR (counts 130->132 vs main's 133) — needs same treatment as #2284: 2 merge conflicts + 5 census fixups + 319-line deep_composite_conflict review. Pre-computed post-merge truth: corpus 135 (ACCEPT 43 · MANAGED 2 · REJECT 90). ALSO: PLAN.md +1 / STATUS.md +1 in diff need scope check.
+- No main movement this tick; main stays aa22a692 (worklog below moves it), suites 378.
+- NEXT TICK QUEUE: #3503 (top priority, pre-computed above) -> DUP CHECK: #2982 vs #2976 vs #2978 -> #1718/#1719/#3441/#3428/#3435/#3160 -> re-scan for fresh PRs (996 open). Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+
+## Session 88 — 2026-11-04 12:10 tick (1 landed: stale-base #3503 with in-merge reconciliation)
+
+- Full recycle; env restored from scratch (rustup foreground + go tarball re-cached to my-project/go-1.26.9.tar.gz). scan fresh, approve 13/13 (35 calls used).
+- LANDED: #3503 (lilyliiphone2026-collab, fixes #3412) -> merge 457e7f22. Stale-base reconciliation: 7 count-surface conflicts (2 content + 5 census faces) resolved to the S87-pre-computed post-merge truth — corpus 135 = ACCEPT 43 / ACCEPT-MANAGED 2 / REJECT 90, census 7/7 green. Four deep_composite_conflict call sites auto-merged; context hand-verified against main's newer literal arms (scalar_mismatch / untyped int->float preserved).
+- In-merge fixups (all credited in the merge message): VERDICTS.md section + 2 rows added (PR missed the README's own contract) + glued-row blemish from a prior in-merge repaired; dead chan_dir_assignable + never-read Chan::dir removed (0 new warnings; _dir rename with E3012-territory note); PLAN/STATUS '(138)' corrected to 135.
+- Battery: build 0 warnings; workspace 379 suites / 2705 passed / 0 failed (composite_lit_inner_types 5/5); corpus 135/135 verdict agreement, tripwire 1.5% not fired; differential FULL 45/45 + 90/90 (44/89 + 1 new fixture each side, as pre-computed).
+- Suite trajectory: 378 -> 379. Main d6507a52 -> 457e7f22 (+ worklog commit), tree clean.
+- DUP CHECK (executed post-merge, in budget): #2982 vs #3058 — CONFIRMED DUPLICATE (same kinds_conflict arm-split, same fixes #2962). Empirical on main 457e7f22: all three #2962 repros still pass 0 diagnostics -> family FRESH, exactly one claimant carries it. Canonical = #2982 (first claimant, 9-test pin); written dup-evidence reply posted on #3058 with revisit-on-differentiation clause. #2976/#2978 dup pair untouched this tick.
+- NEXT TICK QUEUE: #2982 (canonical #2962 fix, verify + land) -> #2976 vs #2978 dup check -> #1718/#1719/#3441/#3428/#3435/#3160 -> re-scan Pareto top (fresh #3551/#3550/#3547/#3581 score-9 batch). Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517.
+
+## Session 90 — 2026-11-04 14:10 tick (1 landed: #2982, the #2962 canonical)
+
+- Full recycle again (repo image rolled back to session-44 snapshot; remote truth intact). env rebuilt, tarball re-cached. scan fresh, approve 11/11.
+- S89 post-mortem: tool outage killed the tick mid-battery; uncommitted trial-merge state lost with the recycle — no remote impact, protocol-safe.
+- LANDED: #2982 (nyxlabs29-cyber, fixes #2962) -> merge dd5d6c8a. Canonical claimant of the #2962 family per S88 dup check (#3058 duplicate, evidence reply posted). kinds_conflict arm-split: (Interface, _) => false stays, (_, Interface) => true after the Void fail-open; equality path untouched (both-directions rule).
+- Repro evidence on merged binary: all three #2962 shapes now error[HYB-E1002] (var-init / recover() arg / return recover()); concrete->any, a == 1, a != nil still 0 diagnostics.
+- Battery: build 0 new warnings; workspace 380 suites / 2714 passed / 0 failed (any_to_concrete_2962 9/9); corpus 135/135, tripwire not fired; census 7/7 (135 unchanged — no fixtures in this PR); differential FULL 45/45 + 90/90.
+- Suite trajectory: 379 -> 380. Main 00796980 -> dd5d6c8a (+ worklog), tree clean.
+- NEXT TICK QUEUE: #3551/#3550/#3547/#3581 (fresh score-9 batch, all 0-behind) -> #1718/#1719/#3441/#3428/#3435/#3160 -> re-scan. Round-2 watch: #3346/#3438/#2863/#3300/#3196/#1833/#3517. NOTE: #2962 family CLOSED-OUT (1 landed + 3 dup replies); scan's DUP bucket may still list stale rows for it.
+- DUP CHECK (post-landing, in budget): #2976 (3y3y3y-huaiji) AND #2978 (Dimany4) both 'fixes #2962' — family's 4th and 3rd claimants. CONFIRMED DUPLICATE + SUPERSEDED (canonical #2982 landed dd5d6c8a this tick). #2978's `!matches!(want, Unknown)` guard proven vacuous (leading Unknown arm consumes want==Unknown) = behaviorally identical to landed `=> true`. Empirical: main c1a5b367 rejects all three #2962 repros E1002, accept controls intact. Written evidence replies posted on both; revisit-on-differentiation clause included. #2962 family fully adjudicated: 1 landed (#2982), 3 dup-evidence replies (#3058/#2976/#2978).
+- LANDED: #3551 (aswadi, fixes #3549) -> binding_kind_of_ty alias resolution (top-level + pointer pointee) preserving Set/Map/Chan/ForeignTy hints through type aliases. In-merge fixup: trailing newline in new test file (fmt hygiene, credited). Battery: workspace 381/2715/0, corpus 135/135, census 7/7, differential FULL 45/45+90/90. Suites 380 -> 381.
+
+## Session 91 — 2026-11-04 17:10 tick (1 landed: #3550)
+
+- Full recycle (repo image roll-back again, remote truth intact). env rebuilt, tarball re-cached. scan fresh, approve 10/10.
+- LANDED: #3550 (aswadi, fixes #3548) -> place_target_ty rewrite: recursive PlaceKind match using peel_pointer_and_alias (Index arm) + struct_fields_for_type with generic substitution (Field arm). E6002 now fires through generic struct fields / aliased containers / alias-of-generic. Merge clean; battery: build 0 new warnings, workspace 382/2716/0 (pin 1/1, 5 shapes), corpus 135/135, census 7/7, differential FULL 45/45+90/90. Suites 381 -> 382. Main cf77a911 -> d1f7587c -> this merge (+worklog).
+- DUP SPOTTED (not yet adjudicated): #3609 (produckq-boop, +64) vs #3617 (dextermos-dev, +244) both 'propagate slot_loan across mixed-target parallel assignments (fixes #3608)'. Also #3606/#3607/#3554 underscore-family overlap to check next tick.
+- NEXT TICK QUEUE: DUP CHECK #3609 vs #3617 (canonical = first claimant after empirical check) -> #3622/#3619/#3627 (0.0d score-9) -> #3547/#3581 -> underscore cluster (#3606/#3607/#3554) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch unchanged.
+- DUP CHECK (executed, in budget): #3609 (produckq-boop, 07:25Z) vs #3617 (dextermos-dev, 08:13Z), both 'fixes #3608' slot_loan propagation — CONFIRMED DUPLICATE. Empirical on main 8d3717b3: adapted repro (k declared, typed tail) passes 0 diagnostics on `sink[0], q2 = 1, q1` + `p := &q2.val` — T24/E3104 bypass REAL, family FRESH. Canonical = #3609 (first claimant); written dup-evidence reply posted on #3617 with revisit-on-differentiation clause.
+
+## Session 92 — 2026-11-04 18:10 tick (1 landed: #3609, closes T24 bypass)
+
+- Full recycle (image roll-back, remote intact). env rebuilt, tarball re-cached. scan fresh, approve 9/9.
+- LANDED: #3609 (produckq-boop, fixes #3608) -> merge 4520474d. mark_slot_loans_assign: alias propagation decoupled from all-Ident gating (allow_addr_root), is_slot_loan_or_alias_expr peels Paren/Move. Empirical: adapted #3608 repro now HYB-E3104 (was 0 diags). Battery: workspace 384/2718/0, corpus 135/135, census 7/7, differential FULL 45/45+90/90. Suites 382 -> 384.
+- NEXT TICK QUEUE: #3622/#3619/#3627 (score-9, 0-behind) -> #3547/#3581 -> underscore cluster DUP CHECK (#3606 vs #3607 vs #3554, three claimants across #3553-family) -> #1718/#1719/#3441/#3428/#3435/#3160. Round-2 watch unchanged.
+- DUP CHECK (executed, in budget): underscore cluster #3554 (gorky117-cell, 11-03 20:11Z, canonical) vs #3606 (moe-agents-team) vs #3607 (dextermos-dev) — all 'fixes #3553', same lex_number site. CONFIRMED DUPLICATES. Empirical on main 9ff59911: 1__0 / 0x_1f / 1_.5 all OK 0-diags (Go rejects), 1e_3 caught by pre-existing leg — family FRESH. Written evidence replies posted on #3606 + #3607 (with revisit-on-differentiation; #3607's exponent-adjacent scope flagged as follow-up-issue material). Next landing candidate: #3554.

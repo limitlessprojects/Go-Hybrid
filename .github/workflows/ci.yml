@@ -132,6 +132,7 @@ jobs:
           python3 tests/test_install_runtime.py
           python3 tests/test_install_checksums.py
           python3 tests/test_install_upgrade.py
+          python3 tests/test_install_release_tag.py
 
   # The compiler (lands with MVP-0): pinned toolchains, full test suite,
   # corpus verdict agreement, and the walking-skeleton examples end-to-end.
@@ -163,7 +164,7 @@ jobs:
           cd compiler
           cargo test --workspace --quiet
 
-      - name: Checker corpus verdict agreement (130/130 + tripwire)
+      - name: Checker corpus verdict agreement (135/135 + tripwire)
         run: |
           set -e
           cd compiler && cargo build -p hyb --quiet

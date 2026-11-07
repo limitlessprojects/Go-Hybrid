@@ -6,7 +6,7 @@
   job.py kaggle wait    <minutes> [slug]    poll until a NEW run terminates (0 ok/1 err/2 timeout)
   job.py kaggle fetch   <jobdir>             download kernel output -> jobdir/result/raw/
   job.py actions dispatch <workflow> <sha> <jobname> <shards> <maxparallel>
-  job.py actions watch   [run_id]             poll latest heavy run (one shot)
+  job.py actions watch   [run_id]             list recent heavy runs (one shot)
   job.py actions fetch   <run_id> <jobdir>    download artifacts -> jobdir/result/ runs
 
 Environment: KAGGLE_CLI (default /home/z/.venv/bin/kaggle), GITHUB_TOKEN read from
@@ -85,8 +85,10 @@ def kaggle_slug():
 # ---------------------------------------------------------------- kaggle tier
 def kaggle_submit(jobdir):
     head = resolve_head()
-    with open(os.path.join(jobdir, "job.json")) as f:
+    with open(os.path.join(jobdir, "job.json"), encoding="utf-8") as f:
         job = json.load(f)
+    if not isinstance(job, dict) or not isinstance(job.get("job"), str) or not job["job"].strip():
+        sys.exit("job.json must be a JSON object with a non-empty string 'job' field")
     job["sha"] = head  # run the code we just pushed
     payload = json.dumps(job, indent=2)
 
@@ -101,7 +103,7 @@ def kaggle_submit(jobdir):
     src = original_script.decode("utf-8")
     if INJECT_MARKER not in src:
         sys.exit("worker/script.py missing inject marker")
-    injected = src.replace(INJECT_MARKER, "JOB_JSON = " + repr(payload))
+    injected = src.replace(INJECT_MARKER, "JOB_JSON = " + repr(payload), 1)
     sidecar = os.path.join(WORKER_DIR, "job.json")
     try:
         with open(sidecar, "rb") as f:
@@ -167,10 +169,13 @@ def kaggle_wait(minutes, slug=None):
     while time.time() < deadline:
         rc, out = sh("{} kernels status {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(slug)), timeout=60)
         polls += 1
-        try:
-            state = out.split('"')[-2].split(".")[-1].upper()  # '"KernelWorkerStatus.RUNNING"'
-        except IndexError:
-            state = "?"  # CLI error text: keep polling, do not trust
+        if rc != 0:
+            state = "?"
+        else:
+            try:
+                state = out.split('"')[-2].split(".")[-1].upper()  # '"KernelWorkerStatus.RUNNING"'
+            except IndexError:
+                state = "?"  # CLI error text: keep polling, do not trust
         print("[poll {}] {}".format(polls, state), flush=True)
         if state in ACTIVE_STATES:
             saw_active = True
@@ -308,7 +313,8 @@ def actions_dispatch(workflow, sha, jobname, shards, maxparallel):
 
 def actions_watch(run_id=None):
     if run_id is None:
-        runs = gh_api("/repos/limitlessprojects/Go-Hybrid/actions/runs?per_page=5")["workflow_runs"]
+        # Filter before pagination so busy PR workflows cannot hide heavy jobs.
+        runs = gh_api("/repos/limitlessprojects/Go-Hybrid/actions/workflows/heavy.yml/runs?per_page=5")["workflow_runs"]
         for r in runs:
             print("{}  {}  {}  sha={}".format(r["id"], r["name"], r["status"], r["head_sha"][:10]))
         return
@@ -352,10 +358,18 @@ def actions_fetch(run_id, jobdir):
     if not arts:
         print("actions fetch: run {} has no artifacts to download".format(run_id), file=sys.stderr)
         return 1
-    os.makedirs(os.path.join(jobdir, "result"), exist_ok=True)
+    result_dir = os.path.abspath(os.path.join(jobdir, "result"))
+    os.makedirs(result_dir, exist_ok=True)
     for a in arts:
+        name = a.get("name")
+        if not isinstance(name, str) or not name or "/" in name or "\\" in name or name in (".", ".."):
+            print("actions fetch: refusing unsafe artifact name {!r}".format(name), file=sys.stderr)
+            return 1
         url = a["archive_download_url"]
-        dest = os.path.join(jobdir, "result", a["name"] + ".zip")
+        dest = os.path.abspath(os.path.join(result_dir, name + ".zip"))
+        if os.path.dirname(dest) != result_dir:
+            print("actions fetch: refusing unsafe artifact destination {!r}".format(dest), file=sys.stderr)
+            return 1
         req = urllib.request.Request(url)
         # GitHub redirects archive downloads to a signed storage URL. urllib
         # forwards normal headers across hosts; do not send our token there.

@@ -189,6 +189,56 @@ class ActionsArtifactPaginationTests(unittest.TestCase):
         self.exercise_fetch(1, failing_download=True)
 
 
+class ActionsWatchWorkflowTests(unittest.TestCase):
+    """Default watch must not lose heavy jobs behind newer unrelated CI runs."""
+
+    @staticmethod
+    def run_record(run_id, name):
+        return {"id": run_id, "name": name, "status": "completed",
+                "conclusion": "success", "head_sha": "a" * 40,
+                "path": ".github/workflows/" + name + ".yml"}
+
+    def watch_output(self, runs, run_id=None):
+        from urllib.parse import parse_qs
+
+        def api(path):
+            endpoint, _, query = path.partition("?")
+            if run_id is not None and endpoint.endswith("/actions/runs/" + str(run_id)):
+                return next(run for run in runs if run["id"] == run_id)
+            if endpoint.endswith("/actions/workflows/heavy.yml/runs"):
+                selected = [run for run in runs
+                            if run["path"] == ".github/workflows/heavy.yml"]
+            elif endpoint.endswith("/actions/runs"):
+                selected = runs
+            else:
+                self.fail("unexpected API request: " + path)
+            # The REST API selects the workflow before paginating the result.
+            limit = int(parse_qs(query).get("per_page", ["30"])[0])
+            return {"workflow_runs": selected[:limit]}
+
+        output = io.StringIO()
+        with patch.object(JOB, "gh_api", side_effect=api), \
+                patch("sys.stdout", new=output):
+            JOB.actions_watch(run_id)
+        return output.getvalue()
+
+    def test_default_watch_finds_heavy_runs_behind_busy_ci(self):
+        runs = [self.run_record(i, "ci") for i in range(10, 4, -1)]
+        runs += [self.run_record(4, "heavy"), self.run_record(3, "heavy")]
+        output = self.watch_output(runs)
+        self.assertEqual(output.splitlines(), [
+            "4  heavy  completed  sha=aaaaaaaaaa",
+            "3  heavy  completed  sha=aaaaaaaaaa",
+        ])
+
+    def test_default_watch_does_not_substitute_unrelated_runs(self):
+        self.assertEqual(self.watch_output([self.run_record(10, "ci")]), "")
+
+    def test_explicit_run_id_can_still_inspect_another_workflow(self):
+        output = self.watch_output([self.run_record(10, "ci")], run_id=10)
+        self.assertEqual(output, "run 10 status=completed conclusion=success\n")
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -243,7 +293,7 @@ class ActionsWatchArgumentTests(unittest.TestCase):
              mock.patch.object(job_mod, "gh_api", return_value={"workflow_runs": []}) as api:
             job_mod.main()
             api.assert_called_once_with(
-                "/repos/limitlessprojects/Go-Hybrid/actions/runs?per_page=5")
+                "/repos/limitlessprojects/Go-Hybrid/actions/workflows/heavy.yml/runs?per_page=5")
 
     def test_make_actions_watch_invokes_documented_cli(self):
         # Record the real recipe's arguments instead of calling GitHub.
@@ -647,6 +697,51 @@ class KaggleFetchFreshnessTests(unittest.TestCase):
             self.assertNotIn("Traceback", result.stdout + result.stderr)
             self.assertEqual(
                 list((root / "result" / "raw").glob(".staging-*")), [])
+
+
+class FailClosedJobControlTests(unittest.TestCase):
+    """Fail-closed guards for kaggle_submit schema, kaggle_wait nonzero status, and actions_fetch artifact paths."""
+
+    def test_kaggle_submit_rejects_missing_or_empty_job_before_push(self):
+        for bad_payload in ('{"commands": []}', '{"job": "", "commands": []}', '[]'):
+            with self.subTest(bad_payload=bad_payload), tempfile.TemporaryDirectory() as tmp:
+                jobdir = Path(tmp)
+                (jobdir / "job.json").write_text(bad_payload, encoding="utf-8")
+                with patch.object(JOB, "resolve_head", return_value="a" * 40), \
+                     patch.object(JOB, "sh") as mock_sh:
+                    with self.assertRaises(SystemExit) as ctx:
+                        JOB.kaggle_submit(str(jobdir))
+                    self.assertNotEqual(ctx.exception.code, 0)
+                    mock_sh.assert_not_called()
+                self.assertFalse((jobdir / "submitted.json").exists())
+
+    def test_kaggle_wait_ignores_quoted_state_on_nonzero_status_exit(self):
+        responses = [
+            (1, 'CLI error while polling "KernelWorkerStatus.RUNNING"'),
+            (1, 'CLI error while polling "KernelWorkerStatus.COMPLETE"'),
+            (0, '"KernelWorkerStatus.RUNNING"'),
+            (1, 'transient error "KernelWorkerStatus.COMPLETE"'),
+            (0, '"KernelWorkerStatus.COMPLETE"'),
+        ]
+        with patch.object(JOB, "sh", side_effect=responses) as mock_sh, \
+             patch.object(JOB.time, "sleep"), \
+             patch("sys.stdout", new=io.StringIO()):
+            rc = JOB.kaggle_wait(5, slug="demo/kernel")
+        self.assertEqual(rc, 0)
+        self.assertEqual(mock_sh.call_count, 5)
+
+    def test_actions_fetch_rejects_traversal_artifact_names(self):
+        for unsafe_name in ("../escape", "sub/nested", "..", ""):
+            with self.subTest(unsafe_name=unsafe_name), tempfile.TemporaryDirectory() as td:
+                arts = {"artifacts": [{"name": unsafe_name, "size_in_bytes": 4,
+                                       "archive_download_url": "https://artifacts.invalid/1"}]}
+                with patch.object(JOB, "gh_token", return_value="fixture-token"), \
+                     patch.object(JOB, "gh_api", return_value=arts), \
+                     patch.object(JOB.urllib.request, "urlopen") as mock_open, \
+                     patch("sys.stderr", new=io.StringIO()):
+                    rc = JOB.actions_fetch(123, td)
+                self.assertEqual(rc, 1)
+                mock_open.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -152,11 +152,11 @@ fn n5_allocation_sites_allocate_every_element() {
     assert!(go.contains("func hy_n5_make[t any](zero func() t, n int, c ...int) []t") && go.contains("hy_n5_make(func() bag { return bag{counts: map[string]int{}} }, int(n))"), "package mode:\n{go}");
     let go = emit_src("struct bag {\n    counts map[string]int\n}\n\nstruct shelf {\n    slots [2]bag\n}\n\nconst k = 3\n\nfn main() {\n    var a [2]bag\n    b := [2]bag{}\n    var c [k]bag\n    d := [3]bag{bag{}}\n    var s shelf\n    var e [2]int\n    f := [2]int{}\n    fmt.println(len(a) + len(b) + len(c) + len(d) + len(s.slots) + len(e) + len(f))\n}\n");
     for want in [
-        "var a [2]bag = func() (hyArr [2]bag) { for i := range hyArr { hyArr[i] = bag{counts: map[string]int{}} }; return hyArr }()",
-        "b := func() (hyArr [2]bag) { for i := range hyArr { hyArr[i] = bag{counts: map[string]int{}} }; return hyArr }()",
-        "var c [k]bag = func() (hyArr [k]bag) { for i := range hyArr { hyArr[i] = bag{counts: map[string]int{}} }; return hyArr }()", // a const length: the IIFE ranges over the array
+        "var a [2]bag = func() (hyArr [2]bag) { for hyIdx := range hyArr { hyArr[hyIdx] = bag{counts: map[string]int{}} }; return hyArr }()",
+        "b := func() (hyArr [2]bag) { for hyIdx := range hyArr { hyArr[hyIdx] = bag{counts: map[string]int{}} }; return hyArr }()",
+        "var c [k]bag = func() (hyArr [k]bag) { for hyIdx := range hyArr { hyArr[hyIdx] = bag{counts: map[string]int{}} }; return hyArr }()", // a const length: the IIFE ranges over the array
         "d := [3]bag{bag{counts: map[string]int{}}, bag{counts: map[string]int{}}, bag{counts: map[string]int{}}}", // a partial literal pads its trailing zero elements
-        "var s shelf = shelf{slots: func() (hyArr [2]bag) { for i := range hyArr { hyArr[i] = bag{counts: map[string]int{}} }; return hyArr }()}", // an array field goes through the same table
+        "var s shelf = shelf{slots: func() (hyArr [2]bag) { for hyIdx := range hyArr { hyArr[hyIdx] = bag{counts: map[string]int{}} }; return hyArr }()}", // an array field goes through the same table
         "var e [2]int\n", "f := [2]int{}", // Go-exact zero values: untouched
     ] {
         assert!(go.contains(want), "missing {want:?} in:\n{go}");
