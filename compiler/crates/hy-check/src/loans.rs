@@ -2480,6 +2480,7 @@ impl<'a> Checker<'a> {
                 self.record_may_share(st, name, value);
                 self.record_alias(st, name, value);
             }
+            self.record_closure_cell_captures(st, Some(pre_st), name, value);
             return;
         }
         let mut rhs = pre_st.clone();
@@ -2528,6 +2529,99 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        self.record_closure_cell_captures(st, Some(pre_st), name, value);
+    }
+
+    fn shape_may_hold_closure(&self, shape: &TypeShape, seen: &mut Vec<String>) -> bool {
+        match shape {
+            TypeShape::Closure | TypeShape::Unknown | TypeShape::Struct(None) => true,
+            TypeShape::Slice(e) | TypeShape::Array(e) | TypeShape::Pointer(e) => self.shape_may_hold_closure(e, seen),
+            TypeShape::Map(k, v) => self.shape_may_hold_closure(k, seen) || self.shape_may_hold_closure(v, seen),
+            TypeShape::Struct(Some(sname)) => {
+                if seen.iter().any(|s| s == sname) { return false; }
+                seen.push(sname.clone());
+                self.struct_fields_for_sname(sname).is_none_or(|fs| fs.iter().any(|(_, ty)| self.shape_may_hold_closure(&self.shape_of_type(ty), seen)))
+            }
+            _ => false,
+        }
+    }
+
+    fn collect_expr_closure_cells(&self, st: &FnState, expr: &Expr, out: &mut HashSet<(String, usize)>) {
+        let inner = unwrap_parens(expr);
+        if matches!(inner, Expr::Move { .. }) || !self.shape_may_hold_closure(&self.shape_of_expr(st, inner), &mut Vec::new()) {
+            return;
+        }
+        match inner {
+            Expr::FnLit { params, results, body, .. } => {
+                let mut bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+                bound.extend(results.iter().filter_map(|r| r.name.clone()));
+                let mut idents = Vec::new();
+                collect_capture_idents_block(body, &mut bound, &mut idents);
+                for id in idents {
+                    if let Some(d) = st.lookup_depth(&id) {
+                        let track = self.binding_may_share(st, &id)
+                            || self.lookup_binding(st, &id).is_some_and(|b| b.moved.is_some() || (!b.immutable && matches!(b.shape, TypeShape::Array(_))));
+                        if track { out.insert((id.clone(), d)); }
+                        if let Some(cs) = st.closure_cell_holders.get(&id) { out.extend(cs.iter().cloned()); }
+                    }
+                }
+            }
+            Expr::Ident { name, .. } => {
+                for key in [name.as_str(), &crate::freeze::resolve_alias(st, name)] {
+                    if let Some(cs) = st.closure_cell_holders.get(key) { out.extend(cs.iter().cloned()); }
+                }
+            }
+            Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::Slice { base, .. }
+            | Expr::Try { operand: base, .. } | Expr::Unary { operand: base, .. } | Expr::AddrOf { operand: base, .. } => self.collect_expr_closure_cells(st, base, out),
+            Expr::StructLit { fields, .. } => for f in fields { self.collect_expr_closure_cells(st, &f.value, out); },
+            Expr::SliceLit { items, .. } => for it in items { self.collect_expr_closure_cells(st, it, out); },
+            Expr::MapLit { entries, .. } => for (k, v) in entries { self.collect_expr_closure_cells(st, k, out); self.collect_expr_closure_cells(st, v, out); },
+            Expr::Call { callee, args, .. } if !self.call_returns_fresh_copy(st, inner) => {
+                self.collect_expr_closure_cells(st, callee, out);
+                for a in args { self.collect_expr_closure_cells(st, &a.value, out); }
+            }
+            _ => {}
+        }
+    }
+
+    fn record_closure_cell_captures(&self, st: &mut FnState, pre_st: Option<&FnState>, name: &str, value: &Expr) {
+        if name == "_" || self.lookup_binding(st, name).is_some_and(|b| !self.shape_may_hold_closure(&b.shape, &mut Vec::new())) {
+            return;
+        }
+        let src_st = pre_st.unwrap_or(st);
+        let mut cells = HashSet::new();
+        self.collect_expr_closure_cells(src_st, value, &mut cells);
+        if cells.is_empty() { return; }
+        let captured_move = cells.iter().find_map(|(id, d)| {
+            let b = if *d == 0 { src_st.env.get(id) } else { src_st.scopes.get(*d - 1).and_then(|s| s.get(id)) };
+            b.and_then(|b| b.moved.clone())
+        });
+        for (id, d) in &cells {
+            if st.lookup_depth(id) == Some(*d) && id != name { st.share_edge(name, id); }
+        }
+        st.closure_cell_holders.entry(name.to_string()).or_default().extend(cells);
+        if let (Some(mv), Some(nb)) = (captured_move, st.env_lookup_mut(name)) {
+            if nb.moved.is_none() { nb.moved = Some(mv); }
+        }
+    }
+
+    fn closure_cell_peers_for_rebind(&self, st: &FnState, name: &str) -> Vec<String> {
+        let Some(depth) = st.lookup_depth(name) else { return Vec::new(); };
+        let mut peers: HashSet<String> = st.closure_cell_holders.iter()
+            .filter(|(h, cells)| *h != name && cells.contains(&(name.to_string(), depth)) && self.lookup_binding(st, h).is_some())
+            .map(|(h, _)| h.clone()).collect();
+        if !st.closure_defs.contains_key(name) && !st.closure_fnlits.contains_key(name)
+            && !self.lookup_binding(st, name).is_some_and(|b| self.shape_may_hold_closure(&b.shape, &mut Vec::new()))
+        {
+            for c in st.may_share.get(name).into_iter().flatten() {
+                if c != name && (st.closure_defs.contains_key(c) || st.closure_fnlits.contains_key(c)
+                    || matches!(self.lookup_binding(st, c).map(|b| &b.shape), Some(TypeShape::Closure)))
+                {
+                    peers.insert(c.clone());
+                }
+            }
+        }
+        peers.into_iter().collect()
     }
 
     pub(crate) fn record_place_store_from_snapshot(
@@ -2665,6 +2759,7 @@ impl<'a> Checker<'a> {
         if name == "_" {
             return;
         }
+        self.record_closure_cell_captures(st, None, name, value);
         match unwrap_parens(value) {
             Expr::Ident { name: src, .. } => {
                 if self.binding_may_share(st, src) {
@@ -2693,40 +2788,6 @@ impl<'a> Checker<'a> {
             // the freeze rule. Link the closure binding to each captured
             // reference-bearing outer binding so a later `move` of either
             // freezes the other (O5.2), exactly like a shallow copy.
-            Expr::FnLit {
-                params,
-                results,
-                body,
-                ..
-            } => {
-                let mut bound: std::collections::HashSet<String> =
-                    params.iter().map(|p| p.name.clone()).collect();
-                bound.extend(results.iter().filter_map(|r| r.name.clone()));
-                let mut idents = Vec::new();
-                collect_capture_idents_block(body, &mut bound, &mut idents);
-                let mut captured_move = None;
-                for id in idents {
-                    if captured_move.is_none() {
-                        captured_move =
-                            self.lookup_binding(st, &id).and_then(|b| b.moved.clone());
-                    }
-                    if self.binding_may_share(st, &id)
-                        || self
-                            .lookup_binding(st, &id)
-                            .map(|b| !b.immutable && matches!(b.shape, TypeShape::Array(_)))
-                            .unwrap_or(false)
-                    {
-                        st.share_edge(name, &id);
-                    }
-                }
-                if let Some(mv) = captured_move {
-                    if let Some(nb) = st.env_lookup_mut(name) {
-                        if nb.moved.is_none() {
-                            nb.moved = Some(mv);
-                        }
-                    }
-                }
-            }
             _ => {
                 if self.call_returns_fresh_copy(st, value) {
                     return;
@@ -2906,6 +2967,12 @@ impl<'a> Checker<'a> {
             if src == name {
                 continue;
             }
+            if let Some(cs) = st.closure_cell_holders.get(&src).cloned() {
+                st.closure_cell_holders
+                    .entry(name.to_string())
+                    .or_default()
+                    .extend(cs);
+            }
             let place = Place {
                 kind: PlaceKind::Ident(src.clone()),
                 span: value.span(),
@@ -2976,6 +3043,9 @@ impl<'a> Checker<'a> {
                     st.share_edge(d, s);
                 }
             }
+        }
+        for d in &dst_roots {
+            self.record_closure_cell_captures(st, None, d, &src.value);
         }
         if let Some(origin) = self.moved_non_owned_origin_in_expr(st, &src.value) {
             let peer_origin = if origin.starts_with("a may-share peer of ") {
@@ -3067,6 +3137,7 @@ impl<'a> Checker<'a> {
         }
         let is_unmoved_borrow = carries_borrow && move_operand_ident(arg_expr).is_none();
         for d in &dst_roots {
+            self.record_closure_cell_captures(st, None, d, arg_expr);
             if !self.binding_may_share(st, d) {
                 continue;
             }
@@ -3222,6 +3293,18 @@ impl<'a> Checker<'a> {
             };
 
             for d in &dst_roots {
+                if let CalleeSlotSource::Arg(se) = src_src {
+                    self.record_closure_cell_captures(st, None, d, se);
+                } else if let CalleeSlotSource::OuterBinding(sn) = src_src {
+                    if let Some(cs) = st.closure_cell_holders.get(sn).cloned() {
+                        for (id, cd) in &cs {
+                            if st.lookup_depth(id) == Some(*cd) && id != d {
+                                st.share_edge(d, id);
+                            }
+                        }
+                        st.closure_cell_holders.entry(d.clone()).or_default().extend(cs);
+                    }
+                }
                 if !self.binding_may_share(st, d) {
                     continue;
                 }
@@ -4612,6 +4695,7 @@ impl<'a> Checker<'a> {
         shape: &TypeShape,
         value: &Expr,
     ) {
+        self.record_closure_cell_captures(st, None, name, value);
         if !self.shape_may_share(shape) && !matches!(shape, TypeShape::Unknown) {
             return;
         }
@@ -6309,21 +6393,8 @@ impl<'a> Checker<'a> {
         } else {
             false
         };
-        let closure_peers: Vec<String> = if same_scope_redecl && !matches!(shape, TypeShape::Closure) {
-            st.may_share
-                .get(name)
-                .into_iter()
-                .flatten()
-                .filter(|c| {
-                    st.closure_defs.contains_key(*c)
-                        || st.closure_fnlits.contains_key(*c)
-                        || matches!(
-                            self.lookup_binding(st, c).map(|b| &b.shape),
-                            Some(TypeShape::Closure)
-                        )
-                })
-                .cloned()
-                .collect()
+        let closure_peers = if same_scope_redecl && !matches!(shape, TypeShape::Closure) {
+            self.closure_cell_peers_for_rebind(st, name)
         } else {
             Vec::new()
         };
@@ -6337,6 +6408,7 @@ impl<'a> Checker<'a> {
         self.preserve_peers_before_sever(st, name, shadows_outer);
         st.aliases.remove(name);
         st.share_clear(name);
+        st.closure_cell_holders.remove(name);
         for cp in closure_peers {
             st.share_edge(name, &cp);
         }
@@ -6860,30 +6932,12 @@ impl<'a> Checker<'a> {
                         b.moved = None; // a fresh value re-owns the binding
                         b.non_owned_origin = info.non_owned;
                     }
-                    let closure_peers: Vec<String> = if !st.closure_defs.contains_key(name)
-                        && !st.closure_fnlits.contains_key(name)
-                    {
-                        st.may_share
-                            .get(name)
-                            .into_iter()
-                            .flatten()
-                            .filter(|c| {
-                                st.closure_defs.contains_key(*c)
-                                    || st.closure_fnlits.contains_key(*c)
-                                    || matches!(
-                                        self.lookup_binding(st, c).map(|b| &b.shape),
-                                        Some(TypeShape::Closure)
-                                    )
-                            })
-                            .cloned()
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
+                    let closure_peers = self.closure_cell_peers_for_rebind(st, name);
                     // a rebind re-owns the binding: drop the old alias and
                     // may-share edges, then re-record from the new value (#27)
                     st.aliases.remove(name);
                     st.share_clear(name);
+                    st.closure_cell_holders.remove(name);
                     for cp in closure_peers {
                         st.share_edge(name, &cp);
                     }
@@ -6926,13 +6980,17 @@ impl<'a> Checker<'a> {
                     if !info.is_fresh_copy {
                         self.record_place_store_from_snapshot(st, &pre_st, root, v, &overwritten);
                     }
-                    if !root.is_empty() && root != "_" && self.binding_may_share(st, root) {
-                        self.record_move_const_and_a3_loans(st, root, v, idx);
+                    if !root.is_empty() {
+                        if root != "_" && self.binding_may_share(st, root) {
+                            self.record_move_const_and_a3_loans(st, root, v, idx);
+                        }
+                        self.record_closure_cell_captures(st, Some(&pre_st), root, v);
                     }
                 }
             }
             self.record_parallel_assign_fanout(st, &pre_st, targets, values, &is_const_write);
         } else if values.len() == 1 && targets.len() > 1 {
+            let pre_st = st.clone();
             let moved_non_owned = self.moved_non_owned_origin_in_expr(st, &values[0]);
             let shapes = self.multi_value_shapes(st, &values[0], targets.len());
             let tys = self.multi_value_tys(st, &values[0], targets.len());
@@ -7008,29 +7066,10 @@ impl<'a> Checker<'a> {
                             None
                         };
                     }
-                    let closure_peers: Vec<String> = if !st.closure_defs.contains_key(name)
-                        && !st.closure_fnlits.contains_key(name)
-                        && !matches!(shape, TypeShape::Closure)
-                    {
-                        st.may_share
-                            .get(name)
-                            .into_iter()
-                            .flatten()
-                            .filter(|c| {
-                                st.closure_defs.contains_key(*c)
-                                    || st.closure_fnlits.contains_key(*c)
-                                    || matches!(
-                                        self.lookup_binding(st, c).map(|b| &b.shape),
-                                        Some(TypeShape::Closure)
-                                    )
-                            })
-                            .cloned()
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
+                    let closure_peers = self.closure_cell_peers_for_rebind(st, name);
                     st.aliases.remove(name);
                     st.share_clear(name);
+                    st.closure_cell_holders.remove(name);
                     for cp in closure_peers {
                         st.share_edge(name, &cp);
                     }
@@ -7056,6 +7095,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     self.record_multi_value_share_and_alias(st, name, &shape, &values[0]);
+                    self.record_closure_cell_captures(st, Some(&pre_st), name, &values[0]);
                     if may_share {
                         for r in &ref_roots {
                             if r != name && self.binding_may_share(st, r) {
@@ -7091,8 +7131,11 @@ impl<'a> Checker<'a> {
                     st.closure_fnlits.remove(name);
                 } else {
                     let root = t.root();
-                    if !root.is_empty() && self.binding_may_share(st, root) {
-                        self.record_multi_value_may_share(st, root, &shape, &values[0]);
+                    if !root.is_empty() {
+                        if self.binding_may_share(st, root) {
+                            self.record_multi_value_may_share(st, root, &shape, &values[0]);
+                        }
+                        self.record_closure_cell_captures(st, Some(&pre_st), root, &values[0]);
                     }
                 }
             }
