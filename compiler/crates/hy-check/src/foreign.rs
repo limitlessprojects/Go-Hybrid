@@ -372,11 +372,41 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
     const SYNC_WAIT_GROUP: &[&str] = &["add", "done", "wait"];
     const SYNC_ONCE: &[&str] = &["do"];
+    /// `io.Reader` — Go standard library read interface.
+    const IO_READER: &[&str] = &["read"];
+    /// `io.Writer` — Go standard library write interface.
+    const IO_WRITER: &[&str] = &["write"];
+    /// `io.Closer` — Go standard library close interface.
+    const IO_CLOSER: &[&str] = &["close"];
+    /// `io.ReadCloser`.
+    const IO_READ_CLOSER: &[&str] = &["read", "close"];
+    /// `io.WriteCloser`.
+    const IO_WRITE_CLOSER: &[&str] = &["write", "close"];
+    /// `io.ReadWriter`.
+    const IO_READ_WRITER: &[&str] = &["read", "write"];
+    /// `io.ReadWriteCloser`.
+    const IO_READ_WRITE_CLOSER: &[&str] = &["read", "write", "close"];
+    /// `io.Seeker`.
+    const IO_SEEKER: &[&str] = &["seek"];
+    /// `io.ReadSeeker`.
+    const IO_READ_SEEKER: &[&str] = &["read", "seek"];
+    /// `io.ReadWriteSeeker`.
+    const IO_READ_WRITE_SEEKER: &[&str] = &["read", "write", "seek"];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
         "sync.once" | "sync.Once" => Some(SYNC_ONCE),
+        "io.reader" | "io.Reader" => Some(IO_READER),
+        "io.writer" | "io.Writer" => Some(IO_WRITER),
+        "io.closer" | "io.Closer" => Some(IO_CLOSER),
+        "io.read_closer" | "io.readcloser" | "io.ReadCloser" => Some(IO_READ_CLOSER),
+        "io.write_closer" | "io.writecloser" | "io.WriteCloser" => Some(IO_WRITE_CLOSER),
+        "io.read_writer" | "io.readwriter" | "io.ReadWriter" => Some(IO_READ_WRITER),
+        "io.read_write_closer" | "io.readwritecloser" | "io.ReadWriteCloser" => Some(IO_READ_WRITE_CLOSER),
+        "io.seeker" | "io.Seeker" => Some(IO_SEEKER),
+        "io.read_seeker" | "io.readseeker" | "io.ReadSeeker" => Some(IO_READ_SEEKER),
+        "io.read_write_seeker" | "io.readwriteseeker" | "io.ReadWriteSeeker" => Some(IO_READ_WRITE_SEEKER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
