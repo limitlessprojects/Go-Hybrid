@@ -4319,8 +4319,23 @@ impl<'a> Collector<'a> {
         let sname = Checker::base_named_type_str(&full_name).to_string();
         // Clone: the diagnostics below need `&mut self` while the declaration
         // table is borrowed from it.
-        let Some(declared) = self.ck.structs.get(&sname).cloned() else {
-            return;
+        // #4016: `ck.structs` deliberately omits zero-field structs (they must
+        // not classify as mutable GC structs), but a zero-field struct IS still
+        // a declared struct, so an unknown field on its literal
+        // (`unit{bogus: 1}`) was accepted and then failed `go build` with
+        // "unknown field bogus in struct literal". Treat a name that
+        // `struct_type_params` knows — but `structs` does not — as a declared
+        // struct with no fields, so U14 can reject the unknown name. Aliases
+        // parse as `Decl::TypeAlias`, so they never reach here as structs.
+        let declared = match self.ck.structs.get(&sname).cloned() {
+            Some(d) => d,
+            None => {
+                if self.ck.struct_type_params.contains_key(&sname) {
+                    Vec::new()
+                } else {
+                    return;
+                }
+            }
         };
         let subst = self.struct_type_arg_map(&full_name);
 
