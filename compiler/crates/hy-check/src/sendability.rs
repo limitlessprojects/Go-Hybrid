@@ -1020,6 +1020,60 @@ impl<'a> Checker<'a> {
     }
 
     /// Check for constant overflow or float truncation in a channel send.
+
+    /// #3273: a channel send must match the channel's element type. The kind
+    /// comparison cannot see it — `chan int64` with a sent `int32` are both
+    /// `OpKind::Int`, `[2]int` and `[3]int` are both `OpKind::Array`, and
+    /// `[]int32` and `[]int64` are both `OpKind::Slice(Int)`. Compare the
+    /// declared spellings, failing open whenever either side is unresolved.
+    ///
+    /// Covers both send positions: a `Stmt::Send` and a `select` send arm.
+    pub(crate) fn check_send_operands(
+        &mut self,
+        st: &FnState,
+        chan: &Expr,
+        value: &Expr,
+        span: Span,
+    ) {
+        let Some(elem_ty) = self.chan_elem_ty(st, chan) else {
+            return;
+        };
+        let want = elem_ty.render();
+        let Some(got_ty) = self.ty_of_expr(st, value) else {
+            return; // untyped constant or unresolved: fail open
+        };
+        let got = got_ty.render();
+        if want == got {
+            return;
+        }
+        let conflict = match (
+            canonical_numeric_name(&want),
+            canonical_numeric_name(&got),
+        ) {
+            (Some(w), Some(g)) => w != g,
+            _ => {
+                sized_spelling_conflict(&want, &got) || slice_elem_conflict(&want, &got)
+            }
+        };
+        if !conflict {
+            return;
+        }
+        self.diags.push(
+            Diagnostic::error(
+                "HYB-E1002",
+                self.path.clone(),
+                span,
+                format!(
+                    "cannot send a value of type `{}` on a channel of `{}` — Go refuses `cannot use ... (variable of type {}) as {} value in send` (HYB-E1002)",
+                    got, want, got, want
+                ),
+            )
+            .with_notes(vec![
+                "the sent value must have exactly the channel's element type; write an explicit conversion when one is intended".to_string(),
+            ]),
+        );
+    }
+
     pub(crate) fn check_chan_send_const_overflow(
         &mut self,
         st: &FnState,
@@ -3643,4 +3697,62 @@ fn unproven_atomic_reason(b: &Binding) -> Option<String> {
     }
 }
 
+/// #3273: two fixed-size array spellings that differ, both known. Anything
+/// unparsed fails open so aliases never false-reject.
+fn sized_spelling_conflict(want: &str, got: &str) -> bool {
+    want != got && is_sized_array_spelling(want) && is_sized_array_spelling(got)
+}
 
+/// #3273: two slice spellings whose element spellings differ, both known.
+/// `byte`/`uint8` and `rune`/`int32` share a canonical name, so the genuine
+/// Go aliases never conflict.
+fn slice_elem_conflict(want: &str, got: &str) -> bool {
+    let (Some(w), Some(g)) = (want.strip_prefix("[]"), got.strip_prefix("[]")) else {
+        return false;
+    };
+    if w == g {
+        return false;
+    }
+    match (canonical_numeric_name(w), canonical_numeric_name(g)) {
+        (Some(a), Some(b)) => a != b,
+        (None, None) => is_sized_array_spelling(w) && is_sized_array_spelling(g),
+        _ => false,
+    }
+}
+/// #3273: the canonical predeclared numeric spelling of a type name, so
+/// `byte`/`uint8` and `rune`/`int32` compare equal. Mirrors the helper in
+/// `buildable.rs`, which is private to that module.
+fn canonical_numeric_name(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "int" => "int",
+        "int8" => "int8",
+        "int16" => "int16",
+        "int32" | "rune" => "int32",
+        "int64" => "int64",
+        "uint" => "uint",
+        "uint8" | "byte" => "uint8",
+        "uint16" => "uint16",
+        "uint32" => "uint32",
+        "uint64" => "uint64",
+        "uintptr" => "uintptr",
+        "float32" => "float32",
+        "float64" => "float64",
+        "complex64" => "complex64",
+        "complex128" => "complex128",
+        _ => return None,
+    })
+}
+
+/// #3273: does this spelling name a fixed-size array (`[3]int`, `[N]byte`)?
+/// Anything that does not start with a bracketed length fails open.
+fn is_sized_array_spelling(s: &str) -> bool {
+    let t = s.trim();
+    let Some(rest) = t.strip_prefix('[') else {
+        return false;
+    };
+    let Some(close) = rest.find(']') else {
+        return false;
+    };
+    let len = &rest[..close];
+    !len.is_empty() && len.chars().all(|c| c.is_ascii_digit())
+}
