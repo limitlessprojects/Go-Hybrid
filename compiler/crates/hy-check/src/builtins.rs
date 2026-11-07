@@ -346,10 +346,16 @@ impl<'a> Checker<'a> {
                             args.len()
                         ),
                     );
-                } else if is_value_literal(&args[0].value) {
+                } else if is_value_literal(&args[0].value)
+                    || matches!(
+                        unwrap_parens(&args[0].value),
+                        Expr::SliceLit { .. } | Expr::StructLit { .. }
+                    )
+                {
                     self.emit_builtin(
                         span,
-                        "`delete` requires a map or set first argument — not a literal (HYB-E2005)".to_string(),
+                        "`delete` requires a map or set first argument — not a scalar, slice, or struct literal (HYB-E2005)"
+                            .to_string(),
                     );
                 }
             }
@@ -365,6 +371,10 @@ impl<'a> Checker<'a> {
                     return;
                 }
                 if is_value_literal(&args[0].value)
+                    || matches!(
+                        unwrap_parens(&args[0].value),
+                        Expr::MapLit { .. } | Expr::StructLit { .. }
+                    )
                     || is_numeric_or_bool_or_char_literal(&args[1].value)
                     || matches!(
                         unwrap_parens(&args[1].value),
@@ -392,10 +402,12 @@ impl<'a> Checker<'a> {
                     );
                     return;
                 }
-                if is_value_literal(&args[0].value) {
+                if is_value_literal(&args[0].value)
+                    || matches!(unwrap_parens(&args[0].value), Expr::StructLit { .. })
+                {
                     self.emit_builtin(
                         span,
-                        "`clear` requires a map or slice value — not a scalar or string literal (HYB-E2005)"
+                        "`clear` requires a map or slice value — not a scalar, string, or struct literal (HYB-E2005)"
                             .to_string(),
                     );
                 }
@@ -1562,6 +1574,10 @@ fn is_value_literal(e: &Expr) -> bool {
 fn is_disallowed_close_operand(e: &Expr) -> bool {
     // Literals can never be channels. Ident / call / field / index stay OK.
     is_value_literal(e)
+        || matches!(
+            unwrap_parens(e),
+            Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
+        )
 }
 
 fn is_numeric_or_bool_or_char_literal(e: &Expr) -> bool {
