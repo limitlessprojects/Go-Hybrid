@@ -121,7 +121,17 @@ pub(crate) fn is_iterable_handle(name: &str) -> bool {
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
-        ("serde_json", "parse" | "new_object" | "new_array") | ("flate2", "new_writer") => {
+        ("serde_json", "parse" | "new_object" | "new_array")
+        | ("flate2", "new_writer")
+        | ("strings", "new_replacer" | "NewReplacer")
+        | (
+            "url" | "net/url",
+            "user" | "user_password" | "User" | "UserPassword",
+        )
+        | (
+            "http" | "net/http",
+            "new_response_controller" | "NewResponseController",
+        ) => {
             CallMode::Produce
         }
         ("serde_json", "to_string_pretty")
@@ -182,6 +192,17 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
+        ("strings", "new_replacer" | "NewReplacer") => {
+            TypeShape::ForeignOpaque("strings.replacer".into())
+        }
+        (
+            "url" | "net/url",
+            "user" | "user_password" | "User" | "UserPassword",
+        ) => TypeShape::ForeignOpaque("url.userinfo".into()),
+        (
+            "http" | "net/http",
+            "new_response_controller" | "NewResponseController",
+        ) => TypeShape::ForeignOpaque("http.response_controller".into()),
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -475,6 +496,16 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const IO_LIMITED_READER: &[&str] = &["read"];
     /// `io.OffsetWriter`.
     const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
+    const STRINGS_REPLACER: &[&str] = &["replace", "write_string"];
+    const URL_USERINFO: &[&str] = &["password", "string", "username"];
+    const NET_LISTEN_CONFIG: &[&str] = &["listen", "listen_packet"];
+    const HTTP_RESPONSE_CONTROLLER: &[&str] = &[
+        "enable_full_duplex",
+        "flush",
+        "hijack",
+        "set_read_deadline",
+        "set_write_deadline",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -496,6 +527,12 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
         "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
         "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
+        "strings.replacer" | "strings.Replacer" => Some(STRINGS_REPLACER),
+        "url.userinfo" | "url.user_info" | "url.Userinfo" => Some(URL_USERINFO),
+        "net.listen_config" | "net.listenconfig" | "net.ListenConfig" => Some(NET_LISTEN_CONFIG),
+        "http.response_controller"
+        | "http.responsecontroller"
+        | "http.ResponseController" => Some(HTTP_RESPONSE_CONTROLLER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -539,6 +576,10 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        ("strings.replacer" | "strings.Replacer", "replace")
+        | ("url.userinfo" | "url.user_info" | "url.Userinfo", "username" | "string") => {
+            TypeShape::Str
+        }
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
@@ -1306,6 +1347,7 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                         | "max_bytes_error"
                         | "protocol_error"
                         | "protocols"
+                        | "new_response_controller"
                         | "response_controller"
                         | "same_site"
                         | "default_client"
