@@ -896,17 +896,19 @@ impl<'a> Checker<'a> {
         events: &std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>>,
         in_managed: &dyn Fn(usize) -> bool,
     ) {
-        let has_loop_carried_state = iter_st
-            .env
-            .iter()
-            .chain(iter_st.scopes.iter().flat_map(|s| s.iter()))
-            .any(|(name, b)| {
-                b.moved.is_some()
-                    || b.slot_loan
-                    || self.non_owned_origin_of(iter_st, name).is_some()
-                    || iter_st.aliases.contains_key(name)
-                    || !iter_st.share_group(name).is_empty()
-            });
+        let has_loop_carried_state = !iter_st.borrow_bindings.is_empty()
+            || !iter_st.loans.is_empty()
+            || iter_st
+                .env
+                .iter()
+                .chain(iter_st.scopes.iter().flat_map(|s| s.iter()))
+                .any(|(name, b)| {
+                    b.moved.is_some()
+                        || b.slot_loan
+                        || self.non_owned_origin_of(iter_st, name).is_some()
+                        || iter_st.aliases.contains_key(name)
+                        || !iter_st.share_group(name).is_empty()
+                });
         if !has_loop_carried_state {
             return;
         }
@@ -1005,6 +1007,28 @@ impl<'a> Checker<'a> {
             self.check_slot_loan_rebind(&replay_st, stmt);
             self.check_stmt_addr_of_loan_projections(&replay_st, stmt, false);
 
+            let mut stmt_consumes = Vec::new();
+            if let hy_syntax::Stmt::For {
+                kind: hy_syntax::ForKind::Iterate { expr, .. },
+                ..
+            } = stmt
+            {
+                let mut calls = Vec::new();
+                crate::walk::expr_calls(expr, &mut calls);
+                for cr in calls {
+                    self.process_call(&mut replay_st, &cr, idx, None, &mut stmt_consumes);
+                }
+            } else {
+                let mut calls = Vec::new();
+                crate::walk::own_calls(stmt, &mut calls);
+                for cr in calls {
+                    self.process_call(&mut replay_st, &cr, idx, None, &mut stmt_consumes);
+                }
+            }
+            if !stmt_consumes.is_empty() {
+                self.check_same_stmt_consumes(&replay_st, &uses, &stmt_consumes);
+            }
+
             match stmt {
                 hy_syntax::Stmt::Local(l) => {
                     self.process_local(&mut replay_st, l, idx, managed);
@@ -1020,6 +1044,9 @@ impl<'a> Checker<'a> {
                     self.process_assign(&mut replay_st, targets, *op, values, *span, idx);
                     self.record_assign_borrow_aliases(&mut replay_st, targets, *op, values);
                     self.mark_slot_loans_assign(&mut replay_st, targets, *op, values);
+                }
+                hy_syntax::Stmt::Return { values, span } => {
+                    self.process_return(&mut replay_st, values, *span);
                 }
                 hy_syntax::Stmt::Task { callee, args, span } => {
                     self.mark_move_in_value(
