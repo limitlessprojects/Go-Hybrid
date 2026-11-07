@@ -123,9 +123,20 @@ impl Emitter {
                 // `defer f.Close()` — emitting `defer (f.Close())` would be
                 // invalid Go. A non-call operand (which the checker rejects)
                 // is left peeled-but-ungated and fails loudly below.
-                let mut operand = Self::peel_parens(call);
-                while let Expr::Try { operand: inner, .. } = operand {
-                    operand = Self::peel_parens(inner);
+                let operand = Self::peel_parens(call);
+                // `defer f.close()?` / `defer (f.close())?` / `defer
+                // (f.close()?)` — the checker's documented legal shape
+                // (HYB-E2001 unwraps Paren/Try). The `?` cannot propagate at
+                // the defer statement: the call has not run yet. It
+                // propagates at function exit instead (emit_defer_try),
+                // rather than being dropped (bb445cd6 peeled it away, which
+                // silently discarded the deferred call's error).
+                if let Expr::Try { operand: inner, .. } = operand {
+                    let mut inner = Self::peel_parens(inner);
+                    while let Expr::Try { operand: i2, .. } = inner {
+                        inner = Self::peel_parens(i2);
+                    }
+                    return self.emit_defer_try(inner);
                 }
                 if matches!(operand, Expr::Call { .. }) {
                     self.hoist_tries_expr(operand)?;
@@ -691,6 +702,189 @@ impl Emitter {
 
     pub(crate) fn expr_key(e: &Expr) -> usize {
         e as *const Expr as usize
+    }
+
+    /// `defer <call>?` (P1 + E3). Go evaluates a deferred call's function
+    /// value and arguments at the `defer` statement and runs the call at
+    /// exit, so the `?` can only propagate at exit: the lowering is a
+    /// deferred closure that stores the call's error into the enclosing
+    /// function's error result when that result is still nil (the first
+    /// error wins; an explicit `return …, err` keeps its error):
+    ///
+    /// ```go
+    /// hyDF0 := f.Close            // receiver evaluated now (method value)
+    /// defer func() {
+    ///     if hyErr1 := hyDF0(); hyErr1 != nil && err == nil {
+    ///         err = hyErr1
+    ///     }
+    /// }()
+    /// ```
+    ///
+    /// Non-constant arguments snapshot into temps before the `defer`, so
+    /// they are evaluated at defer time exactly like Go's own `defer`. With
+    /// no error result to land in (a closure body, or a fn without an
+    /// error result) the error would be silently dropped, which E3b forbids,
+    /// so emission refuses loudly instead.
+    fn emit_defer_try(&mut self, call: &Expr) -> Result<(), EmitError> {
+        let Expr::Call {
+            callee,
+            args,
+            span,
+        } = call
+        else {
+            return Err(EmitError::unsupported(
+                "`defer <expr>?` — the `?` operand of a defer must be a call (HYB-E2001)",
+            ));
+        };
+        let target = match &self.defer_err_target {
+            Some(t) => t.clone(),
+            _ => {
+                return Err(EmitError::unsupported(
+                    "`defer f()?` here has no error result to propagate into at function exit \
+                     (E3/E4: only a fn whose results end in `error`, or main); the deferred \
+                     error would be silently dropped",
+                ))
+            }
+        };
+        // A `?` nested in the callee or arguments evaluates at defer time.
+        self.hoist_tries_expr(call)?;
+        let mut snap_args = Vec::with_capacity(args.len());
+        let mut snapped = false;
+        for a in args {
+            if self.defer_arg_is_constant(&a.value) {
+                snap_args.push(a.clone());
+                continue;
+            }
+            let text = self.emit_expr(&a.value, 0)?;
+            let t = self.next_temp("hyDA");
+            self.push(&format!("{} := {}", t, text));
+            let mut na = a.clone();
+            na.value = Expr::Ident {
+                name: t,
+                span: a.value.span(),
+            };
+            snap_args.push(na);
+            snapped = true;
+        }
+        let call_now = if snapped {
+            Expr::Call {
+                callee: callee.clone(),
+                args: snap_args,
+                span: *span,
+            }
+        } else {
+            call.clone()
+        };
+        let mut call_text = self.emit_expr(&call_now, 0)?;
+        // Receiver: a method call on a local evaluates its receiver now —
+        // bind the Go method value before the defer, as Go's defer would.
+        let local_recv = matches!(callee.as_ref(), Expr::Field { .. })
+            && callee
+                .root_ident()
+                .map(|r| self.local_vars.contains(r))
+                .unwrap_or(false);
+        if local_recv {
+            if let Some(open) = Self::final_call_paren(&call_text) {
+                let fv = self.next_temp("hyDF");
+                self.push(&format!("{} := {}", fv, &call_text[..open]));
+                call_text = format!("{}{}", fv, &call_text[open..]);
+            }
+        }
+        let n_vals = match self.call_results(call) {
+            Some((n, true)) => Some(n),
+            Some((_, false)) => {
+                return Err(EmitError::unsupported(
+                    "`defer f()?` on a call whose results do not end in `error` (E3)",
+                ))
+            }
+            // Unknown shape (a foreign method such as `f.seek(..)` returning
+            // `(int64, error)`): the checker already proved the results end
+            // in `error`, but not how many there are. Go's f(g()) rule binds
+            // ALL of g's results to a variadic parameter, so an inline
+            // `func(...any) error` adapter picks the last one at any arity.
+            None => None,
+        };
+        let errt = self.next_temp("hyErr");
+        let (lhs, call_text) = match n_vals {
+            Some(n) => (
+                std::iter::repeat("_")
+                    .take(n)
+                    .chain(std::iter::once(errt.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                call_text,
+            ),
+            None => (
+                errt.clone(),
+                format!(
+                    "func(hyVs ...any) error {{ hyE, _ := hyVs[len(hyVs)-1].(error); return hyE }}({})",
+                    call_text
+                ),
+            ),
+        };
+        self.push("defer func() {");
+        self.indent += 1;
+        self.push(&format!(
+            "if {} := {}; {} != nil && {} == nil {{",
+            lhs, call_text, errt, target
+        ));
+        self.indent += 1;
+        self.push(&format!("{} = {}", target, errt));
+        self.indent -= 1;
+        self.push("}");
+        self.indent -= 1;
+        self.push("}()");
+        Ok(())
+    }
+
+    /// An argument whose value cannot change between the `defer` and
+    /// function exit (literals, non-local names such as consts and fns, and
+    /// operators over those). It stays inline, which also keeps untyped
+    /// constants untyped (`hyDA := 5` would pin `int`).
+    fn defer_arg_is_constant(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Lit { .. } => true,
+            Expr::Ident { name, .. } => !self.local_vars.contains(name),
+            Expr::Paren { inner, .. } => self.defer_arg_is_constant(inner),
+            Expr::Unary { operand, .. } => self.defer_arg_is_constant(operand),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.defer_arg_is_constant(lhs) && self.defer_arg_is_constant(rhs)
+            }
+            _ => false,
+        }
+    }
+
+    /// Byte index of the `(` that opens the final call's argument list in
+    /// emitted Go call text (`f.Close()` → 7), or None when the text does
+    /// not end in a balanced call.
+    fn final_call_paren(text: &str) -> Option<usize> {
+        if !text.ends_with(')') {
+            return None;
+        }
+        let bytes = text.as_bytes();
+        let mut depth = 0i32;
+        let mut quote: Option<u8> = None;
+        for i in (0..bytes.len()).rev() {
+            let c = bytes[i];
+            if let Some(q) = quote {
+                if c == q && (q == b'`' || i == 0 || bytes[i - 1] != b'\\') {
+                    quote = None;
+                }
+                continue;
+            }
+            match c {
+                b'"' | b'`' | b'\'' => quote = Some(c),
+                b')' => depth += 1,
+                b'(' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return if i > 0 { Some(i) } else { None };
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     pub(crate) fn peel_parens(mut e: &Expr) -> &Expr {
