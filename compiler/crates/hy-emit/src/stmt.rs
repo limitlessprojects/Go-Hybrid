@@ -1281,7 +1281,7 @@ impl Emitter {
 
     /// Binding hints from the defining values (see `BindingKind`).
     fn hint_from_values(&mut self, names: &[String], values: &[Expr]) {
-        let single_hint = if names.len() == 1 && values.len() == 1 && names[0] != "_" {
+        let single_hint = if (names.len() == 1 || names.len() == 2) && values.len() == 1 && names[0] != "_" {
             Some(self.binding_kind_of(&values[0]))
         } else {
             None
@@ -1333,21 +1333,21 @@ impl Emitter {
         }
         let (call, args) = match e {
             Expr::Try { operand, .. } => match Self::peel_parens(operand) {
-                Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
+                Expr::Call { callee, args, .. } => (Self::peel_parens(callee), args.as_slice()),
                 _ => return BindingKind::Plain,
             },
-            Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
-            _ => return BindingKind::Plain,
+            Expr::Call { callee, args, .. } => (Self::peel_parens(callee.as_ref()), args.as_slice()),
+            _ => return self.type_of_expr(e).map_or(BindingKind::Plain, BindingKind::ForeignTy),
         };
         if let Expr::Field { base, name, .. } = call {
-            if let Expr::Ident { name: pkg, .. } = base.as_ref() {
+            if let Expr::Ident { name: pkg, .. } = Self::peel_parens(base.as_ref()) {
                 if self.is_unshadowed_pkg_root(pkg) {
                     if pkg == "io" && name == "read_all" {
                         return BindingKind::Bytes;
                     }
                     // Rust-handle constructors: a serde_json value handle.
                     if pkg == "serde_json"
-                        && matches!(name.as_str(), "parse" | "new_object" | "new_array")
+                        && matches!(name.as_str(), "parse" | "new_object" | "new_array" | "array" | "get")
                     {
                         return BindingKind::ForeignTy("serde_json.value");
                     }
@@ -1360,9 +1360,13 @@ impl Emitter {
                     if pkg == "time" && name == "now" {
                         return BindingKind::ForeignTy("time.time");
                     }
-                    return BindingKind::Foreign;
+                    return self.type_of_expr(e).map_or(BindingKind::Foreign, BindingKind::ForeignTy);
                 }
             }
+            if matches!(name.as_str(), "array" | "get") && self.type_of_expr(base) == Some("serde_json.value") {
+                return BindingKind::ForeignTy("serde_json.value");
+            }
+            if let Some(t) = self.type_of_expr(e) { return BindingKind::ForeignTy(t); }
         }
         // A user fn whose declared result type is a known handle type: the
         // binding resolves through the shape table (Batch I, corpus 13:
@@ -4090,5 +4094,12 @@ fn main() {
             "must flush `m[\"a\"] = q` exactly once, got:\n{}",
             go
         );
+    }
+
+    #[test]
+    fn multireturn_and_method_view_bindings_preserve_foreign_handle_emission() {
+        let src = "fn main() error {\ndoc, err := serde_json.parse(\"[]\")\n_ = err\nitems := doc.array(\"k\")?\nfor item in items { _ = item.string(\"id\")? }\ndoc2 := (serde_json.parse(\"[]\"))?\n_ = doc2.string(\"id\")?\nreturn nil\n}";
+        let go = emit_go(&parse_file("test.hy", src).expect("parse")).expect("emit");
+        assert!(go.contains(r#"doc.Array("k")"#) && go.contains(r#"item.String("id")"#) && go.contains(r#"doc2.String("id")"#), "{go}");
     }
 }
