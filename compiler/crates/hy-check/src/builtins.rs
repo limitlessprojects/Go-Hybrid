@@ -938,7 +938,7 @@ impl<'a> Checker<'a> {
                                 if info.is_some() { for sm in scopes.iter_mut().rev().take_while(|sm| sm.contains_key(name)) { sm.insert(name.clone(), info.clone()); } }
                             }
                             PlaceKind::Index { .. } | PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } if alias.as_ref().is_some_and(|(_, p)| self.place_writes_shared(&sa.st, t, *p)) => return alias.map(|(c, _)| c),
-                            PlaceKind::Field { .. } if alias.is_none() => if let Some((c, _)) = classify(values.get(i).or_else(|| values.first()), scopes.last().unwrap(), &sa) { for sm in scopes.iter_mut().rev().take_while(|sm| sm.contains_key(root)) { sm.insert(root.to_string(), Some((c.clone(), false))); } },
+                            PlaceKind::Field { .. } | PlaceKind::Index { .. } if alias.is_none() => if let Some((c, _)) = classify(values.get(i).or_else(|| values.first()), scopes.last().unwrap(), &sa) { for sm in scopes.iter_mut().rev().take_while(|sm| sm.contains_key(root)) { sm.insert(root.to_string(), Some((c.clone(), false))); } },
                             _ => {}
                         }
                     }
