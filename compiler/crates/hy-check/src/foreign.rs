@@ -597,6 +597,23 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "write_header",
         "write_string",
     ];
+    const OS_PROCESS: &[&str] = &[
+        "kill",
+        "release",
+        "signal",
+        "wait",
+    ];
+    const OS_PROCESS_STATE: &[&str] = &[
+        "exit_code",
+        "exited",
+        "pid",
+        "string",
+        "success",
+        "sys",
+        "sys_usage",
+        "system_time",
+        "user_time",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -631,6 +648,8 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "httptest.response_recorder"
         | "httptest.responserecorder"
         | "httptest.ResponseRecorder" => Some(HTTPTEST_RESPONSE_RECORDER),
+        "os.process" | "os.Process" => Some(OS_PROCESS),
+        "os.process_state" | "os.processstate" | "os.ProcessState" => Some(OS_PROCESS_STATE),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
