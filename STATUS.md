@@ -1,11 +1,15 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor (2026-11-05): default Actions watch selects the heavy workflow before pagination; three focused regressions pass (two failed before). The full Linux job suite passes 95/95 with no skips; earlier Windows environment limitations remain recorded in PLAN.md. Hosted CI/review pending.
+
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
+- Contributor (2026-11-06): claims-link checker now resolves angle-delimited Markdown evidence paths (including spaces) and checks `.hy` verdicts; 11 focused tests and repository guards pass. Hosted CI, review, and any bounty award remain pending. See PLAN.md.
 
 - Contributor #1165: range bounds spelled as different names of one Go integer type no longer raise a false HYB-E2009 (shared canonicaliser in `hy-check` + regression pin); workspace/corpus/differential/CI remain delivery gates.
 - Contributor #2199: a store whose target is a type name (`n string = "str"`, `q.n int = 5`) is rejected as HYB-E1002 (Row 13 BUILDABLE) — the #778 check now also covers assignment targets; declarations and plain stores unchanged; 3 new tests in `type_name_in_value_position.rs` (16/16 green).
 - Contributor #2320: `collect_callee_const_return_roots` no longer fails open — a `const` map returned through five wrappers (`m := h5()`) or through a fn value (`cb := leaf; m := cb()`) is rejected as HYB-E3004 (spawn) + HYB-E3006 (element write) instead of `OK (0 diagnostics)` with a `go run -race` data race in 10/10 runs; past the walk bound and for a callee whose body the file cannot see, the walk reports every may-share file-level `const`, gated on the result being able to share (a chain returning a plain value keeps its old verdict) (SPEC-LANGUAGE O5.6, O4.9). 11 new tests in `callee_const_return_roots_2320.rs`, 5 of them fail pre-fix; corpus 127/127 (39/2/86) and census/markers/registration guards green; no corpus verdict changed.
 - Contributor #1598 follow-up (2026-10-24): specialized smoke gate also requires rejection exit 1 and an exact diagnostic token. Eight new process regressions; four fail before, sixteen combined pass after. New-head compiler CI/review pending.
+- Contributor (2026-11-06): installer stages and rolls back runtime/CLI payloads on copy or promotion failure; offline installer suite passes 9/9. Hosted CI, review, and any bounty award remain pending. See PLAN.md.
 
 - Contributor candidate (2026-10-24): author-stage repro evidence distinguishes checker failure from rejection and requires an exact diagnostic token. Eight subprocess/Git regressions, baseline 4 failures. No compiler soundness claim; see PLAN.md. Upstream review/CI pending.
 
