@@ -84,7 +84,7 @@ def scan_managed_lines(src: str) -> list[int]:
     masked = _mask_comments_and_strings(src)
     return [
         1 + masked.count("\n", 0, m.start())
-        for m in re.finditer(r"\bmanaged\s*\(", masked)
+        for m in re.finditer(r"(?<![.\w])managed\s*\(", masked)
     ]
 
 
@@ -125,6 +125,16 @@ def audit(hyb, prog):
         category = b.get("category") if isinstance(b, dict) else None
         if not isinstance(category, str) or category not in VALID:
             print(f"GATE ERROR: {prog}: category {category!r} outside the closed set")
+            sys.exit(2)
+        reason = b.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            print(f"GATE ERROR: {prog}: missing or empty managed block reason")
+            sys.exit(2)
+        if "tickets" in b and (
+            not isinstance(b["tickets"], list)
+            or any(not isinstance(t, str) for t in b["tickets"])
+        ):
+            print(f"GATE ERROR: {prog}: malformed managed block tickets list")
             sys.exit(2)
         blocks.append(b)
     # line numbers: lexically scan the source for `managed (` tokens outside
@@ -184,6 +194,20 @@ def main():
     if not isinstance(base, dict):
         print(f"GATE ERROR: {baseline_path}: baseline blocks must be a JSON object, got {type(base).__name__}")
         sys.exit(2)
+    for k, v in base.items():
+        if not isinstance(k, str) or ":" not in k:
+            print(f"GATE ERROR: {baseline_path}: malformed baseline block key {k!r}")
+            sys.exit(2)
+        prog_part, line_part = k.rsplit(":", 1)
+        if not prog_part or not line_part.isdigit():
+            print(f"GATE ERROR: {baseline_path}: malformed baseline block key {k!r}")
+            sys.exit(2)
+        if not isinstance(v, dict) or not isinstance(v.get("reason"), str) or not v["reason"].strip():
+            print(f"GATE ERROR: {baseline_path}: malformed baseline block entry for {k!r}")
+            sys.exit(2)
+        if "category" in v and (not isinstance(v["category"], str) or v["category"] not in VALID):
+            print(f"GATE ERROR: {baseline_path}: invalid category in baseline entry for {k!r}")
+            sys.exit(2)
 
     current = {}
     for prog in progs:
