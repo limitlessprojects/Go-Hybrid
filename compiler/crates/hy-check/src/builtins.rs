@@ -248,7 +248,7 @@ impl<'a> Checker<'a> {
                 }
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                     if unshadowed(self, name) {
-                        self.check_builtin_call(name, args, *span);
+                        self.check_builtin_call(st, name, args, *span);
                     }
                 }
                 // W-016 M3: a closure that writes a captured binding and is
@@ -329,12 +329,12 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_builtin_call(&mut self, name: &str, args: &[hy_syntax::CallArg], span: Span) {
+    fn check_builtin_call(&mut self, st: &FnState, name: &str, args: &[hy_syntax::CallArg], span: Span) {
         if self.fns.contains_key(name) {
             return;
         }
         match name {
-            "make" => self.check_make_args(args, span),
+            "make" => self.check_make_args(st, args, span),
             "len" => self.check_len_cap_args("len", args, span, /*cap=*/ false),
             "cap" => self.check_len_cap_args("cap", args, span, /*cap=*/ true),
             "delete" => {
@@ -544,7 +544,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_make_args(&mut self, args: &[hy_syntax::CallArg], span: Span) {
+    fn check_make_args(&mut self, st: &FnState, args: &[hy_syntax::CallArg], span: Span) {
         if args.is_empty() {
             self.emit_builtin(
                 span,
@@ -617,7 +617,7 @@ impl<'a> Checker<'a> {
         }
         let mut evaluated_sizes = Vec::new();
         for arg in args.iter().skip(1) {
-            match self.classify_make_size(&arg.value) {
+            match self.classify_make_size(st, &arg.value) {
                 MakeSize::Ok(v) => evaluated_sizes.push(Some(v)),
                 MakeSize::NonLiteral => evaluated_sizes.push(None),
                 MakeSize::Negative => {
@@ -1308,7 +1308,7 @@ enum MakeSize {
 }
 
 impl<'a> Checker<'a> {
-fn classify_make_size(&self, e: &Expr) -> MakeSize {
+fn classify_make_size(&self, st: &FnState, e: &Expr) -> MakeSize {
     let bare = unwrap_parens(e);
     match bare {
         Expr::Lit { kind, .. } => match kind {
@@ -1338,10 +1338,7 @@ fn classify_make_size(&self, e: &Expr) -> MakeSize {
         {
             MakeSize::BadLiteral("float")
         }
-        _ if expr_mentions_bound(bare, &self.zd_defined, &self.closure_bound) => {
-            MakeSize::NonLiteral
-        }
-        _ => match self.const_int_fold_expr(bare, None) {
+        _ => match self.fold_make_const_int(bare, Some(st), 0) {
             ConstFold::Val(n) if n < 0 => MakeSize::Negative,
             ConstFold::Val(n) if n > i64::MAX as i128 => MakeSize::Overflow,
             ConstFold::Val(n) => MakeSize::Ok(n),
@@ -1350,23 +1347,230 @@ fn classify_make_size(&self, e: &Expr) -> MakeSize {
         },
     }
 }
+
+fn is_unshadowed_in_make(&self, name: &str, st: Option<&FnState>) -> bool {
+    !self.fns.contains_key(name)
+        && !self.zd_defined.contains(name)
+        && !self.closure_bound.iter().any(|c| c.contains(name))
+        && st.is_none_or(|s| self.lookup_binding(s, name).is_none())
 }
 
-fn expr_mentions_bound(
-    e: &Expr,
-    fn_bound: &std::collections::HashSet<String>,
-    closure_sets: &[std::collections::HashSet<String>],
-) -> bool {
-    match unwrap_parens(e) {
-        Expr::Ident { name, .. } => {
-            fn_bound.contains(name) || closure_sets.iter().any(|s| s.contains(name))
+fn fold_make_const_int(&self, e: &Expr, st: Option<&FnState>, depth: u32) -> ConstFold {
+    if depth >= 16 {
+        return ConstFold::NotConst;
+    }
+    match unwrap_parens_and_move(e) {
+        Expr::Ident { name, span: id_span } => {
+            if self.zd_defined.contains(name.as_str())
+                || self.closure_bound.iter().any(|c| c.contains(name.as_str()))
+            {
+                return ConstFold::NotConst;
+            }
+            if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                let Some(init_expr) = sight.constant_initializer() else {
+                    return ConstFold::NotConst;
+                };
+                if sight.ty.as_ref().is_some_and(|ty| self.is_non_int_type(ty)) {
+                    return ConstFold::NotConst;
+                }
+                if (sight.pos.line, sight.pos.col) == (id_span.start.line, id_span.start.col) {
+                    return ConstFold::NotConst;
+                }
+                return self.fold_make_const_int(init_expr, st, depth + 1);
+            }
+            if st.is_some_and(|s| s.env_lookup(name).is_some()) {
+                return ConstFold::NotConst;
+            }
+            if let Some(v) = self.const_values.get(name.as_str()) {
+                return self.fold_make_const_int(v, None, depth + 1);
+            }
+            ConstFold::NotConst
         }
-        Expr::Unary { operand, .. } => expr_mentions_bound(operand, fn_bound, closure_sets),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => match self.fold_make_const_int(operand, st, depth + 1) {
+            ConstFold::Val(v) => v.checked_neg().map(ConstFold::Val).unwrap_or(ConstFold::TooBig),
+            other => other,
+        },
+        Expr::Binary { op, lhs, rhs, .. } => {
+            let l = self.fold_make_const_int(lhs, st, depth + 1);
+            let r = self.fold_make_const_int(rhs, st, depth + 1);
+            crate::const_overflow::fold_bin(*op, l, r)
+        }
+        Expr::Call { callee, args, .. } if args.iter().all(|a| !a.spread) => {
+            let Expr::Ident { name, .. } = unwrap_parens_and_move(callee) else {
+                return ConstFold::NotConst;
+            };
+            if !self.is_unshadowed_in_make(name, st) {
+                return ConstFold::NotConst;
+            }
+            if args.len() == 1 {
+                let arg = &args[0].value;
+                if name == "len" {
+                    if let Some(n) = self.fold_make_const_str_len(arg, st, depth + 1) {
+                        return ConstFold::Val(n);
+                    }
+                    if let Some(n) = self.fold_make_const_arr_len(arg, st) {
+                        return ConstFold::Val(n);
+                    }
+                    return ConstFold::NotConst;
+                }
+                if name == "cap" {
+                    if let Some(n) = self.fold_make_const_arr_len(arg, st) {
+                        return ConstFold::Val(n);
+                    }
+                    return ConstFold::NotConst;
+                }
+                if let Some((lo, hi)) = crate::const_overflow::fixed_width_int_range(name) {
+                    return match self.fold_make_const_int(arg, st, depth + 1) {
+                        ConstFold::Val(v) => ConstFold::Val(wrap_make_int(v, lo, hi)),
+                        other => other,
+                    };
+                }
+            }
+            if (name == "min" || name == "max") && !args.is_empty() {
+                let mut acc: Option<i128> = None;
+                for a in args {
+                    match self.fold_make_const_int(&a.value, st, depth + 1) {
+                        ConstFold::Val(v) => {
+                            acc = Some(match acc {
+                                None => v,
+                                Some(cur) if name == "min" => cur.min(v),
+                                Some(cur) => cur.max(v),
+                            });
+                        }
+                        other => return other,
+                    }
+                }
+                if let Some(v) = acc {
+                    return ConstFold::Val(v);
+                }
+            }
+            ConstFold::NotConst
+        }
+        other => self.const_int_fold_at(other, st, depth + 1),
+    }
+}
+
+fn fold_make_const_str_len(&self, e: &Expr, st: Option<&FnState>, depth: u32) -> Option<i128> {
+    if depth >= 16 {
+        return None;
+    }
+    match unwrap_parens_and_move(e) {
+        Expr::Lit {
+            kind: LitKind::Str(s) | LitKind::RawStr(s),
+            ..
+        } => Some(s.len() as i128),
+        Expr::Binary {
+            op: hy_syntax::BinOp::Add,
+            lhs,
+            rhs,
+            ..
+        } => {
+            let l = self.fold_make_const_str_len(lhs, st, depth + 1)?;
+            let r = self.fold_make_const_str_len(rhs, st, depth + 1)?;
+            l.checked_add(r)
+        }
+        Expr::Ident { name, span: id_span } => {
+            if self.zd_defined.contains(name.as_str())
+                || self.closure_bound.iter().any(|c| c.contains(name.as_str()))
+            {
+                return None;
+            }
+            if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                let init_expr = sight.constant_initializer()?;
+                if (sight.pos.line, sight.pos.col) == (id_span.start.line, id_span.start.col) {
+                    return None;
+                }
+                return self.fold_make_const_str_len(init_expr, st, depth + 1);
+            }
+            if st.is_some_and(|s| s.env_lookup(name).is_some()) {
+                return None;
+            }
+            let v = self.const_values.get(name.as_str())?;
+            self.fold_make_const_str_len(v, None, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+fn fold_make_const_arr_len(&self, e: &Expr, _st: Option<&FnState>) -> Option<i128> {
+    let bare = unwrap_parens_and_move(e);
+    if !Self::is_go_const_len_cap_operand(bare, &self.fns) {
+        return None;
+    }
+    if let Expr::Ident { name, .. } = bare {
+        if self.closure_bound.iter().any(|c| c.contains(name.as_str())) {
+            return None;
+        }
+    }
+    self.const_array_len_at(bare, bare.span().start, 0)
+}
+
+fn is_go_const_len_cap_operand(e: &Expr, fns: &HashMap<String, &'a hy_syntax::FnDecl>) -> bool {
+    let bare = unwrap_parens_and_move(e);
+    if let Some(op) = crate::model::as_addr_of(bare) {
+        return Self::is_go_const_len_cap_operand(op, fns);
+    }
+    match bare {
+        Expr::Ident { .. } | Expr::Lit { .. } => true,
+        Expr::Unary { operand, .. } => Self::is_go_const_len_cap_operand(operand, fns),
         Expr::Binary { lhs, rhs, .. } => {
-            expr_mentions_bound(lhs, fn_bound, closure_sets)
-                || expr_mentions_bound(rhs, fn_bound, closure_sets)
+            Self::is_go_const_len_cap_operand(lhs, fns)
+                && Self::is_go_const_len_cap_operand(rhs, fns)
+        }
+        Expr::Field { base, .. } => Self::is_go_const_len_cap_operand(base, fns),
+        Expr::Index { base, index, .. } => {
+            Self::is_go_const_len_cap_operand(base, fns)
+                && Self::is_go_const_len_cap_operand(index, fns)
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            Self::is_go_const_len_cap_operand(base, fns)
+                && lo.as_ref().is_none_or(|x| Self::is_go_const_len_cap_operand(x, fns))
+                && hi.as_ref().is_none_or(|x| Self::is_go_const_len_cap_operand(x, fns))
+        }
+        Expr::StructLit { fields, .. } => fields
+            .iter()
+            .all(|f| Self::is_go_const_len_cap_operand(&f.value, fns)),
+        Expr::SliceLit { items, .. } => items
+            .iter()
+            .all(|it| Self::is_go_const_len_cap_operand(it, fns)),
+        Expr::MapLit { entries, .. } => entries.iter().all(|(k, v)| {
+            Self::is_go_const_len_cap_operand(k, fns)
+                && Self::is_go_const_len_cap_operand(v, fns)
+        }),
+        Expr::Call { callee, args, .. } => {
+            let Expr::Ident { name, .. } = unwrap_parens_and_move(callee) else {
+                return false;
+            };
+            if fns.contains_key(name.as_str()) {
+                return false;
+            }
+            (crate::const_overflow::fixed_width_int_range(name).is_some()
+                || matches!(name.as_str(), "len" | "cap" | "min" | "max"))
+                && args
+                    .iter()
+                    .all(|a| !a.spread && Self::is_go_const_len_cap_operand(&a.value, fns))
         }
         _ => false,
+    }
+}
+}
+
+fn wrap_make_int(v: i128, lo: i128, hi: i128) -> i128 {
+    let span = hi.wrapping_sub(lo);
+    let bits = (span as u128).wrapping_add(1).trailing_zeros();
+    if bits == 0 || bits > 64 {
+        return v;
+    }
+    let len = 1i128 << bits;
+    let masked = v & (len - 1);
+    if lo < 0 && (masked >> (bits - 1)) & 1 == 1 {
+        masked - len
+    } else {
+        masked
     }
 }
 
