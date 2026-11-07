@@ -514,6 +514,7 @@ fn copy_element_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
 
 /// Non-nilable types in Go and Hybrid cannot be compared to untyped nil (SPEC §3.1 N1).
 /// Nilable types: pointer, interface, slice, map, channel, function.
+/// `option[T]` lowers to the generic prelude struct `hyOption[T]`, which is non-nilable in Go.
 fn is_non_nilable(k: &OpKind) -> bool {
     matches!(
         k,
@@ -523,6 +524,7 @@ fn is_non_nilable(k: &OpKind) -> bool {
             | OpKind::Str
             | OpKind::Struct(_)
             | OpKind::Array(_)
+            | OpKind::Option(_)
     )
 }
 
@@ -548,6 +550,13 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // `cannot convert op (variable of struct type option[int])`).
         (Option(_), Option(_)) => false,
         (_, Option(_)) => true,
+        (Option(_), other) if !matches!(other, Unknown | Option(_)) => true,
+
+        // A declared curated foreign named type (os.file, net.conn, sync.mutex, ...)
+        // lowers to a named Go type. Go forbids converting scalars or containers to/from
+        // foreign structs, and only permits converting to `any` (handled above).
+        (Foreign(_), other) if !matches!(other, Unknown | Foreign(_)) => true,
+        (other, Foreign(_)) if !matches!(other, Unknown | Interface | Foreign(_)) => true,
 
         // Struct targets: Go forbids converting non-structs to structs.
         (Struct(_), other) if !matches!(other, Unknown | Struct(_)) => true,
@@ -1994,10 +2003,19 @@ impl<'a> Collector<'a> {
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
-        let outer_tp = std::mem::replace(
-            &mut self.fn_type_params,
-            f.type_params.iter().map(|p| p.name.clone()).collect(),
-        );
+        let mut tp: HashSet<String> = f.type_params.iter().map(|p| p.name.clone()).collect();
+        if let Some(r) = &f.receiver {
+            if let TypeExpr::Named { name, .. } = &r.ty {
+                if let Some(open) = name.find('[') {
+                    if name.ends_with(']') {
+                        for arg in split_top_level_type_args(&name[open + 1..name.len() - 1]) {
+                            tp.insert(arg.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let outer_tp = std::mem::replace(&mut self.fn_type_params, tp);
         let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
         let outer_select = std::mem::replace(&mut self.select_depth, 0);
         self.block_stmts(body);
@@ -2850,11 +2868,23 @@ impl<'a> Collector<'a> {
                 self.check_type_name_in_value_position(name, *span);
             }
             Expr::Lit { .. } => {}
-            Expr::Interp { parts, .. } => {
+            Expr::Interp { parts, span, .. } => {
                 for p in parts {
                     if let InterpPart::Expr(x) = p {
                         self.expr(x);
                     }
+                }
+                // #3568 — an interpolation with an expression part lowers to
+                // `fmt.Sprintf(...)` (with implicit `import "fmt"`). If `fmt` is bound
+                // in an enclosing lexical/generic scope or declared at package scope,
+                // Go captures or collides with `fmt` (`fmt.Sprintf undefined` or
+                // `fmt redeclared in this block`).
+                if parts.iter().any(|p| matches!(p, InterpPart::Expr(_))) && self.is_fmt_shadowed() {
+                    self.emit_e1002(
+                        *span,
+                        "string interpolation requires package `fmt`, which is shadowed by an in-scope `fmt` declaration — Go refuses `fmt.Sprintf` (HYB-E1002)".to_string(),
+                        "rename the `fmt` binding or declaration so emitter-generated `fmt.Sprintf(...)` resolves to Go's `fmt` package",
+                    );
                 }
             }
             Expr::Binary {
@@ -7742,6 +7772,73 @@ impl<'a> Collector<'a> {
                                 "`httptest.get` and `httptest.post` lower to `http.NewRequest`; rename the shadowing `http` declaration so `net/http` is accessible",
                             );
                         }
+                    }
+                    if pkg == "time"
+                        && self.lookup_kind(pkg).is_none()
+                        && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
+                    {
+                        if args.len() != 1 {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`time.{}` takes exactly 1 argument `(n)`, got {} (HYB-E1002)",
+                                    name,
+                                    args.len()
+                                ),
+                                &format!("write `time.{}(10)` (SPEC duration constructor)", name),
+                            );
+                        } else {
+                            let bare = unwrap_parens(&args[0].value);
+                            if matches!(
+                                bare,
+                                Expr::Lit {
+                                    kind: LitKind::Str(_)
+                                        | LitKind::RawStr(_)
+                                        | LitKind::Bool(_)
+                                        | LitKind::Char(_)
+                                        | LitKind::Nil,
+                                    ..
+                                }
+                            ) {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`time.{}` requires a numeric argument, found non-numeric literal (HYB-E1002)",
+                                        name
+                                    ),
+                                    &format!("pass an integer or numeric expression to `time.{}`", name),
+                                );
+                            }
+                        }
+                    }
+                    if pkg == "os"
+                        && self.lookup_kind(pkg).is_none()
+                        && matches!(name.as_str(), "args" | "stdout" | "stderr" | "stdin")
+                        && !args.is_empty()
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`os.{}` takes no arguments, got {} (HYB-E1002)",
+                                name,
+                                args.len()
+                            ),
+                            &format!("write `os.{}` (package variable, not a function)", name),
+                        );
+                    }
+                    if pkg == "hex"
+                        && self.lookup_kind(pkg).is_none()
+                        && name == "encode"
+                        && args.len() != 1
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.encode` takes exactly 1 slice argument `(src)`, got {} (HYB-E1002)",
+                                args.len()
+                            ),
+                            "write `hex.encode(data)` (SPEC M5 hex encoding)",
+                        );
                     }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);

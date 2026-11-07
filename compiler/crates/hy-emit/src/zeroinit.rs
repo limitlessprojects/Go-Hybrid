@@ -110,6 +110,42 @@ impl Emitter {
         out
     }
 
+    pub(crate) fn n5_substitute_type_params(
+        ty: &TypeExpr,
+        params: &[TypeParam],
+        args: &[TypeExpr],
+    ) -> TypeExpr {
+        match ty {
+            TypeExpr::Named { name, .. } => params.iter().zip(args.iter()).find_map(|(p, a)| (p.name == *name).then(|| a.clone())).unwrap_or_else(|| ty.clone()),
+            TypeExpr::Pointer { to, span } => TypeExpr::Pointer { to: Box::new(Self::n5_substitute_type_params(to, params, args)), span: *span },
+            TypeExpr::Slice { elem, span } => TypeExpr::Slice { elem: Box::new(Self::n5_substitute_type_params(elem, params, args)), span: *span },
+            TypeExpr::Array { len, elem, span } => TypeExpr::Array { len: len.clone(), elem: Box::new(Self::n5_substitute_type_params(elem, params, args)), span: *span },
+            TypeExpr::Map { key, value, span } => TypeExpr::Map { key: Box::new(Self::n5_substitute_type_params(key, params, args)), value: Box::new(Self::n5_substitute_type_params(value, params, args)), span: *span },
+            TypeExpr::Chan { dir, elem, span } => TypeExpr::Chan { dir: *dir, elem: Box::new(Self::n5_substitute_type_params(elem, params, args)), span: *span },
+            TypeExpr::Option { elem, span } => TypeExpr::Option { elem: Box::new(Self::n5_substitute_type_params(elem, params, args)), span: *span },
+            TypeExpr::Fn { .. } => ty.clone(),
+        }
+    }
+
+    pub(crate) fn struct_lit_field_decls(&self, name: &str) -> Option<Vec<FieldDecl>> {
+        if let Some(fields) = self.n5_structs.get(name) {
+            return Some(fields.clone());
+        }
+        let i = name.find('[')?;
+        let head = &name[..i];
+        if self.local_vars.contains(head) {
+            return None;
+        }
+        let (params, fields) = self.n5_generic_structs.get(head)?;
+        let args_str = name.strip_prefix(head)?.strip_prefix('[')?.strip_suffix(']')?;
+        let src = format!("fn _f({}) {{}}\n", args_str.split(',').enumerate().map(|(idx, a)| format!("_p{idx} {}", a.trim())).collect::<Vec<_>>().join(", "));
+        let Decl::Fn(func) = parse_file("n5.hy", &src).ok()?.decls.into_iter().next()? else { return None };
+        (func.params.len() == params.len()).then(|| {
+            let arg_tys: Vec<TypeExpr> = func.params.into_iter().map(|p| p.ty).collect();
+            fields.iter().map(|fd| FieldDecl { name: fd.name.clone(), ty: Self::n5_substitute_type_params(&fd.ty, params, &arg_tys), span: fd.span }).collect()
+        })
+    }
+
     /// `new(T)` where T's zero value needs N5 allocation → `&T{…}`. The
     /// parser encodes the type argument as a bare identifier (`new(bag)`)
     /// or as an empty type-as-value literal (`new(map[string]int)`).

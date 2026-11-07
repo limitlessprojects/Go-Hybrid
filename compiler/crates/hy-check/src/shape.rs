@@ -92,6 +92,9 @@ impl<'a> Checker<'a> {
         if let Some(target) = self.type_aliases.get(base) {
             return self.shape_of_type_depth(target, depth + 1);
         }
+        if self.enums.contains_key(base) {
+            return TypeShape::Primitive;
+        }
         // #884: the T9 prelude's `set[T]` lowers to a struct wrapping a Go
         // map (`type set[t comparable] struct { m map[t]struct{} }`), so a
         // shallow copy shares that map exactly like any other map-carrying
@@ -190,14 +193,31 @@ impl<'a> Checker<'a> {
                 self.shape_carries_handle_at(k, depth + 1)
                     || self.shape_carries_handle_at(v, depth + 1)
             }
-            TypeShape::Struct(Some(name)) => self
-                .struct_fields_for_sname(name)
-                .map(|fields| {
-                    fields.iter().any(|(_, ty)| {
-                        self.shape_carries_handle_at(&self.shape_of_type(ty), depth + 1)
+            TypeShape::Struct(Some(name))
+                if Self::base_named_type_str(name) == "set"
+                    && !self.structs.contains_key("set") =>
+            {
+                Self::parse_generic_type_args(name)
+                    .and_then(|(_, mut args)| args.pop())
+                    .map(|elem_ty| {
+                        let elem_shape = self.shape_of_type(&elem_ty);
+                        matches!(elem_shape, TypeShape::Unknown)
+                            || self.shape_carries_handle_at(&elem_shape, depth + 1)
                     })
-                })
-                .unwrap_or(false),
+                    .unwrap_or(true)
+            }
+            TypeShape::Struct(Some(name)) => {
+                if self.struct_has_unresolved_type_param(name) {
+                    return true;
+                }
+                self.struct_fields_for_sname(name)
+                    .map(|fields| {
+                        fields.iter().any(|(_, ty)| {
+                            self.shape_carries_handle_at(&self.shape_of_type(ty), depth + 1)
+                        })
+                    })
+                    .unwrap_or(false)
+            }
             _ => false,
         }
     }
@@ -266,10 +286,23 @@ impl<'a> Checker<'a> {
             Expr::Index { base, .. } => match self.shape_of_expr(st, base) {
                 TypeShape::Map(_, v) => *v,
                 TypeShape::Slice(e) | TypeShape::Array(e) => *e,
+                // Go indexes through a pointer to array (`p[i]` on `*[N]T`),
+                // and indexing a string yields a byte.
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Array(e) => *e,
+                    _ => TypeShape::Unknown,
+                },
+                TypeShape::Str => TypeShape::Primitive,
                 _ => TypeShape::Unknown,
             },
             Expr::Slice { base, .. } => match self.shape_of_expr(st, base) {
                 TypeShape::Slice(e) | TypeShape::Array(e) => TypeShape::Slice(e),
+                // Slicing through a pointer to array (`p[lo:hi]` on `*[N]T`)
+                // yields a slice of the element type.
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Array(e) => TypeShape::Slice(e),
+                    _ => TypeShape::Unknown,
+                },
                 TypeShape::Str => TypeShape::Str,
                 _ => TypeShape::Unknown,
             },
@@ -337,6 +370,9 @@ impl<'a> Checker<'a> {
                 .map(|r| self.shape_of_type(&r.ty))
                 .unwrap_or(TypeShape::Unknown),
             Expr::Ident { name, .. } => {
+                if st.type_params.contains(name.as_str()) {
+                    return TypeShape::Unknown;
+                }
                 // Local bindings shadow top-level functions and builtins.
                 if let Some(b) = self.lookup_binding(st, name) {
                     if let Some(TypeExpr::Fn { results, .. }) = &b.ty {
@@ -425,13 +461,23 @@ impl<'a> Checker<'a> {
             Expr::Field { base, name, .. } => {
                 // package call (`serde_json.parse`) vs method call (`doc.array`)
                 if let Expr::Ident { name: b, .. } = &**base {
-                    if self.lookup_binding(st, b).is_none() && self.known_package(b) {
+                    if self.lookup_binding(st, b).is_none()
+                        && !st.type_params.contains(b.as_str())
+                        && !self.structs.contains_key(b.as_str())
+                        && !self.enums.contains_key(b.as_str())
+                        && !self.type_aliases.contains_key(b.as_str())
+                        && !self.consts.contains_key(b.as_str())
+                        && self.known_package(b)
+                    {
                         return foreign::package_result(b, name);
                     }
                 }
                 let head = Self::base_named_type_str(name);
                 if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
-                    if self.lookup_binding(st, root).is_none() {
+                    if self.lookup_binding(st, root).is_none()
+                        && !st.type_params.contains(root.as_str())
+                        && !self.consts.contains_key(root.as_str())
+                    {
                         let full = format!("{}.{}", root, head);
                         if let Some(f) = self.fns.get(full.as_str()) {
                             let subst = self.fn_call_shape_subst(st, f, name, None, args);
@@ -639,6 +685,47 @@ impl<'a> Checker<'a> {
                 vec![elem_shape]
             }
             _ => vec![TypeShape::Unknown; n_vars.max(1)],
+        }
+    }
+
+    pub(crate) fn iterate_var_tys(
+        &self,
+        st: &FnState,
+        expr: &Expr,
+        n_vars: usize,
+    ) -> Vec<Option<TypeExpr>> {
+        let iter_ty = self.ty_of_expr(st, expr).map(|t| match self.resolve_type_alias(&t) {
+            TypeExpr::Pointer { to, .. }
+                if matches!(self.resolve_type_alias(&to), TypeExpr::Array { .. }) =>
+            {
+                self.resolve_type_alias(&to)
+            }
+            other => other,
+        });
+        let int_ty = || {
+            Some(TypeExpr::Named {
+                name: "int".to_string(),
+                span: expr.span(),
+            })
+        };
+        match &iter_ty {
+            Some(TypeExpr::Slice { elem, .. }) | Some(TypeExpr::Array { elem, .. }) => {
+                if n_vars >= 2 {
+                    vec![int_ty(), Some((**elem).clone())]
+                } else {
+                    vec![Some((**elem).clone())]
+                }
+            }
+            Some(TypeExpr::Map { key, value, .. }) => {
+                if n_vars >= 2 {
+                    vec![Some((**key).clone()), Some((**value).clone())]
+                } else {
+                    vec![Some((**key).clone())]
+                }
+            }
+            Some(TypeExpr::Chan { elem, .. }) => vec![Some((**elem).clone())],
+            Some(ty) if self.set_elem_type(ty).is_some() => vec![self.set_elem_type(ty)],
+            _ => vec![None; n_vars.max(1)],
         }
     }
 

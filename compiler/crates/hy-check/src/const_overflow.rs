@@ -150,7 +150,12 @@ impl<'a> Checker<'a> {
         // Issue #201-B: a float constant is never assignable to an integer
         // type in Go — `var x int = 2.5` fails with `(truncated)` (and a
         // magnitude that cannot fit fails with `(overflows)`).
-        if let Some(f) = const_float_value(value) {
+        if let Some(f) = const_float_value(value).or_else(|| {
+            (!self.expr_has_local_or_binder(value) && is_float_const_expr(value, &self.const_values, 0, st))
+                .then(|| self.const_float_fold(value, st))
+                .flatten()
+                .filter(|f| f.fract() != 0.0 || !(*f >= lo as f64 && *f <= hi as f64))
+        }) {
             let span = value.span();
             let msg = format!(
                 "float constant `{}` assigned to integer type `{}` of `{}` (HYB-E6002)",
@@ -311,7 +316,13 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        if const_float_value(value).is_some() {
+        if const_float_value(value).is_some()
+            || (!self.expr_has_local_or_binder(value)
+                && is_float_const_expr(value, &self.const_values, 0, st)
+                && self
+                    .const_float_fold(value, st)
+                    .is_some_and(|f| f.fract() != 0.0 || !(f >= lo as f64 && f <= hi as f64)))
+        {
             let span = value.span();
             let msg = format!(
                 "float constant `{}` assigned to integer type `{}` of `{}` (HYB-E6002)",
@@ -756,6 +767,7 @@ impl<'a> Checker<'a> {
             // not a conversion shape.
             return;
         }
+        let callee = unwrap_parens(callee);
         let arg = unwrap_parens(&args[0].value);
         // `[]byte("abc")` — a slice type-as-value called with one argument
         // (the standing type-as-value encoding; see hy-emit's conversion
@@ -768,7 +780,7 @@ impl<'a> Checker<'a> {
         {
             if items.is_empty() {
                 if let Some((_, _, arr_ty)) = callee.as_array_lit() {
-                    if let Some(c) = conv_const(arg) {
+                    if let Some(c) = self.conv_const_expr(arg) {
                         self.emit_conv_kind_error(&arr_ty.render(), &c, arg, span);
                     }
                 } else {
@@ -780,21 +792,43 @@ impl<'a> Checker<'a> {
         let Expr::Ident { name, span: id_span } = callee else {
             return;
         };
-        if matches!(self.resolve_type_alias(&TypeExpr::Named { name: name.clone(), span: *id_span }), TypeExpr::Named { name: ref rn, .. } if matches!(rn.as_str(), "any" | "interface{}"))
-            && !self.is_shadowed_ident_at(name, id_span.start)
-        {
-            let desc = format!("conversion to `{}`", name);
-            self.check_default_int_overflow(&desc, arg, None);
-            self.check_default_float_overflow(&desc, arg, None);
+        if self.is_shadowed_ident_at(name, id_span.start) {
             return;
         }
-        if !is_conversion_target(name) {
+        let resolved_ty = self.resolve_type_alias(&TypeExpr::Named {
+            name: name.clone(),
+            span: *id_span,
+        });
+        match &resolved_ty {
+            TypeExpr::Slice { elem, .. } => {
+                self.check_slice_conversion(elem, arg, span);
+                return;
+            }
+            TypeExpr::Array { .. } => {
+                if let Some(c) = self.conv_const_expr(arg) {
+                    self.emit_conv_kind_error(name, &c, arg, span);
+                }
+                return;
+            }
+            TypeExpr::Named { name: rn, .. } if matches!(rn.as_str(), "any" | "interface{}") => {
+                let desc = format!("conversion to `{}`", name);
+                self.check_default_int_overflow(&desc, arg, None);
+                self.check_default_float_overflow(&desc, arg, None);
+                return;
+            }
+            _ => {}
+        }
+        let target_name = match &resolved_ty {
+            TypeExpr::Named { name: rn, .. } => rn.as_str(),
+            _ => name.as_str(),
+        };
+        if !is_conversion_target(target_name) {
             return;
         }
-        let Some(c) = conv_const(arg) else {
+        let Some(c) = self.conv_const_expr(arg) else {
             return; // non-constant operand: run-time conversion (SPEC X4)
         };
-        self.check_conv_against_target(name, &c, arg, span);
+        self.check_conv_against_target_alias(name, target_name, &c, arg, span);
     }
 
     fn unwrap_some_call_arg<'b>(&self, expr: &'b Expr, st: Option<&FnState>) -> Option<&'b Expr> {
@@ -928,10 +962,11 @@ impl<'a> Checker<'a> {
     }
 
     fn check_slice_conversion(&mut self, elem: &TypeExpr, arg: &Expr, span: Span) {
-        let TypeExpr::Named { name: slice_elem, .. } = elem else {
+        let resolved_elem = self.resolve_type_alias(elem);
+        let TypeExpr::Named { name: slice_elem, .. } = &resolved_elem else {
             return; // []T with a non-named element + a run-time operand
         };
-        match conv_const(arg) {
+        match self.conv_const_expr(arg) {
             Some(ConvConst::Str) => {
                 // Go allows string -> []byte / []rune (and their aliases)
                 // only; every other element type is a compile error.
@@ -975,6 +1010,55 @@ impl<'a> Checker<'a> {
             }
             None => {} // run-time operand: element-type errors are Go's
         }
+    }
+
+    fn conv_const_expr(&self, e: &Expr) -> Option<ConvConst> {
+        if let Some(c) = conv_const(e) {
+            return Some(c);
+        }
+        if self.expr_has_local_or_binder(e) {
+            return None;
+        }
+        if is_float_const_expr(e, &self.const_values, 0, None) {
+            return self.const_float_fold(e, None).map(ConvConst::Float);
+        }
+        match self.const_int_fold_expr(e, None) {
+            ConstFold::Val(v) => Some(ConvConst::Int(v)),
+            ConstFold::TooBig => {
+                let f = self.const_float_fold(e, None).unwrap_or(f64::INFINITY);
+                Some(ConvConst::Huge { f, lt_512: false })
+            }
+            ConstFold::NotConst => None,
+        }
+    }
+
+    fn check_conv_against_target_alias(
+        &mut self,
+        spelled_target: &str,
+        resolved_target: &str,
+        c: &ConvConst,
+        arg: &Expr,
+        span: Span,
+    ) {
+        if let (Some((lo, hi)), ConvConst::Int(v)) = (fixed_width_int_range(resolved_target), c) {
+            if *v < lo || *v > hi {
+                let emitted_folds = fixed_width_int_range(spelled_target).is_some()
+                    && !is_64bit_int_target(spelled_target)
+                    && conv_const(arg).is_some();
+                if is_64bit_int_target(resolved_target) || !emitted_folds {
+                    self.emit_const_conversion_error(
+                        span,
+                        format!("constant `{}` overflows `{}` in a conversion (HYB-E6006)", arg.render(), spelled_target),
+                        vec![
+                            format!("why: Go rejects `{}({})` at compile time (`constant ... overflows {}`), so an accepted Hybrid program would emit unbuildable Go (issue #228)", spelled_target, arg.render(), spelled_target),
+                            format!("fix: use a constant in [{}, {}], or widen the target type", lo, hi),
+                        ],
+                    );
+                    return;
+                }
+            }
+        }
+        self.check_conv_against_target(resolved_target, c, arg, span);
     }
 
     fn check_conv_against_target(&mut self, target: &str, c: &ConvConst, arg: &Expr, span: Span) {
