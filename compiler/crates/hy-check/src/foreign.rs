@@ -510,6 +510,28 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const IO_LIMITED_READER: &[&str] = &["read"];
     /// `io.OffsetWriter`.
     const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
+    /// `io.StringWriter` — standard library string writer interface.
+    const IO_STRING_WRITER: &[&str] = &["write_string"];
+    /// `io.ByteReader` — standard library single-byte reader interface.
+    const IO_BYTE_READER: &[&str] = &["read_byte"];
+    /// `io.ByteWriter` — standard library single-byte writer interface.
+    const IO_BYTE_WRITER: &[&str] = &["write_byte"];
+    /// `io.ByteScanner` — standard library byte scanner interface.
+    const IO_BYTE_SCANNER: &[&str] = &["read_byte", "unread_byte"];
+    /// `io.RuneReader` — standard library rune reader interface.
+    const IO_RUNE_READER: &[&str] = &["read_rune"];
+    /// `io.RuneScanner` — standard library rune scanner interface.
+    const IO_RUNE_SCANNER: &[&str] = &["read_rune", "unread_rune"];
+    /// `io.ReaderAt` — standard library offset reader interface.
+    const IO_READER_AT: &[&str] = &["read_at"];
+    /// `io.WriterAt` — standard library offset writer interface.
+    const IO_WRITER_AT: &[&str] = &["write_at"];
+    /// `io.ReaderFrom` — standard library stream sink reader interface.
+    const IO_READER_FROM: &[&str] = &["read_from"];
+    /// `io.WriterTo` — standard library stream source writer interface.
+    const IO_WRITER_TO: &[&str] = &["write_to"];
+    /// `http.Handler` — standard library HTTP request handler interface.
+    const HTTP_HANDLER: &[&str] = &["serve_http"];
     const HTTP_CLIENT: &[&str] = &[
         "close_idle_connections",
         "do",
@@ -672,6 +694,17 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
         "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
         "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
+        "io.string_writer" | "io.stringwriter" | "io.StringWriter" => Some(IO_STRING_WRITER),
+        "io.byte_reader" | "io.bytereader" | "io.ByteReader" => Some(IO_BYTE_READER),
+        "io.byte_writer" | "io.bytewriter" | "io.ByteWriter" => Some(IO_BYTE_WRITER),
+        "io.byte_scanner" | "io.bytescanner" | "io.ByteScanner" => Some(IO_BYTE_SCANNER),
+        "io.rune_reader" | "io.runereader" | "io.RuneReader" => Some(IO_RUNE_READER),
+        "io.rune_scanner" | "io.runescanner" | "io.RuneScanner" => Some(IO_RUNE_SCANNER),
+        "io.reader_at" | "io.readerat" | "io.ReaderAt" => Some(IO_READER_AT),
+        "io.writer_at" | "io.writerat" | "io.WriterAt" => Some(IO_WRITER_AT),
+        "io.reader_from" | "io.readerfrom" | "io.ReaderFrom" => Some(IO_READER_FROM),
+        "io.writer_to" | "io.writerto" | "io.WriterTo" => Some(IO_WRITER_TO),
+        "http.handler" | "http.Handler" => Some(HTTP_HANDLER),
         "http.client" | "http.Client" => Some(HTTP_CLIENT),
         "http.request" | "http.Request" => Some(HTTP_REQUEST),
         "http.response" | "http.Response" => Some(HTTP_RESPONSE),
