@@ -1739,3 +1739,95 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
     }
 }
 
+/// Does curated package member `pkg.member` name a Go value rather than a
+/// callable declaration?
+///
+/// The curated member allowlist intentionally contains functions, types,
+/// constants, and package variables. Call checking must distinguish the
+/// value members: emitting `time.RFC3339()` or `io.EOF()` is invalid Go
+/// even though the selector itself is part of the supported surface.
+pub(crate) fn is_curated_package_value(pkg: &str, member: &str) -> bool {
+    let norm = normalize_go_ident_to_snake(member);
+    let m = norm.as_str();
+    match pkg {
+        "bufio" => m == "max_scan_token_size" || m.starts_with("err_"),
+        "errors" => m == "err_unsupported",
+        "http" => {
+            m.starts_with("status_")
+                || m.starts_with("method_")
+                || m.starts_with("err_")
+                || matches!(
+                    m,
+                    "default_client"
+                        | "default_serve_mux"
+                        | "default_transport"
+                        | "no_body"
+                        | "time_format"
+                        | "trailer_prefix"
+                )
+        }
+        "httptest" => m == "default_remote_addr",
+        "io" => {
+            m == "eof"
+                || m == "discard"
+                || m.starts_with("err_")
+                || matches!(m, "seek_start" | "seek_current" | "seek_end")
+        }
+        "net" => {
+            m.starts_with("err_")
+                || matches!(m, "ipv4len" | "ipv6len" | "default_resolver")
+        }
+        "strconv" => matches!(m, "int_size" | "err_range" | "err_syntax"),
+        "time" => matches!(
+            m,
+            "nanosecond"
+                | "microsecond"
+                | "millisecond"
+                | "second"
+                | "minute"
+                | "hour"
+                | "layout"
+                | "ansic"
+                | "unix_date"
+                | "ruby_date"
+                | "rfc822"
+                | "rfc822z"
+                | "rfc850"
+                | "rfc1123"
+                | "rfc1123z"
+                | "rfc3339"
+                | "rfc3339_nano"
+                | "kitchen"
+                | "stamp"
+                | "stamp_milli"
+                | "stamp_micro"
+                | "stamp_nano"
+                | "date_time"
+                | "date_only"
+                | "time_only"
+                | "january"
+                | "february"
+                | "march"
+                | "april"
+                | "may"
+                | "june"
+                | "july"
+                | "august"
+                | "september"
+                | "october"
+                | "november"
+                | "december"
+                | "sunday"
+                | "monday"
+                | "tuesday"
+                | "wednesday"
+                | "thursday"
+                | "friday"
+                | "saturday"
+                | "utc"
+                | "local"
+        ),
+        _ => false,
+    }
+}
+
