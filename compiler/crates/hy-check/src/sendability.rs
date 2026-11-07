@@ -1420,6 +1420,7 @@ impl<'a> Checker<'a> {
                         });
                     }
                 } else if matches!(op, Expr::Field { .. })
+                    && op.root_ident().is_some()
                     && matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_))
                 {
                     if let Some(root) = op.root_ident() {
@@ -1436,12 +1437,24 @@ impl<'a> Checker<'a> {
                         if self.lookup_binding(st, root).is_some() {
                             moves.push((root.to_string(), v.span()));
                         }
+                    } else {
+                        let mut roots = Vec::new();
+                        crate::model::collect_ref_roots(op, &mut roots);
+                        for root in roots {
+                            if self
+                                .lookup_binding(st, &root)
+                                .is_some_and(|b| !b.shape.is_sendable_by_type())
+                            {
+                                moves.push((root, v.span()));
+                            }
+                        }
                     }
                 }
                 let move_root = match op {
                     Expr::Ident { name, .. } => Some(name.as_str()),
                     Expr::Field { .. }
-                        if matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_)) =>
+                        if op.root_ident().is_some()
+                            && matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_)) =>
                     {
                         op.root_ident()
                     }
@@ -1478,6 +1491,7 @@ impl<'a> Checker<'a> {
                         });
                     }
                 } else if matches!(op, Expr::Field { .. })
+                    && op.root_ident().is_some()
                     && matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_))
                 {
                     if let Some(root) = op.root_ident() {
@@ -1493,6 +1507,17 @@ impl<'a> Checker<'a> {
                     if let Some(root) = op.root_ident() {
                         if self.lookup_binding(st, root).is_some() {
                             moves.push((root.to_string(), mspan));
+                        }
+                    } else {
+                        let mut roots = Vec::new();
+                        crate::model::collect_ref_roots(op, &mut roots);
+                        for root in roots {
+                            if self
+                                .lookup_binding(st, &root)
+                                .is_some_and(|b| !b.shape.is_sendable_by_type())
+                            {
+                                moves.push((root, mspan));
+                            }
                         }
                     }
                 }
