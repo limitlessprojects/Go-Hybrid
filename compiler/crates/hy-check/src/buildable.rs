@@ -2938,6 +2938,8 @@ impl<'a> Collector<'a> {
                     Expr::Ident { name, .. } => self.read(name),
                     other => self.expr(other),
                 }
+                // #2041 gap 3: `pkg.Type` as a value (`c := http.Client`).
+                self.check_qualified_type_in_value_position(base, name, *span);
             }
             Expr::Call {
                 callee, args, span, ..
@@ -2949,6 +2951,14 @@ impl<'a> Collector<'a> {
                 // local closure called as `f()` has been read.
                 match unwrap_parens(callee) {
                     Expr::Ident { name, .. } => self.read(name),
+                    // `time.Duration(5)` is a legal qualified conversion.
+                    Expr::Field { base, name, .. }
+                        if self.is_qualified_type(base, name) =>
+                    {
+                        if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                            self.read(pkg);
+                        }
+                    }
                     other => self.expr(other),
                 }
                 // `new(T)` and `make(T, len, cap)` take a TYPE as their FIRST
@@ -5915,6 +5925,58 @@ impl<'a> Collector<'a> {
                 "the operand of `&` must be addressable (a variable, pointer indirection, field, slice/array element, or composite literal)",
             );
         }
+    }
+
+    /// `pkg.Name` where `pkg` is an imported, unshadowed package root and
+    /// `Name` is a well-known exported TYPE of that package.
+    fn is_qualified_type(&self, base: &Expr, name: &str) -> bool {
+        let Expr::Ident { name: pkg, .. } = unwrap_parens(base) else {
+            return false;
+        };
+        if self.scopes.iter().any(|layer| layer.contains_key(pkg.as_str())) {
+            return false;
+        }
+        if !self.is_imported_pkg_root(pkg) {
+            return false;
+        }
+        const TYPES: &[(&str, &[&str])] = &[
+            (
+                "http",
+                &[
+                    "client", "request", "response", "server", "cookie", "header",
+                    "transport", "serve_mux", "handler", "handler_func", "response_writer",
+                ],
+            ),
+            ("sync", &["mutex", "rw_mutex", "wait_group", "once", "map", "pool", "cond"]),
+            ("time", &["duration", "time", "month", "weekday", "timer", "ticker", "location"]),
+            ("json", &["decoder", "encoder", "raw_message", "number"]),
+            ("strings", &["builder", "reader", "replacer"]),
+            ("bytes", &["buffer", "reader"]),
+            ("bufio", &["reader", "writer", "scanner"]),
+            ("os", &["file", "file_info", "file_mode"]),
+            ("io", &["reader", "writer", "closer", "read_writer"]),
+            ("context", &["context", "cancel_func"]),
+            ("big", &["int", "float", "rat"]),
+        ];
+        TYPES
+            .iter()
+            .any(|(p, tys)| *p == pkg.as_str() && tys.contains(&name))
+    }
+
+    /// #2041 gap 3 — a qualified TYPE name (`http.Client`) used as a value.
+    fn check_qualified_type_in_value_position(&mut self, base: &Expr, name: &str, span: Span) {
+        if !self.is_qualified_type(base, name) {
+            return;
+        }
+        let q = format!("{}.{}", base.render(), name);
+        self.emit_e1002(
+            span,
+            format!(
+                "`{}` is a type, not a value — Go refuses `{} (type) is not an expression` (HYB-E1002)",
+                q, q
+            ),
+            "a type name can only be used in a type position or as a conversion callee (`T(x)`)",
+        );
     }
 
     fn is_imported_pkg_root(&self, name: &str) -> bool {
