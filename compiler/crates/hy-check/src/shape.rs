@@ -1837,12 +1837,8 @@ impl<'a> Checker<'a> {
                 ) {
                     if pb == ab {
                         for (pa, aa) in pargs.iter().zip(aargs.iter()) {
-                            if tparams.contains(pa.as_str()) {
-                                let sh = self.shape_of_type_arg_str(aa, depth + 1);
-                                if !matches!(sh, TypeShape::Unknown) {
-                                    out.entry(pa.clone()).or_insert(sh);
-                                }
-                            }
+                            let sh = self.shape_of_type_arg_str(aa, depth + 1);
+                            self.unify_param_str_with_arg_shape(pa, &sh, tparams, out, depth + 1);
                         }
                     }
                 }
@@ -1950,7 +1946,104 @@ impl<'a> Checker<'a> {
             }
         }
 
+        for tp in tparam_set {
+            subst.entry(tp).or_insert(TypeShape::Unknown);
+        }
+
         subst
+    }
+
+    fn unify_param_str_with_arg_shape(
+        &self,
+        pa: &str,
+        arg_shape: &TypeShape,
+        tparams: &std::collections::HashSet<String>,
+        out: &mut std::collections::HashMap<String, TypeShape>,
+        depth: usize,
+    ) {
+        if depth > Self::MAX_TYPE_RESOLUTION_DEPTH || matches!(arg_shape, TypeShape::Unknown) {
+            return;
+        }
+        let pa = pa.trim();
+        if tparams.contains(pa) {
+            out.entry(pa.to_string()).or_insert_with(|| arg_shape.clone());
+            return;
+        }
+        if let (Some(rest), TypeShape::Pointer(inner)) = (pa.strip_prefix('*'), arg_shape) {
+            self.unify_param_str_with_arg_shape(rest, inner, tparams, out, depth + 1);
+            return;
+        }
+        if let (Some(rest), TypeShape::Slice(inner)) = (pa.strip_prefix("[]"), arg_shape) {
+            self.unify_param_str_with_arg_shape(rest, inner, tparams, out, depth + 1);
+            return;
+        }
+        if let (Some(inner), other) = (
+            pa.strip_prefix("option[").and_then(|r| r.strip_suffix(']')),
+            arg_shape,
+        ) {
+            self.unify_param_str_with_arg_shape(inner, other, tparams, out, depth + 1);
+            return;
+        }
+        if let (Some(rest), TypeShape::Chan(inner)) = (
+            pa.strip_prefix("<-chan ")
+                .or_else(|| pa.strip_prefix("chan<- "))
+                .or_else(|| pa.strip_prefix("chan ")),
+            arg_shape,
+        ) {
+            self.unify_param_str_with_arg_shape(rest, inner, tparams, out, depth + 1);
+            return;
+        }
+        if pa.starts_with("map[") {
+            if let TypeShape::Map(k, v) = arg_shape {
+                let after_map = &pa[3..];
+                let mut d = 0i32;
+                for (i, ch) in after_map.char_indices() {
+                    if ch == '[' {
+                        d += 1;
+                    } else if ch == ']' {
+                        d -= 1;
+                        if d == 0 && i + 1 < after_map.len() {
+                            self.unify_param_str_with_arg_shape(&after_map[1..i], k, tparams, out, depth + 1);
+                            self.unify_param_str_with_arg_shape(&after_map[i + 1..], v, tparams, out, depth + 1);
+                            return;
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        if pa.starts_with('[') {
+            if let TypeShape::Array(inner) = arg_shape {
+                let mut d = 0i32;
+                for (i, ch) in pa.char_indices() {
+                    if ch == '[' {
+                        d += 1;
+                    } else if ch == ']' {
+                        d -= 1;
+                        if d == 0 {
+                            if i + 1 < pa.len() {
+                                self.unify_param_str_with_arg_shape(&pa[i + 1..], inner, tparams, out, depth + 1);
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        if let TypeShape::Struct(Some(arg_sname)) = arg_shape {
+            if let (Some((pb, pargs)), Some((ab, aargs))) = (
+                Self::split_generic_type_args(pa),
+                Self::split_generic_type_args(arg_sname),
+            ) {
+                if pb == ab {
+                    for (sub_pa, sub_aa) in pargs.iter().zip(aargs.iter()) {
+                        let sh = self.shape_of_type_arg_str(sub_aa, depth + 1);
+                        self.unify_param_str_with_arg_shape(sub_pa, &sh, tparams, out, depth + 1);
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn call_result_shapes(
