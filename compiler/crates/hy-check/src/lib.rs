@@ -563,6 +563,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // T24 + O8: a live slot loan cannot be re-bound to a general
         // pointer — the loan lowers to a copy + store-back (HYB-E3104).
         ck.check_slot_loan_rebind(&st, stmt);
+        // Issue #3257: O8 uniqueness — reading loaned slot through container during live loan (HYB-E3102)
+        ck.check_slot_loan_container_access(&st, stmt, idx);
 
         let mut fnlits = Vec::new();
         walk::own_fnlits(stmt, &mut fnlits);
