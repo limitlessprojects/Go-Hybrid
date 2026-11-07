@@ -24,12 +24,21 @@
 //! variables, select-receive names, match bindings, and closure params.
 //!
 //! Enum variants are left alone: their emission is a separate surface.
+//!
+//! The same pass also rejects a declaration named `none`. SPEC LX3 lists
+//! `none` as a predeclared identifier (shadowable with a lint), but hy-emit
+//! treats every bare Ident `none` as the option constructor and refuses it
+//! outside `return none` against an option result. A declaration named
+//! `none` therefore passes `hyb check` and fails `hyb build` (Row 13).
+//! Rejecting the declaration sites fails closed until emit learns to honour
+//! shadowing; `return none` and match arms `none:` / `none =>` are not
+//! declarations and stay accepted.
 
 use crate::model::Checker;
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
     Block, Decl, Expr, FnResult, ForKind, InterpPart, MatchPattern, Param, Place, PlaceKind,
-    SelectArmKind, Stmt, TypeParam,
+    SelectArmKind, Stmt, TypeExpr, TypeParam,
 };
 
 const GO_ONLY_KEYWORD: &str = "default";
@@ -41,6 +50,9 @@ impl<'a> Checker<'a> {
             match d {
                 Decl::Const(c) => {
                     self.kw_name(&c.name, "const", c.span);
+                    if let Some(ty) = &c.ty {
+                        self.kw_type(ty);
+                    }
                     self.kw_expr(&c.value);
                 }
                 Decl::Struct(s) => {
@@ -48,14 +60,19 @@ impl<'a> Checker<'a> {
                     self.kw_type_params(&s.type_params, s.span);
                     for f in &s.fields {
                         self.kw_name(&f.name, "struct field", f.span);
+                        self.kw_type(&f.ty);
                     }
                 }
-                Decl::TypeAlias(t) => self.kw_name(&t.name, "type alias", t.span),
+                Decl::TypeAlias(t) => {
+                    self.kw_name(&t.name, "type alias", t.span);
+                    self.kw_type(&t.ty);
+                }
                 Decl::Fn(f) => {
                     let what = if f.receiver.is_some() { "method" } else { "fn" };
                     self.kw_name(&f.name, what, f.span);
                     if let Some(r) = &f.receiver {
                         self.kw_name(&r.name, "receiver", f.span);
+                        self.kw_type(&r.ty);
                     }
                     self.kw_type_params(&f.type_params, f.span);
                     self.kw_params(&f.params);
@@ -70,6 +87,23 @@ impl<'a> Checker<'a> {
     }
 
     fn kw_name(&mut self, name: &str, what: &str, span: Span) {
+        if name == "none" {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "{what} named `none` — `none` is Hybrid's option constructor, so hy-emit                          cannot treat the name as an ordinary binding and `hyb build` fails (HYB-E1002)"
+                    ),
+                )
+                .with_notes(vec![
+                    "why: hy-emit spells every bare Ident `none` as the option constructor (`return none` against option[T], or `not yet supported` elsewhere), so a declaration named `none` is accepted by check and then fails emit — GUARANTEES Row 13".to_string(),
+                    "fix: rename it (`none_val`, `absent`, …); keep `none` for `return none` / match arms on `option[T]`".to_string(),
+                ]),
+            );
+            return;
+        }
         if name != GO_ONLY_KEYWORD {
             return;
         }
@@ -99,6 +133,7 @@ impl<'a> Checker<'a> {
     fn kw_params(&mut self, params: &[Param]) {
         for p in params {
             self.kw_name(&p.name, "parameter", p.span);
+            self.kw_type(&p.ty);
         }
     }
 
@@ -106,6 +141,35 @@ impl<'a> Checker<'a> {
         for r in results {
             if let Some(n) = &r.name {
                 self.kw_name(n, "named result", span);
+            }
+            self.kw_type(&r.ty);
+        }
+    }
+
+    fn kw_type(&mut self, ty: &TypeExpr) {
+        match ty {
+            TypeExpr::Named { .. } => {}
+            TypeExpr::Pointer { to, .. }
+            | TypeExpr::Slice { elem: to, .. }
+            | TypeExpr::Chan { elem: to, .. }
+            | TypeExpr::Option { elem: to, .. } => self.kw_type(to),
+            TypeExpr::Array { len, elem, .. } => {
+                if let Some(e) = len {
+                    self.kw_expr(e);
+                }
+                self.kw_type(elem);
+            }
+            TypeExpr::Map { key, value, .. } => {
+                self.kw_type(key);
+                self.kw_type(value);
+            }
+            TypeExpr::Fn {
+                params, results, ..
+            } => {
+                self.kw_params(params);
+                for r in results {
+                    self.kw_type(r);
+                }
             }
         }
     }
@@ -121,6 +185,9 @@ impl<'a> Checker<'a> {
             Stmt::Local(l) => {
                 for n in &l.names {
                     self.kw_name(n, "local", l.span);
+                }
+                if let Some(ty) = &l.ty {
+                    self.kw_type(ty);
                 }
                 for v in &l.values {
                     self.kw_expr(v);
@@ -285,17 +352,30 @@ impl<'a> Checker<'a> {
                     self.kw_expr(&a.value);
                 }
             }
-            Expr::StructLit { fields, .. } => {
+            Expr::StructLit { ty, fields, .. } => {
+                if let Some(ty) = ty {
+                    self.kw_type(ty);
+                }
                 for f in fields {
                     self.kw_expr(&f.value);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some(elem) = elem {
+                    self.kw_type(elem);
+                }
                 for i in items {
                     self.kw_expr(i);
                 }
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } => {
+                self.kw_type(key);
+                self.kw_type(value);
                 for (k, v) in entries {
                     self.kw_expr(k);
                     self.kw_expr(v);
