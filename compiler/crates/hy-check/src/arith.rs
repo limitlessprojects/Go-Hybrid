@@ -94,7 +94,14 @@ impl<'a> Checker<'a> {
                 if matches!(op, AssignOp::DivAssign | AssignOp::ModAssign)
                     && values.len() == 1
                     && (is_int_literal_zero(&values[0])
+                        || is_float_literal_zero(&values[0])
                         || divisor_int_fold_is_zero(
+                            &values[0],
+                            &self.const_values,
+                            st,
+                            &self.zd_defined,
+                        )
+                        || divisor_float_fold_is_zero(
                             &values[0],
                             &self.const_values,
                             st,
