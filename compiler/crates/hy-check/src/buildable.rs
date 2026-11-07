@@ -3447,6 +3447,21 @@ impl<'a> Collector<'a> {
                 return;
             }
         }
+        // `serde_json.value` lowers to `jsonbinding.Value` in `hy-emit`. When
+        // `jsonbinding` is shadowed by an in-scope binding, type parameter, or
+        // package-level declaration, emitted Go resolves `jsonbinding.Value` to
+        // the shadowing declaration and fails `go build` (Row 13 BUILDABLE).
+        if head == "serde_json.value"
+            && !self.is_pkg_symbol_shadowed("serde_json")
+            && self.is_pkg_symbol_shadowed("jsonbinding")
+        {
+            self.emit_e1002(
+                span,
+                "cannot use type `serde_json.value` because `jsonbinding` is shadowed by an in-scope declaration (HYB-E1002)".to_string(),
+                "`serde_json.value` lowers to `jsonbinding.Value`; rename the shadowing `jsonbinding` declaration so the runtime binding package is accessible",
+            );
+            return;
+        }
         if head == "set" {
             if let Some(inner) = inner_opt {
                 let args = split_top_level_type_args(inner);
@@ -5240,6 +5255,27 @@ impl<'a> Collector<'a> {
     /// list: the same number of values, each assignable to its result type.
     /// Go refuses the emitted statement otherwise (Row 13).
     fn check_return(&mut self, values: &[Expr], span: Span) {
+        // In a function or closure whose single unnamed result is `http.handler`,
+        // `return fn(w, r) { ... }` lowers to `return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { ... })`
+        // in `hy-emit`. When the closure contains no `?` (so `try_context` does not
+        // fire `HYB-E2011`) and `http` is shadowed at the `return` site, emitted Go
+        // resolves `http.HandlerFunc` / `http.ResponseWriter` / `http.Request` to the
+        // shadowing declaration and fails `go build` (Row 13 BUILDABLE).
+        if !self.fn_results_all_named
+            && self.fn_result_type_names.len() == 1
+            && self.fn_result_type_names[0] == "http.handler"
+            && values.len() == 1
+        {
+            if let Expr::FnLit { body, .. } = &values[0] {
+                if !block_has_try(body) && self.is_pkg_symbol_shadowed("http") {
+                    self.emit_e1002(
+                        span,
+                        "cannot return closure literal as `http.handler` because `http` is shadowed by an in-scope declaration (HYB-E1002)".to_string(),
+                        "returning a closure from an `http.handler` function lowers to `http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { ... })`; rename the shadowing `http` declaration so `net/http` is accessible",
+                    );
+                }
+            }
+        }
         let want = self.fn_results.clone();
         // Go's multi-value rule: `return f()` where `f`'s results line up
         // exactly with the enclosing signature. The single call is the whole
@@ -7734,6 +7770,35 @@ impl<'a> Collector<'a> {
                                 ),
                                 "`httptest.get` and `httptest.post` lower to `http.NewRequest`; rename the shadowing `http` declaration so `net/http` is accessible",
                             );
+                        }
+                    }
+                    // Rust crate calls (`sha3.*`, `serde_json.*`, `regex.*`) lower to
+                    // `sha3binding.*`, `jsonbinding.*`, and `regexbinding.*` in `hy-emit`.
+                    // When the target binding package identifier is shadowed by an in-scope
+                    // parameter, local binding, loop variable, closure parameter, type
+                    // parameter, or package-level declaration, emitted Go fails downstream
+                    // compilation (Row 13 BUILDABLE).
+                    if self.lookup_kind(pkg).is_none() && !self.is_pkg_symbol_shadowed(pkg) {
+                        let binding_root = match pkg.as_str() {
+                            "sha3" => Some("sha3binding"),
+                            "serde_json" => Some("jsonbinding"),
+                            "regex" => Some("regexbinding"),
+                            _ => None,
+                        };
+                        if let Some(broot) = binding_root {
+                            if self.is_pkg_symbol_shadowed(broot) {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "cannot call `{}.{}` because `{}` is shadowed by an in-scope declaration (HYB-E1002)",
+                                        pkg, name, broot
+                                    ),
+                                    &format!(
+                                        "`{}.{}` lowers to `{}.*`; rename the shadowing `{}` declaration so the runtime binding package is accessible",
+                                        pkg, name, broot, broot
+                                    ),
+                                );
+                            }
                         }
                     }
                     if self.lookup_kind(pkg).is_none() {
