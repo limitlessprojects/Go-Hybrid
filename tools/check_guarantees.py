@@ -187,8 +187,12 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
             if not fixture.is_file():
                 problems.append(f"{where}: fixture {path_rel} does not exist")
                 continue
-            if not str(path_rel).startswith(corpus_rel):
-                problems.append(f"{where}: fixture {path_rel} is outside {corpus_rel}")
+            # Match the corpus harness's top-level *.hy discovery. A lexical
+            # prefix also admits sibling directories and ../ escapes whose
+            # copied headers are never exercised by the harness.
+            if (fixture.resolve().parent != (root / corpus_rel).resolve()
+                    or fixture.suffix != ".hy"):
+                problems.append(f"{where}: fixture {path_rel} is outside the harness inputs in {corpus_rel}")
             verdict, pinned = fixture_verdict(fixture)
             if verdict is None:
                 problems.append(f"{where}: fixture {path_rel} carries no `// EXPECTED-VERDICT:` line")
