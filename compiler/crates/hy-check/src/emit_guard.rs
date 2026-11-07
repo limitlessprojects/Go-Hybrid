@@ -1096,24 +1096,64 @@ impl<'a> Checker<'a> {
             }
             TypeExpr::Named { name, span } => {
                 if let Some(st) = st {
-                    for tok in name.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.') {
-                        if !tok.is_empty() && st.env_lookup(tok).is_some() {
+                    let (head, args_opt) = name.split_once('[').unwrap_or((name.as_str(), ""));
+                    if let Some((pkg, _)) = head.split_once('.') {
+                        if !pkg.is_empty() && st.env_lookup(pkg).is_some() {
                             let msg = format!(
-                                "type `{}` is shadowed by local value `{}` in this scope ? Go rejects `{tok} (variable) is not a type` (HYB-E1002)",
-                                name, tok
+                                "type `{}` is shadowed by local value `{}` in this scope — Go rejects `{pkg} (variable) is not a package` (HYB-E1002)",
+                                name, pkg
                             );
                             self.diags.push(
                                 Diagnostic::error("HYB-E1002", self.path.clone(), *span, msg)
                                     .with_notes(vec![
                                         format!(
-                                            "why: Go resolves `{tok}` to the in-scope local or parameter rather than the type, so the emitted program fails `go build` (GUARANTEES Row 13)"
+                                            "why: Go resolves `{pkg}` to the in-scope local or parameter rather than the package, so the emitted program fails `go build` (GUARANTEES Row 13)"
                                         ),
                                         format!(
-                                            "fix: rename the local binding `{tok}` so it does not shadow the type name"
+                                            "fix: rename the local binding `{pkg}` so it does not shadow the package name"
                                         ),
                                     ]),
                             );
-                            break;
+                            return;
+                        }
+                    } else if !head.is_empty() && st.env_lookup(head).is_some() {
+                        let msg = format!(
+                            "type `{}` is shadowed by local value `{}` in this scope — Go rejects `{head} (variable) is not a type` (HYB-E1002)",
+                            name, head
+                        );
+                        self.diags.push(
+                            Diagnostic::error("HYB-E1002", self.path.clone(), *span, msg)
+                                .with_notes(vec![
+                                    format!(
+                                        "why: Go resolves `{head}` to the in-scope local or parameter rather than the type, so the emitted program fails `go build` (GUARANTEES Row 13)"
+                                    ),
+                                    format!(
+                                        "fix: rename the local binding `{head}` so it does not shadow the type name"
+                                    ),
+                                ]),
+                        );
+                        return;
+                    }
+                    if !args_opt.is_empty() {
+                        for tok in args_opt.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+                            if !tok.is_empty() && st.env_lookup(tok).is_some() {
+                                let msg = format!(
+                                    "type `{}` is shadowed by local value `{}` in this scope — Go rejects `{tok} (variable) is not a type` (HYB-E1002)",
+                                    name, tok
+                                );
+                                self.diags.push(
+                                    Diagnostic::error("HYB-E1002", self.path.clone(), *span, msg)
+                                        .with_notes(vec![
+                                            format!(
+                                                "why: Go resolves `{tok}` to the in-scope local or parameter rather than the type, so the emitted program fails `go build` (GUARANTEES Row 13)"
+                                            ),
+                                            format!(
+                                                "fix: rename the local binding `{tok}` so it does not shadow the type name"
+                                            ),
+                                        ]),
+                                );
+                                break;
+                            }
                         }
                     }
                 }
@@ -3218,3 +3258,4 @@ fn is_primitive_receiver(name: &str) -> bool {
             | "comparable"
     )
 }
+
