@@ -1924,6 +1924,34 @@ impl Emitter {
     }
 
     /// Inline statement rendering for if-init (`v, ok := m[k]`).
+    /// Wrap `text` in parens when it holds a `{` outside any bracket or
+    /// string (a composite/func literal head), so Go's control-clause parser
+    /// (which disables literals) accepts it. Always valid for one expression.
+    fn paren_header_lit(text: String) -> String {
+        let b: Vec<char> = text.chars().collect();
+        let (mut depth, mut i) = (0i32, 0usize);
+        while i < b.len() {
+            match b[i] {
+                '"' | '`' | '\'' => {
+                    let q = b[i];
+                    i += 1;
+                    while i < b.len() && b[i] != q {
+                        if b[i] == '\\' && q != '`' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth -= 1,
+                '{' if depth == 0 => return format!("({})", text),
+                _ => {}
+            }
+            i += 1;
+        }
+        text
+    }
+
     fn stmt_inline(&mut self, s: &Stmt) -> Result<String, EmitError> {
         match s {
             Stmt::Local(l) => {
@@ -1934,6 +1962,14 @@ impl Emitter {
                     .iter()
                     .map(|v| self.emit_expr(v, 0))
                     .collect::<Result<Vec<_>, _>>()?;
+                // Go parses an `if` header with composite literals disabled:
+                // `if v := T{..}; ..` / `if p := &T{..}; ..` is a Go syntax
+                // error. Parenthesize a value with a top-level `{`.
+                let values = if values.len() == l.names.len() {
+                    values.into_iter().map(Self::paren_header_lit).collect()
+                } else {
+                    values
+                };
                 self.hint_from_values(&l.names, &l.values);
                 if let Some(t) = &l.ty {
                     if self.is_pointer_ty(t) {
