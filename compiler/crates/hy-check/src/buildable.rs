@@ -550,6 +550,13 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // `cannot convert op (variable of struct type option[int])`).
         (Option(_), Option(_)) => false,
         (_, Option(_)) => true,
+        (Option(_), other) if !matches!(other, Unknown | Option(_)) => true,
+
+        // A declared curated foreign named type (os.file, net.conn, sync.mutex, ...)
+        // lowers to a named Go type. Go forbids converting scalars or containers to/from
+        // foreign structs, and only permits converting to `any` (handled above).
+        (Foreign(_), other) if !matches!(other, Unknown | Foreign(_)) => true,
+        (other, Foreign(_)) if !matches!(other, Unknown | Interface | Foreign(_)) => true,
 
         // Struct targets: Go forbids converting non-structs to structs.
         (Struct(_), other) if !matches!(other, Unknown | Struct(_)) => true,
