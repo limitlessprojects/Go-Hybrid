@@ -4105,6 +4105,7 @@ impl<'a> Collector<'a> {
                 }
                 match name.as_str() {
                     "len" | "cap" | "copy" => return Some(vec![OpKind::Int]),
+                    "real" | "imag" => return Some(vec![OpKind::Float]),
                     "append" => {
                         let first = args
                             .first()
@@ -8352,6 +8353,7 @@ impl<'a> Collector<'a> {
         if matches!(
             name,
             "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
+                | "real" | "imag" | "complex"
         ) && args.iter().any(|a| a.spread)
         {
             self.emit_e1002(
@@ -8828,6 +8830,69 @@ impl<'a> Collector<'a> {
                 }
             }
 
+            "real" | "imag" => {
+                if args.len() != 1 {
+                    return; // arity handled by builtins.rs
+                }
+                let op = &args[0].value;
+                let ak = self.kind_of_expr(op);
+                if matches!(
+                    ak,
+                    OpKind::Str
+                        | OpKind::Bool
+                        | OpKind::Slice(_)
+                        | OpKind::Array(_)
+                        | OpKind::Map(_, _)
+                        | OpKind::Chan(_)
+                        | OpKind::Struct(_)
+                        | OpKind::Pointer(_)
+                        | OpKind::Fn(..)
+                        | OpKind::Interface
+                ) {
+                    self.emit_e1002(
+                        op.span(),
+                        format!(
+                            "invalid argument `{}` (type `{}`) for built-in `{name}` — Go refuses `invalid argument: {} (must be complex)` (HYB-E1002)",
+                            op.render(),
+                            ak.label(),
+                            op.render()
+                        ),
+                        "argument to `real` or `imag` must be a complex number (`complex64` or `complex128`)",
+                    );
+                }
+            }
+            "complex" => {
+                if args.len() != 2 {
+                    return; // arity handled by builtins.rs
+                }
+                for arg in args {
+                    let ak = self.kind_of_expr(&arg.value);
+                    if matches!(
+                        ak,
+                        OpKind::Str
+                            | OpKind::Bool
+                            | OpKind::Slice(_)
+                            | OpKind::Array(_)
+                            | OpKind::Map(_, _)
+                            | OpKind::Chan(_)
+                            | OpKind::Struct(_)
+                            | OpKind::Pointer(_)
+                            | OpKind::Fn(..)
+                            | OpKind::Interface
+                    ) {
+                        self.emit_e1002(
+                            arg.value.span(),
+                            format!(
+                                "invalid argument `{}` (type `{}`) in `complex` — Go refuses `invalid argument: {} (must be float)` (HYB-E1002)",
+                                arg.value.render(),
+                                ak.label(),
+                                arg.value.render()
+                            ),
+                            "arguments to `complex` must be floating-point numbers (`float32` or `float64`)",
+                        );
+                    }
+                }
+            }
             "new" => {
                 if args.len() != 1 {
                     return; // arity handled by builtins.rs
