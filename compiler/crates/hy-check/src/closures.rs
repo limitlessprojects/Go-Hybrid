@@ -1186,7 +1186,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     ..
                 } = &arm.pattern
                 {
+                    mark_nested_overwritten(st, name, nested);
                     ck.bind_match_arm(st, name, subject, managed);
+                    sync_nested_moves(st, nested);
                 }
                 if let Some(g) = &arm.guard {
                     ck.mark_move_in_value(
@@ -1999,6 +2001,67 @@ fn update_pre_defer_peers(
                 }
             }
         }
+        Stmt::For {
+            kind: Iterate { vars, expr },
+            ..
+        } => {
+            if !matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_)) {
+                let shapes = ck.iterate_var_shapes(st, expr, vars.len());
+                let mut refs = Vec::new();
+                expr_referenced_bindings(expr, &mut refs);
+                for (target, shape) in vars.iter().zip(shapes) {
+                    if target == "_" {
+                        continue;
+                    }
+                    let self_read = ck.value_reads_storage_of(st, expr, target);
+                    if !self_read {
+                        sever_peer_node(peers, target);
+                    }
+                    if ck.shape_may_share(&shape) {
+                        for r in &refs {
+                            let may_share = ck
+                                .lookup_binding(st, r)
+                                .map(|b| ck.shape_may_share(&b.shape))
+                                .unwrap_or(true);
+                            if may_share {
+                                link_peer_nodes(peers, target, r);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Stmt::Match { subject, arms, .. } => {
+            let mut refs = Vec::new();
+            expr_referenced_bindings(subject, &mut refs);
+            for arm in arms {
+                if let hy_syntax::MatchPattern::Path {
+                    binding: Some(target),
+                    ..
+                } = &arm.pattern
+                {
+                    if target == "_" {
+                        continue;
+                    }
+                    let self_read = ck.value_reads_storage_of(st, subject, target);
+                    if !self_read {
+                        sever_peer_node(peers, target);
+                    }
+                    for r in &refs {
+                        let may_share = ck
+                            .lookup_binding(st, r)
+                            .map(|b| {
+                                ck.shape_may_share(&b.shape)
+                                    || matches!(b.shape, TypeShape::Unknown)
+                            })
+                            .unwrap_or(true);
+                        if may_share {
+                            link_peer_nodes(peers, target, r);
+                        }
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -2102,7 +2165,11 @@ fn stmt_moves_watched_binding(
     };
 
     match stmt {
-        Stmt::Task { args, .. } => {
+        Stmt::Task { callee, args, .. } => {
+            let cdesc = format!("the spawn callee `{}`", callee.render());
+            if let Some(mv) = check_expr(callee, cdesc) {
+                return Some(mv);
+            }
             for a in args {
                 let desc = format!("the spawn argument `{}`", a.value.render());
                 if let Some(mv) = check_expr(&a.value, desc) {
@@ -2116,6 +2183,10 @@ fn stmt_moves_watched_binding(
             is_move,
             span,
         } => {
+            let cdesc = format!("the send target `{}`", chan.render());
+            if let Some(mv) = check_expr(chan, cdesc) {
+                return Some(mv);
+            }
             let desc = format!(
                 "the move-send `{} <- {}`",
                 chan.render(),
