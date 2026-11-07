@@ -8883,9 +8883,16 @@ impl<'a> Checker<'a> {
                 let base_shape = self.place_shape(st, base)?;
                 Some(self.field_shape(&base_shape, name))
             }
-            PlaceKind::Index { base, .. } => match self.place_shape(st, base)? {
+            PlaceKind::Index { base, .. } => match self
+                .place_shape(st, base)
+                .or_else(|| self.place_target_ty(st, base).map(|t| self.shape_of_type(&t)))?
+            {
                 TypeShape::Map(_, v) => Some(*v),
                 TypeShape::Slice(e) | TypeShape::Array(e) => Some(*e),
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Array(e) => Some(*e),
+                    _ => None,
+                },
                 _ => None,
             },
             _ => None,

@@ -266,7 +266,17 @@ impl<'a> Checker<'a> {
             Expr::Index { base, .. } => match self.shape_of_expr(st, base) {
                 TypeShape::Map(_, v) => *v,
                 TypeShape::Slice(e) | TypeShape::Array(e) => *e,
-                _ => TypeShape::Unknown,
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Array(e) => *e,
+                    _ => self
+                        .projected_expr_ty(st, expr)
+                        .map(|t| self.shape_of_type(&t))
+                        .unwrap_or(TypeShape::Unknown),
+                },
+                _ => self
+                    .projected_expr_ty(st, expr)
+                    .map(|t| self.shape_of_type(&t))
+                    .unwrap_or(TypeShape::Unknown),
             },
             Expr::Slice { base, .. } => match self.shape_of_expr(st, base) {
                 TypeShape::Slice(e) | TypeShape::Array(e) => TypeShape::Slice(e),
