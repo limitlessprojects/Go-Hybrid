@@ -148,3 +148,70 @@ fn redefining_unguarded_arm_builds_and_runs_when_go_is_available() {
         );
     }
 }
+
+#[test]
+fn redefining_guarded_arm_body_in_simple_chain_gets_nested_scope() {
+    // When a guarded `some(v) if flag:` arm's guard does not read `v`, the
+    // emitter injects `v := hyMatch0.val` inside the `if flag {` block. If
+    // the arm body's top level redefines `v` (`v := v + 1`), the body must
+    // be wrapped in a nested `{ ... }` block so Go does not fail with
+    // `no new variables on left side of :=`.
+    let go = emit(
+        "fn main() {\n    o := some(2)\n    flag := true\n    match o {\n        some(v) if flag: { v := v + 1\n            fmt.println(v) }\n        some(v): fmt.println(v)\n        none: fmt.println(0)\n    }\n}\n",
+    );
+    let inject_pos = go.find("\t\t\tv := hyMatch0.val\n").unwrap_or_else(|| {
+        panic!("expected the pattern binding injection inside guard block, got:\n{go}")
+    });
+    let wrap_pos = go.find("\t\t\t{\n").unwrap_or_else(|| {
+        panic!("expected a nested block wrapping the redefining guarded arm body, got:\n{go}")
+    });
+    let body_pos = go.find("\t\t\t\tv := v + 1\n").unwrap_or_else(|| {
+        panic!("expected the arm shadow inside the nested block, got:\n{go}")
+    });
+    assert!(
+        inject_pos < wrap_pos && wrap_pos < body_pos,
+        "expected inject -> nested block -> shadow, got:\n{go}"
+    );
+}
+
+#[test]
+fn redefining_guarded_arm_body_in_multi_arm_match_gets_nested_scope() {
+    // Three reachable `some` arms route through `has_unguarded_some`; a
+    // guarded arm whose guard does not read `v` but whose body redefines
+    // `v` after reading it must wrap its body in a nested block.
+    let go = emit(
+        "fn main() {\n    o := some(3)\n    flag := true\n    match o {\n        some(v) if v > 10: fmt.println(v)\n        some(v) if flag: { v := v + 1\n            fmt.println(v) }\n        some(v): fmt.println(v)\n        none: fmt.println(0)\n    }\n}\n",
+    );
+    let inject_pos = go.find("\t\t\t\tv := hyMatch0.val\n").unwrap_or_else(|| {
+        panic!("expected the pattern binding injection inside guard block, got:\n{go}")
+    });
+    let wrap_pos = go.find("\t\t\t\t{\n").unwrap_or_else(|| {
+        panic!("expected a nested block wrapping the redefining guarded arm body, got:\n{go}")
+    });
+    let body_pos = go.find("\t\t\t\t\tv := v + 1\n").unwrap_or_else(|| {
+        panic!("expected the arm shadow inside the nested block, got:\n{go}")
+    });
+    assert!(
+        inject_pos < wrap_pos && wrap_pos < body_pos,
+        "expected inject -> nested block -> shadow, got:\n{go}"
+    );
+}
+
+#[test]
+fn redefining_arms_in_ordered_arms_match_get_nested_scope() {
+    // A guarded `none if flag:` arm forces the `needs_ordered_arms` lowering
+    // path; both guarded and unguarded `some(v)` arms that redefine `v` at
+    // their top level after reading it must wrap their body in a nested block.
+    let go = emit(
+        "fn main() {\n    o := some(4)\n    flag := true\n    match o {\n        some(v) if flag: { v := v + 1\n            fmt.println(v) }\n        some(w): { w := w + 2\n            fmt.println(w) }\n        none if flag: fmt.println(0)\n        _: fmt.println(-1)\n    }\n}\n",
+    );
+    assert!(
+        go.contains("\t\t\tv := hyMatch0.val\n\t\t\t{\n\t\t\t\tv := v + 1\n"),
+        "expected guarded ordered arm to wrap redefining body, got:\n{go}"
+    );
+    assert!(
+        go.contains("\t\tw := hyMatch0.val\n\t\t{\n\t\t\tw := w + 2\n"),
+        "expected unguarded ordered arm to wrap redefining body, got:\n{go}"
+    );
+}
+
