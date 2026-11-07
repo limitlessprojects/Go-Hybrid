@@ -25,7 +25,7 @@
 
 use crate::model::{unwrap_parens_and_move, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{Expr, ForKind, LitKind, Stmt, TypeExpr};
+use hy_syntax::{Block, Expr, ForKind, InterpPart, LitKind, MatchPattern, Place, PlaceKind, SelectArmKind, Stmt, TypeExpr};
 
 impl<'a> Checker<'a> {
     /// Statement entry: classify the iterable of every `for x in e` and the
@@ -322,10 +322,36 @@ impl<'a> Checker<'a> {
         // the diagnostic still prints the spellings the author wrote.
         let tl_c = tl.as_deref().map(crate::const_overflow::canonical_int_type_name);
         let th_c = th.as_deref().map(crate::const_overflow::canonical_int_type_name);
+        // Issue #3795: `hy-emit` (`stmt.rs:2188-2195`) also hoists `hi` into a
+        // standalone `hyHi := <hi>` temporary for exclusive ranges whenever
+        // `hi` contains a call/receive/try or mentions an in-scope variable
+        // shadowed by `var`. That `:=` binding defaults an untyped `hi` (such
+        // as `10 + len("")` or `len([2]int{k, 0})`) to Go `int`, so `v < hyHi`
+        // fails `go build` with `mismatched types` whenever `lo` fixes `v` to a
+        // non-`int` integer width.
+        let var_in_scope = var != "_" && st.env_lookup(var).is_some();
+        let is_bare_const_len = match unwrap_parens_and_move(hi) {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens_and_move(callee) {
+                    name == "len" && args.len() == 1 && match unwrap_parens_and_move(&args[0].value) {
+                        Expr::Ident { name: arg_name, .. } => {
+                            self.consts.contains_key(arg_name.as_str())
+                        }
+                        _ => false,
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        let hi_hoisted = inclusive
+            || (!is_bare_const_len && Self::range_bound_has_call_or_recv(hi))
+            || (var_in_scope && Self::range_bound_mentions_ident(hi, var));
         let mismatch = match (&tl_c, &th_c) {
             (Some(a), Some(b)) => a != b,
             (None, Some(b)) => *b != "int",
-            (Some(a), None) => inclusive && *a != "int",
+            (Some(a), None) => hi_hoisted && *a != "int",
             (None, None) => false,
         };
         if mismatch {
@@ -446,6 +472,11 @@ impl<'a> Checker<'a> {
                             && !self.type_aliases.contains_key(name.as_str())
                             && match self.shape_of_expr(st, &args[0].value) {
                                 TypeShape::Slice(_) | TypeShape::Map(_, _) | TypeShape::Chan(_) => true,
+                                TypeShape::Str => name == "len" && match unwrap_parens_and_move(&args[0].value) {
+                                    Expr::Ident { name: s, .. } => st.env_lookup(s).is_some_and(|b| !b.immutable),
+                                    Expr::Index { .. } | Expr::Field { .. } | Expr::Call { .. } | Expr::Receive { .. } => true,
+                                    _ => false,
+                                },
                                 TypeShape::Struct(Some(ref n)) => {
                                     name == "len"
                                         && !self.structs.contains_key("set")
@@ -529,7 +560,17 @@ impl<'a> Checker<'a> {
                             None
                         }
                     })
-                    .or_else(|| self.composite_type_expr(st, expr));
+                    .or_else(|| self.composite_type_expr(st, expr))
+                    .or_else(|| match unwrap_parens_and_move(expr) {
+                        Expr::Call { callee, .. } => match unwrap_parens_and_move(callee) {
+                            Expr::Field { base, name, .. } => {
+                                let rb = Self::base_named_type(&self.peel_pointer_and_alias(&self.composite_type_expr(st, base)?))?;
+                                self.method_decls.get(&(rb, Self::base_named_type_str(name).to_string()))?.results.first().map(|r| r.ty.clone())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    });
                 if let Some(ty) = chan_ty {
                     let resolved = self.resolve_type_alias(&ty);
                     if matches!(
@@ -587,6 +628,255 @@ impl<'a> Checker<'a> {
                     Diagnostic::error("HYB-E2009", self.path.clone(), span, msg).with_notes(notes),
                 );
             }
+        }
+    }
+
+    fn range_bound_has_call_or_recv(e: &Expr) -> bool {
+        match e {
+            Expr::Call { .. } | Expr::Receive { .. } | Expr::Try { .. } => true,
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::range_bound_has_call_or_recv(lhs) || Self::range_bound_has_call_or_recv(rhs)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Paren { inner: operand, .. }
+            | Expr::Field { base: operand, .. } => Self::range_bound_has_call_or_recv(operand),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Expr(x) => Self::range_bound_has_call_or_recv(x),
+                InterpPart::Lit(_) => false,
+            }),
+            Expr::Index { base, index, .. } => {
+                Self::range_bound_has_call_or_recv(base)
+                    || Self::range_bound_has_call_or_recv(index)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::range_bound_has_call_or_recv(base)
+                    || lo
+                        .as_deref()
+                        .map(Self::range_bound_has_call_or_recv)
+                        .unwrap_or(false)
+                    || hi
+                        .as_deref()
+                        .map(Self::range_bound_has_call_or_recv)
+                        .unwrap_or(false)
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| Self::range_bound_has_call_or_recv(&f.value)),
+            Expr::SliceLit { items, .. } => items.iter().any(Self::range_bound_has_call_or_recv),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                Self::range_bound_has_call_or_recv(k) || Self::range_bound_has_call_or_recv(v)
+            }),
+            Expr::FnLit { .. } | Expr::Lit { .. } | Expr::Ident { .. } => false,
+        }
+    }
+
+    fn range_bound_mentions_ident(e: &Expr, target: &str) -> bool {
+        match e {
+            Expr::Ident { name, .. } => name == target,
+            Expr::Lit { .. } => false,
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::range_bound_mentions_ident(lhs, target)
+                    || Self::range_bound_mentions_ident(rhs, target)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Receive { chan: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Paren { inner: operand, .. } => {
+                Self::range_bound_mentions_ident(operand, target)
+            }
+            Expr::Call { callee, args, .. } => {
+                Self::range_bound_mentions_ident(callee, target)
+                    || args
+                        .iter()
+                        .any(|a| Self::range_bound_mentions_ident(&a.value, target))
+            }
+            Expr::Index { base, index, .. } => {
+                Self::range_bound_mentions_ident(base, target)
+                    || Self::range_bound_mentions_ident(index, target)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::range_bound_mentions_ident(base, target)
+                    || lo
+                        .as_ref()
+                        .is_some_and(|x| Self::range_bound_mentions_ident(x, target))
+                    || hi
+                        .as_ref()
+                        .is_some_and(|x| Self::range_bound_mentions_ident(x, target))
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| Self::range_bound_mentions_ident(&f.value, target)),
+            Expr::SliceLit { items, .. } => {
+                e.as_array_lit()
+                    .and_then(|(len, _, _)| len)
+                    .is_some_and(|l| Self::range_bound_mentions_ident(l, target))
+                    || items
+                        .iter()
+                        .any(|x| Self::range_bound_mentions_ident(x, target))
+            }
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                Self::range_bound_mentions_ident(k, target)
+                    || Self::range_bound_mentions_ident(v, target)
+            }),
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                let binds = params.iter().any(|p| p.name == target)
+                    || results
+                        .iter()
+                        .any(|r| r.name.as_deref() == Some(target));
+                !binds && Self::range_bound_block_mentions_ident(body, target)
+            }
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Lit(_) => false,
+                InterpPart::Expr(x) => Self::range_bound_mentions_ident(x, target),
+            }),
+        }
+    }
+
+    fn range_bound_block_mentions_ident(b: &Block, target: &str) -> bool {
+        for st in &b.stmts {
+            if Self::range_bound_stmt_mentions_ident(st, target) {
+                return true;
+            }
+            if matches!(st, Stmt::Local(l) if l.names.iter().any(|n| n == target)) {
+                return false;
+            }
+        }
+        false
+    }
+
+    fn range_bound_place_mentions_ident(p: &Place, target: &str) -> bool {
+        match &p.kind {
+            PlaceKind::Ident(n) => n == target,
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                Self::range_bound_place_mentions_ident(base, target)
+            }
+            PlaceKind::Index { base, index } => {
+                Self::range_bound_place_mentions_ident(base, target)
+                    || Self::range_bound_mentions_ident(index, target)
+            }
+        }
+    }
+
+    fn range_bound_stmt_mentions_ident(st: &Stmt, target: &str) -> bool {
+        match st {
+            Stmt::Local(l) => l
+                .values
+                .iter()
+                .any(|v| Self::range_bound_mentions_ident(v, target)),
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                targets
+                    .iter()
+                    .any(|t| Self::range_bound_place_mentions_ident(t, target))
+                    || values
+                        .iter()
+                        .any(|v| Self::range_bound_mentions_ident(v, target))
+            }
+            Stmt::Expr { expr, .. } => Self::range_bound_mentions_ident(expr, target),
+            Stmt::Send { chan, value, .. } => {
+                Self::range_bound_mentions_ident(chan, target)
+                    || Self::range_bound_mentions_ident(value, target)
+            }
+            Stmt::Return { values, .. } => values
+                .iter()
+                .any(|v| Self::range_bound_mentions_ident(v, target)),
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                let init_mentions = init
+                    .as_ref()
+                    .is_some_and(|i| Self::range_bound_stmt_mentions_ident(i, target));
+                let shadows = init.as_ref().is_some_and(
+                    |i| matches!(i.as_ref(), Stmt::Local(l) if l.names.iter().any(|n| n == target)),
+                );
+                init_mentions
+                    || (!shadows
+                        && (Self::range_bound_mentions_ident(cond, target)
+                            || Self::range_bound_block_mentions_ident(then, target)
+                            || otherwise
+                                .as_ref()
+                                .is_some_and(|o| Self::range_bound_stmt_mentions_ident(o, target))))
+            }
+            Stmt::For { kind, body, .. } => {
+                let kind_mentions = match kind {
+                    ForKind::Infinite => false,
+                    ForKind::While { cond } => Self::range_bound_mentions_ident(cond, target),
+                    ForKind::Range { lo, hi, .. } => {
+                        Self::range_bound_mentions_ident(lo, target)
+                            || Self::range_bound_mentions_ident(hi, target)
+                    }
+                    ForKind::Iterate { expr, .. } => Self::range_bound_mentions_ident(expr, target),
+                };
+                let binder_shadows = match kind {
+                    ForKind::Range { var, .. } => var == target,
+                    ForKind::Iterate { vars, .. } => vars.iter().any(|v| v == target),
+                    ForKind::Infinite | ForKind::While { .. } => false,
+                };
+                kind_mentions
+                    || (!binder_shadows && Self::range_bound_block_mentions_ident(body, target))
+            }
+            Stmt::Match { subject, arms, .. } => {
+                Self::range_bound_mentions_ident(subject, target)
+                    || arms.iter().any(|a| {
+                        let shadowed = matches!(
+                            &a.pattern,
+                            MatchPattern::Path {
+                                binding: Some(b),
+                                ..
+                            } if b == target
+                        );
+                        !shadowed
+                            && (a
+                                .guard
+                                .as_ref()
+                                .is_some_and(|g| Self::range_bound_mentions_ident(g, target))
+                                || Self::range_bound_block_mentions_ident(&a.body, target))
+                    })
+            }
+            Stmt::Select { arms, .. } => arms.iter().any(|a| {
+                let head_mentions = match &a.kind {
+                    SelectArmKind::Recv { chan, .. } => {
+                        Self::range_bound_mentions_ident(chan, target)
+                    }
+                    SelectArmKind::Send { chan, value, .. } => {
+                        Self::range_bound_mentions_ident(chan, target)
+                            || Self::range_bound_mentions_ident(value, target)
+                    }
+                    SelectArmKind::Default => false,
+                };
+                let arm_binds = match &a.kind {
+                    SelectArmKind::Recv { names, .. } => names.iter().any(|n| n == target),
+                    SelectArmKind::Send { .. } | SelectArmKind::Default => false,
+                };
+                head_mentions
+                    || (!arm_binds && Self::range_bound_block_mentions_ident(&a.body, target))
+            }),
+            Stmt::Defer { call, .. } => Self::range_bound_mentions_ident(call, target),
+            Stmt::Task { callee, args, .. } => {
+                Self::range_bound_mentions_ident(callee, target)
+                    || args
+                        .iter()
+                        .any(|a| Self::range_bound_mentions_ident(&a.value, target))
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                Self::range_bound_block_mentions_ident(body, target)
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => false,
         }
     }
 }
