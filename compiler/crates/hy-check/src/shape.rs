@@ -358,7 +358,8 @@ impl<'a> Checker<'a> {
                         .unwrap_or(TypeShape::Unknown),
                     "len" | "cap" | "min" | "max" | "int" | "int8" | "int16" | "int32"
                     | "int64" | "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr"
-                    | "float32" | "float64" | "bool" | "byte" | "rune" => TypeShape::Primitive,
+                    | "float32" | "float64" | "bool" | "byte" | "rune" | "complex64"
+                    | "complex128" | "complex" | "real" | "imag" => TypeShape::Primitive,
                     "string" => TypeShape::Str,
                     // `new(T)` is Go's `new`: it returns `*T` — a POINTER to
                     // zeroed, mutable storage — never a primitive copy. Typing
