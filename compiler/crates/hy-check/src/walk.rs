@@ -528,6 +528,30 @@ pub(crate) struct CallRef<'a> {
     pub span: Span,
 }
 
+fn place_calls<'a>(place: &'a Place, out: &mut Vec<CallRef<'a>>) {
+    match &place.kind {
+        PlaceKind::Ident(_) => {}
+        PlaceKind::Index { base, index } => {
+            place_calls(base, out);
+            expr_calls(index, out);
+        }
+        PlaceKind::Field { base, .. } => place_calls(base, out),
+        PlaceKind::AddrOf { base } => place_calls(base, out),
+    }
+}
+
+fn place_fnlits<'a>(place: &'a Place, out: &mut Vec<&'a Expr>) {
+    match &place.kind {
+        PlaceKind::Ident(_) => {}
+        PlaceKind::Index { base, index } => {
+            place_fnlits(base, out);
+            expr_fnlits(index, out);
+        }
+        PlaceKind::Field { base, .. } => place_fnlits(base, out),
+        PlaceKind::AddrOf { base } => place_fnlits(base, out),
+    }
+}
+
 /// Collect the calls of THIS statement only. For-statement ITERATE
 /// expressions are excluded here: their borrow calls get loop-extent loans
 /// and are processed by the For handler (loans.rs / lib.rs dispatch).
