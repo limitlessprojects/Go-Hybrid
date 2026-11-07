@@ -763,6 +763,33 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                let head = Self::base_named_type_str(name);
+                let recv_base = self
+                    .ty_of_expr(st, base)
+                    .or_else(|| self.projected_composite_ty(st, base))
+                    .map(|t| self.peel_pointer_and_alias(&t))
+                    .and_then(|t| Self::base_named_type(&t))
+                    .or_else(|| match self.shape_of_expr(st, base) {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(&s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match *inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(&s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                if let Some(rb) = recv_base {
+                    if let Some(decl) = self.method_decls.get(&(rb, head.to_string())) {
+                        return Some(TypeExpr::Fn {
+                            params: decl.params.clone(),
+                            results: decl.results.iter().map(|r| r.ty.clone()).collect(),
+                            span: *span,
+                        });
+                    }
+                }
                 let base_ty = self.ty_of_expr(st, base)?;
                 let resolved = self.resolve_type_alias(&base_ty);
                 if name == "pop" {
