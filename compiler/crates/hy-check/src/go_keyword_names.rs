@@ -69,7 +69,12 @@ impl<'a> Checker<'a> {
                 }
                 Decl::Fn(f) => {
                     let what = if f.receiver.is_some() { "method" } else { "fn" };
-                    self.kw_name(&f.name, what, f.span);
+                    if let Some((assoc_ty, assoc_fn)) = f.name.split_once('.') {
+                        self.kw_name(assoc_ty, what, f.span);
+                        self.kw_name(assoc_fn, what, f.span);
+                    } else {
+                        self.kw_name(&f.name, what, f.span);
+                    }
                     if let Some(r) = &f.receiver {
                         self.kw_name(&r.name, "receiver", f.span);
                         self.kw_type(&r.ty);
@@ -81,7 +86,20 @@ impl<'a> Checker<'a> {
                         self.kw_block(b);
                     }
                 }
-                Decl::Import { .. } | Decl::Enum(_) => {}
+                Decl::Enum(e) => {
+                    self.kw_name(&e.name, "enum", e.span);
+                    for v in &e.variants {
+                        if let Some(ty) = &v.payload {
+                            self.kw_type(ty);
+                        }
+                    }
+                }
+                Decl::Import { path, span } => {
+                    if !path.starts_with("rust/") {
+                        let root = path.rsplit('/').next().unwrap_or(path.as_str());
+                        self.kw_name(root, "import", *span);
+                    }
+                }
             }
         }
     }
