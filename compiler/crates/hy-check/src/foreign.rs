@@ -372,11 +372,112 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
     const SYNC_WAIT_GROUP: &[&str] = &["add", "done", "wait"];
     const SYNC_ONCE: &[&str] = &["do"];
+    /// `net.Conn` — Go standard library generic network connection interface.
+    const NET_CONN: &[&str] = &[
+        "read",
+        "write",
+        "close",
+        "local_addr",
+        "remote_addr",
+        "set_deadline",
+        "set_read_deadline",
+        "set_write_deadline",
+    ];
+    /// `net.Listener` — Go standard library generic network listener interface.
+    const NET_LISTENER: &[&str] = &["accept", "close", "addr"];
+    /// `net.TCPConn` — Go standard library TCP connection.
+    const NET_TCP_CONN: &[&str] = &[
+        "read",
+        "write",
+        "close",
+        "local_addr",
+        "remote_addr",
+        "set_deadline",
+        "set_read_deadline",
+        "set_write_deadline",
+        "close_read",
+        "close_write",
+        "set_keep_alive",
+        "set_keep_alive_period",
+        "set_linger",
+        "set_no_delay",
+        "syscall_conn",
+        "read_from",
+        "write_to",
+    ];
+    /// `net.TCPListener` — Go standard library TCP listener.
+    const NET_TCP_LISTENER: &[&str] = &[
+        "accept",
+        "close",
+        "addr",
+        "accept_tcp",
+        "set_deadline",
+        "syscall_conn",
+        "file",
+    ];
+    /// `net.UDPConn` — Go standard library UDP connection.
+    const NET_UDP_CONN: &[&str] = &[
+        "read",
+        "write",
+        "close",
+        "local_addr",
+        "remote_addr",
+        "set_deadline",
+        "set_read_deadline",
+        "set_write_deadline",
+        "read_from",
+        "read_from_udp",
+        "read_msg_udp",
+        "write_to",
+        "write_to_udp",
+        "write_msg_udp",
+        "syscall_conn",
+        "file",
+    ];
+    /// `net.UnixConn` — Go standard library Unix domain socket connection.
+    const NET_UNIX_CONN: &[&str] = &[
+        "read",
+        "write",
+        "close",
+        "local_addr",
+        "remote_addr",
+        "set_deadline",
+        "set_read_deadline",
+        "set_write_deadline",
+        "close_read",
+        "close_write",
+        "read_from",
+        "read_from_unix",
+        "read_msg_unix",
+        "write_to",
+        "write_to_unix",
+        "write_msg_unix",
+        "syscall_conn",
+        "file",
+    ];
+    /// `net.UnixListener` — Go standard library Unix domain socket listener.
+    const NET_UNIX_LISTENER: &[&str] = &[
+        "accept",
+        "close",
+        "addr",
+        "accept_unix",
+        "set_deadline",
+        "set_unlink_on_close",
+        "syscall_conn",
+        "file",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
         "sync.once" | "sync.Once" => Some(SYNC_ONCE),
+        "net.conn" | "net.Conn" => Some(NET_CONN),
+        "net.listener" | "net.Listener" => Some(NET_LISTENER),
+        "net.tcp_conn" | "net.tcpconn" | "net.TCPConn" => Some(NET_TCP_CONN),
+        "net.tcp_listener" | "net.tcplistener" | "net.TCPListener" => Some(NET_TCP_LISTENER),
+        "net.udp_conn" | "net.udpconn" | "net.UDPConn" => Some(NET_UDP_CONN),
+        "net.unix_conn" | "net.unixconn" | "net.UnixConn" => Some(NET_UNIX_CONN),
+        "net.unix_listener" | "net.unixlistener" | "net.UnixListener" => Some(NET_UNIX_LISTENER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -420,6 +521,40 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        (
+            "net.conn"
+                | "net.Conn"
+                | "net.tcp_conn"
+                | "net.tcpconn"
+                | "net.TCPConn"
+                | "net.udp_conn"
+                | "net.udpconn"
+                | "net.UDPConn"
+                | "net.unix_conn"
+                | "net.unixconn"
+                | "net.UnixConn",
+            "local_addr" | "remote_addr",
+        ) => TypeShape::ForeignOpaque("net.addr".into()),
+        (
+            "net.listener"
+                | "net.Listener"
+                | "net.tcp_listener"
+                | "net.tcplistener"
+                | "net.TCPListener"
+                | "net.unix_listener"
+                | "net.unixlistener"
+                | "net.UnixListener",
+            "addr",
+        ) => TypeShape::ForeignOpaque("net.addr".into()),
+        ("net.tcp_listener" | "net.tcplistener" | "net.TCPListener", "accept_tcp") => {
+            TypeShape::ForeignOpaque("net.tcp_conn".into())
+        }
+        ("net.unix_listener" | "net.unixlistener" | "net.UnixListener", "accept_unix") => {
+            TypeShape::ForeignOpaque("net.unix_conn".into())
+        }
+        ("net.listener" | "net.Listener", "accept") => {
+            TypeShape::ForeignOpaque("net.conn".into())
+        },
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
