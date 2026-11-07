@@ -967,16 +967,7 @@ impl<'a> Collector<'a> {
     /// non-numeric elements, and unresolved bindings return `None` so the
     /// caller stays fail-open.
     fn chan_element_scalar(&self, e: &Expr) -> Option<&'static str> {
-        let Expr::Ident { name, .. } = unwrap_parens(e) else {
-            return None;
-        };
-        let tname = self.lookup_type_name(name)?;
-        let t = tname.trim();
-        let t = t.strip_prefix("<-").unwrap_or(t).trim();
-        let t = t.strip_prefix("chan")?;
-        let t = t.trim_start();
-        let t = t.strip_prefix("<-").unwrap_or(t).trim();
-        canonical_numeric_name(t)
+        self.container_elem_scalar_of_expr(e)
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -1418,9 +1409,9 @@ impl<'a> Collector<'a> {
     fn container_elem_scalar_of_ty(&self, ty: &TypeExpr) -> Option<&'static str> {
         let resolved = self.ck.resolve_type_alias(ty);
         match &resolved {
-            TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
-                self.scalar_of_ty(elem)
-            }
+            TypeExpr::Slice { elem, .. }
+            | TypeExpr::Array { elem, .. }
+            | TypeExpr::Chan { elem, .. } => self.scalar_of_ty(elem),
             TypeExpr::Map { value, .. } => self.scalar_of_ty(value),
             TypeExpr::Pointer { to, .. } => match to.as_ref() {
                 TypeExpr::Array { elem, .. } => self.scalar_of_ty(elem),
@@ -1432,10 +1423,22 @@ impl<'a> Collector<'a> {
 
     /// #2858 — resolve the exact element/value numeric scalar of an expression representing a container.
     fn container_elem_scalar_of_expr(&self, e: &Expr) -> Option<&'static str> {
-        match unwrap_parens(e) {
-            Expr::Ident { name, .. } => self.lookup_container_elem_scalar(name),
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(sc) = self.lookup_container_elem_scalar(name) {
+                    return Some(sc);
+                }
+                if self.lookup_kind(name).is_none() {
+                    if let Some(alias_ty) = self.ck.type_aliases.get(name.as_str()) {
+                        return self.container_elem_scalar_of_ty(alias_ty);
+                    }
+                }
+                None
+            }
+            Expr::StructLit { ty: Some(t), .. } => self.container_elem_scalar_of_ty(t),
             Expr::SliceLit { elem, .. } => {
-                if let Some((_, inner_elem, _)) = e.as_array_lit() {
+                if let Some((_, inner_elem, _)) = bare.as_array_lit() {
                     self.scalar_of_ty(inner_elem)
                 } else if let Some(el) = elem {
                     self.scalar_of_ty(el)
@@ -1451,17 +1454,36 @@ impl<'a> Collector<'a> {
             }
             Expr::Call { callee, args, .. } => {
                 let bare_callee = unwrap_parens(callee);
-                if let Expr::Ident { name, .. } = bare_callee {
-                    if name == "make" {
-                        if let Some(first) = args.first() {
-                            return self.container_elem_scalar_of_expr(&first.value);
+                match bare_callee {
+                    Expr::Ident { name, .. } => {
+                        if name == "make" {
+                            if let Some(first) = args.first() {
+                                return self.container_elem_scalar_of_expr(&first.value);
+                            }
+                        }
+                        if self.lookup_kind(name).is_none() {
+                            if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                                if fd.receiver.is_none()
+                                    && fd.type_params.is_empty()
+                                    && fd.results.len() == 1
+                                {
+                                    return self.container_elem_scalar_of_ty(&fd.results[0].ty);
+                                }
+                            }
                         }
                     }
-                    if let Some(fd) = self.ck.fns.get(name.as_str()) {
-                        if fd.receiver.is_none() && fd.type_params.is_empty() && fd.results.len() == 1 {
-                            return self.container_elem_scalar_of_ty(&fd.results[0].ty);
+                    Expr::Field { base, name, .. } => {
+                        let bk = self.kind_of_expr(base);
+                        let head = Checker::base_named_type_str(name);
+                        if let Some(sname) = self.struct_base_name(&bk) {
+                            if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
+                                if m.type_params.is_empty() && m.results.len() == 1 {
+                                    return self.container_elem_scalar_of_ty(&m.results[0].ty);
+                                }
+                            }
                         }
                     }
+                    _ => {}
                 }
                 None
             }
@@ -1557,6 +1579,7 @@ impl<'a> Collector<'a> {
                     self.container_elem_scalar_of_expr(base)
                 }
             }
+            Expr::Receive { chan, .. } => self.chan_element_scalar(chan),
             _ => None,
         }
     }
@@ -1655,15 +1678,21 @@ impl<'a> Collector<'a> {
                     }
                 }
             }
-            // #2858: comma-ok map index (val, ok := m["k"])
+            // #2858: comma-ok map index (val, ok := m["k"]) and channel receive (val, ok := <-ch)
             if n == 2 {
-                if let Expr::Index { base, .. } = unwrap_parens(&l.values[0]) {
-                    let elem_sc = if self.kind_of_expr(base) == OpKind::Str {
-                        Some("uint8")
-                    } else {
-                        self.container_elem_scalar_of_expr(base)
-                    };
-                    return vec![elem_sc, None];
+                match unwrap_parens(&l.values[0]) {
+                    Expr::Index { base, .. } => {
+                        let elem_sc = if self.kind_of_expr(base) == OpKind::Str {
+                            Some("uint8")
+                        } else {
+                            self.container_elem_scalar_of_expr(base)
+                        };
+                        return vec![elem_sc, None];
+                    }
+                    Expr::Receive { chan, .. } => {
+                        return vec![self.chan_element_scalar(chan), None];
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2622,9 +2651,13 @@ impl<'a> Collector<'a> {
                                 OpKind::Chan(e) => *e,
                                 _ => OpKind::Unknown,
                             };
+                            let elem_scalar = self.chan_element_scalar(chan);
                             for (i, n) in names.iter().enumerate() {
                                 self.define_elidable(n, chan.span());
                                 self.bind_kind(n, if i == 0 { elem.clone() } else { OpKind::Bool });
+                                if i == 0 {
+                                    self.set_scalar(n, elem_scalar);
+                                }
                             }
                         }
                         SelectArmKind::Default => {}
@@ -3804,7 +3837,9 @@ impl<'a> Collector<'a> {
         let (_, ty) = fields.iter().find(|(n, _)| n == field)?;
         let resolved = self.ck.resolve_type_alias(ty);
         match &resolved {
-            TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+            TypeExpr::Slice { elem, .. }
+            | TypeExpr::Array { elem, .. }
+            | TypeExpr::Chan { elem, .. } => {
                 if let TypeExpr::Named { name, .. } = elem.as_ref() {
                     if let Some(arg) = subst.get(name.as_str()) {
                         return self.scalar_of_type_name(arg);
