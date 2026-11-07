@@ -8,8 +8,9 @@
 // the wrapper becomes unreachable; a MOVED value (Set's argument) has its id
 // zeroed first, so the late cleanup releases nothing (idempotent anyway).
 //
-// Key strings cross as the pinned-borrow protocol: []byte(key) copy →
-// pin → cross → unpin + KeepAlive (copy-small; keys are small).
+// Key strings cross as zero-copy views of their own backing bytes:
+// unsafe.StringData + {ptr, len} + KeepAlive for the call's duration —
+// no []byte copy, no pin (spike7-zerocopy-string).
 package jsonbinding
 
 /*
