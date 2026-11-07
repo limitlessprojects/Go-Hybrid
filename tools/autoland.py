@@ -148,6 +148,14 @@ def log_event(token_env: str, event: str, verdict: str, note: str, issue: int | 
 
 
 def run_bundle(slug: str, live: bool, token_env: str) -> int:
+    # Cleanup below owns only changes made after this gate. In particular a
+    # dry-run, missing bundle, or failed baseline must never discard a
+    # caller's existing edits or untracked files.
+    status = sh(["git", "status", "--porcelain", "--untracked-files=all"])
+    if status.returncode != 0:
+        return die("WORKTREE-FAILED", slug, "cannot verify a clean working tree — nothing changed", 2)
+    if status.stdout.strip():
+        return die("DIRTY-WORKTREE", slug, "commit or stash existing changes before running — nothing changed", 2)
     d = QUEUE / slug
     if not (d / "meta.json").is_file():
         return die("NO-BUNDLE", slug, "missing meta.json", 2)
@@ -257,17 +265,14 @@ def main() -> int:
                 if read_meta(d).get("status") == "landed":
                     continue
                 rc = max(rc, run_bundle(d.name, live, args.token_env))
-                revert_on_failure()
             return rc
         if not args.slug:
             print("run requires --slug or --all")
             return 2
         rc = run_bundle(args.slug, live, args.token_env)
-        revert_on_failure()
         return rc
     except Exception as e:  # noqa: BLE001 — the honest-record path
         print(f"AUTOLAND-ERROR: {e}")
-        revert_on_failure()
         return 1
 
 
