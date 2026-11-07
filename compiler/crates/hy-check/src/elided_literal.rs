@@ -30,7 +30,34 @@ use hy_syntax::{
 /// Curated foreign named types that are Go interfaces, function types, or
 /// scalar aliases rather than structs (`go build` refuses `T{...}` with
 /// `invalid composite literal type ...`).
-fn is_non_struct_foreign_type(name: &str) -> bool {
+fn is_non_struct_foreign_type(name: &str, non_empty: bool) -> bool {
+    if non_empty
+        && matches!(
+            name,
+            "http.header"
+                | "http.Header"
+                | "url.values"
+                | "url.Values"
+                | "net.ip"
+                | "net.IP"
+                | "net.ip_mask"
+                | "net.IPMask"
+                | "net.hardware_addr"
+                | "net.HardwareAddr"
+                | "net.buffers"
+                | "net.Buffers"
+                | "json.raw_message"
+                | "json.RawMessage"
+                | "sort.int_slice"
+                | "sort.IntSlice"
+                | "sort.float64_slice"
+                | "sort.Float64Slice"
+                | "sort.string_slice"
+                | "sort.StringSlice"
+        )
+    {
+        return true;
+    }
     matches!(
         name,
         "io.reader"
@@ -55,26 +82,95 @@ fn is_non_struct_foreign_type(name: &str) -> bool {
             | "io.rune_scanner"
             | "io.string_writer"
             | "http.handler"
+            | "http.Handler"
+            | "http.handler_func"
+            | "http.HandlerFunc"
             | "http.response_writer"
+            | "http.ResponseWriter"
             | "http.flusher"
+            | "http.Flusher"
             | "http.hijacker"
+            | "http.Hijacker"
+            | "http.close_notifier"
+            | "http.CloseNotifier"
+            | "http.pusher"
+            | "http.Pusher"
             | "http.round_tripper"
+            | "http.RoundTripper"
+            | "http.cookie_jar"
+            | "http.CookieJar"
+            | "http.file"
+            | "http.File"
+            | "http.file_system"
+            | "http.FileSystem"
+            | "http.conn_state"
+            | "http.ConnState"
+            | "http.same_site"
+            | "http.SameSite"
+            | "http.dir"
+            | "http.Dir"
             | "time.duration"
+            | "time.Duration"
+            | "time.month"
+            | "time.Month"
+            | "time.weekday"
+            | "time.Weekday"
             | "os.file_mode"
+            | "os.FileMode"
             | "os.file_info"
+            | "os.FileInfo"
             | "os.dir_entry"
+            | "os.DirEntry"
             | "os.signal"
+            | "os.Signal"
+            | "sync.locker"
+            | "sync.Locker"
             | "net.conn"
+            | "net.Conn"
             | "net.listener"
+            | "net.Listener"
             | "net.addr"
+            | "net.Addr"
             | "net.packet_conn"
+            | "net.PacketConn"
+            | "net.error"
+            | "net.Error"
+            | "net.invalid_addr_error"
+            | "net.InvalidAddrError"
+            | "net.unknown_network_error"
+            | "net.UnknownNetworkError"
+            | "url.escape_error"
+            | "url.EscapeError"
+            | "url.invalid_host_error"
+            | "url.InvalidHostError"
+            | "json.number"
+            | "json.Number"
+            | "json.delim"
+            | "json.Delim"
+            | "json.marshaler"
+            | "json.Marshaler"
+            | "json.unmarshaler"
+            | "json.Unmarshaler"
+            | "hex.invalid_byte_error"
+            | "hex.InvalidByteError"
+            | "filepath.walk_func"
+            | "filepath.WalkFunc"
+            | "bufio.split_func"
+            | "bufio.SplitFunc"
             | "fmt.stringer"
+            | "fmt.Stringer"
             | "fmt.go_stringer"
+            | "fmt.GoStringer"
             | "fmt.state"
+            | "fmt.State"
             | "fmt.formatter"
+            | "fmt.Formatter"
             | "fmt.scanner"
+            | "fmt.Scanner"
             | "fmt.scan_state"
+            | "fmt.ScanState"
             | "sort.interface"
+            | "sort.Interface"
     )
 }
 
@@ -284,7 +380,7 @@ impl<'a> Checker<'a> {
             return true;
         }
         let head = name.split('[').next().unwrap_or(name.as_str());
-        if is_non_struct_foreign_type(head) {
+        if is_non_struct_foreign_type(head, !is_empty) {
             return false;
         }
         self.structs.contains_key(head) || head.contains('.')
