@@ -207,13 +207,14 @@ impl<'a> Checker<'a> {
                 }
                 match kind {
                     ForKind::While { cond } => self.check_expr_emit_guard(st, cond),
-                    ForKind::Range { var, lo, hi, .. } => {
+                    ForKind::Range { var, lo, hi, inclusive } => {
                         self.check_expr_emit_guard(st, lo);
                         self.check_expr_emit_guard(st, hi);
                         if deep {
+                            let mat_hi = *inclusive || crate::range_iter::expr_reads_range_var(hi, var);
                             let range_ty = self
-                                .typed_int_bound(st, lo)
-                                .or_else(|| self.typed_int_bound(st, hi))
+                                .typed_int_bound(st, lo, mat_hi)
+                                .or_else(|| self.typed_int_bound(st, hi, mat_hi))
                                 .map(|name| TypeExpr::Named {
                                     name,
                                     span: lo.span(),
