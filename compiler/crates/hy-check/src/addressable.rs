@@ -30,6 +30,19 @@ use hy_syntax::{Block, Expr, ForKind, MatchPattern, Param, Place, PlaceKind, Sel
 impl<'a> Checker<'a> {
     /// `target` of an assignment (any operator, including `++`/`--`).
     pub(crate) fn check_assign_target_addressable(&mut self, st: &FnState, target: &Place) {
+        if matches!(&target.kind, PlaceKind::AddrOf { .. }) {
+            let msg = format!(
+                "cannot assign to `{}` — an address-of expression is not an assignable place in Go (HYB-E2010)",
+                target.render()
+            );
+            let notes = vec![
+                "why: Go rejects an assignment to an address-of expression (`cannot assign to &x`), so an accepted Hybrid program would emit unbuildable Go — GUARANTEES Row 13".to_string(),
+                "fix: assign to the variable or field directly (`x = …`), or assign through a pointer dereference if supported".to_string(),
+            ];
+            self.diags
+                .push(Diagnostic::error("HYB-E2010", self.path.clone(), target.span, msg).with_notes(notes));
+            return;
+        }
         let Some(elem) = self.place_unassignable_at(st, target) else {
             return;
         };
@@ -113,7 +126,8 @@ impl<'a> Checker<'a> {
                 Some(TypeShape::Struct(_)) => self.place_unaddressable_at(st, base),
                 _ => None,
             },
-            PlaceKind::Ident(_) | PlaceKind::AddrOf { .. } => None,
+            PlaceKind::AddrOf { .. } => Some(p),
+            PlaceKind::Ident(_) => None,
         }
     }
 
@@ -225,3 +239,4 @@ fn stmt_binders(s: &Stmt, out: &mut HashSet<String>) {
         _ => {}
     }
 }
+
