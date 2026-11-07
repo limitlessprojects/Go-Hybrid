@@ -211,11 +211,18 @@ impl<'a> Checker<'a> {
                         self.check_expr_emit_guard(st, lo);
                         self.check_expr_emit_guard(st, hi);
                         if deep {
+                            let range_ty = self
+                                .typed_int_bound(st, lo)
+                                .or_else(|| self.typed_int_bound(st, hi))
+                                .map(|name| TypeExpr::Named {
+                                    name,
+                                    span: lo.span(),
+                                });
                             self.define_binding(
                                 st,
                                 var,
                                 TypeShape::Primitive,
-                                None,
+                                range_ty,
                                 false,
                                 false,
                                 false,
@@ -226,8 +233,9 @@ impl<'a> Checker<'a> {
                         self.check_expr_emit_guard(st, expr);
                         if deep {
                             let shapes = self.iterate_var_shapes(st, expr, vars.len());
-                            for (name, shape) in vars.iter().zip(shapes) {
-                                self.define_binding(st, name, shape, None, false, false, false);
+                            let var_tys = self.iterate_var_tys(st, expr, vars.len());
+                            for ((name, shape), var_ty) in vars.iter().zip(shapes).zip(var_tys) {
+                                self.define_binding(st, name, shape, var_ty, false, false, false);
                             }
                         }
                     }
