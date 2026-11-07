@@ -486,3 +486,13 @@
 - Stalled-watch: #3942/#3949/#3918 zero author movement (updated_at == our replies).
 - Next queue: #3815/#3817/#3819 (aswadi), #3814 (Burapa-J arith fold), #3820/#3831/#3841-#3849 band, then #4015+ flood; watch #3825 for post-#3811 residue.
 - Suites 472 -> 473 integration files (+2 new suites this tick, one per PR). Both pushes remote-asserted; replies 201 x2; zero silent closes.
+
+## Session 142 — 2026-11-08 01:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef5b68); toolchains restored; approve 4/4 (4994 left); scan skipped (quota doctrine).
+- **2 landed**:
+  - **#3858** -> `011823c9` (Burapa-J, fixes #3857): tuple.rs check_type_expr_single_value — array-length TypeExprs walked in Local/FnLit/SliceLit/MapLit positions; FnLit out of skip-list; file-const fn callees resolved in static_result_count; is_unshadowed_pkg shadow guards. Extended suite 5 tests; corpus 135; differential FULL.
+  - **#3860** -> `6af66ee8` (Burapa-J, fixes #3859): shape_carries_handle_at set[T] element inspection + unresolved-generic fail-closed; call_shape type-param Unknown; package calls refuse struct/enum/alias/const/typeparam shadowing. Extended suite 12 tests; corpus 135; differential FULL.
+- Queue reality check: aswadi band (#3815/#3817/#3819) and #3820-#3857 old band no longer open (maintainer-processed); oldest open now starts #3858 (landed), then #3861/#3864/#3867/#3883-#3899. Correction: S141 worklog's "#3814 Burapa-J arith" was wrong — #3814 is an issue; the PR is #3843 (also no longer open).
+- Count correction: integration-file counts in the #3811/#3813 commits (472/473) understated by one each — actual 473/474 (arithmetic drift, zero coverage gaps; all suites ran all ticks). Today verified 474 .rs on disk == 474 binaries in log == all green. Disclosed in #3860 landing reply.
+- Two transient env faults this tick: first #3860 battery exited 101 with dropped stderr (clean re-run green); both remote-asserted; replies 201 x2; zero silent closes.
+- Next queue: #3861 (dextermos-dev range_iter shadows), #3864/#3897 (buildable member lowerings — possible dup pair, check), #3867 (const_init type-param shadows), #3883-#3899 band, then #4015+ flood.
