@@ -967,16 +967,53 @@ impl<'a> Collector<'a> {
     /// non-numeric elements, and unresolved bindings return `None` so the
     /// caller stays fail-open.
     fn chan_element_scalar(&self, e: &Expr) -> Option<&'static str> {
-        let Expr::Ident { name, .. } = unwrap_parens(e) else {
-            return None;
-        };
-        let tname = self.lookup_type_name(name)?;
-        let t = tname.trim();
-        let t = t.strip_prefix("<-").unwrap_or(t).trim();
-        let t = t.strip_prefix("chan")?;
-        let t = t.trim_start();
-        let t = t.strip_prefix("<-").unwrap_or(t).trim();
-        canonical_numeric_name(t)
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                if let Some(s) = self.lookup_container_elem_scalar(name) {
+                    return Some(s);
+                }
+                let tname = self.lookup_type_name(name)?;
+                let t = tname.trim();
+                let t = t.strip_prefix("<-").unwrap_or(t).trim();
+                let t = t.strip_prefix("chan")?;
+                let t = t.trim_start();
+                let t = t.strip_prefix("<-").unwrap_or(t).trim();
+                canonical_numeric_name(t)
+            }
+            Expr::Call { callee, args, .. } => {
+                let bare_callee = unwrap_parens(callee);
+                if let Expr::Ident { name, .. } = bare_callee {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            if let Expr::StructLit { ty: Some(t), .. } = unwrap_parens(&first.value) {
+                                return self.chan_elem_scalar_of_ty(t);
+                            }
+                            return self.chan_element_scalar(&first.value);
+                        }
+                    }
+                    if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                        if fd.receiver.is_none() && fd.type_params.is_empty() && fd.results.len() == 1 {
+                            return self.chan_elem_scalar_of_ty(&fd.results[0].ty);
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Receive { chan, .. } => self.chan_element_scalar(chan),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                self.struct_field_container_elem_scalar(&bk, name)
+            }
+            Expr::Slice { base, .. } => self.chan_element_scalar(base),
+            _ => None,
+        }
+    }
+
+    fn chan_elem_scalar_of_ty(&self, ty: &TypeExpr) -> Option<&'static str> {
+        match &self.ck.resolve_type_alias(ty) {
+            TypeExpr::Chan { elem, .. } => self.scalar_of_ty(elem),
+            _ => None,
+        }
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -1426,7 +1463,8 @@ impl<'a> Collector<'a> {
                 TypeExpr::Array { elem, .. } => self.scalar_of_ty(elem),
                 _ => None,
             },
-            _ => None,
+                        TypeExpr::Chan { elem, .. } => self.scalar_of_ty(elem),
+_ => None,
         }
     }
 
