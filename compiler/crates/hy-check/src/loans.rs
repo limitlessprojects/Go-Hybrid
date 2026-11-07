@@ -2142,7 +2142,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Field { base, .. } | Expr::Index { base, .. } => {
                 let sh = self.shape_of_expr(st, e);
-                if field_borrow_kind(&sh).is_some() || matches!(sh, TypeShape::Unknown) {
+                if self.field_borrow_kind(&sh).is_some() || matches!(sh, TypeShape::Unknown) {
                     self.collect_expr_addr_of_roots(st, base, out);
                 }
             }
@@ -2183,12 +2183,12 @@ impl<'a> Checker<'a> {
             if let Some(results) = self.call_result_tys(st, callee) {
                 return results.iter().any(|ty| {
                     let shape = self.shape_of_type(ty);
-                    field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown)
+                    self.field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown)
                 });
             }
         }
         let shape = self.shape_of_expr(st, inner);
-        field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown)
+        self.field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown)
     }
 
     pub(crate) fn expr_carries_borrow(&self, st: &FnState, e: &Expr) -> bool {
@@ -4333,7 +4333,7 @@ impl<'a> Checker<'a> {
             if name == "_" {
                 continue;
             }
-            let borrow_slot = field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
+            let borrow_slot = self.field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
             if (l.names.len() == l.values.len() || borrow_slot) && self.expr_carries_borrow(st, value) {
                 st.borrow_bindings.insert(name.clone());
             } else {
@@ -4400,7 +4400,7 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     let borrow_slot =
-                        field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
+                        self.field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
                     let inner = unwrap_parens(v);
                     let is_borrow = as_addr_of(inner).is_some()
                         || contains_addr_of_in_literal(inner)
@@ -6646,7 +6646,7 @@ impl<'a> Checker<'a> {
                 if matches!(t.kind, PlaceKind::Field { .. }) {
                     let shape = self.shape_of_expr(st, v);
                     let is_borrow = as_addr_of(v).is_some()
-                        || field_borrow_kind(&shape).is_some();
+                        || self.field_borrow_kind(&shape).is_some();
                     if is_borrow {
                         self.emit_a6_field_borrow_error(t);
                     }
@@ -6656,7 +6656,7 @@ impl<'a> Checker<'a> {
             let shapes = self.multi_value_shapes(st, &values[0], targets.len());
             for (t, shape) in targets.iter().zip(shapes.iter()) {
                 if matches!(t.kind, PlaceKind::Field { .. })
-                    && field_borrow_kind(shape).is_some()
+                    && self.field_borrow_kind(shape).is_some()
                 {
                     self.emit_a6_field_borrow_error(t);
                 }
@@ -9495,7 +9495,7 @@ impl<'a> Checker<'a> {
         for (sname, fields) in decls {
             for (fname, fty) in fields {
                 let shape = self.shape_of_type(&fty);
-                match field_borrow_kind(&shape) {
+                match self.field_borrow_kind(&shape) {
                     Some("borrow-handle") => {
                         let msg = format!(
                             "struct field `{}.{}` has borrow-handle type `{}`",
@@ -9565,15 +9565,41 @@ impl<'a> Checker<'a> {
             slot_loan: false,
         }
     }
-}
 
-fn field_borrow_kind(shape: &TypeShape) -> Option<&'static str> {
-    match shape {
-        TypeShape::BorrowHandle(_) => Some("borrow-handle"),
-        TypeShape::Pointer(inner) if !matches!(**inner, TypeShape::Atomic) => Some("pointer"),
-        TypeShape::Slice(elem) | TypeShape::Array(elem) => field_borrow_kind(elem),
-        TypeShape::Map(k, v) => field_borrow_kind(k).or_else(|| field_borrow_kind(v)),
-        _ => None,
+    fn field_borrow_kind(&self, shape: &TypeShape) -> Option<&'static str> {
+        self.shape_borrow_kind(shape, &mut Vec::new())
+    }
+
+    fn shape_borrow_kind(&self, shape: &TypeShape, seen: &mut Vec<String>) -> Option<&'static str> {
+        match shape {
+            TypeShape::BorrowHandle(_) => Some("borrow-handle"),
+            TypeShape::Pointer(inner) if !matches!(**inner, TypeShape::Atomic) => Some("pointer"),
+            TypeShape::Slice(elem) | TypeShape::Array(elem) => self.shape_borrow_kind(elem, seen),
+            TypeShape::Map(k, v) => self
+                .shape_borrow_kind(k, seen)
+                .or_else(|| self.shape_borrow_kind(v, seen)),
+            TypeShape::Struct(Some(sname)) if sname.contains('[') => {
+                if !self.structs.contains_key("set") {
+                    if let Some(("set", args)) = Self::parse_generic_type_args(sname) {
+                        if let Some(arg) = args.first() {
+                            return self.shape_borrow_kind(&self.shape_of_type(arg), seen);
+                        }
+                    }
+                }
+                if seen.iter().any(|s| s == sname) {
+                    return None;
+                }
+                seen.push(sname.clone());
+                let res = self.struct_fields_for_sname(sname).and_then(|fields| {
+                    fields
+                        .iter()
+                        .find_map(|(_, fty)| self.shape_borrow_kind(&self.shape_of_type(fty), seen))
+                });
+                seen.pop();
+                res
+            }
+            _ => None,
+        }
     }
 }
 
