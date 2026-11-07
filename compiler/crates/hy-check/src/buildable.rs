@@ -1394,6 +1394,62 @@ impl<'a> Collector<'a> {
             _ => None,
         }
     }
+
+    fn resolve_type_str(&self, s: &str) -> String {
+        let mut curr = s.trim().to_string();
+        for _ in 0..10 {
+            if let Some(alias_ty) = self.ck.type_aliases.get(curr.as_str()) {
+                curr = alias_ty.render();
+            } else {
+                break;
+            }
+        }
+        curr
+    }
+
+    /// #3448 - container element, key, value, base, and array alias soundness for variable declarations.
+    fn container_type_names_conflict(&self, target_str: &str, got_opt: Option<&str>) -> bool {
+        let Some(got_str) = got_opt else {
+            return false;
+        };
+        let t_res = self.resolve_type_str(target_str);
+        let g_res = self.resolve_type_str(got_str);
+        if t_res == g_res {
+            return false;
+        }
+        let t_chan = t_res
+            .strip_prefix("<-chan ")
+            .or_else(|| t_res.strip_prefix("chan<- "))
+            .or_else(|| t_res.strip_prefix("chan "))
+            .map(str::trim);
+        let g_chan = g_res
+            .strip_prefix("<-chan ")
+            .or_else(|| g_res.strip_prefix("chan<- "))
+            .or_else(|| g_res.strip_prefix("chan "))
+            .map(str::trim);
+        if let (Some(te), Some(ge)) = (t_chan, g_chan) {
+            let t_elem_resolved = self.resolve_type_str(te);
+            let g_elem_resolved = self.resolve_type_str(ge);
+            return t_elem_resolved != g_elem_resolved;
+        }
+        if t_res.starts_with("map[") && g_res.starts_with("map[") {
+            return true;
+        }
+        if t_res.starts_with("[]") && g_res.starts_with("[]") {
+            let t_elem = self.resolve_type_str(&t_res[2..]);
+            let g_elem = self.resolve_type_str(&g_res[2..]);
+            return t_elem != g_elem;
+        }
+        if t_res.starts_with('*') && g_res.starts_with('*') {
+            let t_base = self.resolve_type_str(&t_res[1..]);
+            let g_base = self.resolve_type_str(&g_res[1..]);
+            return t_base != g_base;
+        }
+        if is_sized_array_spelling(&t_res) && is_sized_array_spelling(&g_res) {
+            return true;
+        }
+        false
+    }
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
@@ -2115,6 +2171,10 @@ impl<'a> Collector<'a> {
                         Some(t.render().as_str()),
                         self.typed_value_type_name(&l.values[0]).as_deref(),
                     )
+                    || self.container_type_names_conflict(
+                        t.render().as_str(),
+                        self.typed_value_type_name(&l.values[0]).as_deref(),
+                    )
                 {
                     self.emit_e1002(
                         l.span,
@@ -2145,6 +2205,10 @@ impl<'a> Collector<'a> {
                         || scalar_mismatch
                         || self.sized_array_names_differ(
                             Some(t.render().as_str()),
+                            self.typed_value_type_name(v).as_deref(),
+                        )
+                        || self.container_type_names_conflict(
+                            t.render().as_str(),
                             self.typed_value_type_name(v).as_deref(),
                         )
                     {
