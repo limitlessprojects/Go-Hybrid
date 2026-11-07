@@ -359,6 +359,43 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Stmt::Assign {
+                targets,
+                op: hy_syntax::AssignOp::Assign,
+                values,
+                ..
+            } => {
+                if targets.len() == values.len() {
+                    let updates: Vec<_> = targets
+                        .iter()
+                        .zip(values.iter())
+                        .filter_map(|(t, val)| match &t.kind {
+                            hy_syntax::PlaceKind::Ident(name) if name != "_" => {
+                                let ty = self
+                                    .ty_of_expr(st, val)
+                                    .or_else(|| self.composite_type_expr(st, val));
+                                let inferred = self.shape_of_expr(st, val);
+                                let shape = match (&ty, inferred) {
+                                    (Some(te), TypeShape::Unknown) => self.shape_of_type(te),
+                                    (_, s) => s,
+                                };
+                                Some((name.clone(), shape, ty))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    for (name, shape, ty) in updates {
+                        if let Some(b) = tmp.env_lookup_mut(&name) {
+                            if ! matches!(shape, TypeShape::Unknown) {
+                                b.shape = shape;
+                            }
+                            if ty.is_some() {
+                                b.ty = ty;
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
