@@ -651,8 +651,46 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const NET_UDP_ADDR: &[&str] = &["addr_port", "network", "string"];
     const NET_UNIX_ADDR: &[&str] = &["network", "string"];
     const NET_IP_ADDR: &[&str] = &["network", "string"];
+    /// `time.Time` — the 28 single-return value methods `hy-emit` actually
+    /// lowers (see the `time.time` entry in its `SHAPES` table). Multi-return
+    /// methods (`Date`, `Clock`, `ISOWeek`, `Zone`, `ZoneBounds`) stay out on
+    /// both sides — Hybrid has no multi-value method lowering — as do the
+    /// encoding helpers (`GoString`, `GobEncode`, `MarshalBinary`, …) that no
+    /// curated surface ships. Same bug class as #2200/#3626, different handle:
+    /// `s.t.totally_fake()` passed `hyb check` and died in `go build` (#3933).
+    const TIME_TIME: &[&str] = &[
+        "format",
+        "add",
+        "sub",
+        "add_date",
+        "round",
+        "truncate",
+        "before",
+        "after",
+        "equal",
+        "compare",
+        "is_zero",
+        "unix",
+        "unix_milli",
+        "unix_micro",
+        "unix_nano",
+        "utc",
+        "local",
+        "in",
+        "year",
+        "month",
+        "day",
+        "hour",
+        "minute",
+        "second",
+        "nanosecond",
+        "year_day",
+        "weekday",
+        "string",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
+        "time.time" | "time.Time" => Some(TIME_TIME),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
         "sync.once" | "sync.Once" => Some(SYNC_ONCE),
@@ -749,6 +787,22 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
         }
+        // #3933: `time.Time` value-method results. The handle-returning ones
+        // keep the `time.time` shape so chains (`s.t.utc().unix()`) stay
+        // inside the pinned surface; `sub` chains onto the `time.duration`
+        // table; scalars/predicates are `Primitive`, text is `Str`.
+        (
+            "time.time" | "time.Time",
+            "add" | "add_date" | "round" | "truncate" | "utc" | "local" | "in",
+        ) => TypeShape::ForeignOpaque("time.time".into()),
+        ("time.time" | "time.Time", "sub") => TypeShape::ForeignOpaque("time.duration".into()),
+        ("time.time" | "time.Time", "format" | "string") => TypeShape::Str,
+        (
+            "time.time" | "time.Time",
+            "before" | "after" | "equal" | "compare" | "is_zero" | "unix" | "unix_milli"
+            | "unix_micro" | "unix_nano" | "year" | "month" | "day" | "hour" | "minute" | "second"
+            | "nanosecond" | "year_day" | "weekday",
+        ) => TypeShape::Primitive,
         // scalar atomics only ("atomic.int" is receiver_type_name's key for
         // TypeShape::Atomic): load/swap/add yield the scalar. A non-scalar
         // atomic's `load()` / `swap()` returns a pointer / `any` — Unknown,
