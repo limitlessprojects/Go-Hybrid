@@ -372,11 +372,130 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
     const SYNC_WAIT_GROUP: &[&str] = &["add", "done", "wait"];
     const SYNC_ONCE: &[&str] = &["do"];
+    const BYTES_BUFFER: &[&str] = &[
+        "write", "write_byte", "write_rune", "write_string", "write_to",
+        "read", "read_byte", "read_bytes", "read_from", "read_rune", "read_string",
+        "next", "grow", "reset", "string", "bytes", "len", "cap", "truncate",
+        "unread_byte", "unread_rune",
+    ];
+    const STRINGS_BUILDER: &[&str] = &[
+        "write", "write_byte", "write_rune", "write_string",
+        "grow", "reset", "string", "len", "cap",
+    ];
+    const SYNC_COND: &[&str] = &["wait", "signal", "broadcast"];
+    const SYNC_POOL: &[&str] = &["get", "put"];
+    const SYNC_MAP: &[&str] = &[
+        "load",
+        "store",
+        "delete",
+        "load_or_store",
+        "load_and_delete",
+        "range",
+        "compare_and_swap",
+        "compare_and_delete",
+        "swap",
+    ];
+    const TIME_TICKER: &[&str] = &["stop", "reset"];
+    const TIME_TIMER: &[&str] = &["stop", "reset"];
+    /// `bufio.Reader` — Go standard library buffered reader methods.
+    const BUFIO_READER: &[&str] = &[
+        "buffered",
+        "discard",
+        "peek",
+        "read",
+        "read_byte",
+        "read_bytes",
+        "read_line",
+        "read_rune",
+        "read_slice",
+        "read_string",
+        "reset",
+        "size",
+        "unread_byte",
+        "unread_rune",
+        "write_to",
+    ];
+    /// `bufio.Writer` — Go standard library buffered writer methods.
+    const BUFIO_WRITER: &[&str] = &[
+        "available",
+        "available_buffer",
+        "buffered",
+        "flush",
+        "read_from",
+        "reset",
+        "size",
+        "write",
+        "write_byte",
+        "write_rune",
+        "write_string",
+    ];
+    /// `bufio.Scanner` — Go standard library buffered scanner methods.
+    const BUFIO_SCANNER: &[&str] = &[
+        "buffer",
+        "bytes",
+        "err",
+        "scan",
+        "split",
+        "text",
+    ];
+    /// `os.File` — standard library file handle. Go defines 24 methods on `*os.File`.
+    const OS_FILE: &[&str] = &[
+        "chdir",
+        "chmod",
+        "chown",
+        "close",
+        "fd",
+        "name",
+        "read",
+        "read_at",
+        "read_dir",
+        "read_from",
+        "readdir",
+        "readdirnames",
+        "seek",
+        "set_deadline",
+        "set_read_deadline",
+        "set_write_deadline",
+        "stat",
+        "sync",
+        "syscall_conn",
+        "truncate",
+        "write",
+        "write_at",
+        "write_string",
+        "write_to",
+    ];
+    /// `io.PipeReader`.
+    const IO_PIPE_READER: &[&str] = &["close", "close_with_error", "read"];
+    /// `io.PipeWriter`.
+    const IO_PIPE_WRITER: &[&str] = &["close", "close_with_error", "write"];
+    /// `io.SectionReader`.
+    const IO_SECTION_READER: &[&str] = &["outer", "read", "read_at", "seek", "size"];
+    /// `io.LimitedReader`.
+    const IO_LIMITED_READER: &[&str] = &["read"];
+    /// `io.OffsetWriter`.
+    const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
         "sync.once" | "sync.Once" => Some(SYNC_ONCE),
+        "bytes.buffer" | "bytes.Buffer" => Some(BYTES_BUFFER),
+        "strings.builder" | "strings.Builder" => Some(STRINGS_BUILDER),
+        "sync.cond" | "sync.Cond" => Some(SYNC_COND),
+        "sync.pool" | "sync.Pool" => Some(SYNC_POOL),
+        "sync.map" | "sync.Map" => Some(SYNC_MAP),
+        "time.ticker" | "time.Ticker" => Some(TIME_TICKER),
+        "time.timer" | "time.Timer" => Some(TIME_TIMER),
+        "bufio.reader" | "bufio.Reader" => Some(BUFIO_READER),
+        "bufio.writer" | "bufio.Writer" => Some(BUFIO_WRITER),
+        "bufio.scanner" | "bufio.Scanner" => Some(BUFIO_SCANNER),
+        "os.file" | "os.File" => Some(OS_FILE),
+        "io.pipe_reader" | "io.PipeReader" => Some(IO_PIPE_READER),
+        "io.pipe_writer" | "io.PipeWriter" => Some(IO_PIPE_WRITER),
+        "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
+        "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
+        "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -451,6 +570,7 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "sync"
             | "sync/atomic"
             | "atomic"
+            | "bytes"
             | "bufio"
             | "net"
             | "net/http"
@@ -527,6 +647,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "errors"
             | "sync"
             | "atomic"
+            | "bytes"
             | "bufio"
             | "net"
             | "http"
@@ -1045,6 +1166,49 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "swap_uint64"
                 | "swap_uintptr"
                 | "swap_pointer"
+        ),
+        "bytes" => matches!(
+            m,
+            "new_buffer"
+                | "new_buffer_string"
+                | "new_reader"
+                | "compare"
+                | "contains"
+                | "contains_any"
+                | "contains_rune"
+                | "count"
+                | "cut"
+                | "equal"
+                | "equal_fold"
+                | "fields"
+                | "has_prefix"
+                | "has_suffix"
+                | "index"
+                | "index_any"
+                | "index_byte"
+                | "index_rune"
+                | "join"
+                | "last_index"
+                | "last_index_any"
+                | "last_index_byte"
+                | "repeat"
+                | "replace"
+                | "replace_all"
+                | "runes"
+                | "split"
+                | "split_after"
+                | "split_after_n"
+                | "split_n"
+                | "title"
+                | "to_lower"
+                | "to_title"
+                | "to_upper"
+                | "trim"
+                | "trim_left"
+                | "trim_prefix"
+                | "trim_right"
+                | "trim_space"
+                | "trim_suffix"
         ),
         "bufio" => matches!(
             m,
