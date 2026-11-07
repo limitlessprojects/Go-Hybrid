@@ -536,3 +536,12 @@
 - Zero silent closes; 2 replies 201; both pushes remote-asserted (979c472a, 93e4625f == ls-remote); post-battery trim kept disk healthy (no ENOSPC this tick).
 - Next queue: #3892/#3894 (Burapa-J loans/sendability), then #4015+ flood. Stalled-watch unchanged: #3942/#3949/#3918.
 - Suites 479 integration files (+1: builtin_complex_soundness_3072; #3890 python-side only).
+
+## Session 147 — 2026-11-08 06:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef9a1b, 7th consecutive); toolchains restored; approve 4/4 (4994 left); scan skipped (quota doctrine).
+- **1 landed, 1 fully-reviewed-pending-battery**:
+  - **#3892** -> `a3f88231` (Burapa-J, fixes #3891): loans.rs — check_a2_conflict + map-slot conflict now consult effective_loan_last (loop-extended window) instead of raw l.last; alias source unwrap extends to Move wrappers (`q := move p` no longer skips extension); diagnostic reports eff_last. Extended suite 8/8 (3 new fixtures: loop-carried O8 E3102, loop-carried A2 E3101, move-alias window); workspace 488/3126/0; corpus 135; differential FULL. Reply 201.
+  - **#3894** (Burapa-J, sendability) diff reviewed end-to-end this tick, battery deferred (budget): set[T] element recursion in all three shape_holds_* walkers (user-set-struct guard respected), Unproven-tp arm moved from top-level match to fallback tail (more precise classification wins first), spawn-callee + static-arg-inference shadow sets extended (type-param/struct/enum/alias), fn type_params defined in const env, match-arm binders resolve enum variant payload for chan-dir checks (new resolve_enum_arm_dir_ty). 2 new tests in callee_and_nil (nested set/callee/enum-dir rejects E3001/E3005/E3008/E3009 + sendable control). Branch pr-3894 fetched locally; battery next tick is first action.
+- Zero silent closes; reply 201; push remote-asserted (a3f88231 == ls-remote); disk trimmed, no ENOSPC.
+- Next queue: #3894 battery+land (ready), then #4015+ flood. Stalled-watch unchanged: #3942/#3949/#3918.
+- Suites 479 integration files (unchanged; #3892 extends existing suite).
