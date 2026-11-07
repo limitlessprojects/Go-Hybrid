@@ -105,24 +105,28 @@ impl Emitter {
                         }
                         if let (
                             TypeExpr::Array {
-                                len:
-                                    Some(
-                                        len_expr,
-                                    ),
+                                len: Some(len_expr),
                                 ..
                             },
                             Some(init),
                         ) = (&resolved, self.n5_zero_init(elem))
                         {
                             if let Expr::Lit {
-                                kind: LitKind::Int(n),
+                                kind: LitKind::Int(s),
                                 ..
-                            } = len_expr.as_ref()
+                            } = Self::unwrap_parens(len_expr)
                             {
-                                parts.resize(
-                                    n.replace('_', "").parse().unwrap_or(0).max(parts.len()),
-                                    init,
-                                );
+                                if let Some(n) = super::constconv::parse_int(s)
+                                    .and_then(|v| usize::try_from(v).ok())
+                                {
+                                    parts.resize(n.max(parts.len()), init);
+                                }
+                            } else {
+                                let skip = parts.len();
+                                return Ok(format!(
+                                    "func() (hyArr {head}) {{ hyArr = {head}{{{}}}; for hyIdx := {skip}; hyIdx < len(hyArr); hyIdx++ {{ hyArr[hyIdx] = {init} }}; return hyArr }}()",
+                                    parts.join(", ")
+                                ));
                             }
                         }
                         return Ok(format!("{}{{{}}}", head, parts.join(", ")));
@@ -609,25 +613,22 @@ impl Emitter {
         ty: &TypeExpr,
         fields: &[FieldInit],
     ) -> Result<String, EmitError> {
-        let body = self.field_inits(fields)?;
-        let extra = self.n5_missing_fields(ty, fields);
-        if extra.is_empty() {
-            return Ok(body);
-        }
-        let mut parts = Vec::new();
-        if !body.is_empty() {
-            parts.push(body);
-        }
-        parts.extend(extra);
-        Ok(parts.join(", "))
-    }
-
-    fn field_inits(&mut self, fields: &[FieldInit]) -> Result<String, EmitError> {
+        let field_decls = match self.n5_resolve_alias(ty) {
+            TypeExpr::Named { name, .. } => self.struct_lit_field_decls(&name),
+            _ => None,
+        };
         let mut parts = Vec::new();
         for f in fields {
-            let v = self.emit_expr(&f.value, 0)?;
+            let exp_ty = field_decls.as_ref().and_then(|ds| {
+                ds.iter()
+                    .find(|d| d.name == f.name)
+                    .map(|d| d.ty.clone())
+            });
+            let v = self.emit_expr_exp(&f.value, 0, exp_ty.as_ref())?;
             parts.push(format!("{}: {}", f.name, v));
         }
+        let extra = self.n5_missing_fields(ty, fields);
+        parts.extend(extra);
         Ok(parts.join(", "))
     }
 
@@ -961,7 +962,7 @@ impl Emitter {
         }
     }
 
-    fn assoc_index_type_arg(e: &Expr) -> Option<String> {
+    pub(crate) fn assoc_index_type_arg(e: &Expr) -> Option<String> {
         match Self::unwrap_parens(e) {
             Expr::Ident { name, .. } => Some(name.clone()),
             Expr::Field { base, name, .. } => {
@@ -1320,7 +1321,7 @@ impl Emitter {
         // takes any integer type for the sizes; the helper takes `int`.
         let elem = match first_val {
             Expr::SliceLit { elem: Some(t), items, .. } if items.is_empty() && first_val.as_array_lit().is_none() => Some(t.as_ref().clone()),
-            Expr::Ident { name, span } => match self.n5_resolve_alias(&TypeExpr::Named { name: name.clone(), span: *span }) {
+            Expr::Ident { name, span } if !self.local_vars.contains(name) => match self.n5_resolve_alias(&TypeExpr::Named { name: name.clone(), span: *span }) {
                 TypeExpr::Slice { elem, .. } => Some(*elem),
                 _ => None,
             },
