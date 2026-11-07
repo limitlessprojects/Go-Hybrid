@@ -637,6 +637,31 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const BUILTIN_ERROR: &[&str] = &["error"];
     const NET_ADDR: &[&str] = &["network", "string"];
     const NET_ERROR: &[&str] = &["error", "temporary", "timeout"];
+    const HTTP_HANDLER: &[&str] = &["serve_http"];
+    const HTTP_SERVE_MUX: &[&str] = &["handle", "handle_func", "serve_http"];
+    const HTTP_HEADER: &[&str] = &[
+        "get",
+        "set",
+        "add",
+        "del",
+        "values",
+        "clone",
+        "write",
+        "write_subset",
+    ];
+    const URL_VALUES: &[&str] = &["get", "set", "add", "del", "has", "encode"];
+    const TIME_DURATION: &[&str] = &[
+        "milliseconds",
+        "microseconds",
+        "nanoseconds",
+        "seconds",
+        "minutes",
+        "hours",
+        "string",
+        "truncate",
+        "round",
+        "abs",
+    ];
     match recv_type {
         "error" | "errors.error" => Some(BUILTIN_ERROR),
         "net.addr" | "net.Addr" => Some(NET_ADDR),
@@ -688,6 +713,11 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "net.udp_addr" | "net.udpaddr" | "net.UDPAddr" => Some(NET_UDP_ADDR),
         "net.unix_addr" | "net.unixaddr" | "net.UnixAddr" => Some(NET_UNIX_ADDR),
         "net.ip_addr" | "net.ipaddr" | "net.IPAddr" => Some(NET_IP_ADDR),
+        "http.handler" | "http.Handler" => Some(HTTP_HANDLER),
+        "http.serve_mux" | "http.servemux" | "http.ServeMux" => Some(HTTP_SERVE_MUX),
+        "http.header" | "http.Header" => Some(HTTP_HEADER),
+        "url.values" | "url.Values" => Some(URL_VALUES),
+        "time.duration" | "time.Duration" => Some(TIME_DURATION),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
