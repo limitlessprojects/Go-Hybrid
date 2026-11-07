@@ -1018,41 +1018,106 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// `set[int]` -> `"int"`.
+    /// `set[int]` -> `"int"`, `option[int64]` -> `"option:int64"`.
     fn set_elem_of_ty(ty: &TypeExpr) -> Option<String> {
-        if let TypeExpr::Named { name, .. } = ty {
-            return name
+        match ty {
+            TypeExpr::Named { name, .. } => name
                 .strip_prefix("set[")
                 .and_then(|r| r.strip_suffix(']'))
-                .map(|t| t.to_string());
+                .map(|t| t.to_string()),
+            TypeExpr::Option { elem, .. } => Some(format!("option:{}", elem.render())),
+            _ => None,
         }
-        None
     }
 
-    /// The element type text of a set-valued expression, when provable.
+    fn resolved_set_or_option_elem_of_ty(&self, ty: &TypeExpr) -> Option<String> {
+        let resolved = self.ck.resolve_type_alias(ty);
+        Self::set_elem_of_ty(&resolved)
+    }
+
+    /// The element type text of a set-valued or option-valued expression, when provable.
     fn set_elem_of_expr(&self, e: &Expr) -> Option<String> {
         match unwrap_parens(e) {
             Expr::Ident { name, .. } => {
-                for layer in self.set_elem_scopes.iter().rev() {
-                    if let Some(v) = layer.get(name) {
-                        return v.clone();
+                for (klayer, slayer) in self
+                    .kind_scopes
+                    .iter()
+                    .rev()
+                    .zip(self.set_elem_scopes.iter().rev())
+                {
+                    if let Some(v) = slayer.get(name) {
+                        if v.is_some() {
+                            return v.clone();
+                        }
+                    }
+                    if klayer.contains_key(name) {
+                        if let Some(tname) = self.lookup_type_name(name) {
+                            if let Some(alias_ty) = self.ck.type_aliases.get(tname.as_str()) {
+                                return self.resolved_set_or_option_elem_of_ty(alias_ty);
+                            }
+                        }
+                        return None;
                     }
                 }
                 None
             }
-            Expr::StructLit { ty: Some(t), .. } => Self::set_elem_of_ty(t),
-            // `mk()` where `fn mk() set[T]` — the declared single result.
-            Expr::Call { callee, .. } => match unwrap_parens(callee) {
-                Expr::Ident { name, .. } if self.lookup_kind(name).is_none() => self
-                    .ck
-                    .fns
-                    .get(name.as_str())
-                    .filter(|f| f.results.len() == 1)
-                    .and_then(|f| Self::set_elem_of_ty(&f.results[0].ty)),
+            Expr::StructLit { ty: Some(t), .. } => self.resolved_set_or_option_elem_of_ty(t),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                let subst = self.struct_type_arg_map(&full_name);
+                let (_, fty) = fields.iter().find(|(n, _)| n == name)?;
+                let resolved = self.ck.resolve_type_alias(fty);
+                match &resolved {
+                    TypeExpr::Named { name: n, .. } => {
+                        let inner = n.strip_prefix("set[")?.strip_suffix(']')?;
+                        Some(subst.get(inner).cloned().unwrap_or_else(|| inner.to_string()))
+                    }
+                    TypeExpr::Option { elem, .. } => {
+                        let rendered = elem.render();
+                        let actual = subst.get(&rendered).cloned().unwrap_or(rendered);
+                        Some(format!("option:{}", actual))
+                    }
+                    _ => None,
+                }
+            }
+            // `mk()` / `p.mk()` / `some(v)` returning `set[T]` or `option[T]`.
+            Expr::Call { callee, args, .. } => match unwrap_parens(callee) {
+                Expr::Ident { name, .. } if self.lookup_kind(name).is_none() => {
+                    if name == "some" && args.len() == 1 && !self.ck.fns.contains_key("some") {
+                        if let Some(sc) = self.initializer_scalar(&args[0].value) {
+                            return Some(format!("option:{}", sc));
+                        }
+                    }
+                    self.ck
+                        .fns
+                        .get(name.as_str())
+                        .filter(|f| f.results.len() == 1)
+                        .and_then(|f| self.resolved_set_or_option_elem_of_ty(&f.results[0].ty))
+                }
+                Expr::Field { base, name, .. } => {
+                    let bk = self.kind_of_expr(base);
+                    let head = Checker::base_named_type_str(name);
+                    let sname = self.struct_base_name(&bk)?;
+                    let m = self.ck.method_decls.get(&(sname, head.to_string()))?;
+                    if m.type_params.is_empty() && m.results.len() == 1 {
+                        self.resolved_set_or_option_elem_of_ty(&m.results[0].ty)
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             },
             _ => None,
         }
+    }
+
+    fn option_elem_scalar_of_expr(&self, e: &Expr) -> Option<&'static str> {
+        let raw = self.set_elem_of_expr(e)?;
+        let elem = raw.strip_prefix("option:")?;
+        self.scalar_of_type_name(elem)
     }
 
     /// #2474: `s.insert(v)` / `s.contains(v)` / `s.remove(v)` on a `set[T]`
@@ -1068,8 +1133,34 @@ impl<'a> Collector<'a> {
         let Some(elem) = self.set_elem_of_expr(base) else {
             return;
         };
+        if elem.starts_with("option:") {
+            return;
+        }
         let want = self.kind_of_named(&elem, 0);
         let got = self.kind_of_expr(&args[0].value);
+        if want.is_numeric() && got.is_numeric() {
+            if let (Some(w), Some(g)) = (
+                self.scalar_of_type_name(&elem),
+                self.typed_value_scalar(&args[0].value),
+            ) {
+                if w != g {
+                    self.emit_e1002(
+                        args[0].value.span(),
+                        format!(
+                            "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.{}` on `set[{}]` (HYB-E1002)",
+                            args[0].value.render(),
+                            g,
+                            w,
+                            base.render(),
+                            name,
+                            elem
+                        ),
+                        "a set's insert/contains/remove take a value of the set's element type",
+                    );
+                }
+                return;
+            }
+        }
         let int_to_float_conflict = want == OpKind::Float
             && got == OpKind::Int
             && !self.is_untyped_int_const(&args[0].value);
@@ -1104,6 +1195,28 @@ impl<'a> Collector<'a> {
         };
         let want = *elem;
         let got = self.kind_of_expr(&args[0].value);
+        if want.is_numeric() && got.is_numeric() {
+            if let (Some(w), Some(g)) = (
+                self.option_elem_scalar_of_expr(base),
+                self.typed_value_scalar(&args[0].value),
+            ) {
+                if w != g {
+                    self.emit_e1002(
+                        args[0].value.span(),
+                        format!(
+                            "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.or` on `option[{}]` (HYB-E1002)",
+                            args[0].value.render(),
+                            g,
+                            w,
+                            base.render(),
+                            w
+                        ),
+                        "argument to `option.or` must match the option payload type",
+                    );
+                }
+                return;
+            }
+        }
         let int_to_float_conflict = want == OpKind::Float
             && got == OpKind::Int
             && !self.is_untyped_int_const(&args[0].value);
@@ -1477,6 +1590,26 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
+        if let Expr::Field { base, name, .. } = unwrap_parens(callee) {
+            let bk = self.kind_of_expr(base);
+            if matches!(bk, OpKind::Option(_)) {
+                if (name == "unwrap" && args.is_empty()) || (name == "or" && args.len() == 1) {
+                    return Some(vec![self.option_elem_scalar_of_expr(base)]);
+                }
+            }
+            if name == "pop" && args.is_empty() && matches!(bk, OpKind::Slice(_)) {
+                return Some(vec![self.container_elem_scalar_of_expr(base)]);
+            }
+            let head = Checker::base_named_type_str(name);
+            if let Some(sname) = self.struct_base_name(&bk) {
+                if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
+                    if m.type_params.is_empty() {
+                        return Some(m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                    }
+                }
+            }
+            return None;
+        }
         let Expr::Ident { name, .. } = unwrap_parens(callee) else {
             return None;
         };
@@ -2536,7 +2669,8 @@ impl<'a> Collector<'a> {
                             if let Some(b) = binding {
                                 self.define_elidable(b, subject.span());
                                 // #2915: payload binding `some(v)` inherits the element type of `option[T]`.
-                                let bind_k = if segments.first().map(|s| s.as_str()) == Some("some") {
+                                let is_some_pat = segments.first().map(|s| s.as_str()) == Some("some");
+                                let bind_k = if is_some_pat {
                                     if let OpKind::Option(elem) = &subject_kind {
                                         (**elem).clone()
                                     } else {
@@ -2545,7 +2679,15 @@ impl<'a> Collector<'a> {
                                 } else {
                                     OpKind::Unknown
                                 };
+                                let bind_scalar = if is_some_pat && matches!(subject_kind, OpKind::Option(_)) {
+                                    self.option_elem_scalar_of_expr(subject)
+                                } else {
+                                    None
+                                };
                                 self.bind_kind(b, bind_k);
+                                if bind_scalar.is_some() {
+                                    self.set_scalar(b, bind_scalar);
+                                }
                             }
                         }
                         MatchPattern::Lit(lit) => {
