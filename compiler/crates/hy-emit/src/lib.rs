@@ -663,8 +663,10 @@ pub struct Emitter {
     /// `box.get_stats` → `"pool_stats"`).
     pub(crate) fn_ret_struct: BTreeMap<String, String>,
     /// N5 (zeroinit.rs): non-generic user struct → its declared fields,
-    /// and user type alias → its target, for zero values that allocate.
+    /// generic user struct → (type_params, declared fields) for expected-type
+    /// propagation into nested fields, and user type alias → its target.
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
+    n5_generic_structs: BTreeMap<String, (Vec<TypeParam>, Vec<FieldDecl>)>,
     n5_aliases: BTreeMap<String, TypeExpr>,
 }
 
@@ -716,6 +718,7 @@ impl Emitter {
             fn_ret_struct: BTreeMap::new(),
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
+            n5_generic_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
         }
     }
@@ -840,6 +843,16 @@ impl Emitter {
             .filter_map(|d| match d {
                 Decl::Struct(s) => {
                     Some((s.name.clone(), s.fields.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        self.n5_generic_structs = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Struct(s) if !s.type_params.is_empty() => {
+                    Some((s.name.clone(), (s.type_params.clone(), s.fields.clone())))
                 }
                 _ => None,
             })
