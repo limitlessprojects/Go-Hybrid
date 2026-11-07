@@ -397,6 +397,14 @@ fn canonical_numeric_name(name: &str) -> Option<&'static str> {
     })
 }
 
+/// #3283: Go shift counts must be unsigned integers. Returns true for signed integer spellings.
+fn is_signed_integer_scalar(name: &str) -> bool {
+    matches!(
+        name.trim(),
+        "int" | "int8" | "i8" | "int16" | "i16" | "int32" | "i32" | "rune" | "int64" | "i64"
+    )
+}
+
 /// #2771 — `[3]int` yes; `[]int` (slice), `[N]int` (non-constant length), and
 /// named types no — so only genuinely sized arrays are compared.
 fn is_sized_array_spelling(s: &str) -> bool {
@@ -6229,6 +6237,25 @@ impl<'a> Collector<'a> {
                     _ => ">>",
                 };
                 let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
+                if is_shift {
+                    let rhs_scalar = self.typed_value_scalar(rhs)
+                        .or_else(|| self.typed_value_type_name(rhs).as_deref().and_then(canonical_numeric_name));
+                    if let Some(s) = rhs_scalar {
+                        if is_signed_integer_scalar(s) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "invalid operation `{}`: shift count `{}` has type `{}`, must be unsigned integer (HYB-E1002)",
+                                    span_expr_label(lhs, op_str, rhs),
+                                    rhs.render(),
+                                    s
+                                ),
+                                "shift count must be an unsigned integer or untyped constant",
+                            );
+                            return;
+                        }
+                    }
+                }
                 if !matches!(lk, OpKind::Unknown | OpKind::Int)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int)
                     || (!is_shift && self.scalar_conflict(lhs, rhs))
@@ -6568,6 +6595,28 @@ impl<'a> Collector<'a> {
                 }
                 let vk = self.kind_of_expr(val);
                 let is_shift = matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign);
+                if is_shift {
+                    let val_scalar = self.typed_value_scalar(val)
+                        .or_else(|| self.typed_value_type_name(val).as_deref().and_then(canonical_numeric_name));
+                    if let Some(s) = val_scalar {
+                        if is_signed_integer_scalar(s) {
+                            let op_str = if op == AssignOp::ShlAssign { "<<=" } else { ">>=" };
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "invalid operation `{} {} {}`: shift count `{}` has type `{}`, must be unsigned integer (HYB-E1002)",
+                                    target.render(),
+                                    op_str,
+                                    val.render(),
+                                    val.render(),
+                                    s
+                                ),
+                                "shift count must be an unsigned integer or untyped constant",
+                            );
+                            return;
+                        }
+                    }
+                }
                 let scalar_mismatch = !is_shift && matches!(
                     (self.place_scalar(target), self.typed_value_scalar(val)),
                     (Some(tp), Some(vp)) if tp != vp
