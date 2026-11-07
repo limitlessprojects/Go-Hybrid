@@ -79,12 +79,65 @@ impl<'a> Checker<'a> {
     }
 
     fn addr_place_shape(&self, st: &FnState, p: &Place) -> Option<TypeShape> {
-        self.place_shape(st, p).or_else(|| self.place_target_ty(st, p).map(|t| self.shape_of_type(&t)))
+        self.place_shape(st, p)
+            .or_else(|| self.place_target_ty(st, p).map(|t| self.shape_of_type(&t)))
+            .or_else(|| match &p.kind {
+                PlaceKind::Ident(name) => self.lookup_binding(st, name).map(|b| b.shape.clone()),
+                PlaceKind::AddrOf { base } => self
+                    .addr_place_shape(st, base)
+                    .map(|s| TypeShape::Pointer(Box::new(s))),
+                PlaceKind::Field { base, name } => {
+                    let bs = self.addr_place_shape(st, base)?;
+                    match self.field_shape(&bs, name) {
+                        TypeShape::Unknown => None,
+                        s => Some(s),
+                    }
+                }
+                PlaceKind::Index { base, .. } => match self.addr_place_shape(st, base)? {
+                    TypeShape::Map(_, v) | TypeShape::Slice(v) | TypeShape::Array(v) => Some(*v),
+                    TypeShape::Pointer(inner) => match *inner {
+                        TypeShape::Array(v) | TypeShape::Slice(v) | TypeShape::Map(_, v) => Some(*v),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+            })
     }
 
     fn addr_expr_shape(&self, st: &FnState, e: &Expr) -> TypeShape {
         match self.shape_of_expr(st, e) {
-            TypeShape::Unknown => self.composite_type_expr(st, e).map(|t| self.shape_of_type(&t)).unwrap_or(TypeShape::Unknown),
+            TypeShape::Unknown => self
+                .composite_type_expr(st, e)
+                .map(|t| self.shape_of_type(&t))
+                .unwrap_or_else(|| match unwrap_parens_and_move(e) {
+                    Expr::Index { base, .. } => match self.addr_expr_shape(st, base) {
+                        TypeShape::Map(_, v) | TypeShape::Slice(v) | TypeShape::Array(v) => *v,
+                        TypeShape::Pointer(inner) => match *inner {
+                            TypeShape::Array(v) | TypeShape::Slice(v) | TypeShape::Map(_, v) => *v,
+                            _ => TypeShape::Unknown,
+                        },
+                        _ => TypeShape::Unknown,
+                    },
+                    Expr::Slice { base, .. } => match self.addr_expr_shape(st, base) {
+                        TypeShape::Slice(v) | TypeShape::Array(v) => TypeShape::Slice(v),
+                        TypeShape::Pointer(inner) => match *inner {
+                            TypeShape::Array(v) | TypeShape::Slice(v) => TypeShape::Slice(v),
+                            _ => TypeShape::Unknown,
+                        },
+                        TypeShape::Str => TypeShape::Str,
+                        _ => TypeShape::Unknown,
+                    },
+                    Expr::Field { base, name, .. } => {
+                        let bs = self.addr_expr_shape(st, base);
+                        self.field_shape(&bs, name)
+                    }
+                    Expr::Try { operand, .. } => self.addr_expr_shape(st, operand),
+                    Expr::Receive { chan, .. } => match self.addr_expr_shape(st, chan) {
+                        TypeShape::Chan(elem) => *elem,
+                        _ => TypeShape::Unknown,
+                    },
+                    _ => TypeShape::Unknown,
+                }),
             s => s,
         }
     }
@@ -107,13 +160,19 @@ impl<'a> Checker<'a> {
             PlaceKind::Index { base, .. } => match self.addr_place_shape(st, base) {
                 Some(TypeShape::Map(..)) | Some(TypeShape::Str) => Some(p),
                 Some(TypeShape::Array(_)) => self.place_unaddressable_at(st, base),
+                Some(TypeShape::Pointer(inner))
+                    if matches!(*inner, TypeShape::Map(..) | TypeShape::Str) =>
+                {
+                    Some(p)
+                }
                 _ => None,
             },
             PlaceKind::Field { base, .. } => match self.addr_place_shape(st, base) {
                 Some(TypeShape::Struct(_)) => self.place_unaddressable_at(st, base),
                 _ => None,
             },
-            PlaceKind::Ident(_) | PlaceKind::AddrOf { .. } => None,
+            PlaceKind::AddrOf { base } => self.place_unaddressable_at(st, base),
+            PlaceKind::Ident(_) => None,
         }
     }
 
@@ -132,6 +191,11 @@ impl<'a> Checker<'a> {
             Expr::Index { base, .. } => match self.addr_expr_shape(st, base) {
                 TypeShape::Map(..) | TypeShape::Str => Some(e),
                 TypeShape::Array(_) => self.expr_unaddressable_at(st, base),
+                TypeShape::Pointer(inner)
+                    if matches!(*inner, TypeShape::Map(..) | TypeShape::Str) =>
+                {
+                    Some(e)
+                }
                 _ => None,
             },
             Expr::Field { base, .. } => match self.addr_expr_shape(st, base) {

@@ -1001,10 +1001,39 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
 
     let go_path = format!("{}.go", out_path);
+    // This path is implicit in `-o`, so preserve hand-written Go files just
+    // as `generate` does. Old, unmarked build output cannot be distinguished
+    // from user source and must be moved aside explicitly before rebuilding.
+    match std::fs::read_to_string(&go_path) {
+        Ok(existing) if !existing.starts_with(GENERATED_HEADER_PREFIX) => {
+            eprintln!(
+                "{} exists and is NOT hyb-generated — refusing to overwrite a hand-written file; \
+                 choose another -o path or move the existing file after verifying it is an old generated artifact",
+                go_path
+            );
+            return ExitCode::from(2);
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!("error reading {}: {}", go_path, e);
+            return ExitCode::from(2);
+        }
+    }
+    let source_name = std::path::Path::new(&file)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("?")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n");
+    let marked_go_src = format!(
+        "{}{}. DO NOT EDIT.\n\n{}",
+        GENERATED_HEADER_PREFIX, source_name, go_src
+    );
     if let Some(parent) = std::path::Path::new(&go_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = std::fs::write(&go_path, &go_src) {
+    if let Err(e) = std::fs::write(&go_path, &marked_go_src) {
         eprintln!("error writing {}: {}", go_path, e);
         return ExitCode::from(2);
     }
@@ -1203,7 +1232,12 @@ fn ensure_staticlib(rt: &std::path::Path) -> Result<std::path::PathBuf, BuildErr
                 .current_dir(&crate_dir)
                 .env("CARGO_BUILD_JOBS", "2");
             if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
-                cargo.env("CARGO_TARGET_DIR", t);
+                // Probes resolve this path from hyb's caller, while Cargo runs
+                // in crate_dir. Keep both looking in the same target directory.
+                let target = std::path::absolute(t).map_err(|e| {
+                    BuildError::Tool(format!("resolving CARGO_TARGET_DIR: {}", e))
+                })?;
+                cargo.env("CARGO_TARGET_DIR", target);
             }
             let out = cargo
                 .output()
