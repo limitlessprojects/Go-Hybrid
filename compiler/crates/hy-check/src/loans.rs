@@ -7285,6 +7285,15 @@ impl<'a> Checker<'a> {
         self.scan_block_const_writes(st, body, false);
     }
 
+    pub(crate) fn check_expr_closure_const_writes(&mut self, st: &FnState, expr: &Expr) {
+        let mut fnlits = Vec::new();
+        walk::expr_fnlits(expr, &mut fnlits);
+        for flit in fnlits {
+            let mut merged = st.clone();
+            self.scan_closure_body(&mut merged, flit, &HashSet::new());
+        }
+    }
+
     /// Returns the end-of-block state so a loop back-edge replay
     /// (`replay_const_backedge`, #2309) can feed it to the next iteration.
     fn scan_block_const_writes(

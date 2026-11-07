@@ -135,6 +135,8 @@ pub fn check_file(file: &File) -> CheckResult {
     for f in fns {
         check_fn(&mut ck, f);
     }
+    ck.check_file_const_closures();
+    ck.run_file_close_and_range_directions();
 
     // Issue #134: an accepted program must emit buildable Go — unused `:=`
     // bindings (incl. `_ := 5`), unused imports, and repeated names on the
@@ -973,6 +975,23 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
 }
 
 impl<'a> Checker<'a> {
+    pub(crate) fn check_file_const_closures(&mut self) {
+        let const_values: Vec<&'a Expr> = self
+            .file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Const(c) => Some(&c.value),
+                _ => None,
+            })
+            .collect();
+        let empty = FnState::default();
+        for value in const_values {
+            self.check_expr_closure_const_writes(&empty, value);
+            closures::check_expr_closure_boundaries(self, &empty, value);
+        }
+    }
+
     /// Row 14 (discussion #4): audit a `managed` block's reason/category/tickets
     /// and record it in `managed_audit` (shared between Pass B and closures.rs).
     pub(crate) fn audit_managed_block(
