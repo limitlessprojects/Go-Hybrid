@@ -7846,6 +7846,157 @@ impl<'a> Collector<'a> {
                             "write `hex.encode(data)` (SPEC M5 hex encoding)",
                         );
                     }
+                    if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
+                        let method = name.as_str();
+                        if method == "scanf" {
+                            if args.is_empty() {
+                                self.emit_e1002(
+                                    span,
+                                    "`fmt.scanf` requires at least 1 format string argument `(format[, ...])`, got 0 (HYB-E1002)".to_string(),
+                                    "write `fmt.scanf(\"%s\", ...)`",
+                                );
+                            } else {
+                                let bare = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.scanf` requires a string format argument, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string literal or expression as format to `fmt.scanf`",
+                                    );
+                                }
+                            }
+                        } else if method == "sscanf" {
+                            if args.len() < 2 {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`fmt.sscanf` requires at least 2 arguments `(str, format[, ...])`, got {} (HYB-E1002)",
+                                        args.len()
+                                    ),
+                                    "write `fmt.sscanf(str, \"%s\", ...)`",
+                                );
+                            } else {
+                                let bare0 = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare0,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.sscanf` requires a string first argument `(str)`, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string expression or literal as the input string to `fmt.sscanf`",
+                                    );
+                                }
+                                let bare1 = unwrap_parens(&args[1].value);
+                                if matches!(
+                                    bare1,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.sscanf` requires a string format second argument `(format)`, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string literal or expression as format to `fmt.sscanf`",
+                                    );
+                                }
+                            }
+                        } else if method == "fscanf" {
+                            if args.len() < 2 {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`fmt.fscanf` requires at least 2 arguments `(r, format[, ...])`, got {} (HYB-E1002)",
+                                        args.len()
+                                    ),
+                                    "write `fmt.fscanf(r, \"%s\", ...)`",
+                                );
+                            } else {
+                                let bare1 = unwrap_parens(&args[1].value);
+                                if matches!(
+                                    bare1,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.fscanf` requires a string format second argument `(format)`, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string literal or expression as format to `fmt.fscanf`",
+                                    );
+                                }
+                            }
+                        } else if matches!(method, "sscan" | "sscanln") {
+                            if args.is_empty() {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`fmt.{}` requires at least 1 string argument `(str[, ...])`, got 0 (HYB-E1002)",
+                                        name
+                                    ),
+                                    &format!("write `fmt.{}(str, ...)`", name),
+                                );
+                            } else {
+                                let bare0 = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare0,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.{}` requires a string first argument `(str)`, found non-string literal (HYB-E1002)",
+                                            name
+                                        ),
+                                        &format!("pass a string expression or literal as the input string to `fmt.{}`", name),
+                                    );
+                                }
+                            }
+                        } else if matches!(method, "fscan" | "fscanln") && args.is_empty() {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`fmt.{}` requires at least 1 source reader argument `(r[, ...])`, got 0 (HYB-E1002)",
+                                    name
+                                ),
+                                &format!("write `fmt.{}(r, ...)`", name),
+                            );
+                        }
+                    }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
