@@ -35,6 +35,13 @@ be relaxed, plus one policy that keeps the queue honest:
 
 ## Session start (the 30-second context restore)
 
+Board posting uses `board_issue` in `tools/triage_config.json` when configured;
+this repository pins #940. The target must remain an open issue with the exact
+board marker. Without that setting, discovery requires the exact board title
+and marker plus a repository owner/member/collaborator or GitHub Actions author.
+An incomplete search or multiple eligible boards stops without writing. With
+no eligible board, the existing first-run workflow creates one.
+
 ```bash
 python3 tools/triage_bot.py scan --out /tmp/triage        # fresh queue
 python3 tools/triage_bot.py approve --max 40              # unblock CI
