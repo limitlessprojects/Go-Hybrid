@@ -1061,6 +1061,15 @@ impl Parser {
                 let span = block.span;
                 Ok(Stmt::Block { block, span })
             }
+            Tok::Ident(s) if s == "scope" && self.scope_block_follows() => {
+                self.bump();
+                if matches!(self.cur(), Tok::Ident(_)) {
+                    self.bump();
+                }
+                let block = self.parse_block()?;
+                let span = self.span_from(start);
+                Ok(Stmt::Block { block, span })
+            }
             Tok::Ident(s) if s == "panic" && self.panic_prefix_follows() => {
                 // `panic expr` (prefix form, spike-6 04 / examples 04).
                 // `panic` is a predeclared identifier; the prefix call shape
@@ -1108,6 +1117,14 @@ impl Parser {
     /// `[`, `.`, binary operators, assignment) are left to the ordinary
     /// statement parser, so a call `panic(x)` and a shadowed `panic` are
     /// unchanged.
+    fn scope_block_follows(&self) -> bool {
+        match self.nth(1) {
+            Tok::Punct("{") => true,
+            Tok::Ident(_) => matches!(self.nth(2), Tok::Punct("{")),
+            _ => false,
+        }
+    }
+
     fn panic_prefix_follows(&self) -> bool {
         match self.nth(1) {
             Tok::StrChunk(_) | Tok::RawStr(_) => true,
@@ -1848,6 +1865,35 @@ impl Parser {
                 Ok(Expr::Move {
                     operand,
                     span: self.span_from(start),
+                })
+            }
+            Tok::Kw("task") => {
+                self.bump();
+                let call = self.parse_unary(lit)?;
+                let Expr::Call {
+                    callee,
+                    mut args,
+                    span: cspan,
+                } = call
+                else {
+                    return self.err("task requires a call expression: `task name(args)`");
+                };
+                let mut spawn_args = Vec::with_capacity(args.len() + 1);
+                spawn_args.push(CallArg {
+                    name: None,
+                    value: *callee,
+                    spread: false,
+                    span: cspan,
+                });
+                spawn_args.append(&mut args);
+                let span = self.span_from(start);
+                Ok(Expr::Call {
+                    callee: Box::new(Expr::Ident {
+                        name: "__hy_task_spawn".to_string(),
+                        span,
+                    }),
+                    args: spawn_args,
+                    span,
                 })
             }
             _ => self.parse_primary(lit),
