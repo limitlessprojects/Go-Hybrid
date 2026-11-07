@@ -18,9 +18,31 @@ import subprocess
 import sys
 
 
+def parse_dwarf_uint(val_str):
+    """Parse decimal, hexadecimal, or DW_OP_plus_uconst unsigned integer attributes."""
+    if not val_str:
+        return None
+    val = val_str.strip()
+    m = re.search(r"\(DW_OP_plus_uconst:\s*(0x[0-9a-fA-F]+|\d+)\)\s*$", val)
+    if m:
+        val = m.group(1)
+    if re.fullmatch(r"0x[0-9a-fA-F]+|\d+", val):
+        try:
+            return int(val, 0)
+        except ValueError:
+            return None
+    return None
+
+
 def main(binpath):
-    proc = subprocess.run(["readelf", "--debug-dump=info", binpath],
-                          capture_output=True, text=True, timeout=600)
+    proc = subprocess.run(
+        ["readelf", "--debug-dump=info", binpath],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=600,
+    )
     if proc.returncode != 0:
         err = proc.stderr.strip()
         msg = f"readelf failed with exit code {proc.returncode}"
@@ -42,26 +64,43 @@ def main(binpath):
         if cur is None:
             continue
         nm = re.search(r"DW_AT_name\s*:\s*(.+?)\s*$", line)
-        off = re.search(r"DW_AT_data_member_location\s*:\s*(\d+)", line)
-        sz = re.search(r"DW_AT_byte_size\s*:\s*(\d+)", line)
+        off_m = re.search(r"DW_AT_data_member_location\s*:\s*(.+?)\s*$", line)
+        sz_m = re.search(r"DW_AT_byte_size\s*:\s*(.+?)\s*$", line)
+        decl_m = re.search(r"DW_AT_declaration\s*:\s*(.+?)\s*$", line)
         if nm is not None:
-            cur["name"] = nm.group(1)
-        if off is not None:
-            cur["off"] = int(off.group(1))
-        if sz is not None:
-            cur["size"] = int(sz.group(1))
+            cur["name"] = nm.group(1).strip()
+        if off_m is not None:
+            parsed_off = parse_dwarf_uint(off_m.group(1))
+            if parsed_off is not None:
+                cur["off"] = parsed_off
+        if sz_m is not None:
+            parsed_sz = parse_dwarf_uint(sz_m.group(1))
+            if parsed_sz is not None:
+                cur["size"] = parsed_sz
+        if decl_m is not None:
+            decl_val = parse_dwarf_uint(decl_m.group(1))
+            if decl_val == 1:
+                cur["declaration"] = True
 
     def members_of(struct_name):
+        candidates = []
         for i, d in enumerate(dies):
             if d["tag"] == "DW_TAG_structure_type" and d.get("name") == struct_name:
+                if d.get("declaration"):
+                    continue
                 base = d["depth"]
                 mem = {}
                 for e in dies[i + 1:]:
                     if e["depth"] <= base:
                         break
-                    if e["tag"] == "DW_TAG_member" and "name" in e:
+                    if e["depth"] == base + 1 and e["tag"] == "DW_TAG_member" and "name" in e:
                         mem[e["name"]] = e.get("off")
-                return d.get("size"), mem
+                candidates.append((d.get("size"), mem))
+        for size, mem in candidates:
+            if mem:
+                return size, mem
+        if candidates:
+            return candidates[0]
         return None, None
 
     gsize, g = members_of("runtime.g")
@@ -73,6 +112,15 @@ def main(binpath):
         if m is None:
             missing_structs.append("runtime.m")
         print(f"FAILED: {' / '.join(missing_structs)} not found in DWARF", file=sys.stderr)
+        sys.exit(1)
+
+    if gsize is None or msize is None:
+        missing_sizes = []
+        if gsize is None:
+            missing_sizes.append("runtime.g byte_size")
+        if msize is None:
+            missing_sizes.append("runtime.m byte_size")
+        print(f"FAILED: missing required byte size: {', '.join(missing_sizes)}", file=sys.stderr)
         sys.exit(1)
 
     required_g = ("m", "stackguard0", "stack")
