@@ -390,3 +390,13 @@
 - Suites 463 -> 464 (+1 issue_bytes_strings_foreign_surface). One landing, zero gate fails, zero dup replies, four Track-3 replies (2 acks + 2 receipts), zero silent closes.
 - Next queue: surface-wave siblings oldest-first — #3911 (bradwue313 sync.cond/pool/map/time), #3916 (marhabynova bufio), #3918 (net.conn/listener), #3920 (os.file) — each additive to foreign.rs tables, expect auto-merge; then #3902 (cyzcz nested elided literals), #3904 (float consts), #3905 (false E3005), #3912/#3913 (gorky117 nil/option), #3946 (installer mv PATH fix), #3942/#3949 (CrowAleksito may_share/closure moves), #3925 (triage board validation); wave tail 3950 (IR --emit-proof, fixes #3930).
 - Worklog: this commit.
+
+## Session 134 — 2026-11-07 14:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aeec0b9, repo at S133 head fb3f347b); rust 1.99.0 (rust-docs removed upfront) + go1.26.9 restored in parallel, main unchanged -> 3 landings during tick. approve 7/7 (4993 left), scan skipped.
+- **Surface-wave landing procedure matured**: siblings all conflict at the same foreign.rs anchors (additive insertions by #3909/#3911/#3916...) — union resolution scripted (scripts/union_resolve.py, kept in my scripts dir not the repo: resolves by keeping HEAD-then-PR verbatim per conflict). Each landing: merge --no-commit -> union -> explicit add (S129 rule) -> committed-blob grep -> battery on merged main -> push/remote-assert.
+- **2 landed**:
+  - **#3911** -> `c3c7b12f` (bradwue313): foreign_method_surface +5 curated surfaces (sync.cond wait/signal/broadcast, sync.pool get/put, sync.map 9 methods, time.ticker/timer stop/reset); in-merge union of #3909+#3911 constants+arms (manual edit, +20/+152 net). Battery on merged main: 465 suites, corpus 135/135, differential FULL. Remote asserted. Landing reply 201.
+  - **#3916** -> `a5e064f2` (marhabynova): bufio.reader (15)/bufio.writer (11)/bufio.scanner (6) surfaces; union-resolved via script (+44/+342 net). Battery on merged main: 466 suites, corpus 135/135, differential FULL. Remote asserted. Landing reply 201.
+- Suites 464 -> 466 (+2). Two landings, zero gate fails, zero dup replies, zero silent closes.
+- Next queue: surface-wave siblings #3918 (net.conn/listener/packet_conn) -> #3920 (os.file) -> #3922 (io handles) -> #3924 (http.*) -> #3927 (json.*) -> #3929 (httptest.*) -> #3932 (os.process) -> #3935 (strings.reader) -> #3944 (net.ip/address) — same union procedure expected; then non-family #3902/#3904/#3905/#3912/#3913/#3914/#3907/#3925/#3938/#3942/#3946/#3949/#3950.
+- Worklog: this commit.
