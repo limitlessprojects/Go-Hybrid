@@ -438,6 +438,32 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "split",
         "text",
     ];
+    const HTTP_HANDLER: &[&str] = &["serve_http"];
+    const HTTP_RESPONSE_WRITER: &[&str] = &["header", "write", "write_header"];
+    const HTTP_SERVE_MUX: &[&str] = &["handle", "handle_func", "serve_http"];
+    const HTTP_HEADER: &[&str] = &[
+        "get",
+        "set",
+        "add",
+        "del",
+        "values",
+        "clone",
+        "write",
+        "write_subset",
+    ];
+    const URL_VALUES: &[&str] = &["get", "set", "add", "del", "has", "encode"];
+    const TIME_DURATION: &[&str] = &[
+        "milliseconds",
+        "microseconds",
+        "nanoseconds",
+        "seconds",
+        "minutes",
+        "hours",
+        "string",
+        "truncate",
+        "round",
+        "abs",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -453,6 +479,12 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "bufio.reader" | "bufio.Reader" => Some(BUFIO_READER),
         "bufio.writer" | "bufio.Writer" => Some(BUFIO_WRITER),
         "bufio.scanner" | "bufio.Scanner" => Some(BUFIO_SCANNER),
+        "http.handler" | "http.Handler" => Some(HTTP_HANDLER),
+        "http.response_writer" | "http.ResponseWriter" => Some(HTTP_RESPONSE_WRITER),
+        "http.serve_mux" | "http.ServeMux" => Some(HTTP_SERVE_MUX),
+        "http.header" | "http.Header" => Some(HTTP_HEADER),
+        "url.values" | "url.Values" => Some(URL_VALUES),
+        "time.duration" | "time.Duration" => Some(TIME_DURATION),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -500,6 +532,10 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
         }
+        ("http.response_writer" | "http.ResponseWriter", "header") => {
+            TypeShape::ForeignOpaque("http.header".into())
+        }
+        ("url.url" | "url.URL", "query") => TypeShape::ForeignOpaque("url.values".into()),
         // scalar atomics only ("atomic.int" is receiver_type_name's key for
         // TypeShape::Atomic): load/swap/add yield the scalar. A non-scalar
         // atomic's `load()` / `swap()` returns a pointer / `any` — Unknown,
