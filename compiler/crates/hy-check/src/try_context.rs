@@ -149,9 +149,16 @@ enum Ctx<'a> {
     NoErrorResult(&'a str),
 }
 
+#[derive(Clone, Default)]
+struct LocalTryInfo {
+    callable_results: Option<(Vec<FnResult>, Vec<String>)>,
+    struct_base: Option<String>,
+}
+
 struct TryWalker<'a, 'b> {
     ck: &'b mut Checker<'a>,
     scopes: Vec<Vec<String>>,
+    local_info: Vec<std::collections::HashMap<String, LocalTryInfo>>,
     type_params: Vec<String>,
     return_e11: bool,
 }
@@ -159,15 +166,88 @@ struct TryWalker<'a, 'b> {
 impl<'a, 'b> TryWalker<'a, 'b> {
     fn push_scope(&mut self) {
         self.scopes.push(Vec::new());
+        self.local_info.push(std::collections::HashMap::new());
     }
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.local_info.pop();
     }
     fn bind_name(&mut self, name: &str) {
         if name != "_" && !name.is_empty() {
             if let Some(top) = self.scopes.last_mut() {
                 top.push(name.to_string());
             }
+            if let Some(info_top) = self.local_info.last_mut() {
+                info_top.insert(name.to_string(), LocalTryInfo::default());
+            }
+        }
+    }
+    fn bind_typed(&mut self, name: &str, ty: Option<&TypeExpr>, value: Option<&Expr>) {
+        self.bind_name(name);
+        if name == "_" || name.is_empty() {
+            return;
+        }
+        let mut info = LocalTryInfo::default();
+        if let Some(t) = ty {
+            let resolved = self.ck.resolve_type_alias(t);
+            if let TypeExpr::Fn { results, .. } = &resolved {
+                let fn_results = results
+                    .iter()
+                    .map(|r| FnResult {
+                        name: None,
+                        ty: r.clone(),
+                        span: r.span(),
+                    })
+                    .collect();
+                info.callable_results = Some((fn_results, self.type_params.clone()));
+            }
+            if let Some(base) = Checker::base_named_type(&resolved) {
+                if self.ck.structs.contains_key(base.as_str()) {
+                    info.struct_base = Some(base);
+                }
+            }
+        }
+        if let Some(v) = value {
+            match unwrap_parens(v) {
+                Expr::FnLit { results, .. } => {
+                    info.callable_results = Some((results.clone(), self.type_params.clone()));
+                }
+                other => {
+                    if info.struct_base.is_none() {
+                        info.struct_base = self.expr_struct_base(other);
+                    }
+                }
+            }
+        }
+        if let Some(info_top) = self.local_info.last_mut() {
+            info_top.insert(name.to_string(), info);
+        }
+    }
+    fn lookup_local_info(&self, name: &str) -> Option<&LocalTryInfo> {
+        for scope in self.local_info.iter().rev() {
+            if let Some(info) = scope.get(name) {
+                return Some(info);
+            }
+        }
+        None
+    }
+    fn expr_struct_base(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self
+                .lookup_local_info(name)
+                .and_then(|i| i.struct_base.clone()),
+            Expr::StructLit { ty: Some(t), .. } => {
+                let resolved = self.ck.resolve_type_alias(t);
+                let base = Checker::base_named_type(&resolved)?;
+                self.ck.structs.contains_key(base.as_str()).then_some(base)
+            }
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: hy_syntax::UnOp::Deref,
+                operand,
+                ..
+            } => self.expr_struct_base(operand),
+            _ => None,
         }
     }
     fn is_unshadowed_pkg_root(&self, pkg: &str) -> bool {
@@ -205,6 +285,7 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
     let mut w = TryWalker {
         ck,
         scopes: Vec::new(),
+        local_info: Vec::new(),
         type_params: Vec::new(),
         return_e11: false,
     };
@@ -234,10 +315,13 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
                 };
                 w.push_scope();
                 if let Some(r) = &f.receiver {
-                    w.bind_name(&r.name);
+                    w.bind_typed(&r.name, Some(&r.ty), None);
                 }
-                f.params.iter().for_each(|p| w.bind_name(&p.name));
-                f.results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| w.bind_name(n));
+                f.params.iter().for_each(|p| w.bind_typed(&p.name, Some(&p.ty), None));
+                f.results
+                    .iter()
+                    .filter_map(|r| r.name.as_deref().map(|n| (n, &r.ty)))
+                    .for_each(|(n, ty)| w.bind_typed(n, Some(ty), None));
                 let is_main = f.name == "main" && f.receiver.is_none();
                 let ctx = if is_main || results_end_in_error(w.ck, &f.results, &w.type_params) {
                     Ctx::Ok
@@ -304,7 +388,15 @@ fn walk_stmt(ck: &mut TryWalker<'_, '_>, s: &Stmt, ctx: Ctx<'_>) {
                 walk_type(ck, ty, val_ctx);
             }
             l.values.iter().for_each(|v| walk_expr(ck, v, val_ctx));
-            l.names.iter().for_each(|n| ck.bind_name(n));
+            if l.names.len() == l.values.len() {
+                for (n, v) in l.names.iter().zip(l.values.iter()) {
+                    ck.bind_typed(n, l.ty.as_ref(), Some(v));
+                }
+            } else {
+                for n in &l.names {
+                    ck.bind_typed(n, l.ty.as_ref(), None);
+                }
+            }
         }
         Stmt::Assign {
             targets, values, ..
@@ -435,8 +527,11 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
         let saved_return_e11 = std::mem::replace(&mut ck.return_e11, false);
         ck.push_scope();
         let fnlit_scope_idx = ck.scopes.len() - 1;
-        params.iter().for_each(|p| ck.bind_name(&p.name));
-        results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| ck.bind_name(n));
+        params.iter().for_each(|p| ck.bind_typed(&p.name, Some(&p.ty), None));
+        results
+            .iter()
+            .filter_map(|r| r.name.as_deref().map(|n| (n, &r.ty)))
+            .for_each(|(n, ty)| ck.bind_typed(n, Some(ty), None));
         let ctx = if e11 {
             if fnlit_has_valid_e11_signature(ck.ck, params, results, http_before) {
                 Ctx::E11Handler { fnlit_scope_idx }
