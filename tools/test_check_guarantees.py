@@ -228,6 +228,56 @@ class Fixtures(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.assertIn("carries no `// EXPECTED-VERDICT:` line", joined(problems_of(root)))
 
+    def test_fixture_sibling_prefix_and_traversal_outside_corpus_fail(self):
+        sibling = "tests/checker-corpus-extra/01-outside.hy"
+        traversed = "tests/checker-corpus/../checker-corpus-extra/01-outside.hy"
+        for bad_path in (sibling, traversed):
+            with self.subTest(bad_path=bad_path):
+                tmp, root = build(
+                    rows=[row(fixtures=[{"path": bad_path, "expect": "reject"}])],
+                    fixtures={FIXTURE_1: fixture("REJECT A1c"), sibling: fixture("REJECT A1c")},
+                )
+                self.addCleanup(tmp.cleanup)
+                self.assertIn("is outside tests/checker-corpus", joined(problems_of(root)))
+
+    def test_fixture_with_second_unclaimed_diagnostic_or_conflicting_verdicts_fails(self):
+        multi_diag = (
+            "// EXPECTED-VERDICT: REJECT A1c\n"
+            "// EXPECTED-DIAGNOSTIC: HYB-E3001\n"
+            "// EXPECTED-DIAGNOSTIC: HYB-E3002\n"
+            "fn main() {\n}\n"
+        )
+        tmp, root = build(
+            rows=[row(rules=["HYB-E3001"], fixtures=[{"path": FIXTURE_1, "expect": "reject"}])],
+            fixtures={FIXTURE_1: multi_diag},
+        )
+        self.addCleanup(tmp.cleanup)
+        self.assertIn("pins HYB-E3002", joined(problems_of(root)))
+
+        conflicting = (
+            "// EXPECTED-VERDICT: REJECT A1c\n"
+            "// EXPECTED-VERDICT: ACCEPT\n"
+            "fn main() {\n}\n"
+        )
+        tmp2, root2 = build(
+            rows=[row()],
+            fixtures={FIXTURE_1: conflicting},
+        )
+        self.addCleanup(tmp2.cleanup)
+        self.assertIn("conflicting `// EXPECTED-VERDICT:` lines", joined(problems_of(root2)))
+
+    def test_evidence_link_with_anchor_resolves_and_escaped_link_fails(self):
+        tmp, root = build(rows=[row(evidence="[guarantees](GUARANTEES.md#the-claims-table)")])
+        self.addCleanup(tmp.cleanup)
+        self.assertEqual(problems_of(root), [])
+
+        outside = root.parent / "outside-target.md"
+        outside.write_text("outside\n", encoding="utf-8")
+        self.addCleanup(lambda: outside.unlink(missing_ok=True))
+        tmp2, root2 = build(rows=[row(evidence="[escaped](../outside-target.md)")])
+        self.addCleanup(tmp2.cleanup)
+        self.assertIn("evidence link `../outside-target.md` does not exist", joined(problems_of(root2)))
+
 
 class Coverage(unittest.TestCase):
     def test_scoped_rule_in_no_row_fails(self):
@@ -292,6 +342,15 @@ class Doc(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         (root / "GUARANTEES.md").unlink()
         self.assertIn("does not exist", joined(problems_of(root)))
+
+    def test_inverted_or_duplicate_markers_fail_closed(self):
+        tmp, root = build(render=False)
+        self.addCleanup(tmp.cleanup)
+        doc_path = root / "GUARANTEES.md"
+        doc_path.write_text(f"{MOD.END}\n{MOD.BEGIN}\n", encoding="utf-8")
+        self.assertIn("no generated-table markers", joined(problems_of(root)))
+        with self.assertRaises(MOD.Misuse):
+            MOD.write_doc(root, root / "guarantees.json")
 
 
 class Misuse(unittest.TestCase):
