@@ -312,24 +312,6 @@ impl<'a> Checker<'a> {
         hi: &Expr,
         inclusive: bool,
     ) {
-        let tl = self.typed_int_bound(st, lo);
-        let th = self.typed_int_bound(st, hi);
-        // Issue #1165: compare the two bounds as *Go types*, not as spellings.
-        // `byte` and `rune` are Go aliases of `uint8`/`int32`, and `u8`/`i32`
-        // are the SPEC spellings the emitter maps onto those same Go types, so
-        // `var a u8 = 0; var b uint8 = 10; for i in a..b` is a legal loop that
-        // was rejected with a false HYB-E2009. Canonicalise before comparing;
-        // the diagnostic still prints the spellings the author wrote.
-        let tl_c = tl.as_deref().map(crate::const_overflow::canonical_int_type_name);
-        let th_c = th.as_deref().map(crate::const_overflow::canonical_int_type_name);
-        // Issue #3795: `hy-emit` (`stmt.rs:2188-2195`) also hoists `hi` into a
-        // standalone `hyHi := <hi>` temporary for exclusive ranges whenever
-        // `hi` contains a call/receive/try or mentions an in-scope variable
-        // shadowed by `var`. That `:=` binding defaults an untyped `hi` (such
-        // as `10 + len("")` or `len([2]int{k, 0})`) to Go `int`, so `v < hyHi`
-        // fails `go build` with `mismatched types` whenever `lo` fixes `v` to a
-        // non-`int` integer width.
-        let var_in_scope = var != "_" && st.env_lookup(var).is_some();
         let is_bare_const_len = match unwrap_parens_and_move(hi) {
             Expr::Call { callee, args, .. } => {
                 if let Expr::Ident { name, .. } = unwrap_parens_and_move(callee) {
@@ -345,9 +327,21 @@ impl<'a> Checker<'a> {
             }
             _ => false,
         };
+        let var_in_scope = var != "_" && st.env_lookup(var).is_some();
         let hi_hoisted = inclusive
             || (!is_bare_const_len && Self::range_bound_has_call_or_recv(hi))
-            || (var_in_scope && Self::range_bound_mentions_ident(hi, var));
+            || (var_in_scope && Self::range_bound_mentions_ident(hi, var))
+            || crate::range_iter::expr_reads_range_var(hi, var);
+        let tl = self.typed_int_bound(st, lo, hi_hoisted);
+        let th = self.typed_int_bound(st, hi, hi_hoisted);
+        // Issue #1165: compare the two bounds as *Go types*, not as spellings.
+        // `byte` and `rune` are Go aliases of `uint8`/`int32`, and `u8`/`i32`
+        // are the SPEC spellings the emitter maps onto those same Go types, so
+        // `var a u8 = 0; var b uint8 = 10; for i in a..b` is a legal loop that
+        // was rejected with a false HYB-E2009. Canonicalise before comparing;
+        // the diagnostic still prints the spellings the author wrote.
+        let tl_c = tl.as_deref().map(crate::const_overflow::canonical_int_type_name);
+        let th_c = th.as_deref().map(crate::const_overflow::canonical_int_type_name);
         let mismatch = match (&tl_c, &th_c) {
             (Some(a), Some(b)) => a != b,
             (None, Some(b)) => *b != "int",
@@ -402,14 +396,39 @@ impl<'a> Checker<'a> {
     /// The bound's INTEGER type when a typed expression fixes it — `None`
     /// for untyped literals and untyped consts, which adapt to the
     /// counter's type in the lowering (and in Go's constant arithmetic).
-    pub(crate) fn typed_int_bound(&self, st: &FnState, e: &Expr) -> Option<String> {
+    fn untyped_const_kind<'c>(&'c self, st: &FnState, e: &'c Expr, in_const: bool, seen: &mut Vec<&'c str>) -> u8 {
+        match unwrap_parens_and_move(e) {
+            Expr::Lit { kind: LitKind::Char(_), .. } => 2,
+            Expr::Lit { kind: LitKind::Int(_), .. } => 1,
+            Expr::Ident { name, .. } if in_const || st.env_lookup(name).is_none() => {
+                if seen.contains(&name.as_str()) { return 0; }
+                self.consts.get(name.as_str()).filter(|b| b.ty.is_none()).and_then(|_| self.const_values.get(name.as_str())).map_or(0, |init| {
+                    seen.push(name.as_str());
+                    let k = self.untyped_const_kind(st, init, true, seen);
+                    seen.pop();
+                    k
+                })
+            }
+            Expr::Unary { operand, .. } => self.untyped_const_kind(st, operand, in_const, seen),
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let l = self.untyped_const_kind(st, lhs, in_const, seen);
+                if matches!(op, hy_syntax::BinOp::Shl | hy_syntax::BinOp::Shr) { return l; }
+                let r = self.untyped_const_kind(st, rhs, in_const, seen);
+                if l == 0 || r == 0 { 0 } else { l.max(r) }
+            }
+            _ => 0,
+        }
+    }
+
+    pub(crate) fn typed_int_bound(&self, st: &FnState, e: &Expr, materialized: bool) -> Option<String> {
+        if materialized && self.untyped_const_kind(st, e, false, &mut Vec::new()) == 2 {
+            return Some("rune".to_string());
+        }
         match unwrap_parens_and_move(e) {
             Expr::Lit { .. } => None,
             Expr::Ident { name, .. } => {
                 if st.env_lookup(name).is_none() {
                     if let Some(b) = self.consts.get(name.as_str()) {
-                        // a file-level const: a TYPED const fixes the
-                        // bound's type; an untyped const adapts.
                         let ty = b.ty.as_ref()?;
                         let resolved = self.resolve_type_alias(ty);
                         if let TypeExpr::Named { name: rn, .. } = resolved {
@@ -427,7 +446,7 @@ impl<'a> Checker<'a> {
                 op: hy_syntax::UnOp::Neg,
                 operand,
                 ..
-            } => self.typed_int_bound(st, operand),
+            } => self.typed_int_bound(st, operand, false),
             Expr::Binary { op, lhs, rhs, .. } => match op {
                 hy_syntax::BinOp::Add
                 | hy_syntax::BinOp::Sub
@@ -437,9 +456,9 @@ impl<'a> Checker<'a> {
                 | hy_syntax::BinOp::BitAnd
                 | hy_syntax::BinOp::BitOr
                 | hy_syntax::BinOp::BitXor => self
-                    .typed_int_bound(st, lhs)
-                    .or_else(|| self.typed_int_bound(st, rhs)),
-                hy_syntax::BinOp::Shl | hy_syntax::BinOp::Shr => self.typed_int_bound(st, lhs),
+                    .typed_int_bound(st, lhs, false)
+                    .or_else(|| self.typed_int_bound(st, rhs, false)),
+                hy_syntax::BinOp::Shl | hy_syntax::BinOp::Shr => self.typed_int_bound(st, lhs, false),
                 _ => None,
             },
             Expr::Call { callee, args, .. } => {
@@ -490,7 +509,7 @@ impl<'a> Checker<'a> {
                         if matches!(name.as_str(), "min" | "max")
                             && !self.type_aliases.contains_key(name.as_str())
                         {
-                            if let Some(w) = args.iter().find_map(|a| self.typed_int_bound(st, &a.value)) {
+                            if let Some(w) = args.iter().find_map(|a| self.typed_int_bound(st, &a.value, false)) {
                                 return Some(w);
                             }
                             if !args.is_empty() && args.iter().all(|a| self.non_integer_bound_kind(st, &a.value).is_none()) {
@@ -879,4 +898,45 @@ impl<'a> Checker<'a> {
             Stmt::Break { .. } | Stmt::Continue { .. } => false,
         }
     }
+}
+
+fn stmt_reads_range_var(st: &Stmt, target: &str) -> bool {
+    let mut u = Vec::new();
+    crate::walk::own_uses(st, &mut u);
+    if u.iter().any(|x| x.name == target) { return true; }
+    match st {
+        Stmt::If { init, cond, then, otherwise, .. } => {
+            if let Some(i) = init {
+                if stmt_reads_range_var(i, target) { return true; }
+                if let Stmt::Local(l) = i.as_ref() { if l.names.iter().any(|n| n == target) { return false; } }
+            }
+            expr_reads_range_var(cond, target) || block_reads_range_var(then, target) || otherwise.as_deref().is_some_and(|o| stmt_reads_range_var(o, target))
+        }
+        Stmt::For { body, .. } | Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => block_reads_range_var(body, target),
+        _ => false,
+    }
+}
+
+fn block_reads_range_var(b: &hy_syntax::Block, target: &str) -> bool {
+    for st in &b.stmts {
+        if let Stmt::Local(l) = st {
+            if l.values.iter().any(|v| expr_reads_range_var(v, target)) { return true; }
+            if l.names.iter().any(|n| n == target) { return false; }
+            continue;
+        }
+        if stmt_reads_range_var(st, target) { return true; }
+    }
+    false
+}
+
+pub(crate) fn expr_reads_range_var(e: &Expr, target: &str) -> bool {
+    let mut uses = Vec::new();
+    crate::walk::expr_uses(e, &mut uses);
+    if uses.iter().any(|u| u.name == target) { return true; }
+    let mut flits = Vec::new();
+    crate::walk::expr_fnlits(e, &mut flits);
+    flits.into_iter().any(|f| match unwrap_parens_and_move(f) {
+        Expr::FnLit { params, results, body, .. } => !params.iter().any(|p| p.name == target) && !results.iter().any(|r| r.name.as_deref() == Some(target)) && block_reads_range_var(body, target),
+        _ => false,
+    })
 }
