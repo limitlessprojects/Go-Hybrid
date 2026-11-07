@@ -521,6 +521,22 @@
       "tier0_rule_id": "LOAN-ESCAPE"
     },
     {
+      "code": "HYB-E3105",
+      "name": "slot-loan-base-rebound",
+      "category": "ownership-loans",
+      "severity": "error",
+      "title": "re-binding a slot loan's base invalidates the live loan",
+      "summary": "A slot loan `s := &xs[i]` lowers to a copy-out at the binding plus a store-back into `xs[i]` at the loan's last use (O8). Re-binding `xs` inside that non-lexical window makes the store-back name a container the loan was never taken from: it either indexes past the end of the new slice (`panic: index out of range`) or silently writes the wrong element. A3 already rejects MUTATING the loaned container inside the window (HYB-E3102); re-binding its base is the missing half of the same invalidation, and is rejected the same way. A re-binding of an unrelated binding, of a sibling field, or after the loan's last use stays legal.",
+      "fixits": [
+        "finish using the loan before re-binding its base: move the re-bind after the loan's last use",
+        "copy what you need out of the element, re-bind, then write the copy back yourself",
+        "re-bind a separate slice binding instead of the one the loan was taken from"
+      ],
+      "example": "s := &xs[0]; xs = xs[:0]; s.replicas = 5   // reject: HYB-E3105 — the store-back would index an empty slice",
+      "rule": "O8",
+      "tier0_rule_id": "A3"
+    },
+    {
       "code": "HYB-E4001",
       "name": "nil-for-non-nilable",
       "category": "nil-safety",
