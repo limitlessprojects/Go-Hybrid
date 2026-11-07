@@ -548,9 +548,12 @@ enum mode {          // unit-only enum with explicit constants (the iota story)
 
 **T13 — Exhaustiveness is compile-checked.** A `match` on an enum value
 must cover every variant, or end with a `_` arm (which is then required to
-be the last arm). A missing variant is `HYB-E5001` with the missing names in
-the diagnostic (§9.6's registry). This is the single most-requested Go feature
-(positioning §4.1) and it is non-negotiable in the MVP.
+be the last arm). A guarded arm does not count as coverage on its own (the
+guard can fail); a trailing `_` covers whatever a guard leaves open, so
+`some(v) if cond: …` with a final `_` is exhaustive while the same match
+with only `none` is not. A missing variant is `HYB-E5001` with the missing
+names in the diagnostic (§9.6's registry). This is the single most-requested
+Go feature (positioning §4.1) and it is non-negotiable in the MVP.
 
 ```hy
 fn describe(s shape) string {
