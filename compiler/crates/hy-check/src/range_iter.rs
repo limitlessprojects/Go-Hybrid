@@ -45,6 +45,7 @@ impl<'a> Checker<'a> {
                     let shape = self.shape_of_expr(st, expr);
                     let is_chan = matches!(shape, TypeShape::Chan(_));
                     let is_set = !self.structs.contains_key("set")
+                        && !self.struct_type_params.contains_key("set")
                         && matches!(
                             shape,
                             TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set"
@@ -217,6 +218,7 @@ impl<'a> Checker<'a> {
                     if st.env_lookup(name).is_none()
                         && !self.fns.contains_key(name.as_str())
                         && !self.structs.contains_key(name.as_str())
+                        && !self.struct_type_params.contains_key(name.as_str())
                         && !self.enums.contains_key(name.as_str())
                         && !self.type_aliases.contains_key(name.as_str())
                     {
@@ -449,6 +451,7 @@ impl<'a> Checker<'a> {
                     if st.env_lookup(name).is_none()
                         && !self.fns.contains_key(name.as_str())
                         && !self.structs.contains_key(name.as_str())
+                        && !self.struct_type_params.contains_key(name.as_str())
                         && !self.enums.contains_key(name.as_str())
                     {
                         if args.len() == 1
@@ -480,6 +483,7 @@ impl<'a> Checker<'a> {
                                 TypeShape::Struct(Some(ref n)) => {
                                     name == "len"
                                         && !self.structs.contains_key("set")
+                                        && !self.struct_type_params.contains_key("set")
                                         && (n.starts_with("set[") || n == "set")
                                 }
                                 _ => false,
@@ -548,6 +552,7 @@ impl<'a> Checker<'a> {
             | TypeShape::BorrowHandle(_) => {}
             TypeShape::Struct(Some(ref n))
                 if !self.structs.contains_key("set")
+                    && !self.struct_type_params.contains_key("set")
                     && (n.starts_with("set[") || n == "set") => {}
             TypeShape::Chan(_) => {
                 let chan_ty = self
