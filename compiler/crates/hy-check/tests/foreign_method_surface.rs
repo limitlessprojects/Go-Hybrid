@@ -326,3 +326,100 @@ fn atomic_bool_stays_fail_open_rather_than_half_gated() {
         "atomic surface became type-aware -- if bool now rejects, that is an improvement; update this test and the note in foreign.rs",
     );
 }
+
+// --- `time.time` (issue #3933) --------------------------------------------
+//
+// `time` is a curated package root and `time.time` is declarable as a struct
+// field, but `foreign_method_surface` had no arm for it: any phantom method on
+// a `time.time` receiver passed `hyb check` with 0 diagnostics and died in
+// `go build` with `s.t.totally_fake undefined (type time.Time has no field or
+// method totally_fake)` — the #2200 bug class on a new handle (GUARANTEES
+// row 13). The surface is the 28 single-return value methods `hy-emit` lowers;
+// multi-return methods (Date/Clock/ISOWeek/Zone/ZoneBounds) stay OUT on both
+// sides (no multi-value method lowering), pinned below.
+
+#[test]
+fn phantom_time_time_method_is_rejected() {
+    let r = check(
+        "struct stats {\n\
+             t time.time\n\
+             n int\n\
+         }\n\
+         fn main() {\n\
+             var s stats\n\
+             s.t.totally_fake()\n\
+             fmt.println(\"n={s.n}\")\n\
+         }\n",
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "got {:?}", r.diagnostics);
+    assert!(
+        codes(&r).iter().any(|c| c == "HYB-E1002"),
+        "got {:?}",
+        codes(&r)
+    );
+    let msg = &r.diagnostics[0].message;
+    assert!(msg.contains("totally_fake"), "message: {msg}");
+    assert!(msg.contains("time.time"), "message: {msg}");
+}
+
+#[test]
+fn real_time_time_methods_still_accept_including_chains() {
+    let r = check(
+        "struct stats {\n\
+             t time.time\n\
+             d time.duration\n\
+             n int\n\
+         }\n\
+         fn main() {\n\
+             var s stats\n\
+             y := s.t.year()\n\
+             ts := s.t.utc().unix()\n\
+             txt := s.t.format(\"2006-01-02\")\n\
+             later := s.t.add(s.d)\n\
+             gap := later.sub(s.t)\n\
+             fmt.println(\"y={y} ts={ts} txt={txt} gap={gap.nanoseconds()} n={s.n}\")\n\
+         }\n",
+    );
+    assert_eq!(r.verdict, Verdict::Accept, "got {:?}", r.diagnostics);
+}
+
+#[test]
+fn pointer_and_capitalized_time_time_receivers_enforce_surface() {
+    for decl in ["t time.time", "t *time.time"] {
+        let bad = check(&format!(
+            "struct stats {{\n    {decl}\n    n int\n}}\n\
+             fn main() {{\n    var s stats\n    s.t.totally_fake()\n    fmt.println(\"n={{s.n}}\")\n}}\n"
+        ));
+        assert_eq!(
+            bad.verdict,
+            Verdict::Reject,
+            "phantom method on `{decl}` must reject, got {:?}",
+            bad.diagnostics
+        );
+        assert!(
+            codes(&bad).iter().any(|c| c == "HYB-E1002"),
+            "expected HYB-E1002 for `{decl}`, got {:?}",
+            codes(&bad)
+        );
+    }
+}
+
+#[test]
+fn multi_return_time_time_methods_stay_rejected() {
+    // Date() returns (year, month, day) — a multi-value method Hybrid does not
+    // lower. Deliberately outside the pinned surface on BOTH sides: the
+    // checker must fail closed, not bless a call the emitter cannot spell.
+    let r = check(
+        "struct stats {\n\
+             t time.time\n\
+             n int\n\
+         }\n\
+         fn main() {\n\
+             var s stats\n\
+             s.t.date()\n\
+             fmt.println(\"n={s.n}\")\n\
+         }\n",
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "got {:?}", r.diagnostics);
+    assert!(codes(&r).iter().any(|c| c == "HYB-E1002"), "got {:?}", codes(&r));
+}
