@@ -305,6 +305,198 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
     }
 }
 
+/// Static parameter count of a foreign package-level call when Go fixes it
+/// (#1650). `None` means "not described here": either a variadic function
+/// (`fmt.println`, `filepath.join`, `errors.join`) or a member this table does
+/// not cover. The checker stays silent on `None` rather than guessing, so a
+/// wrong entry can only cause a false *reject*, never a false accept.
+///
+/// Callers pass the source spelling; the member is normalized first so the
+/// snake_case and Go-cased spellings share one entry (`time.Sleep` and
+/// `time.sleep` both hit `"sleep"`).
+pub(crate) fn package_param_count(pkg: &str, member: &str) -> Option<usize> {
+    let norm = normalize_go_ident_to_snake(member);
+    let m = norm.as_str();
+    match pkg {
+        "time" => match m {
+            "now" => Some(0),
+            "sleep" | "since" | "until" | "after" | "after_func" | "tick" | "new_timer"
+            | "new_ticker" | "parse_duration" | "load_location" | "load_location_from_tz_data"
+            | "unix_milli" | "unix_micro" | "milliseconds" | "seconds" | "minutes" | "hours"
+            | "nanoseconds" | "microseconds" => Some(1),
+            "parse" | "unix" | "fixed_zone" => Some(2),
+            "parse_in_location" => Some(3),
+            "date" => Some(8),
+            _ => None,
+        },
+        "sort" => match m {
+            "ints" | "strings" | "float64s" | "sort" | "stable" | "is_sorted"
+            | "ints_are_sorted" | "float64s_are_sorted" | "strings_are_sorted" | "reverse" => {
+                Some(1)
+            }
+            "slice" | "slice_stable" | "search" | "search_ints" | "search_strings"
+            | "search_float64s" | "slice_is_sorted" | "find" => Some(2),
+            _ => None,
+        },
+        "strings" => match m {
+            "trim_space" | "to_upper" | "to_lower" | "to_title" | "title" | "fields"
+            | "to_valid_utf8" | "new_reader" | "to_lower_special" | "to_upper_special"
+            | "to_title_special" | "clone" => Some(1),
+            "split" | "split_after" | "join" | "contains" | "contains_any" | "contains_func"
+            | "contains_rune" | "has_prefix" | "has_suffix" | "trim" | "trim_left"
+            | "trim_right" | "trim_func" | "trim_left_func" | "trim_right_func"
+            | "trim_prefix" | "trim_suffix" | "index" | "index_any" | "index_byte"
+            | "index_func" | "index_rune" | "last_index" | "last_index_any"
+            | "last_index_byte" | "last_index_func" | "repeat" | "count" | "equal_fold"
+            | "cut" | "cut_prefix" | "cut_suffix" | "map" | "compare" | "fields_func" => Some(2),
+            "replace_all" | "split_n" | "split_after_n" => Some(3),
+            "replace" => Some(4),
+            _ => None,
+        },
+        "errors" => match m {
+            "new" | "unwrap" => Some(1),
+            "is" | "as" => Some(2),
+            _ => None,
+        },
+        "strconv" => match m {
+            "atoi" | "itoa" | "parse_bool" | "quote" | "quote_rune" | "quote_rune_to_ascii"
+            | "quote_to_ascii" | "quote_rune_to_graphic" | "quote_to_graphic" | "unquote"
+            | "can_backquote" | "is_graphic" | "is_print" | "quoted_prefix" => Some(1),
+            "parse_float" | "parse_complex" | "format_int" | "format_uint" | "append_int"
+            | "append_uint" | "append_bool" | "append_float" | "append_quote" | "unquote_char" => {
+                Some(2)
+            }
+            "parse_int" | "parse_uint" => Some(3),
+            "format_complex" | "format_float" => Some(4),
+            _ => None,
+        },
+        "os" => match m {
+            "getwd" | "hostname" | "getpid" | "getppid" | "getuid" | "geteuid" | "getgid"
+            | "getegid" | "getgroups" | "getpagesize" | "user_home_dir" | "user_cache_dir"
+            | "user_config_dir" | "executable" | "temp_dir" | "environ" | "clearenv" | "args"
+            | "stdout" | "stderr" | "stdin" => Some(0),
+            "read_file" | "read_dir" | "open" | "open_file" | "create" | "remove"
+            | "remove_all" | "getenv" | "lookup_env" | "unsetenv" | "stat" | "lstat" | "chdir"
+            | "readlink" | "exit" | "expand_env" | "is_exist" | "is_not_exist"
+            | "is_permission" | "is_timeout" | "is_path_separator" => Some(1),
+            "write_file" | "mkdir" | "mkdir_all" | "setenv" | "rename" | "symlink" | "link"
+            | "chmod" | "create_temp" | "mkdir_temp" | "truncate" | "same_file" => Some(2),
+            "chown" | "lchown" | "chtimes" => Some(3),
+            _ => None,
+        },
+        "io" => match m {
+            "read_all" | "nop_closer" => Some(1),
+            "copy" | "read_full" | "write_string" | "limit_reader" | "tee_reader" => Some(2),
+            "copy_n" | "read_at_least" | "copy_buffer" => Some(3),
+            "new_section_reader" => Some(4),
+            "pipe" => Some(0),
+            _ => None,
+        },
+        "bufio" => match m {
+            "new_reader" | "new_writer" | "new_scanner" => Some(1),
+            "new_reader_size" | "new_writer_size" | "new_read_writer" => Some(2),
+            _ => None,
+        },
+        "http" => match m {
+            "new_serve_mux" => Some(0),
+            "get" | "head" | "handler" | "handler_func" | "file_server" | "file_server_fs" => {
+                Some(1)
+            }
+            "post_form" | "handle" | "handle_func" | "listen_and_serve" | "serve"
+            | "strip_prefix" | "timeout_handler" | "max_bytes_handler" => Some(2),
+            "post" | "new_request" | "serve_file" => Some(3),
+            "new_request_with_context" | "redirect" | "serve_file_fs" | "serve_tls"
+            | "listen_and_serve_tls" => Some(4),
+            _ => None,
+        },
+        "httptest" => match m {
+            "new_recorder" => Some(0),
+            "new_server" | "new_unstarted_server" => Some(1),
+            "get" | "post" => Some(2),
+            "new_request" | "new_tls_server" => Some(3),
+            _ => None,
+        },
+        "url" => match m {
+            "parse" | "parse_request_uri" | "parse_query" | "query_escape" | "query_unescape"
+            | "path_escape" | "path_unescape" | "user" => Some(1),
+            "user_password" => Some(2),
+            _ => None,
+        },
+        "json" => match m {
+            "marshal" | "new_decoder" | "new_encoder" | "valid" => Some(1),
+            "unmarshal" | "compact" | "html_escape" => Some(2),
+            "marshal_indent" => Some(3),
+            "indent" => Some(4),
+            _ => None,
+        },
+        "hex" => match m {
+            "encode" | "encode_to_string" | "decode_string" | "encoded_len" | "decoded_len"
+            | "new_encoder" | "new_decoder" | "dump" => Some(1),
+            _ => None,
+        },
+        "filepath" => match m {
+            "base" | "dir" | "ext" | "clean" | "is_abs" | "glob" | "split" | "to_slash"
+            | "from_slash" | "eval_symlinks" | "abs" | "volume_name" | "is_local" | "localize"
+            | "split_list" => Some(1),
+            "rel" | "match" | "walk" | "walk_dir" | "has_prefix" => Some(2),
+            _ => None,
+        },
+        "path" => match m {
+            "base" | "dir" | "ext" | "clean" | "is_abs" | "split" => Some(1),
+            "match" => Some(2),
+            _ => None,
+        },
+        "net" => match m {
+            "interfaces" | "pipe" => Some(0),
+            "split_host_port" | "lookup_host" | "lookup_addr" | "lookup_cname" | "lookup_ip"
+            | "lookup_mx" | "lookup_ns" | "lookup_srv" | "lookup_txt" | "parse_ip"
+            | "parse_mac" | "interface_addrs" | "interface_by_index" | "interface_by_name" => {
+                Some(1)
+            }
+            "listen" | "listen_packet" | "listen_tcp" | "listen_udp" | "listen_ip"
+            | "listen_unix" | "listen_unixgram" | "dial" | "dial_tcp" | "dial_udp"
+            | "dial_ip" | "dial_unix" | "join_host_port" | "lookup_port" | "parse_cidr"
+            | "resolve_ip_addr" | "resolve_tcp_addr" | "resolve_udp_addr"
+            | "resolve_unix_addr" => Some(2),
+            "dial_timeout" => Some(3),
+            "ipv4" | "ipv4_mask" => Some(4),
+            _ => None,
+        },
+        "atomic" => match m {
+            "load_int32" | "load_int64" | "load_uint32" | "load_uint64" | "load_uintptr"
+            | "load_pointer" => Some(1),
+            "add_int32" | "add_int64" | "add_uint32" | "add_uint64" | "add_uintptr"
+            | "store_int32" | "store_int64" | "store_uint32" | "store_uint64"
+            | "store_uintptr" | "store_pointer" | "swap_int32" | "swap_int64"
+            | "swap_uint32" | "swap_uint64" | "swap_uintptr" | "swap_pointer" => Some(2),
+            "compare_and_swap_int32" | "compare_and_swap_int64" | "compare_and_swap_uint32"
+            | "compare_and_swap_uint64" | "compare_and_swap_uintptr"
+            | "compare_and_swap_pointer" => Some(3),
+            _ => None,
+        },
+        "regex" => match m {
+            "compile" | "is_valid" => Some(1),
+            "is_match" | "match_string" => Some(2),
+            _ => None,
+        },
+        "serde_json" => match m {
+            "new_object" | "new_array" => Some(0),
+            "parse" | "to_string_pretty" | "string" => Some(1),
+            _ => None,
+        },
+        "sha3" => match m {
+            "digest256" => Some(1),
+            "stream_checksum" => Some(2),
+            _ => None,
+        },
+        "flate2" => match m {
+            "new_writer" | "finish" => Some(1),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Mode of a method call on a typed receiver, keyed by the receiver's
 /// boundary type name ("serde_json.value", "flate2.writer", "atomic", ...).
 pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
