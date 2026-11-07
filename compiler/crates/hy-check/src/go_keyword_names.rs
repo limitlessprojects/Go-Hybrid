@@ -24,6 +24,15 @@
 //! variables, select-receive names, match bindings, and closure params.
 //!
 //! Enum variants are left alone: their emission is a separate surface.
+//!
+//! The same pass also rejects a declaration named `none`. SPEC LX3 lists
+//! `none` as a predeclared identifier (shadowable with a lint), but hy-emit
+//! treats every bare Ident `none` as the option constructor and refuses it
+//! outside `return none` against an option result. A declaration named
+//! `none` therefore passes `hyb check` and fails `hyb build` (Row 13).
+//! Rejecting the declaration sites fails closed until emit learns to honour
+//! shadowing; `return none` and match arms `none:` / `none =>` are not
+//! declarations and stay accepted.
 
 use crate::model::Checker;
 use hy_diag::{Diagnostic, Span};
@@ -78,6 +87,23 @@ impl<'a> Checker<'a> {
     }
 
     fn kw_name(&mut self, name: &str, what: &str, span: Span) {
+        if name == "none" {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "{what} named `none` — `none` is Hybrid's option constructor, so hy-emit                          cannot treat the name as an ordinary binding and `hyb build` fails (HYB-E1002)"
+                    ),
+                )
+                .with_notes(vec![
+                    "why: hy-emit spells every bare Ident `none` as the option constructor (`return none` against option[T], or `not yet supported` elsewhere), so a declaration named `none` is accepted by check and then fails emit — GUARANTEES Row 13".to_string(),
+                    "fix: rename it (`none_val`, `absent`, …); keep `none` for `return none` / match arms on `option[T]`".to_string(),
+                ]),
+            );
+            return;
+        }
         if name != GO_ONLY_KEYWORD {
             return;
         }
