@@ -121,7 +121,12 @@ pub(crate) fn is_iterable_handle(name: &str) -> bool {
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
-        ("serde_json", "parse" | "new_object" | "new_array") | ("flate2", "new_writer") => {
+        ("serde_json", "parse" | "new_object" | "new_array")
+        | ("flate2", "new_writer")
+        | (
+            "json" | "encoding/json",
+            "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder",
+        ) => {
             CallMode::Produce
         }
         ("serde_json", "to_string_pretty")
@@ -182,6 +187,12 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
+        ("json" | "encoding/json", "new_decoder" | "NewDecoder") => {
+            TypeShape::ForeignOpaque("json.decoder".into())
+        }
+        ("json" | "encoding/json", "new_encoder" | "NewEncoder") => {
+            TypeShape::ForeignOpaque("json.encoder".into())
+        }
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -536,6 +547,17 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "string",
         "unmarshal_binary",
     ];
+    const JSON_DECODER: &[&str] = &[
+        "buffered",
+        "decode",
+        "disallow_unknown_fields",
+        "input_offset",
+        "more",
+        "token",
+        "use_number",
+    ];
+    const JSON_ENCODER: &[&str] = &["encode", "set_escape_html", "set_indent"];
+    const JSON_RAW_MESSAGE: &[&str] = &["marshal_json", "unmarshal_json"];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -563,6 +585,9 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "http.server" | "http.Server" => Some(HTTP_SERVER),
         "http.cookie" | "http.Cookie" => Some(HTTP_COOKIE),
         "url.url" | "url.URL" => Some(URL_URL),
+        "json.decoder" | "json.Decoder" => Some(JSON_DECODER),
+        "json.encoder" | "json.Encoder" => Some(JSON_ENCODER),
+        "json.raw_message" | "json.rawmessage" | "json.RawMessage" => Some(JSON_RAW_MESSAGE),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
