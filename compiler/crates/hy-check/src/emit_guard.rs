@@ -649,6 +649,30 @@ impl<'a> Checker<'a> {
     fn check_call_const_overflow(&mut self, st: &FnState, callee: &Expr, args: &[CallArg]) {
         let unwrapped = crate::model::unwrap_parens(callee);
 
+        // 0. Foreign fmt calls take `any` (or `...any`), where untyped int constants default to `int`
+        if let Expr::Field { base, name: method_name, .. } = unwrapped {
+            if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
+                if self.lookup_binding(st, pkg).is_none() && pkg == "fmt" {
+                    let lower = method_name.to_ascii_lowercase();
+                    let m = lower.as_str();
+                    let start_any_idx = match m {
+                        "print" | "println" | "sprint" | "sprintln" | "eprint" | "eprintln" | "scan" | "scanln" => 0,
+                        "printf" | "sprintf" | "eprintf" | "errorf" => 1,
+                        "fprint" | "fprintln" => 1,
+                        "fprintf" => 2,
+                        _ => usize::MAX,
+                    };
+                    if start_any_idx < usize::MAX {
+                        for a in args.iter().skip(start_any_idx) {
+                            if !a.spread {
+                                self.check_default_int_overflow(&format!("argument to fmt.{}", method_name), &a.value, Some(st));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 1. Built-in: append(slice, items...) and delete(map, key)
         if let Expr::Ident { name, .. } = unwrapped {
             if name == "append" {
