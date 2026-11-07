@@ -629,6 +629,14 @@ pub struct Emitter {
     /// True when the current fn declares any named result item (so Go's
     /// result signature is fully named and bare `return` returns live slots).
     cur_fn_has_named_results: bool,
+    /// File-level `const` initializers keyed by name. Lets the emitter FOLD a
+    /// named constant through a primitive conversion (`const big = 300`, then
+    /// `u8(big)`) instead of printing the name and letting Go reject the
+    /// program with `constant 300 overflows uint8` (issue #1726).
+    file_consts: BTreeMap<String, Expr>,
+    /// The same, for `const` declarations inside the function being emitted.
+    /// Cleared at the top of every `emit_fn`.
+    fn_consts: BTreeMap<String, Expr>,
     /// Per-fn result shapes, collected eagerly (Batch I): name →
     /// (n_results, ends_in_error, first_result's binding kind, per-param
     /// pointer-base types). Drives the `?` hoist arity (13:
@@ -706,6 +714,8 @@ impl Emitter {
             cur_fn_error_returns: None,
             closure_written: BTreeSet::new(),
             cur_fn_has_named_results: false,
+            file_consts: BTreeMap::new(),
+            fn_consts: BTreeMap::new(),
             fn_shapes: BTreeMap::new(),
             closure_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
@@ -977,7 +987,16 @@ impl Emitter {
                     self.explicit_imports.insert(root.to_string(), resolved);
                     self.imports.insert(root.to_string());
                 }
-                Decl::Const(c) => self.emit_file_const(c)?,
+                Decl::Const(c) => {
+                    // Record the initializer BEFORE emitting: a later
+                    // conversion naming this const (`u8(big)`) has to fold it,
+                    // and emit order puts the declaration first either way.
+                    // Issue #1726.
+                    if c.ty.is_none() {
+                        self.file_consts.insert(c.name.clone(), c.value.clone());
+                    }
+                    self.emit_file_const(c)?
+                }
                 Decl::Struct(s) => self.emit_struct(s)?,
                 Decl::Enum(e) => {
                     return Err(EmitError::unsupported(format!(
@@ -1083,6 +1102,66 @@ impl Emitter {
             None => self.push(&format!("{} {} = {}", kw, c.name, value)),
         }
         Ok(())
+    }
+
+    /// Walk a block — recursively through every statement that owns a body —
+    /// collecting `const` declarations into `out`.
+    ///
+    /// A re-declaration inside a nested block overwrites the outer one, which
+    /// is what Go binds at that point too. This is a pre-pass over the whole
+    /// function, not a scope stack: the fold only ever needs the initializer
+    /// text, and a conversion inside an inner block naming an outer const is
+    /// the case that actually occurs.
+    fn collect_block_consts(b: &hy_syntax::Block, out: &mut BTreeMap<String, Expr>) {
+        use hy_syntax::Stmt;
+        let one = |s: &hy_syntax::Stmt| hy_syntax::Block {
+            stmts: vec![s.clone()],
+            span: s.span(),
+        };
+        for st in &b.stmts {
+            match st {
+                Stmt::Local(l) => {
+                    if l.kind == hy_syntax::LocalKind::Const
+                        && l.names.len() == 1
+                        && l.values.len() == 1
+                    {
+                        out.insert(l.names[0].clone(), l.values[0].clone());
+                    }
+                }
+                Stmt::If { init, then, otherwise, .. } => {
+                    if let Some(i) = init {
+                        Self::collect_block_consts(&one(i), out);
+                    }
+                    Self::collect_block_consts(then, out);
+                    if let Some(o) = otherwise {
+                        Self::collect_block_consts(&one(o), out);
+                    }
+                }
+                Stmt::For { body, .. }
+                | Stmt::Block { block: body, .. }
+                | Stmt::Managed { body, .. } => Self::collect_block_consts(body, out),
+                Stmt::Match { arms, .. } => {
+                    for a in arms {
+                        Self::collect_block_consts(&a.body, out);
+                    }
+                }
+                Stmt::Select { arms, .. } => {
+                    for a in arms {
+                        Self::collect_block_consts(&a.body, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Resolve a `const` name to its initializer expression. Function-local
+    /// declarations shadow file-level ones.
+    fn const_value(&self, name: &str) -> Option<Expr> {
+        self.fn_consts
+            .get(name)
+            .or_else(|| self.file_consts.get(name))
+            .cloned()
     }
 
     fn emit_struct(&mut self, s: &StructDecl) -> Result<(), EmitError> {
@@ -1432,7 +1511,16 @@ impl Emitter {
         self.pointer_vars.clear();
         self.loan_aliases.clear();
         self.local_vars.clear();
+        self.fn_consts.clear();
         self.temp_n = 0;
+        // Collect this function's own `const` declarations so a conversion
+        // naming one (`const loc = 256 + 44` … `u8(loc)`) folds instead of
+        // emitting `uint8(loc)` and letting Go reject it. Issue #1726.
+        if let Some(body) = &f.body {
+            let mut locals = BTreeMap::new();
+            Self::collect_block_consts(body, &mut locals);
+            self.fn_consts = locals;
+        }
         self.try_temps.clear();
         self.loop_labels.clear();
         self.loop_label_n = 0;

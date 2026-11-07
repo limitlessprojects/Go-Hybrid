@@ -1189,7 +1189,15 @@ impl Emitter {
                     // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
                     // executable test-claim. The fold computes that same
                     // two's-complement truncation at emit time.
-                    if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
+                    // The resolver hands `fold_constant` the initializer of any
+                    // file-level or function-local `const` the operand names, so
+                    // `u8(big)` folds exactly like `u8(300)` instead of emitting
+                    // `uint8(big)` and dying in Go as `constant 300 overflows
+                    // uint8`. Issue #1726.
+                    let resolver = |n: &str| self.const_value(n);
+                    if let Some(folded) =
+                        super::constconv::fold_constant(&args[0].value, name, &resolver)
+                    {
                         return Ok(format!("{}({})", go, folded));
                     }
                     let a = self.emit_call_arg(&args[0])?;
