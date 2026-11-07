@@ -1096,7 +1096,13 @@ impl<'a> Checker<'a> {
             }
             TypeExpr::Named { name, span } => {
                 if let Some(st) = st {
-                    for tok in name.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.') {
+                    for src_tok in name.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.') {
+                        // The emitter renames the SPEC primitive spellings
+                        // (`f64` -> `float64`, ...), so the identifier Go
+                        // resolves is the emitted one: a local `f64` never
+                        // collides with `var g f64`, while a local `float64`
+                        // does.
+                        let tok = emitted_type_token(src_tok);
                         if !tok.is_empty() && st.env_lookup(tok).is_some() {
                             let msg = format!(
                                 "type `{}` is shadowed by local value `{}` in this scope ? Go rejects `{tok} (variable) is not a type` (HYB-E1002)",
@@ -3217,4 +3223,22 @@ fn is_primitive_receiver(name: &str) -> bool {
             | "any"
             | "comparable"
     )
+}
+
+/// Go spelling of a type-name token after `hy-emit`'s primitive renaming
+/// (`hy_emit::shapes::go_primitive_name`); every other token is emitted as is.
+fn emitted_type_token(tok: &str) -> &str {
+    match tok {
+        "u8" => "uint8",
+        "u16" => "uint16",
+        "u32" => "uint32",
+        "u64" => "uint64",
+        "i8" => "int8",
+        "i16" => "int16",
+        "i32" => "int32",
+        "i64" => "int64",
+        "f32" => "float32",
+        "f64" => "float64",
+        other => other,
+    }
 }
