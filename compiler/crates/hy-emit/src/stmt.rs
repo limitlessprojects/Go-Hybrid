@@ -2464,6 +2464,14 @@ impl Emitter {
         // the live named result variables instead of clobbering them to zero.
         if !(values.is_empty() && self.cur_fn_has_named_results) {
             if let Some(zeros) = &self.cur_fn_error_returns {
+                // #3541: a lone return f() that the checker accepted as Go multi-value
+                // forward already yields every result the signature declares, so do NOT pad
+                let single_call_covers = values.len() == 1
+                    && matches!(Self::peel_parens(&values[0]), hy_syntax::Expr::Call { .. })
+                    && self.call_results(&values[0])
+                        .map(|(n, has_err)| n + has_err as usize >= zeros.len())
+                        .unwrap_or(2 >= zeros.len());
+                if !single_call_covers {
                 while vs.len() < zeros.len() {
                     let i = vs.len();
                     let z = &zeros[i];
@@ -2472,6 +2480,7 @@ impl Emitter {
                     } else {
                         z.clone()
                     });
+                }
                 }
             }
         }
