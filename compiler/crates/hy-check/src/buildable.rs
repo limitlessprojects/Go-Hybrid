@@ -514,7 +514,6 @@ fn copy_element_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
 
 /// Non-nilable types in Go and Hybrid cannot be compared to untyped nil (SPEC §3.1 N1).
 /// Nilable types: pointer, interface, slice, map, channel, function.
-/// `option[T]` lowers to the generic prelude struct `hyOption[T]`, which is non-nilable in Go.
 fn is_non_nilable(k: &OpKind) -> bool {
     matches!(
         k,
@@ -524,7 +523,6 @@ fn is_non_nilable(k: &OpKind) -> bool {
             | OpKind::Str
             | OpKind::Struct(_)
             | OpKind::Array(_)
-            | OpKind::Option(_)
     )
 }
 
@@ -550,13 +548,6 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // `cannot convert op (variable of struct type option[int])`).
         (Option(_), Option(_)) => false,
         (_, Option(_)) => true,
-        (Option(_), other) if !matches!(other, Unknown | Option(_)) => true,
-
-        // A declared curated foreign named type (os.file, net.conn, sync.mutex, ...)
-        // lowers to a named Go type. Go forbids converting scalars or containers to/from
-        // foreign structs, and only permits converting to `any` (handled above).
-        (Foreign(_), other) if !matches!(other, Unknown | Foreign(_)) => true,
-        (other, Foreign(_)) if !matches!(other, Unknown | Interface | Foreign(_)) => true,
 
         // Struct targets: Go forbids converting non-structs to structs.
         (Struct(_), other) if !matches!(other, Unknown | Struct(_)) => true,
@@ -8234,7 +8225,23 @@ impl<'a> Collector<'a> {
         // spread argument is legal.
         if matches!(
             name,
-            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
+            "len"
+                | "cap"
+                | "close"
+                | "delete"
+                | "min"
+                | "max"
+                | "clear"
+                | "copy"
+                | "panic"
+                | "print"
+                | "println"
+                | "make"
+                | "new"
+                | "complex"
+                | "real"
+                | "imag"
+                | "recover"
         ) && args.iter().any(|a| a.spread)
         {
             self.emit_e1002(
