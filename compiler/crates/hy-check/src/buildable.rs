@@ -553,6 +553,12 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Interface, _) => false,
         (a, b) if a == b => false,
 
+        // #2482: An interface (`any`) value cannot be converted to a concrete
+        // type in Go without a type assertion `x.(T)` (`cannot convert ... to type ...: need type assertion`).
+        // Hybrid has no type assertion syntax, so converting `any` to any concrete
+        // type is always invalid. The reverse direction (`any(concrete)`) is handled above.
+        (other, Interface) if !matches!(other, Unknown | Interface) => true,
+
         // An `option[T]` value lowers to the generic prelude struct
         // `option[T]`; Go converts it to nothing but itself or an interface
         // (`u8(op)`, `float64(op)`, `string(op)` fail `go build` with
@@ -621,7 +627,6 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
                 a != b
             }
         }
-        (Pointer(_), Interface) => false,
         (Pointer(_), _) | (_, Pointer(_)) => true,
 
         _ => false,
