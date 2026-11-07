@@ -23,12 +23,52 @@ VALID = {"mutex", "atomic", "actor", "finalizer", "interop", "other"}
 
 
 def _mask_comments_and_strings(src: str) -> str:
-    """Replace comments and string/char literals with spaces while preserving newlines."""
+    """Replace comments and string/char literals with spaces while preserving newlines.
+
+    Mirrors the Rust lexer's Frame::Str / Frame::Interp { depth } stack
+    (compiler/crates/hy-syntax/src/lexer.rs) so interpolated strings `"…{expr}…"`
+    keep string text masked while lexing `{expr}` in code mode (including nested
+    strings, raw strings, char literals, comments, and nested braces).
+    """
     out = []
+    frames = []  # "str" for Frame::Str; int >= 0 for Frame::Interp { depth }
     i = 0
     n = len(src)
     while i < n:
         ch = src[i]
+        if frames and frames[-1] == "str":
+            if ch == '"':
+                frames.pop()
+                out.append(" ")
+                i += 1
+                continue
+            if ch == "{":
+                if i + 1 < n and src[i + 1] == "{":
+                    out.append("  ")
+                    i += 2
+                    continue
+                frames.append(0)
+                out.append("{")
+                i += 1
+                continue
+            if ch == "}":
+                if i + 1 < n and src[i + 1] == "}":
+                    out.append("  ")
+                    i += 2
+                    continue
+                out.append(" ")
+                i += 1
+                continue
+            if ch == "\\" and i + 1 < n:
+                out.append("\n" if src[i] == "\n" else " ")
+                out.append("\n" if src[i + 1] == "\n" else " ")
+                i += 2
+                continue
+            out.append("\n" if ch == "\n" else " ")
+            i += 1
+            continue
+
+        # Code mode (top-level or inside a `{...}` string interpolation frame)
         # Line comment // ...
         if ch == "/" and i + 1 < n and src[i + 1] == "/":
             while i < n and src[i] != "\n":
@@ -57,12 +97,11 @@ def _mask_comments_and_strings(src: str) -> str:
                 out.append(" ")
                 i += 1
             continue
-        # Quoted string "..." or char literal '...'
-        if ch in ('"', "'"):
-            quote = ch
+        # Char literal '...'
+        if ch == "'":
             out.append(" ")
             i += 1
-            while i < n and src[i] != quote:
+            while i < n and src[i] != "'":
                 if src[i] == "\\" and i + 1 < n:
                     out.append("\n" if src[i] == "\n" else " ")
                     out.append("\n" if src[i + 1] == "\n" else " ")
@@ -73,6 +112,28 @@ def _mask_comments_and_strings(src: str) -> str:
             if i < n:
                 out.append(" ")
                 i += 1
+            continue
+        # Quoted string "..." (pushes Frame::Str)
+        if ch == '"':
+            frames.append("str")
+            out.append(" ")
+            i += 1
+            continue
+        # Braces inside Frame::Interp { depth }
+        if ch == "{":
+            if frames and isinstance(frames[-1], int):
+                frames[-1] += 1
+            out.append("{")
+            i += 1
+            continue
+        if ch == "}":
+            if frames and isinstance(frames[-1], int):
+                if frames[-1] == 0:
+                    frames.pop()
+                else:
+                    frames[-1] -= 1
+            out.append("}")
+            i += 1
             continue
         out.append(ch)
         i += 1
