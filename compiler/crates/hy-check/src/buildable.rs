@@ -836,6 +836,23 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                 Decl::Const(cd) => {
                     c.ty_opt(&cd.ty);
                     c.expr(&cd.value);
+                    if let Some(t) = &cd.ty {
+                        let want = c.kind_of_ty(t, 0);
+                        let got = c.kind_of_expr(&cd.value);
+                        if kinds_conflict(&want, &got) {
+                            c.emit_e1002(
+                                cd.span,
+                                format!(
+                                    "cannot initialize const `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in constant declaration` (HYB-E1002)",
+                                    cd.name,
+                                    want.label(),
+                                    got.label(),
+                                    want.label()
+                                ),
+                                "the declared type is fixed; write an explicit conversion or match the literal kind to the declared type",
+                            );
+                        }
+                    }
                 }
                 Decl::Struct(s) => {
                     for f in &s.fields {
