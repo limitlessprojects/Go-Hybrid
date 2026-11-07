@@ -295,3 +295,57 @@ fn make_array_lit_rejected_hyb_e2005() {
     assert_has(&r2, "HYB-E2005");
 }
 
+#[test]
+fn min_max_and_len_cap_operands_validated_e2005() {
+    // 1. min / max reject boolean literals
+    let bad_min_bool = check("fn main() {\n    _ = min(true, false)\n}\n");
+    assert_has(&bad_min_bool, "HYB-E2005");
+
+    let bad_max_bool = check("fn main() {\n    _ = max(false, true)\n}\n");
+    assert_has(&bad_max_bool, "HYB-E2005");
+
+    // 2. min / max reject nil literals
+    let bad_min_nil = check("fn main() {\n    _ = min(nil)\n}\n");
+    assert_has(&bad_min_nil, "HYB-E2005");
+
+    let bad_max_nil = check("fn main() {\n    _ = max(nil)\n}\n");
+    assert_has(&bad_max_nil, "HYB-E2005");
+
+    // 3. min / max reject struct, slice, and map composite literals
+    let bad_min_struct = check("struct point { x int }\nfn main() {\n    _ = min(point{x: 1}, point{x: 2})\n}\n");
+    assert_has(&bad_min_struct, "HYB-E2005");
+
+    let bad_max_struct = check("struct point { x int }\nfn main() {\n    _ = max(point{x: 1}, point{x: 2})\n}\n");
+    assert_has(&bad_max_struct, "HYB-E2005");
+
+    let bad_min_slice = check("fn main() {\n    _ = min([]int{1}, []int{2})\n}\n");
+    assert_has(&bad_min_slice, "HYB-E2005");
+
+    let bad_max_map = check("fn main() {\n    _ = max(map[string]int{\"a\": 1}, map[string]int{\"b\": 2})\n}\n");
+    assert_has(&bad_max_map, "HYB-E2005");
+
+    // 4. len / cap reject struct composite literals
+    let bad_len_struct = check("struct point { x int }\nfn main() {\n    _ = len(point{x: 1})\n}\n");
+    assert_has(&bad_len_struct, "HYB-E2005");
+
+    let bad_cap_struct = check("struct point { x int }\nfn main() {\n    _ = cap(point{x: 1})\n}\n");
+    assert_has(&bad_cap_struct, "HYB-E2005");
+
+    // 5. len / cap reject nil literals
+    let bad_len_nil = check("fn main() {\n    _ = len(nil)\n}\n");
+    assert_has(&bad_len_nil, "HYB-E2005");
+
+    let bad_cap_nil = check("fn main() {\n    _ = cap(nil)\n}\n");
+    assert_has(&bad_cap_nil, "HYB-E2005");
+
+    // 6. cap rejects map composite literals
+    let bad_cap_map = check("fn main() {\n    _ = cap(map[string]int{\"a\": 1})\n}\n");
+    assert_has(&bad_cap_map, "HYB-E2005");
+
+    // 7. Valid ordered min / max and valid len / cap remain accepted
+    let valid = check(
+        "fn main() {\n    m1 := min(1, 2)\n    m2 := max(1.5, 2.5)\n    m3 := min(\"a\", \"b\")\n    s := []int{1, 2}\n    l1 := len(s)\n    c1 := cap(s)\n    m := map[string]int{\"x\": 1}\n    l2 := len(m)\n    _ = m1\n    _ = m2\n    _ = m3\n    _ = l1\n    _ = c1\n    _ = l2\n}\n",
+    );
+    assert_lacks(&valid, "HYB-E2005");
+}
+
