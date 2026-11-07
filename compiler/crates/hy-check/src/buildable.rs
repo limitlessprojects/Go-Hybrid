@@ -7382,6 +7382,10 @@ impl<'a> Collector<'a> {
                 && exp_key != OpKind::Interface
                 && self.non_single_value_count(k).is_none()
             {
+                let bare_k = unwrap_parens(k);
+                if matches!(bare_k, Expr::Lit { kind: LitKind::Nil, .. }) {
+                    continue;
+                }
                 let kk = self.kind_of_expr(k);
                 // #2788: a typed key of another concrete numeric width.
                 let scalar_mismatch = self
