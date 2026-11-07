@@ -477,3 +477,22 @@
 - Dup-court sweep on old band: #3785 and #3794 already hold maintainer hall-of-fame comments (independent-implementation credit, fixes landed earlier) — left untouched. #3785/#3841 same-family confirmed; first-to-land already settled.
 - Queue triage: #3942/#3949/#3918 still no author movement (updated_at == our evidence-reply timestamps). Next queue: #3811 (dextermos-dev, fixes #3568) and the 11-06/11-07 hy-check band (#3813..#3831, #3838..#3899), then the #4015+ flood; Track-3 spikes excluded per ledger.
 - Suites 471 -> 472 integration files (+1: closure_loop_and_select_binder_tys_3806; #3950 adds CLI/lib surface only). Both pushes remote-asserted; zero silent closes.
+
+## Session 141 — 2026-11-08 00:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef4d59); rust 1.99.0 + go1.26.9 restored; approve 2/2 (4990 left); scan skipped (quota doctrine).
+- **2 landed**:
+  - **#3811** -> `11e3af55` (dextermos-dev, fixes #3568): HYB-E1002 on string interpolation with expression parts when fmt shadowed (is_fmt_shadowed over is_pkg_symbol_shadowed, mirrors is_filepath_shadowed); receiver type-arg hardening (`fn (b box[fmt])` args into fn_type_params via split_top_level_type_args). New suite 10 tests; 472 integration files; corpus 135; differential FULL. Note posted: receiver-tp territory overlaps #3825 (bradwue313) — #3811 predates (07:18 vs 07:49), first-to-land respected in reply.
+  - **#3813** -> `71d90d57` (Burapa-J, fixes #3812): closure_writes_captured taint arm extended to PlaceKind::Index (alias-free) — `rows[0] = shared` no longer leaves closure-local containers un-tainted. One-line fix + 2 tests; 473 integration files; corpus 135; differential FULL. Both batteries warm-cache, full cycle ~35 min for the pair.
+- Stalled-watch: #3942/#3949/#3918 zero author movement (updated_at == our replies).
+- Next queue: #3815/#3817/#3819 (aswadi), #3814 (Burapa-J arith fold), #3820/#3831/#3841-#3849 band, then #4015+ flood; watch #3825 for post-#3811 residue.
+- Suites 472 -> 473 integration files (+2 new suites this tick, one per PR). Both pushes remote-asserted; replies 201 x2; zero silent closes.
+
+## Session 142 — 2026-11-08 01:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef5b68); toolchains restored; approve 4/4 (4994 left); scan skipped (quota doctrine).
+- **2 landed**:
+  - **#3858** -> `011823c9` (Burapa-J, fixes #3857): tuple.rs check_type_expr_single_value — array-length TypeExprs walked in Local/FnLit/SliceLit/MapLit positions; FnLit out of skip-list; file-const fn callees resolved in static_result_count; is_unshadowed_pkg shadow guards. Extended suite 5 tests; corpus 135; differential FULL.
+  - **#3860** -> `6af66ee8` (Burapa-J, fixes #3859): shape_carries_handle_at set[T] element inspection + unresolved-generic fail-closed; call_shape type-param Unknown; package calls refuse struct/enum/alias/const/typeparam shadowing. Extended suite 12 tests; corpus 135; differential FULL.
+- Queue reality check: aswadi band (#3815/#3817/#3819) and #3820-#3857 old band no longer open (maintainer-processed); oldest open now starts #3858 (landed), then #3861/#3864/#3867/#3883-#3899. Correction: S141 worklog's "#3814 Burapa-J arith" was wrong — #3814 is an issue; the PR is #3843 (also no longer open).
+- Count correction: integration-file counts in the #3811/#3813 commits (472/473) understated by one each — actual 473/474 (arithmetic drift, zero coverage gaps; all suites ran all ticks). Today verified 474 .rs on disk == 474 binaries in log == all green. Disclosed in #3860 landing reply.
+- Two transient env faults this tick: first #3860 battery exited 101 with dropped stderr (clean re-run green); both remote-asserted; replies 201 x2; zero silent closes.
+- Next queue: #3861 (dextermos-dev range_iter shadows), #3864/#3897 (buildable member lowerings — possible dup pair, check), #3867 (const_init type-param shadows), #3883-#3899 band, then #4015+ flood.
