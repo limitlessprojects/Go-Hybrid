@@ -372,11 +372,16 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
     const SYNC_WAIT_GROUP: &[&str] = &["add", "done", "wait"];
     const SYNC_ONCE: &[&str] = &["do"];
+    /// `sort.StringSlice`, `sort.IntSlice`, `sort.Float64Slice` — Go standard library sort slice handles.
+    const SORT_SLICE_METHODS: &[&str] = &["len", "less", "swap", "sort", "search"];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
         "sync.once" | "sync.Once" => Some(SYNC_ONCE),
+        "sort.string_slice" | "sort.StringSlice" => Some(SORT_SLICE_METHODS),
+        "sort.int_slice" | "sort.IntSlice" => Some(SORT_SLICE_METHODS),
+        "sort.float64_slice" | "sort.Float64Slice" => Some(SORT_SLICE_METHODS),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
