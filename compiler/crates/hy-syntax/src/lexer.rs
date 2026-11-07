@@ -697,6 +697,23 @@ impl<'a> Lexer<'a> {
                 self.escape_diag(start, false, "malformed float literal: exponent has no digits (SPEC-LANGUAGE.md LX6)");
             }
         }
+        if is_float && self.at(0) == Some('.') && self.at(1) != Some('.') {
+            s.push('.');
+            self.bump();
+            while let Some(c) = self.at(0) {
+                if c == '_' || c.is_ascii_alphanumeric() {
+                    s.push(c);
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+            self.escape_diag(
+                start,
+                false,
+                format!("malformed float literal `{s}`: multiple decimal points are not allowed"),
+            );
+        }
         if is_float {
             if self.at(0) == Some('.') && self.at(1) != Some('.') {
                 while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric() || (c == '.' && self.at(1) != Some('.'))) {

@@ -204,6 +204,24 @@ fn prefixed_base_literal_with_fraction_fails_closed() {
 }
 
 #[test]
+fn decimal_float_with_second_dot_fails_closed() {
+    // A second non-range dot used to split off a leading-dot float, allowing
+    // newline-insensitive parsing to accept two adjacent expressions.
+    for src in [
+        "fn main() { x := 1.2.3 }",
+        "fn main() { x := .5.2 }",
+        "fn main() { x := 1e2.5 }",
+    ] {
+        let errs = lex_errs(src);
+        assert!(
+            errs.iter()
+                .any(|d| d.code == "HYB-E0002" && d.tier0_rule.as_deref() == Some("LX6")),
+            "expected HYB-E0002 [LX6] for `{src}`, got: {errs:?}"
+        );
+    }
+}
+
+#[test]
 fn utf8_byte_escapes_in_strings_preserve_utf8_bytes_issue_1199() {
     // Hex and octal byte escapes in interpreted strings denote raw UTF-8 bytes
     // (LX7 / T3), not Latin-1 code points re-encoded as UTF-8.
