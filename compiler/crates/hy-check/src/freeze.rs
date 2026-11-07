@@ -400,6 +400,7 @@ impl<'a> Checker<'a> {
             if let Expr::Ident { name, .. } = op {
                 self.mark_move(st, name, mspan, desc.clone(), MoveKind::Moved);
             } else if matches!(op, Expr::Field { .. })
+                && op.root_ident().is_some()
                 && matches!(
                     self.shape_of_expr(st, op),
                     crate::model::TypeShape::OwnHandle(_)
@@ -410,6 +411,18 @@ impl<'a> Checker<'a> {
                 }
             } else {
                 self.check_o54_non_ident_move(st, op, mspan);
+                if op.root_ident().is_none() {
+                    let mut roots = Vec::new();
+                    crate::model::collect_ref_roots(op, &mut roots);
+                    for root in roots {
+                        if self
+                            .lookup_binding(st, &root)
+                            .is_some_and(|b| !b.shape.is_sendable_by_type())
+                        {
+                            self.mark_move(st, &root, mspan, desc.clone(), MoveKind::Moved);
+                        }
+                    }
+                }
             }
         }
     }
@@ -452,6 +465,7 @@ impl<'a> Checker<'a> {
     ) {
         let shape = self.shape_of_expr(st, operand);
         if matches!(operand, Expr::Field { .. })
+            && operand.root_ident().is_some()
             && matches!(shape, crate::model::TypeShape::OwnHandle(_))
         {
             return;
