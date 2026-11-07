@@ -7779,6 +7779,7 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+
                     if pkg == "time"
                         && self.lookup_kind(pkg).is_none()
                         && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
@@ -7817,6 +7818,91 @@ impl<'a> Collector<'a> {
                             }
                         }
                     }
+                    if pkg == "time" && self.lookup_kind(pkg).is_none() {
+                        let method = name.as_str();
+                        if method == "now" {
+                            if !args.is_empty() {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`time.now` takes 0 arguments, got {} (HYB-E1002)",
+                                        args.len()
+                                    ),
+                                    "write `time.now()`",
+                                );
+                            }
+                        } else if matches!(method, "sleep" | "after" | "tick") {
+                            if args.len() != 1 {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`time.{}` takes exactly 1 duration argument `(d)`, got {} (HYB-E1002)",
+                                        name,
+                                        args.len()
+                                    ),
+                                    &format!("write `time.{}(time.seconds(1))`", name),
+                                );
+                            } else {
+                                let bare = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Str(_)
+                                            | LitKind::RawStr(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`time.{}` requires a duration argument, found non-duration literal (HYB-E1002)",
+                                            name
+                                        ),
+                                        &format!("pass a duration expression to `time.{}`", name),
+                                    );
+                                }
+                            }
+                        } else if matches!(method, "since" | "until") {
+                            if args.len() != 1 {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`time.{}` takes exactly 1 time argument `(t)`, got {} (HYB-E1002)",
+                                        name,
+                                        args.len()
+                                    ),
+                                    &format!("write `time.{}(t)`", name),
+                                );
+                            } else {
+                                let bare = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Str(_)
+                                            | LitKind::RawStr(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`time.{}` requires a `time.Time` argument, found literal (HYB-E1002)",
+                                            name
+                                        ),
+                                        &format!("pass a `time.Time` expression to `time.{}`", name),
+                                    );
+                                }
+                            }
+                        }
+                    }
                     if pkg == "os"
                         && self.lookup_kind(pkg).is_none()
                         && matches!(name.as_str(), "args" | "stdout" | "stderr" | "stdin")
@@ -7845,6 +7931,93 @@ impl<'a> Collector<'a> {
                             ),
                             "write `hex.encode(data)` (SPEC M5 hex encoding)",
                         );
+                    }
+                    if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
+                        let method = name.as_str();
+                        if matches!(method, "append" | "appendln") {
+                            if args.is_empty() {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`fmt.{}` requires at least 1 destination byte slice argument `(b[, ...])`, got 0 (HYB-E1002)",
+                                        name
+                                    ),
+                                    &format!("write `fmt.{}(buf, ...)`", name),
+                                );
+                            } else {
+                                let bare = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil
+                                            | LitKind::Str(_),
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.{}` requires a byte slice destination argument, found non-slice literal (HYB-E1002)",
+                                            name
+                                        ),
+                                        &format!("pass a byte slice `[]byte` as destination to `fmt.{}`", name),
+                                    );
+                                }
+                            }
+                        } else if method == "appendf" {
+                            if args.len() < 2 {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`fmt.appendf` requires at least 2 arguments `(b, format[, ...])`, got {} (HYB-E1002)",
+                                        args.len()
+                                    ),
+                                    "write `fmt.appendf(buf, \"%s\", ...)`",
+                                );
+                            } else {
+                                let dest_bare = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    dest_bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil
+                                            | LitKind::Str(_),
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.appendf` requires a byte slice destination argument, found non-slice literal (HYB-E1002)".to_string(),
+                                        "pass a byte slice `[]byte` as destination to `fmt.appendf`",
+                                    );
+                                }
+                                let fmt_bare = unwrap_parens(&args[1].value);
+                                if matches!(
+                                    fmt_bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.appendf` requires a string format argument, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string literal or expression as format to `fmt.appendf`",
+                                    );
+                                }
+                            }
+                        }
                     }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
