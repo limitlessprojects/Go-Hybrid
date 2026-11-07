@@ -741,6 +741,8 @@ struct Collector<'a> {
     /// instantiations) — Go compiles them; bare `k` must NOT hit the
     /// value-position undeclared-type net. Swapped per body like `fn_results`.
     fn_type_params: HashSet<String>,
+    /// Whether the enclosing method receiver binds `fmt` as a generic type argument (`box[fmt]`).
+    fn_recv_captures_fmt: bool,
     /// Whether every result of the enclosing signature is named, so Go's
     /// naked `return` is legal (corpus 63).
     fn_results_all_named: bool,
@@ -803,6 +805,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_results: Vec::new(),
             fn_result_type_names: Vec::new(),
             fn_type_params: HashSet::new(),
+            fn_recv_captures_fmt: false,
             fn_results_all_named: false,
             fn_results_error_tail: false,
             scalar_scopes: Vec::new(),
@@ -1994,10 +1997,22 @@ impl<'a> Collector<'a> {
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
+        let recv_captures_fmt = f.receiver.as_ref().is_some_and(|r| {
+            if let TypeExpr::Named { name, .. } = &r.ty {
+                if let Some(open) = name.find('[') {
+                    if name.ends_with(']') {
+                        return split_top_level_type_args(&name[open + 1..name.len() - 1])
+                            .contains(&"fmt");
+                    }
+                }
+            }
+            false
+        });
         let outer_tp = std::mem::replace(
             &mut self.fn_type_params,
             f.type_params.iter().map(|p| p.name.clone()).collect(),
         );
+        let outer_recv_fmt = std::mem::replace(&mut self.fn_recv_captures_fmt, recv_captures_fmt);
         let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
         let outer_select = std::mem::replace(&mut self.select_depth, 0);
         self.block_stmts(body);
@@ -2009,6 +2024,7 @@ impl<'a> Collector<'a> {
         self.fn_result_scalars = outer_scalars;
         self.fn_result_type_names = outer_rt;
         self.fn_type_params = outer_tp;
+        self.fn_recv_captures_fmt = outer_recv_fmt;
         self.pop_scope();
     }
 
@@ -2850,7 +2866,10 @@ impl<'a> Collector<'a> {
                 self.check_type_name_in_value_position(name, *span);
             }
             Expr::Lit { .. } => {}
-            Expr::Interp { parts, .. } => {
+            Expr::Interp { parts, span } => {
+                if parts.iter().any(|p| matches!(p, InterpPart::Expr(_))) {
+                    self.check_interp_fmt_unshadowed(*span);
+                }
                 for p in parts {
                     if let InterpPart::Expr(x) = p {
                         self.expr(x);
@@ -4232,6 +4251,36 @@ impl<'a> Collector<'a> {
         self.diags.push(
             Diagnostic::error("HYB-E2005", self.path.clone(), span, msg)
                 .with_notes(vec![note.to_string()]),
+        );
+    }
+
+    /// #3568 — an interpolation with an expression part lowers to
+    /// `fmt.Sprintf(...)` (with `import "fmt"`). If `fmt` is bound in an
+    /// enclosing lexical/generic scope or declared at package scope, Go
+    /// captures or collides with `fmt` (`fmt.Sprintf undefined` or `fmt
+    /// redeclared in this block`).
+    fn check_interp_fmt_unshadowed(&mut self, span: Span) {
+        let local_or_tp = self
+            .scopes
+            .iter()
+            .rev()
+            .any(|layer| layer.contains_key("fmt"))
+            || self.fn_type_params.contains("fmt")
+            || self.fn_recv_captures_fmt;
+        let pkg_decl = self.ck.pkg_names.contains_key("fmt")
+            || self.ck.fns.contains_key("fmt")
+            || self.ck.structs.contains_key("fmt")
+            || self.ck.struct_type_params.contains_key("fmt")
+            || self.ck.enums.contains_key("fmt")
+            || self.ck.consts.contains_key("fmt")
+            || self.ck.type_aliases.contains_key("fmt");
+        if !local_or_tp && !pkg_decl {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            "string interpolation requires package `fmt`, which is shadowed by an in-scope `fmt` declaration — Go refuses `fmt.Sprintf` (HYB-E1002)".to_string(),
+            "rename the `fmt` binding or declaration so emitter-generated `fmt.Sprintf(...)` resolves to Go's `fmt` package",
         );
     }
 
