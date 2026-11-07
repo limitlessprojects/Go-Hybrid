@@ -30,6 +30,7 @@ impl<'a> Checker<'a> {
     /// flat walk already lists those statements (same discipline as
     /// `arith.rs` / `builtins.rs`); the closure walk recurses explicitly.
     pub(crate) fn check_stmt_recv_operands(&mut self, st: &FnState, stmt: &Stmt) {
+        self.check_file_decl_recv_operands(stmt);
         match stmt {
             Stmt::Local(l) => {
                 if let Some(ty) = &l.ty {
@@ -148,6 +149,114 @@ impl<'a> Checker<'a> {
             | Stmt::Continue { .. }
             | Stmt::Block { .. }
             | Stmt::Managed { .. } => {}
+        }
+    }
+
+    fn check_file_decl_recv_operands(&mut self, trigger_stmt: &Stmt) {
+        let first_span = self
+            .file
+            .fns()
+            .find_map(|f| f.body.as_ref()?.stmts.first().map(|s| s.span()));
+        if first_span != Some(trigger_stmt.span()) {
+            return;
+        }
+        let mut decl_st = FnState::default();
+        for d in &self.file.decls {
+            if let hy_syntax::Decl::Const(c) = d {
+                let ty = c
+                    .ty
+                    .clone()
+                    .or_else(|| self.ty_of_expr(&decl_st, &c.value))
+                    .or_else(|| self.composite_type_expr(&decl_st, &c.value));
+                let shape = match (&ty, self.shape_of_expr(&decl_st, &c.value)) {
+                    (Some(t), TypeShape::Unknown) => self.shape_of_type(t),
+                    (_, s) => s,
+                };
+                self.define_binding(&mut decl_st, &c.name, shape, ty, true, false, false);
+            }
+        }
+        for d in &self.file.decls {
+            match d {
+                hy_syntax::Decl::Const(c) => {
+                    if let Some(ty) = &c.ty {
+                        self.check_type_recv_operands(&decl_st, ty);
+                    }
+                    self.check_expr_recv_operands(&decl_st, &c.value);
+                }
+                hy_syntax::Decl::Struct(s) => {
+                    for f in &s.fields {
+                        self.check_type_recv_operands(&decl_st, &f.ty);
+                    }
+                }
+                hy_syntax::Decl::TypeAlias(a) => {
+                    self.check_type_recv_operands(&decl_st, &a.ty);
+                }
+                hy_syntax::Decl::Enum(e) => {
+                    for v in &e.variants {
+                        if let Some(payload) = &v.payload {
+                            self.check_type_recv_operands(&decl_st, payload);
+                        }
+                    }
+                }
+                hy_syntax::Decl::Fn(f) => {
+                    let mut fn_st = decl_st.clone();
+                    if let Some(r) = &f.receiver {
+                        let rty = if r.is_pointer {
+                            hy_syntax::TypeExpr::Pointer {
+                                to: Box::new(r.ty.clone()),
+                                span: r.ty.span(),
+                            }
+                        } else {
+                            r.ty.clone()
+                        };
+                        self.define_binding(
+                            &mut fn_st,
+                            &r.name,
+                            self.shape_of_type(&rty),
+                            Some(rty),
+                            false,
+                            false,
+                            false,
+                        );
+                    }
+                    for p in &f.params {
+                        self.define_binding(
+                            &mut fn_st,
+                            &p.name,
+                            self.shape_of_type(&p.ty),
+                            Some(p.ty.clone()),
+                            false,
+                            false,
+                            false,
+                        );
+                    }
+                    for r in &f.results {
+                        if let Some(rname) = &r.name {
+                            if rname != "_" {
+                                self.define_binding(
+                                    &mut fn_st,
+                                    rname,
+                                    self.shape_of_type(&r.ty),
+                                    Some(r.ty.clone()),
+                                    false,
+                                    false,
+                                    false,
+                                );
+                            }
+                        }
+                    }
+                    if let Some(r) = &f.receiver {
+                        self.check_type_recv_operands(&fn_st, &r.ty);
+                    }
+                    for p in &f.params {
+                        self.check_type_recv_operands(&fn_st, &p.ty);
+                    }
+                    for r in &f.results {
+                        self.check_type_recv_operands(&fn_st, &r.ty);
+                    }
+                }
+                hy_syntax::Decl::Import { .. } => {}
+            }
         }
     }
 
