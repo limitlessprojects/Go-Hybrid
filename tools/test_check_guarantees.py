@@ -17,7 +17,9 @@ build throwaway trees and pin every failure mode the guard claims to catch:
   - a doc without the generated-table markers
 and the clean case, where the table, the registry, the corpus and the doc agree.
 """
+import contextlib
 import importlib.util
+import io
 import json
 import tempfile
 import unittest
@@ -227,6 +229,86 @@ class Fixtures(unittest.TestCase):
         )
         self.addCleanup(tmp.cleanup)
         self.assertIn("carries no `// EXPECTED-VERDICT:` line", joined(problems_of(root)))
+
+
+class FixtureMetadata(unittest.TestCase):
+    """A claims-table fixture must also be valid corpus-harness metadata."""
+
+    def make_metadata_tree(self, headers, expect="reject"):
+        with contextlib.redirect_stdout(io.StringIO()):
+            tmp, root = build(
+                rows=[row(fixtures=[{"path": FIXTURE_1, "expect": expect}])],
+                fixtures={FIXTURE_1: headers + "\nfn main() {}\n"},
+            )
+        self.addCleanup(tmp.cleanup)
+        return root
+
+    def assert_invalid_metadata(self, headers, expect="reject"):
+        root = self.make_metadata_tree(headers, expect)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = MOD.main(["--root", str(root)])
+        self.assertEqual(status, 1, output.getvalue())
+        self.assertIn("invalid corpus metadata", output.getvalue())
+        self.assertNotIn("guarantees OK", output.getvalue())
+
+    def test_duplicate_verdict_headers_are_rejected(self):
+        for second in ("REJECT A1c", "ACCEPT"):
+            with self.subTest(second=second):
+                self.assert_invalid_metadata(
+                    "// EXPECTED-VERDICT: REJECT A1c\n"
+                    f"// EXPECTED-VERDICT: {second}"
+                )
+
+    def test_reject_requires_a_rule(self):
+        self.assert_invalid_metadata("// EXPECTED-VERDICT: REJECT")
+
+    def test_accept_cannot_carry_a_rejection_rule(self):
+        for verdict, expect in (("ACCEPT", "accept"), ("ACCEPT-MANAGED", "accept-managed")):
+            with self.subTest(verdict=verdict):
+                self.assert_invalid_metadata(f"// EXPECTED-VERDICT: {verdict} A1c", expect)
+
+    def test_trailing_verdict_junk_is_rejected(self):
+        self.assert_invalid_metadata("// EXPECTED-VERDICT: REJECT A1c unexpected text")
+
+    def test_duplicate_diagnostic_headers_are_rejected(self):
+        for second in ("HYB-E3005", "HYB-E3001"):
+            with self.subTest(second=second):
+                self.assert_invalid_metadata(
+                    "// EXPECTED-VERDICT: REJECT A1c\n"
+                    "// EXPECTED-DIAGNOSTIC: HYB-E3005\n"
+                    f"// EXPECTED-DIAGNOSTIC: {second}"
+                )
+
+    def test_malformed_diagnostic_headers_are_rejected(self):
+        for diagnostic in ("HYB-E3005garbage", "not-a-code", ""):
+            with self.subTest(diagnostic=diagnostic):
+                self.assert_invalid_metadata(
+                    "// EXPECTED-VERDICT: REJECT A1c\n"
+                    f"// EXPECTED-DIAGNOSTIC: {diagnostic}"
+                )
+
+    def test_diagnostic_requires_a_reject_fixture(self):
+        for verdict, expect in (("ACCEPT", "accept"), ("ACCEPT-MANAGED", "accept-managed")):
+            with self.subTest(verdict=verdict):
+                self.assert_invalid_metadata(
+                    f"// EXPECTED-VERDICT: {verdict}\n"
+                    "// EXPECTED-DIAGNOSTIC: HYB-E3005",
+                    expect,
+                )
+
+    def test_valid_corpus_metadata_keeps_passing(self):
+        cases = (
+            ("// EXPECTED-VERDICT: ACCEPT", "accept"),
+            ("// EXPECTED-VERDICT: ACCEPT-MANAGED", "accept-managed"),
+            ("// EXPECTED-VERDICT: REJECT A1c (registered explanation)", "reject"),
+            ("// EXPECTED-VERDICT: REJECT A1c\n"
+             "// EXPECTED-DIAGNOSTIC: HYB-E3005", "reject"),
+        )
+        for headers, expect in cases:
+            with self.subTest(headers=headers):
+                root = self.make_metadata_tree(headers, expect)
+                self.assertEqual(problems_of(root), [])
 
 
 class Coverage(unittest.TestCase):
