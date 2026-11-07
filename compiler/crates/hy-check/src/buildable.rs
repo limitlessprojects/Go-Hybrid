@@ -397,6 +397,10 @@ fn canonical_numeric_name(name: &str) -> Option<&'static str> {
     })
 }
 
+fn is_signed_integer_scalar(name: &str) -> bool {
+    matches!(name.trim(), "int" | "int8" | "int16" | "int32" | "int64")
+}
+
 /// #2771 — `[3]int` yes; `[]int` (slice), `[N]int` (non-constant length), and
 /// named types no — so only genuinely sized arrays are compared.
 fn is_sized_array_spelling(s: &str) -> bool {
@@ -6244,6 +6248,20 @@ impl<'a> Collector<'a> {
                         ),
                         "modulo, bitwise, and shift operators require integer operands",
                     );
+                } else if is_shift {
+                    if let Some(r_scalar) = self.typed_value_scalar(rhs) {
+                        if is_signed_integer_scalar(r_scalar) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "invalid operation `{}`: shift count type `{}`, must be unsigned integer (HYB-E1002)",
+                                    span_expr_label(lhs, op_str, rhs),
+                                    r_scalar
+                                ),
+                                "shift count must be an unsigned integer in Go (e.g. `uint`, `uint8`, `uint32`, `uint64`)",
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -6587,6 +6605,23 @@ impl<'a> Collector<'a> {
                         ),
                         "integer compound assignment operators require integer operands",
                     );
+                } else if is_shift {
+                    if let Some(v_scalar) = self.typed_value_scalar(val) {
+                        if is_signed_integer_scalar(v_scalar) {
+                            let op_sym = if matches!(op, AssignOp::ShlAssign) { "<<=" } else { ">>=" };
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "invalid operation `{} {} {}`: shift count type `{}`, must be unsigned integer (HYB-E1002)",
+                                    target.render(),
+                                    op_sym,
+                                    val.render(),
+                                    v_scalar
+                                ),
+                                "shift count must be an unsigned integer in Go (e.g. `uint`, `uint8`, `uint32`, `uint64`)",
+                            );
+                        }
+                    }
                 }
             }
         }
