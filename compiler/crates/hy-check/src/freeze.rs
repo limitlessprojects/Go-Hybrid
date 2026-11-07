@@ -1207,8 +1207,6 @@ impl<'a> Checker<'a> {
             iter_st.scope_pop();
         }
 
-        self.check_loop_backedge_replay(&iter_st, loop_stmts, events, in_managed);
-
         let popped_st = iter_st.clone();
         let mut any_loop_carried = false;
         for (name, b) in iter_st
@@ -1216,10 +1214,11 @@ impl<'a> Checker<'a> {
             .iter_mut()
             .chain(iter_st.scopes.iter_mut().flat_map(|s| s.iter_mut()))
         {
-            if b.moved.is_some() {
+            if let Some(mv) = &b.moved {
                 let root = resolve_alias(&popped_st, name);
                 if pre_moved.contains(name)
                     || reported_backedge.contains(&root)
+                    || !Self::move_span_can_reach_backedge(loop_body, mv.span)
                 {
                     b.moved = None;
                 } else {
@@ -1227,6 +1226,11 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        let mut replay_base = iter_st.clone();
+        for (_, b) in replay_base.env.iter_mut().chain(replay_base.scopes.iter_mut().flat_map(|s| s.iter_mut())) {
+            if b.moved.as_ref().is_some_and(|m| m.kind == MoveKind::Consumed) { b.moved = None; }
+        }
+        self.check_loop_backedge_replay(&replay_base, loop_stmts, events, in_managed);
         if !any_loop_carried {
             return;
         }

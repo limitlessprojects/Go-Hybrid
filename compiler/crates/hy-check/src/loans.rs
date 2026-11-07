@@ -2706,6 +2706,8 @@ impl<'a> Checker<'a> {
                 collect_capture_idents_block(body, &mut bound, &mut idents);
                 let mut captured_move = None;
                 for id in idents {
+                    let top_redef = body.stmts.iter().any(|s| matches!(s, Stmt::Local(l) if l.names.contains(&id) && !l.values.iter().any(|v| self.value_reads_storage_of(st, v, &id))));
+                    if top_redef { continue; }
                     if captured_move.is_none() {
                         captured_move =
                             self.lookup_binding(st, &id).and_then(|b| b.moved.clone());
@@ -4463,7 +4465,7 @@ impl<'a> Checker<'a> {
     /// Extend call-scoped borrow loans opened by the calls inside `value`
     /// to the last use of the view binding `name` (the A2 non-lexical
     /// window for define-stored element views).
-    fn extend_call_loans_to_view(&self, st: &mut FnState, value: &Expr, name: &str, idx: usize) {
+    pub(crate) fn extend_call_loans_to_view(&self, st: &mut FnState, value: &Expr, name: &str, idx: usize) {
         let view_last = st.last_use.get(name).copied().unwrap_or(idx).max(idx);
         let mut calls = Vec::new();
         walk::expr_calls(value, &mut calls);
