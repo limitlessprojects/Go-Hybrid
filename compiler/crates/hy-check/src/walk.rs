@@ -460,6 +460,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                         via_move: true,
                         via_addr: false,
                     });
+                    expr_move_chain_subexpr_uses(operand, out);
                 } else {
                     expr_uses(operand, out);
                 }
@@ -513,6 +514,40 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
         // closures.rs pass (O4.9).
         Expr::FnLit { .. } => {}
         Expr::Paren { inner, .. } => expr_uses(inner, out),
+    }
+}
+
+/// Collect identifier uses from index and slice-bound subexpressions along a
+/// rooted `move` projection chain (`move s.holders[idx].doc`,
+/// `move s.holders[lo:hi][idx].doc`) without re-recording the root base
+/// identifier as a non-move read.
+fn expr_move_chain_subexpr_uses(expr: &Expr, out: &mut Vec<Use>) {
+    match expr {
+        Expr::Ident { .. } => {}
+        Expr::Field { base, .. } => expr_move_chain_subexpr_uses(base, out),
+        Expr::Index { base, index, .. } => {
+            expr_move_chain_subexpr_uses(base, out);
+            expr_uses(index, out);
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            expr_move_chain_subexpr_uses(base, out);
+            if let Some(lo) = lo {
+                expr_uses(lo, out);
+            }
+            if let Some(hi) = hi {
+                expr_uses(hi, out);
+            }
+        }
+        Expr::Paren { inner, .. } => expr_move_chain_subexpr_uses(inner, out),
+        Expr::AddrOf { operand, .. }
+        | Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        }
+        | Expr::Move { operand, .. }
+        | Expr::Try { operand, .. } => expr_move_chain_subexpr_uses(operand, out),
+        _ => expr_uses(expr, out),
     }
 }
 
