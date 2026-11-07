@@ -121,7 +121,19 @@ pub(crate) fn is_iterable_handle(name: &str) -> bool {
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
-        ("serde_json", "parse" | "new_object" | "new_array") | ("flate2", "new_writer") => {
+        ("serde_json", "parse" | "new_object" | "new_array")
+        | ("flate2", "new_writer")
+        | (
+            "httptest" | "net/http/httptest",
+            "new_server"
+                | "new_tls_server"
+                | "new_unstarted_server"
+                | "new_recorder"
+                | "NewServer"
+                | "NewTLSServer"
+                | "NewUnstartedServer"
+                | "NewRecorder",
+        ) => {
             CallMode::Produce
         }
         ("serde_json", "to_string_pretty")
@@ -182,6 +194,19 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
+        (
+            "httptest" | "net/http/httptest",
+            "new_server"
+                | "new_tls_server"
+                | "new_unstarted_server"
+                | "NewServer"
+                | "NewTLSServer"
+                | "NewUnstartedServer",
+        ) => TypeShape::ForeignOpaque("httptest.server".into()),
+        (
+            "httptest" | "net/http/httptest",
+            "new_recorder" | "NewRecorder",
+        ) => TypeShape::ForeignOpaque("httptest.response_recorder".into()),
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -475,6 +500,21 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const IO_LIMITED_READER: &[&str] = &["read"];
     /// `io.OffsetWriter`.
     const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
+    const HTTPTEST_SERVER: &[&str] = &[
+        "client",
+        "close",
+        "close_client_connections",
+        "start",
+        "start_tls",
+    ];
+    const HTTPTEST_RESPONSE_RECORDER: &[&str] = &[
+        "flush",
+        "header",
+        "result",
+        "write",
+        "write_header",
+        "write_string",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -496,6 +536,10 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
         "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
         "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
+        "httptest.server" | "httptest.Server" => Some(HTTPTEST_SERVER),
+        "httptest.response_recorder"
+        | "httptest.responserecorder"
+        | "httptest.ResponseRecorder" => Some(HTTPTEST_RESPONSE_RECORDER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
