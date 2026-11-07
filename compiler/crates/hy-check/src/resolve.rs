@@ -491,17 +491,26 @@ impl<'a> Scan<'a> {
                 body,
                 ..
             } => {
-                let mut fn_allowed = self.allowed.clone();
-                let mut fn_locals = self.local_decls.clone();
+                let mut sig_names = HashSet::new();
                 for p in params {
-                    fn_allowed.insert(p.name.clone());
-                    fn_locals.insert(p.name.clone());
+                    sig_names.insert(p.name.clone());
                 }
                 for r in results {
                     if let Some(n) = &r.name {
-                        fn_allowed.insert(n.clone());
-                        fn_locals.insert(n.clone());
+                        sig_names.insert(n.clone());
                     }
+                }
+                for p in params {
+                    self.run_sig_type(&p.ty, &sig_names);
+                }
+                for r in results {
+                    self.run_sig_type(&r.ty, &sig_names);
+                }
+                let mut fn_allowed = self.allowed.clone();
+                let mut fn_locals = self.local_decls.clone();
+                for n in sig_names {
+                    fn_allowed.insert(n.clone());
+                    fn_locals.insert(n);
                 }
                 let mut check = Scan {
                     path: self.path,
@@ -513,12 +522,6 @@ impl<'a> Scan<'a> {
                     uncurated_imports: self.uncurated_imports,
                     diags: self.diags,
                 };
-                for p in params {
-                    check.run_type(&p.ty);
-                }
-                for r in results {
-                    check.run_type(&r.ty);
-                }
                 check.run_block(body);
             }
         }
@@ -684,6 +687,40 @@ impl<'a> Scan<'a> {
                 }
                 for r in results {
                     self.run_type(r);
+                }
+            }
+        }
+    }
+
+    fn run_sig_type(&mut self, t: &TypeExpr, sig_names: &HashSet<String>) {
+        match t {
+            TypeExpr::Named { .. } => {}
+            TypeExpr::Pointer { to, .. } => self.run_sig_type(to, sig_names),
+            TypeExpr::Slice { elem, .. }
+            | TypeExpr::Chan { elem, .. }
+            | TypeExpr::Option { elem, .. } => self.run_sig_type(elem, sig_names),
+            TypeExpr::Array { len, elem, .. } => {
+                if let Some(l) = len {
+                    if let Expr::Ident { name, .. } = crate::model::unwrap_parens(l) {
+                        if !sig_names.contains(name) {
+                            self.run_expr(l);
+                        }
+                    } else {
+                        self.run_expr(l);
+                    }
+                }
+                self.run_sig_type(elem, sig_names);
+            }
+            TypeExpr::Map { key, value, .. } => {
+                self.run_sig_type(key, sig_names);
+                self.run_sig_type(value, sig_names);
+            }
+            TypeExpr::Fn { params, results, .. } => {
+                for p in params {
+                    self.run_sig_type(&p.ty, sig_names);
+                }
+                for r in results {
+                    self.run_sig_type(r, sig_names);
                 }
             }
         }
@@ -1038,8 +1075,8 @@ impl Checker<'_> {
             let mut fn_allowed = allowed.clone();
             let mut fn_locals = local_decls.clone();
             let fn_tps = seed_fn_type_params(f_decl);
-            seed_fn_scope(f_decl, &mut fn_allowed);
-            seed_fn_scope(f_decl, &mut fn_locals);
+            let mut sig_names = HashSet::new();
+            seed_fn_scope(f_decl, &mut sig_names);
             let mut scan = Scan {
                 path,
                 packages,
@@ -1051,13 +1088,13 @@ impl Checker<'_> {
                 diags,
             };
             if let Some(r) = &f_decl.receiver {
-                scan.run_type(&r.ty);
+                scan.run_sig_type(&r.ty, &sig_names);
             }
             for p in &f_decl.params {
-                scan.run_type(&p.ty);
+                scan.run_sig_type(&p.ty, &sig_names);
             }
             for r in &f_decl.results {
-                scan.run_type(&r.ty);
+                scan.run_sig_type(&r.ty, &sig_names);
             }
         }
     }
