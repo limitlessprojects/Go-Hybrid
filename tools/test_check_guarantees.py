@@ -19,6 +19,8 @@ and the clean case, where the table, the registry, the corpus and the doc agree.
 """
 import importlib.util
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -230,6 +232,32 @@ class Fixtures(unittest.TestCase):
 
 
 class Coverage(unittest.TestCase):
+    def test_non_string_exemptions_fail_the_real_cli(self):
+        # JSON null becomes str(None) == "None" in the old guard: an
+        # unexplained omission is incorrectly certified as documented.
+        for reason in (None, False, True, 0, 1.5, [], {}, ["typing"]):
+            with self.subTest(reason=reason):
+                tmp, root = build(unclaimed={"HYB-E3002": reason, "HYB-E8001": "lint"})
+                self.addCleanup(tmp.cleanup)
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), "--root", str(root)],
+                    capture_output=True, text=True, encoding="utf-8", timeout=10,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("HYB-E3002", result.stdout)
+                self.assertIn("non-empty string", result.stdout)
+                self.assertNotIn("guarantees OK", result.stdout)
+
+    def test_text_exemption_still_passes_the_real_cli(self):
+        tmp, root = build(unclaimed={"HYB-E3002": "  typing rule, no row yet  ", "HYB-E8001": "lint"})
+        self.addCleanup(tmp.cleanup)
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--root", str(root)],
+            capture_output=True, text=True, encoding="utf-8", timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("guarantees OK", result.stdout)
+
     def test_scoped_rule_in_no_row_fails(self):
         # HYB-E3002 is in the scoped family, claimed by no row and not declared unclaimed
         tmp, root = build(unclaimed={"HYB-E8001": "lint, row 8 covers the hatch"})
