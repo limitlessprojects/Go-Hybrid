@@ -2462,7 +2462,21 @@ impl Emitter {
         // a short explicit return means nil. When the fn has named results,
         // bare `return` (`values.is_empty()`) must stay naked so Go returns
         // the live named result variables instead of clobbering them to zero.
-        if !(values.is_empty() && self.cur_fn_has_named_results) {
+        let is_exact_multi_call = if values.len() == 1 {
+            if let Some((n, err)) = self.call_results(&values[0]) {
+                let total = n + if err { 1 } else { 0 };
+                if let Some(zeros) = &self.cur_fn_error_returns {
+                    total == zeros.len()
+                } else {
+                    total > 1
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !(values.is_empty() && self.cur_fn_has_named_results) && !is_exact_multi_call {
             if let Some(zeros) = &self.cur_fn_error_returns {
                 while vs.len() < zeros.len() {
                     let i = vs.len();

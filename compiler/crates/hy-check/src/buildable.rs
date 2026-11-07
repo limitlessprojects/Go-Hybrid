@@ -75,6 +75,8 @@ pub(crate) enum OpKind {
     /// any value), and assigning *from* one stays fail-open because type
     /// assertions are not modelled.
     Interface,
+    /// The standard error interface (`error`).
+    Error,
     Int,
     Float,
     Bool,
@@ -121,6 +123,7 @@ impl OpKind {
         match self {
             OpKind::Unknown => "unknown".to_string(),
             OpKind::Interface => "any".to_string(),
+            OpKind::Error => "error".to_string(),
             OpKind::Int => "int".to_string(),
             OpKind::Float => "float64".to_string(),
             OpKind::Bool => "bool".to_string(),
@@ -193,6 +196,12 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // Equality (`a == 1`) stays accepted: equality_kinds_conflict needs
         // both directions to conflict and (Interface, _) above never does.
         (_, Interface) => true,
+        // error is an interface: only Error, Interface, Struct, Pointer, or Unknown can assign to/from it.
+        // Concrete primitives (Int, Float, Bool, Str, Slice, Array, Map, Chan) never implement error.
+        (Error, Error) => false,
+        (Error, Struct(_)) | (Error, Pointer(_)) => false,
+        (Struct(_), Error) | (Pointer(_), Error) => false,
+        (Error, _) | (_, Error) => true,
         // An untyped int constant is assignable to a float target
         // (`var f float64 = 1` builds). The kind model cannot tell an untyped
         // constant from an `int` variable, so this direction must stay allowed
@@ -636,7 +645,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // An `any` is resolved as a TYPE, but its members are invisible to the
         // kind model (it may hold anything), so a member lookup on it cannot
         // claim absence — same fail-open as `kinds_conflict`'s Interface arm.
-        OpKind::Interface => false,
+        OpKind::Interface | OpKind::Error => false,
         OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str => true,
         OpKind::Void => false,
         // A struct whose NAME did not resolve cannot have its members looked up.
@@ -3594,6 +3603,7 @@ impl<'a> Collector<'a> {
             return self.kind_of_ty(target, depth + 1);
         }
         match name {
+            "error" => OpKind::Error,
             // #682 U9-U12: `any` is a resolved interface type, not an
             // unresolved one, so it must not fall through to `Unknown`.
             "any" | "interface{}" => OpKind::Interface,
@@ -5271,6 +5281,20 @@ impl<'a> Collector<'a> {
                         && self.fn_results_error_tail
                         && res.len() + 1 == want.len()
                     {
+                        if res.len() > 1 {
+                            self.emit_e1002(
+                                values[0].span(),
+                                format!(
+                                    "`return` supplies multi-value call `{}` ({} results) in an error-tail function expecting {} results — Go refuses `multiple-value {} in single-value context` (HYB-E1002)",
+                                    callee.render(),
+                                    res.len(),
+                                    want.len(),
+                                    callee.render()
+                                ),
+                                "a multi-value call cannot be combined with an automatic error-tail nil in Go; assign to variables or return exact arity",
+                            );
+                            return;
+                        }
                         for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
                             if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
                                 let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
