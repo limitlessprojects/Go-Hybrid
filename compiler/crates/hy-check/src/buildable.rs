@@ -1540,9 +1540,14 @@ impl<'a> Collector<'a> {
                 operand,
                 ..
             } => self.typed_value_scalar(operand),
-            Expr::Call { callee, args, .. } => match self.call_result_scalars(callee, args) {
-                Some(rs) if rs.len() == 1 => rs[0],
-                _ => None,
+            Expr::Call { callee, args, .. } => {
+                if let Some(s) = self.option_payload_call_scalar(callee) {
+                    return Some(s);
+                }
+                match self.call_result_scalars(callee, args) {
+                    Some(rs) if rs.len() == 1 => rs[0],
+                    _ => None,
+                }
             },
             // #2858: struct field scalar resolution
             Expr::Field { base, name, .. } => {
@@ -1555,6 +1560,63 @@ impl<'a> Collector<'a> {
                     Some("uint8")
                 } else {
                     self.container_elem_scalar_of_expr(base)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// `o.unwrap()` / `o.or(d)` on an `option[T]` yield a value of Go type
+    /// `T`. When `T` is a predeclared numeric type, that is the exact scalar
+    /// (`option[i8]` -> `int8`), so `var z int64 = o.unwrap()` must not pass
+    /// the #2712 width check as width-less.
+    fn option_payload_call_scalar(&self, callee: &Expr) -> Option<&'static str> {
+        let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
+            return None;
+        };
+        if name != "unwrap" && name != "or" {
+            return None;
+        }
+        if !matches!(self.kind_of_expr(base), OpKind::Option(_)) {
+            return None;
+        }
+        self.option_payload_scalar(base)
+    }
+
+    /// The exact numeric payload of a provably `option[T]` value: a local or
+    /// parameter declared `option[T]`, or the single `option[T]` result of a
+    /// non-generic top-level function. Everything else fails open.
+    fn option_payload_scalar(&self, e: &Expr) -> Option<&'static str> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let tname = self.lookup_type_name(name)?;
+                let elem = tname.trim().strip_prefix("option[")?.strip_suffix(']')?;
+                if self.ck.structs.contains_key(elem)
+                    || self.ck.enums.contains_key(elem)
+                    || self.ck.type_aliases.contains_key(elem)
+                {
+                    return None;
+                }
+                canonical_numeric_name(elem)
+            }
+            Expr::Call { callee, .. } => {
+                let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+                    return None;
+                };
+                if self
+                    .scopes
+                    .iter()
+                    .any(|layer| layer.contains_key(name.as_str()))
+                {
+                    return None;
+                }
+                let fd = self.ck.fns.get(name.as_str())?;
+                if fd.receiver.is_some() || !fd.type_params.is_empty() || fd.results.len() != 1 {
+                    return None;
+                }
+                match &fd.results[0].ty {
+                    TypeExpr::Option { elem, .. } => self.scalar_of_ty(elem),
+                    _ => None,
                 }
             }
             _ => None,
@@ -5248,7 +5310,9 @@ impl<'a> Collector<'a> {
         if values.len() == 1 {
             if let Expr::Call { callee, args, .. } = unwrap_parens(&values[0]) {
                 if let Some(res) = self.call_result_kinds(callee, args) {
-                    let res_scalars = self.call_result_scalars(callee, args);
+                    let res_scalars = self.call_result_scalars(callee, args).or_else(|| {
+                        self.option_payload_call_scalar(callee).map(|s| vec![Some(s)])
+                    });
                     if res.len() == want.len() {
                         for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
                             if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
