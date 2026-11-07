@@ -10,6 +10,11 @@
 
 - `hyb` probes explicit `CARGO_TARGET_DIR` paths relative to its caller, but builds the runtime with Cargo's working directory set to `runtime/rust/hyrt`. Resolve that environment value to an absolute path before launching Cargo so both operations use the same directory; absolute paths and the unset crate-local default are preserved.
 - On base `fca2f63a`, the four new real CLI regressions have two relative-path failures and two passing absolute/unset controls. After the fix, all four pass, including caller/target paths containing spaces and second-invocation cache reuse. A separate smoke with real pinned Cargo and a dependency-free Rust staticlib also passes all four cases. On `4cda40a`, macOS x86_64 / Rust 1.99.0 / Go 1.26.9 validation passes: compiler workspace 2945/2945, corpus 135/135, differential 45/45 build-and-run + 90/90 reject, registration/conflict/census/changed-test-format/whitespace guards. Hosted CI and maintainer review remain pending; details in `spikes/relative-runtime-target-dir/RESULTS.md`.
+## Contributor validation — preserve build sidecar source (2026-11-07)
+
+- On base `fca2f63`, `hyb build good.hy -o app --emit-go` overwrites an existing hand-written or non-UTF-8 `app.go`. The implicit sidecar now refuses unmarked/unreadable existing content before Go compilation and marks new output with a basename-only generated header. The emitter and bridge input are unchanged.
+- Legacy unmarked build output requires a one-time explicit migration: choose another `-o` path or verify and move the old generated artifact. Six real CLI regressions cover preservation with and without `--emit-go`, non-UTF-8 bytes, legacy output, new headers, and repeated updates. The original four tests all fail before the fix.
+- Pinned macOS Go 1.26.9 / Rust 1.99.0: compiler workspace 2947 passed, 0 failed/ignored; corpus 135/135 (managed tripwire not fired); differential 45/45 build-and-run + 90/90 reject. The initial differential run lacked runtime Cargo dependencies; fetching the locked dependencies and rerunning offline passed without source changes. Test registration, conflict-marker, new-test formatting and changed-file whitespace checks pass. Hosted CI and maintainer review remain pending.
 
 ## Contributor validation — Actions watch workflow selection (2026-11-05)
 

@@ -1,6 +1,7 @@
 # STATUS (for the human — 15 lines max)
 
 - Contributor (2026-11-07): runtime Cargo builds now resolve relative `CARGO_TARGET_DIR` from the caller, matching staticlib discovery. Four CLI regressions pass (two failed before); real Cargo smoke passes all four path modes and fresh reuse. Pinned macOS validation on `4cda40a`: workspace 2945/2945, corpus 135/135, differential 45/45 + 90/90 and guards pass. Hosted CI/review pending; see PLAN.md.
+- Contributor (2026-11-07): `hyb build` preserves unmarked/unreadable Go sidecars before compilation; marked outputs remain reusable, while legacy unmarked output requires explicit migration. Six CLI regressions, pinned macOS workspace 2947/2947, corpus 135/135 and differential 45/45 + 90/90 pass. Hosted CI/review pending; see PLAN.md.
 
 - Contributor (2026-11-05): default Actions watch selects the heavy workflow before pagination; three focused regressions pass (two failed before). The full Linux job suite passes 95/95 with no skips; earlier Windows environment limitations remain recorded in PLAN.md. Hosted CI/review pending.
 
