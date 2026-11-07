@@ -38,6 +38,20 @@ pub(crate) fn resolve_alias(st: &FnState, name: &str) -> String {
     cur
 }
 
+/// Checks whether an expression is a pure field chain rooted at an identifier
+/// (`s.conn`, `s.h.doc`), rather than indexed projections or non-place composite expressions.
+pub(crate) fn is_binding_rooted_field_chain(expr: &Expr) -> Option<&str> {
+    let mut curr = expr;
+    loop {
+        match curr {
+            Expr::Field { base, .. } => curr = base,
+            Expr::Paren { inner, .. } => curr = inner,
+            Expr::Ident { name, .. } => return Some(name.as_str()),
+            _ => return None,
+        }
+    }
+}
+
 /// Transitive connected component of `seed` across both `aliases` (parent and
 /// child directions) and `may_share`, including `seed` itself.
 fn storage_component(st: &FnState, seed: &str) -> HashSet<String> {
@@ -405,8 +419,10 @@ impl<'a> Checker<'a> {
                     crate::model::TypeShape::OwnHandle(_)
                 )
             {
-                if let Some(root) = op.root_ident() {
+                if let Some(root) = is_binding_rooted_field_chain(op) {
                     self.mark_move(st, root, mspan, desc.clone(), MoveKind::Moved);
+                } else {
+                    self.check_o54_non_ident_move(st, op, mspan);
                 }
             } else {
                 self.check_o54_non_ident_move(st, op, mspan);
@@ -426,7 +442,7 @@ impl<'a> Checker<'a> {
         for (op, _) in ops {
             let root = match op {
                 Expr::Ident { name, .. } => Some(name.as_str()),
-                Expr::Field { .. } => op.root_ident(),
+                Expr::Field { .. } => is_binding_rooted_field_chain(op),
                 _ => None,
             };
             if let Some(src) = root {
@@ -453,6 +469,7 @@ impl<'a> Checker<'a> {
         let shape = self.shape_of_expr(st, operand);
         if matches!(operand, Expr::Field { .. })
             && matches!(shape, crate::model::TypeShape::OwnHandle(_))
+            && is_binding_rooted_field_chain(operand).is_some()
         {
             return;
         }
