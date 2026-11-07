@@ -187,7 +187,9 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
             if not fixture.is_file():
                 problems.append(f"{where}: fixture {path_rel} does not exist")
                 continue
-            if not str(path_rel).startswith(corpus_rel):
+            corpus_dir = (root / corpus_rel).resolve()
+            fixture_resolved = fixture.resolve()
+            if ".." in Path(path_rel).parts or corpus_dir not in fixture_resolved.parents:
                 problems.append(f"{where}: fixture {path_rel} is outside {corpus_rel}")
             verdict, pinned = fixture_verdict(fixture)
             if verdict is None:
@@ -210,10 +212,19 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
                     f"{where}: the evidence cell cites {cited}, which is not declared in `fixtures`"
                 )
 
+        root_resolved = root.resolve()
         for target in LINK_RE.findall(evidence_md):
             if target.startswith(("http://", "https://", "#", "mailto:")):
                 continue
-            if not (root / target).exists():
+            path_part = target.split("#", 1)[0]
+            if not path_part:
+                continue
+            candidate = (root / path_part).resolve()
+            if (
+                ".." in Path(path_part).parts
+                or (candidate != root_resolved and root_resolved not in candidate.parents)
+                or not candidate.exists()
+            ):
                 problems.append(f"{where}: evidence link `{target}` does not exist")
 
     for code, entry in sorted(codes.items()):
@@ -240,12 +251,17 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
     else:
         doc = doc_path.read_text(encoding="utf-8")
         if BEGIN in doc and END in doc:
-            current = doc[doc.index(BEGIN) : doc.index(END) + len(END)] + "\n"
-            if current != rendered:
+            if doc.count(BEGIN) != 1 or doc.count(END) != 1 or doc.index(BEGIN) > doc.index(END):
                 problems.append(
-                    f"doc: the table in {doc_rel} differs from the table rendered from "
-                    f"{table_path.name} — run `python3 tools/check_guarantees.py --render`"
+                    f"doc: {doc_rel} has duplicate or inverted generated-table markers"
                 )
+            else:
+                current = doc[doc.index(BEGIN) : doc.index(END) + len(END)] + "\n"
+                if current != rendered:
+                    problems.append(
+                        f"doc: the table in {doc_rel} differs from the table rendered from "
+                        f"{table_path.name} — run `python3 tools/check_guarantees.py --render`"
+                    )
         else:
             problems.append(
                 f"doc: {doc_rel} carries no generated-table markers — run --render once to adopt them"
@@ -260,8 +276,15 @@ def write_doc(root: Path, table_path: Path, doc_override: str | None = None) -> 
     if not doc_path.is_file():
         raise Misuse(f"doc: {doc_path} does not exist")
     doc = doc_path.read_text(encoding="utf-8")
-    if BEGIN in doc and END in doc:
-        updated = doc[: doc.index(BEGIN)] + rendered + doc[doc.index(END) + len(END) + 1 :]
+    if BEGIN in doc or END in doc:
+        if doc.count(BEGIN) != 1 or doc.count(END) != 1 or doc.index(BEGIN) > doc.index(END):
+            raise Misuse(f"doc: {doc_path} has duplicate or inverted generated-table markers")
+        after_end = doc.index(END) + len(END)
+        if doc[after_end : after_end + 2] == "\r\n":
+            after_end += 2
+        elif doc[after_end : after_end + 1] == "\n":
+            after_end += 1
+        updated = doc[: doc.index(BEGIN)] + rendered + doc[after_end:]
     else:
         # first adoption: replace the contiguous table block that follows the header row
         lines = doc.splitlines(keepends=True)
