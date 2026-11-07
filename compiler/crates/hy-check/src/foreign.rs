@@ -121,7 +121,17 @@ pub(crate) fn is_iterable_handle(name: &str) -> bool {
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
-        ("serde_json", "parse" | "new_object" | "new_array") | ("flate2", "new_writer") => {
+        ("serde_json", "parse" | "new_object" | "new_array")
+        | ("flate2", "new_writer")
+        | (
+            "bytes",
+            "new_reader"
+                | "NewReader"
+                | "new_buffer"
+                | "NewBuffer"
+                | "new_buffer_string"
+                | "NewBufferString",
+        ) => {
             CallMode::Produce
         }
         ("serde_json", "to_string_pretty")
@@ -182,6 +192,13 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
+        ("bytes", "new_reader" | "NewReader") => {
+            TypeShape::ForeignOpaque("bytes.reader".into())
+        }
+        (
+            "bytes",
+            "new_buffer" | "NewBuffer" | "new_buffer_string" | "NewBufferString",
+        ) => TypeShape::ForeignOpaque("bytes.buffer".into()),
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -475,6 +492,19 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const IO_LIMITED_READER: &[&str] = &["read"];
     /// `io.OffsetWriter`.
     const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
+    const BYTES_READER: &[&str] = &[
+        "len",
+        "read",
+        "read_at",
+        "read_byte",
+        "read_rune",
+        "reset",
+        "seek",
+        "size",
+        "unread_byte",
+        "unread_rune",
+        "write_to",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -496,6 +526,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
         "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
         "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
+        "bytes.reader" | "bytes.Reader" => Some(BYTES_READER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -539,6 +570,9 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        ("bytes.reader" | "bytes.Reader", "len" | "size")
+        | ("bytes.buffer" | "bytes.Buffer", "len" | "cap") => TypeShape::Primitive,
+        ("bytes.buffer" | "bytes.Buffer", "string") => TypeShape::Str,
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
@@ -610,7 +644,6 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
             | "flag"
             | "testing"
             | "unicode"
-            | "bytes"
             | "context"
             | "regexp"
             | "crypto"
@@ -1169,7 +1202,9 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
         ),
         "bytes" => matches!(
             m,
-            "new_buffer"
+            "buffer"
+                | "reader"
+                | "new_buffer"
                 | "new_buffer_string"
                 | "new_reader"
                 | "compare"
