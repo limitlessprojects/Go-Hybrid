@@ -836,6 +836,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                 Decl::Const(cd) => {
                     c.ty_opt(&cd.ty);
                     c.expr(&cd.value);
+                    c.check_const_decl(cd);
                 }
                 Decl::Struct(s) => {
                     for f in &s.fields {
@@ -2252,6 +2253,102 @@ impl<'a> Collector<'a> {
                 is_untyped: matches!(l.kind, LocalKind::Const) && l.ty.is_none(),
             });
             top.insert(name.clone(), Some(id));
+        }
+    }
+
+    fn check_const_decl(&mut self, cd: &hy_syntax::ConstDecl) {
+        let Some(t) = &cd.ty else {
+            return;
+        };
+        let want = self.kind_of_ty(t, 0);
+        let vk = self.kind_of_expr(&cd.value);
+        // `const arr [2]int = [10, 20]` uses bracketed array-literal shorthand
+        // (`Expr::SliceLit { elem: None, .. }`) where `check_local_array_lit_len_match`
+        // validates the element count.
+        let unheaded_array_shorthand = matches!(
+            (&want, &vk),
+            (OpKind::Array(a), OpKind::Slice(b))
+                if !kinds_conflict(a, b)
+                    && matches!(unwrap_parens(&cd.value), Expr::SliceLit { elem: None, .. })
+        );
+        if unheaded_array_shorthand {
+            return;
+        }
+        let int_float_conflict = want == OpKind::Float
+            && vk == OpKind::Int
+            && !self.is_untyped_int_const(&cd.value);
+        let scalar_mismatch = matches!(
+            (self.scalar_of_ty(t), self.const_expr_scalar(&cd.value)),
+            (Some(w), Some(v)) if w != v
+        );
+        if kinds_conflict(&want, &vk)
+            || int_float_conflict
+            || scalar_mismatch
+            || self.sized_array_names_differ(
+                Some(t.render().as_str()),
+                self.const_expr_type_name(&cd.value).as_deref(),
+            )
+        {
+            self.emit_e1002(
+                cd.span,
+                format!(
+                    "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in constant declaration` (HYB-E1002)",
+                    cd.name,
+                    want.label(),
+                    vk.label(),
+                    want.label()
+                ),
+                "the declared type is fixed; write an explicit conversion when a conversion is intended",
+            );
+        }
+    }
+
+    fn const_expr_scalar(&self, e: &Expr) -> Option<&'static str> {
+        if let Some(s) = self.typed_value_scalar(e) {
+            return Some(s);
+        }
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.ck.file.decls.iter().find_map(|d| match d {
+                Decl::Const(other) if other.name == *name => {
+                    other.ty.as_ref().and_then(|t| self.scalar_of_ty(t))
+                }
+                _ => None,
+            }),
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.const_expr_scalar(operand),
+            Expr::Binary { op, lhs, rhs, .. } => match op {
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::BitAnd => self
+                    .const_expr_scalar(lhs)
+                    .or_else(|| self.const_expr_scalar(rhs)),
+                BinOp::Shl | BinOp::Shr => self.const_expr_scalar(lhs),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn const_expr_type_name(&self, e: &Expr) -> Option<String> {
+        if let Some(n) = self.typed_value_type_name(e) {
+            return Some(n);
+        }
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.ck.file.decls.iter().find_map(|d| match d {
+                Decl::Const(other) if other.name == *name => {
+                    other.ty.as_ref().map(|t| t.render())
+                }
+                _ => None,
+            }),
+            _ => None,
         }
     }
 
