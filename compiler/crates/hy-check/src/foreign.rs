@@ -438,6 +438,33 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "split",
         "text",
     ];
+    /// `os.File` — standard library file handle. Go defines 24 methods on `*os.File`.
+    const OS_FILE: &[&str] = &[
+        "chdir",
+        "chmod",
+        "chown",
+        "close",
+        "fd",
+        "name",
+        "read",
+        "read_at",
+        "read_dir",
+        "read_from",
+        "readdir",
+        "readdirnames",
+        "seek",
+        "set_deadline",
+        "set_read_deadline",
+        "set_write_deadline",
+        "stat",
+        "sync",
+        "syscall_conn",
+        "truncate",
+        "write",
+        "write_at",
+        "write_string",
+        "write_to",
+    ];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -453,6 +480,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "bufio.reader" | "bufio.Reader" => Some(BUFIO_READER),
         "bufio.writer" | "bufio.Writer" => Some(BUFIO_WRITER),
         "bufio.scanner" | "bufio.Scanner" => Some(BUFIO_SCANNER),
+        "os.file" | "os.File" => Some(OS_FILE),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
