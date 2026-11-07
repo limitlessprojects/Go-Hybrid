@@ -1217,6 +1217,7 @@ impl<'a> Collector<'a> {
                 self.struct_field_type_name(&bk, name)
             }
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
+            Expr::Move { operand, .. } => self.typed_value_type_name(operand),
             _ => None,
         }
     }
@@ -5193,7 +5194,27 @@ impl<'a> Collector<'a> {
     }
 
     fn check_fn_lit_call(&mut self, params: &[Param], args: &[CallArg], callee: &Expr, span: Span) {
-        if self.multi_value_arg_count(args).is_some() {
+        if let Some(n) = self.multi_value_arg_count(args) {
+            let want = params.len();
+            if want != n {
+                return;
+            }
+            let got_kinds = self.multi_value_kinds(&args[0].value);
+            for (p, got) in params.iter().zip(got_kinds.iter()) {
+                let want = self.kind_of_ty(&p.ty, 0);
+                if kinds_conflict(&want, got) {
+                    self.emit_e1002(
+                        args[0].value.span(),
+                        format!(
+                            "cannot use `{}` (result of type `{}`) as `{}` value in argument to func literal (HYB-E1002)",
+                            args[0].value.render(),
+                            got.label(),
+                            p.ty.render()
+                        ),
+                        "multi-value return types must match func literal parameter types",
+                    );
+                }
+            }
             return;
         }
         let want = params.len();
@@ -5221,14 +5242,30 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let is_untyped_int_to_float = want == OpKind::Float
+                && got == OpKind::Int
+                && self.is_untyped_int_const(&a.value);
+            let int_to_float_conflict = want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float;
+            let scalar_mismatch = matches!(
+                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (Some(w), Some(g)) if w != g
+            );
+            let array_mismatch = self.sized_array_names_differ(
+                Some(&p.ty.render()),
+                self.typed_value_type_name(&a.value).as_deref(),
+            );
+            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch || array_mismatch {
+                let got_label = self.typed_value_scalar(&a.value)
+                    .map(|s| s.to_string())
+                    .or_else(|| self.typed_value_type_name(&a.value))
+                    .unwrap_or_else(|| got.label());
                 self.emit_e1002(
                     a.value.span(),
                     format!(
                         "cannot use `{}` (value of type `{}`) as `{}` value in argument to func literal (HYB-E1002)",
                         a.value.render(),
-                        got.label(),
-                        want.label()
+                        got_label,
+                        p.ty.render()
                     ),
                     "argument types must match closure parameter types",
                 );
@@ -7397,16 +7434,19 @@ impl<'a> Collector<'a> {
                 let is_untyped_int_to_float = exp_key == OpKind::Float
                     && kk == OpKind::Int
                     && self.is_untyped_int_const(k);
+                let array_mismatch = self.sized_array_names_differ(
+                    Some(&key_ty.render()),
+                    self.typed_value_type_name(k).as_deref(),
+                );
                 let conflict = (exp_key == OpKind::Float && kk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_key, &kk)
                     || scalar_mismatch
-                    || deep_conflict.is_some();
+                    || deep_conflict.is_some()
+                    || array_mismatch;
                 if kk != OpKind::Unknown && conflict {
-                    let got_ty = if deep_conflict.is_some() {
-                        self.typed_value_type_name(k).unwrap_or_else(|| kk.label().to_string())
-                    } else {
-                        kk.label().to_string()
-                    };
+                    let got_ty = self.typed_value_type_name(k)
+                        .or_else(|| self.typed_value_scalar(k).map(|s| s.to_string()))
+                        .unwrap_or_else(|| kk.label().to_string());
                     let detail = deep_conflict
                         .map(|r| format!(" — {}", r))
                         .unwrap_or_default();
@@ -7472,16 +7512,19 @@ impl<'a> Collector<'a> {
                 let is_untyped_int_to_float = exp_val == OpKind::Float
                     && vk == OpKind::Int
                     && self.is_untyped_int_const(v);
+                let array_mismatch = self.sized_array_names_differ(
+                    Some(&val_ty.render()),
+                    self.typed_value_type_name(v).as_deref(),
+                );
                 let conflict = (exp_val == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&exp_val, &vk)
                     || scalar_mismatch
-                    || deep_conflict.is_some();
+                    || deep_conflict.is_some()
+                    || array_mismatch;
                 if vk != OpKind::Unknown && conflict {
-                    let got_ty = if deep_conflict.is_some() {
-                        self.typed_value_type_name(v).unwrap_or_else(|| vk.label().to_string())
-                    } else {
-                        vk.label().to_string()
-                    };
+                    let got_ty = self.typed_value_type_name(v)
+                        .or_else(|| self.typed_value_scalar(v).map(|s| s.to_string()))
+                        .unwrap_or_else(|| vk.label().to_string());
                     let detail = deep_conflict
                         .map(|r| format!(" — {}", r))
                         .unwrap_or_default();
