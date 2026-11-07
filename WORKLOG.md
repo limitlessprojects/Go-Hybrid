@@ -358,3 +358,12 @@
 - Suites 458 -> 459 (+2: exclusive_range_hoisted_hyhi_3795, try operand suite). Two landings, zero gate fails, zero dup replies, zero silent closes.
 - Next queue: #3798 (none-declarations) -> #3800 (Burapa-J freeze replay/loan escape, complex) -> #3803 (cyzcz builtins const fold + shadow guards) -> #3804 (dextermos-dev errors.wrap fmt-shadowed, fixes #3626 — family-check vs landed #3772 errors.wrap operand kinds first); spikes #3765/#3774 Track-3 route; fresh wave 3807..3881 family scan+dedupe.
 - Worklog: this commit.
+
+## Session 131 — 2026-11-07 09:10 UTC+8 tick
+- env cold-recycled on stale session-44 snapshot; node_modules pre-deleted, rust 1.99.0 + go1.26.9 restored, tarball re-cached, main fast-forwarded c403585c -> e6af7efd (S130 head). approve 6/6 (4986 left), scan skipped.
+- **2 landed**:
+  - **#3798** -> `7cdea0a0` (RPMFAN): go_keyword_names.rs kw_name gate rejects declarations named `none` (HYB-E1002 before GO_ONLY_KEYWORD check) — hy-emit spells bare Ident `none` as the option constructor, so none-declarations passed check and failed hyb build (Row 13); return none / match arms stay accepted (#1657 niche distinct); new suite go_keyword_none_names. MERGE case. Trial-tree-asserted 53a724e9, blob clean, remote asserted. ALL-GREEN 460 suites, corpus 135/135, differential FULL. Landing reply 201.
+  - **#3800** -> `55a023d6` (Burapa-J): freeze.rs check_loop_backedge_replay replays per-stmt call sites (process_call via expr_calls for For-Iterate headers / own_calls otherwise -> check_same_stmt_consumes) and Stmt::Return (process_return) so loop-carried return escapes are caught; has_loop_carried_state considers borrow_bindings/loans outright; new 206-line suite freeze_loop_backedge_replay_calls. MERGE case. Trial-tree-asserted 72eba45d, blob clean, remote asserted. ALL-GREEN 461 suites, corpus 135/135, differential FULL. Landing reply 201.
+- Suites 460 -> 461 (+1; #3798's suite... actually +1 net across the two — both added one suite each? 459->460->461: +1 each). Two landings, zero gate fails, zero dup replies, zero silent closes.
+- Next queue: #3803 (cyzcz builtins const fold + shadow guards) -> #3804 (dextermos-dev errors.wrap fmt-shadowed, fixes #3626 — family-check vs landed #3772 errors.wrap operand kinds first, patch-id matrix) -> fresh wave 3807..3881 family scan+dedupe; spikes #3765/#3774 Track-3 route.
+- Worklog: this commit.
