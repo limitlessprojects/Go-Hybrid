@@ -172,6 +172,32 @@ def age_days(iso, now):
     return round((now - datetime.fromisoformat(iso.replace("Z", "+00:00"))).total_seconds() / 86400, 1)
 
 
+def has_tests(paths):
+    """Return True if any changed path represents a test suite or test fixture.
+
+    Aligns triage scan test detection with the shepherd's W3 gate
+    (`shepherd.py::TEST_PATTERNS`) while covering the repository's test conventions:
+    - `tests/` anywhere or `/corpus` anywhere
+    - `*_accept.hy` or `*_reject.hy` corpus fixtures
+    - `*_test.go` or `*_test.rs` Go/Rust tests
+    - `test_*.py` or `test_*.rs` anywhere (matching file basename, e.g. tools/test_*.py)
+    - `*/tests.rs` (emitter unit test modules)
+    """
+    for p in paths:
+        base = os.path.basename(p)
+        if (
+            "tests/" in p
+            or "corpus/" in p
+            or "/corpus" in p
+            or p.endswith(("_reject.hy", "_accept.hy", "_test.go", "_test.rs"))
+            or base.startswith("test_")
+            or p.endswith("/tests.rs")
+            or p == "tests.rs"
+        ):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------- scan
 
 def collect(cfg, gh, args):
@@ -233,9 +259,7 @@ def collect(cfg, gh, args):
             "deletions": dels,
             "behind_by": behind_by,
             "overlap_risk": sorted(overlap_paths)[:8],
-            "tests_included": any(
-                "tests/" in p or "/corpus" in p or p.endswith("_reject.hy") or p.endswith("_accept.hy")
-                for p in paths),
+            "tests_included": has_tests(paths),
         }
 
     items = []
