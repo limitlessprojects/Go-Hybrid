@@ -1303,6 +1303,7 @@ impl<'a> Checker<'a> {
         // fields, aliases, local annotations, literals and conversions.
         let empty_st = crate::model::FnState::default();
         self.check_expr_builtin_args(st.unwrap_or(&empty_st), len);
+        self.check_expr_type_conversions(len);
         // 1) A constant integer expression: must be non-negative.
         let direct_or_folded = const_int_value(len).or_else(|| {
             if matches!(unwrap_parens(len), Expr::Ident { .. }) {

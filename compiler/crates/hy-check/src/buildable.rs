@@ -836,6 +836,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                 Decl::Const(cd) => {
                     c.ty_opt(&cd.ty);
                     c.expr(&cd.value);
+                    c.check_const_decl(cd);
                 }
                 Decl::Struct(s) => {
                     for f in &s.fields {
@@ -2010,6 +2011,42 @@ impl<'a> Collector<'a> {
         self.fn_result_type_names = outer_rt;
         self.fn_type_params = outer_tp;
         self.pop_scope();
+    }
+
+    fn check_const_decl(&mut self, cd: &hy_syntax::ConstDecl) {
+        if let Some(t) = &cd.ty {
+            let want = self.kind_of_ty(t, 0);
+            let vk = self.kind_of_expr(&cd.value);
+            let is_bracketed_array = matches!(&want, OpKind::Array(_))
+                && matches!(unwrap_parens(&cd.value), Expr::SliceLit { elem: None, .. });
+            let int_float_conflict = want == OpKind::Float
+                && vk == OpKind::Int
+                && !self.is_untyped_int_const(&cd.value);
+            let scalar_mismatch = matches!(
+                (self.scalar_of_ty(t), self.typed_value_scalar(&cd.value)),
+                (Some(w), Some(v)) if w != v
+            );
+            if (!is_bracketed_array && kinds_conflict(&want, &vk))
+                || int_float_conflict
+                || scalar_mismatch
+                || self.sized_array_names_differ(
+                    Some(t.render().as_str()),
+                    self.typed_value_type_name(&cd.value).as_deref(),
+                )
+            {
+                self.emit_e1002(
+                    cd.span,
+                    format!(
+                        "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in constant declaration` (HYB-E1002)",
+                        cd.name,
+                        want.label(),
+                        vk.label(),
+                        want.label()
+                    ),
+                    "the declared type is fixed; write an explicit conversion when a conversion is intended",
+                );
+            }
+        }
     }
 
     fn local(&mut self, l: &LocalDecl) {
