@@ -121,7 +121,10 @@ pub(crate) fn is_iterable_handle(name: &str) -> bool {
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
-        ("serde_json", "parse" | "new_object" | "new_array") | ("flate2", "new_writer") => {
+        ("serde_json", "parse" | "new_object" | "new_array")
+        | ("flate2", "new_writer")
+        | ("time", "fixed_zone" | "FixedZone")
+        | ("os", "new_syscall_error" | "NewSyscallError") => {
             CallMode::Produce
         }
         ("serde_json", "to_string_pretty")
@@ -182,6 +185,12 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
+        ("time", "fixed_zone" | "FixedZone") => {
+            TypeShape::ForeignOpaque("time.location".into())
+        }
+        ("os", "new_syscall_error" | "NewSyscallError") => {
+            TypeShape::ForeignOpaque("error".into())
+        }
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -475,6 +484,12 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const IO_LIMITED_READER: &[&str] = &["read"];
     /// `io.OffsetWriter`.
     const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
+    const TIME_LOCATION: &[&str] = &["string"];
+    const TIME_PARSE_ERROR: &[&str] = &["error"];
+    const STRCONV_NUM_ERROR: &[&str] = &["error", "unwrap"];
+    const OS_PATH_ERROR: &[&str] = &["error", "timeout", "unwrap"];
+    const OS_LINK_ERROR: &[&str] = &["error", "unwrap"];
+    const OS_SYSCALL_ERROR: &[&str] = &["error", "timeout", "unwrap"];
     match recv_type {
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
@@ -496,6 +511,12 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
         "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
         "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
+        "time.location" | "time.Location" => Some(TIME_LOCATION),
+        "time.parse_error" | "time.parseerror" | "time.ParseError" => Some(TIME_PARSE_ERROR),
+        "strconv.num_error" | "strconv.numerror" | "strconv.NumError" => Some(STRCONV_NUM_ERROR),
+        "os.path_error" | "os.patherror" | "os.PathError" => Some(OS_PATH_ERROR),
+        "os.link_error" | "os.linkerror" | "os.LinkError" => Some(OS_LINK_ERROR),
+        "os.syscall_error" | "os.syscallerror" | "os.SyscallError" => Some(OS_SYSCALL_ERROR),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -539,6 +560,50 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        (
+            "time.location"
+                | "time.Location"
+                | "time.parse_error"
+                | "time.parseerror"
+                | "time.ParseError"
+                | "strconv.num_error"
+                | "strconv.numerror"
+                | "strconv.NumError"
+                | "os.path_error"
+                | "os.patherror"
+                | "os.PathError"
+                | "os.link_error"
+                | "os.linkerror"
+                | "os.LinkError"
+                | "os.syscall_error"
+                | "os.syscallerror"
+                | "os.SyscallError",
+            "string" | "error",
+        ) => TypeShape::Str,
+        (
+            "os.path_error"
+                | "os.patherror"
+                | "os.PathError"
+                | "os.syscall_error"
+                | "os.syscallerror"
+                | "os.SyscallError",
+            "timeout",
+        ) => TypeShape::Primitive,
+        (
+            "strconv.num_error"
+                | "strconv.numerror"
+                | "strconv.NumError"
+                | "os.path_error"
+                | "os.patherror"
+                | "os.PathError"
+                | "os.link_error"
+                | "os.linkerror"
+                | "os.LinkError"
+                | "os.syscall_error"
+                | "os.syscallerror"
+                | "os.SyscallError",
+            "unwrap",
+        ) => TypeShape::ForeignOpaque("error".into()),
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
@@ -803,6 +868,7 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "dir_entry"
                 | "path_error"
                 | "link_error"
+                | "new_syscall_error"
                 | "syscall_error"
                 | "process"
                 | "process_state"
