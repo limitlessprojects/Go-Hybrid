@@ -1901,6 +1901,106 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// #3948: Recursively unifies generic parameter type argument strings (including
+    /// compound slice `[]t`, array `[N]t`, pointer `*t`, option `option[t]`, map `map[k]v`,
+    /// and nested generics `box[t]`) against argument type argument strings to extract
+    /// concrete TypeShapes for type parameters in `tparams`.
+    fn unify_type_arg_strs(
+        &self,
+        pa: &str,
+        aa: &str,
+        tparams: &std::collections::HashSet<String>,
+        out: &mut std::collections::HashMap<String, TypeShape>,
+        depth: usize,
+    ) {
+        if depth > Self::MAX_TYPE_RESOLUTION_DEPTH {
+            return;
+        }
+        let pa = pa.trim();
+        let aa = aa.trim();
+        if tparams.contains(pa) {
+            let sh = self.shape_of_type_arg_str(aa, depth + 1);
+            if !matches!(sh, TypeShape::Unknown) {
+                out.entry(pa.to_string()).or_insert(sh);
+            }
+            return;
+        }
+        if let (Some(prest), Some(arest)) = (pa.strip_prefix('*'), aa.strip_prefix('*')) {
+            self.unify_type_arg_strs(prest, arest, tparams, out, depth + 1);
+            return;
+        }
+        if let (Some(prest), Some(arest)) = (pa.strip_prefix("[]"), aa.strip_prefix("[]")) {
+            self.unify_type_arg_strs(prest, arest, tparams, out, depth + 1);
+            return;
+        }
+        if pa.starts_with('[') && aa.starts_with('[') {
+            if let (Some(p_close), Some(a_close)) = (pa.find(']'), aa.find(']')) {
+                if p_close + 1 < pa.len() && a_close + 1 < aa.len() {
+                    self.unify_type_arg_strs(
+                        &pa[p_close + 1..],
+                        &aa[a_close + 1..],
+                        tparams,
+                        out,
+                        depth + 1,
+                    );
+                    return;
+                }
+            }
+        }
+        if let (Some(prest), Some(arest)) = (
+            pa.strip_prefix("option[").and_then(|r| r.strip_suffix(']')),
+            aa.strip_prefix("option[").and_then(|r| r.strip_suffix(']')),
+        ) {
+            self.unify_type_arg_strs(prest, arest, tparams, out, depth + 1);
+            return;
+        }
+        if pa.starts_with("map[") && aa.starts_with("map[") {
+            let p_after = &pa[3..];
+            let a_after = &aa[3..];
+            let mut p_match = None;
+            let mut d = 0i32;
+            for (i, ch) in p_after.char_indices() {
+                if ch == '[' {
+                    d += 1;
+                } else if ch == ']' {
+                    d -= 1;
+                    if d == 0 && i + 1 < p_after.len() {
+                        p_match = Some((&p_after[1..i], &p_after[i + 1..]));
+                        break;
+                    }
+                }
+            }
+            let mut a_match = None;
+            let mut d = 0i32;
+            for (i, ch) in a_after.char_indices() {
+                if ch == '[' {
+                    d += 1;
+                } else if ch == ']' {
+                    d -= 1;
+                    if d == 0 && i + 1 < a_after.len() {
+                        a_match = Some((&a_after[1..i], &a_after[i + 1..]));
+                        break;
+                    }
+                }
+            }
+            if let (Some((pk, pv)), Some((ak, av))) = (p_match, a_match) {
+                self.unify_type_arg_strs(pk, ak, tparams, out, depth + 1);
+                self.unify_type_arg_strs(pv, av, tparams, out, depth + 1);
+                return;
+            }
+        }
+        if let (Some((pb, pargs)), Some((ab, aargs))) = (
+            Self::split_generic_type_args(pa),
+            Self::split_generic_type_args(aa),
+        ) {
+            if pb == ab {
+                for (p_sub, a_sub) in pargs.iter().zip(aargs.iter()) {
+                    self.unify_type_arg_strs(p_sub, a_sub, tparams, out, depth + 1);
+                }
+            }
+        }
+    }
+
     fn unify_param_with_arg_shape(
         &self,
         param_ty: &TypeExpr,
@@ -1924,12 +2024,7 @@ impl<'a> Checker<'a> {
                 ) {
                     if pb == ab {
                         for (pa, aa) in pargs.iter().zip(aargs.iter()) {
-                            if tparams.contains(pa.as_str()) {
-                                let sh = self.shape_of_type_arg_str(aa, depth + 1);
-                                if !matches!(sh, TypeShape::Unknown) {
-                                    out.entry(pa.clone()).or_insert(sh);
-                                }
-                            }
+                            self.unify_type_arg_strs(pa, aa, tparams, out, depth + 1);
                         }
                     }
                 }
@@ -1994,12 +2089,7 @@ impl<'a> Checker<'a> {
                         if let Some((ibase, iargs)) = Self::split_generic_type_args(&inst_name) {
                             if ibase == rbase {
                                 for (rp, ia) in rparams.iter().zip(iargs.iter()) {
-                                    if tparam_set.contains(rp.as_str()) {
-                                        let sh = self.shape_of_type_arg_str(ia, 0);
-                                        if !matches!(sh, TypeShape::Unknown) {
-                                            subst.insert(rp.clone(), sh);
-                                        }
-                                    }
+                                    self.unify_type_arg_strs(rp, ia, &tparam_set, &mut subst, 0);
                                 }
                             }
                         }
@@ -2035,6 +2125,10 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+
+        for tp in &tparam_set {
+            subst.entry(tp.clone()).or_insert(TypeShape::Unknown);
         }
 
         subst
