@@ -80,12 +80,12 @@ fn test_os_variable_calls_with_arguments_reject() {
 #[test]
 fn test_hex_encode_arity_rejects() {
     rejects_e1002("import \"encoding/hex\"\nfn main() {\n    s := hex.encode()\n    _ = s\n}\n");
-    rejects_e1002("import \"encoding/hex\"\nfn main() {\n    b := \"hi\".bytes()\n    s := hex.encode(b, b)\n    _ = s\n}\n");
+    rejects_e1002("import \"encoding/hex\"\nfn main() {\n    b := []byte(\"hi\")\n    s := hex.encode(b, b)\n    _ = s\n}\n");
 }
 
 #[test]
 fn test_special_member_calls_positive_controls_accept() {
     accepts("import \"time\"\nfn main() {\n    d := time.milliseconds(500)\n    s := time.seconds(10)\n    m := time.minutes(1)\n    h := time.hours(24)\n    _ = d\n    _ = s\n    _ = m\n    _ = h\n}\n");
     accepts("import \"os\"\nfn main() {\n    a := os.args()\n    s := os.stdout()\n    e := os.stderr()\n    i := os.stdin()\n    _ = a\n    _ = s\n    _ = e\n    _ = i\n}\n");
-    accepts("import \"encoding/hex\"\nfn main() {\n    b := \"hi\".bytes()\n    s := hex.encode(b)\n    _ = s\n}\n");
+    accepts("import \"encoding/hex\"\nfn main() {\n    b := []byte(\"hi\")\n    s := hex.encode(b)\n    _ = s\n}\n");
 }
