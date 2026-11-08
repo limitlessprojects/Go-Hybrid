@@ -9740,7 +9740,7 @@ impl<'a> Collector<'a> {
                         format!("cannot use `{name}` (function) as type in argument to `new` (HYB-E2005)"),
                         "`new` takes a type name — not a function",
                     );
-                } else if name == "true" || name == "false" || name == "nil" {
+                } else if name == "true" || name == "false" || name == "nil" || name == "none" {
                     self.emit_e2005(
                         span,
                         format!("cannot use `{name}` as type in argument to `new` (HYB-E2005)"),
