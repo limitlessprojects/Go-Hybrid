@@ -557,6 +557,10 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "shutdown",
     ];
     const HTTP_COOKIE: &[&str] = &["string", "valid"];
+    /// `http.ResponseWriter` — standard library HTTP response writer interface.
+    const HTTP_RESPONSE_WRITER: &[&str] = &["header", "write", "write_header"];
+    /// `http.RoundTripper` — standard library HTTP transport round tripper interface.
+    const HTTP_ROUND_TRIPPER: &[&str] = &["round_trip"];
     const URL_URL: &[&str] = &[
         "escaped_fragment",
         "escaped_path",
@@ -684,6 +688,8 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "http.response" | "http.Response" => Some(HTTP_RESPONSE),
         "http.server" | "http.Server" => Some(HTTP_SERVER),
         "http.cookie" | "http.Cookie" => Some(HTTP_COOKIE),
+        "http.response_writer" | "http.responsewriter" | "http.ResponseWriter" => Some(HTTP_RESPONSE_WRITER),
+        "http.round_tripper" | "http.roundtripper" | "http.RoundTripper" => Some(HTTP_ROUND_TRIPPER),
         "url.url" | "url.URL" => Some(URL_URL),
         "json.decoder" | "json.Decoder" => Some(JSON_DECODER),
         "json.encoder" | "json.Encoder" => Some(JSON_ENCODER),
@@ -751,6 +757,12 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         }
         ("http.request" | "http.Request", "cookie") => TypeShape::ForeignOpaque("http.cookie".into()),
         ("http.response" | "http.Response", "location") => TypeShape::ForeignOpaque("url.url".into()),
+        ("http.response_writer" | "http.responsewriter" | "http.ResponseWriter", "header") => {
+            TypeShape::ForeignOpaque("http.header".into())
+        }
+        ("http.round_tripper" | "http.roundtripper" | "http.RoundTripper", "round_trip") => {
+            TypeShape::ForeignOpaque("http.response".into())
+        }
         ("error" | "errors.error", "error") => TypeShape::Str,
         ("net.addr" | "net.Addr", "network" | "string") => TypeShape::Str,
         ("net.error" | "net.Error", "error") => TypeShape::Str,
