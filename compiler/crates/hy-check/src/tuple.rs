@@ -47,13 +47,17 @@ impl<'a> Checker<'a> {
     /// per statement.
     pub(crate) fn check_stmt_multi_value(&mut self, st: &FnState, stmt: &Stmt) {
         match stmt {
-            Stmt::Local(l) if l.values.len() == 1 => {
-                self.check_multi_value_bind(st, &l.values[0], l.names.len(), l.span);
-                self.check_subexprs_single_value(st, &l.values[0]);
-            }
-            Stmt::Local(l) if l.values.len() > 1 => {
-                for v in &l.values {
-                    self.check_expr_single_value(st, v, l.span);
+            Stmt::Local(l) => {
+                if let Some(ty) = &l.ty {
+                    self.check_type_expr_single_value(st, ty);
+                }
+                if l.values.len() == 1 {
+                    self.check_multi_value_bind(st, &l.values[0], l.names.len(), l.span);
+                    self.check_subexprs_single_value(st, &l.values[0]);
+                } else if l.values.len() > 1 {
+                    for v in &l.values {
+                        self.check_expr_single_value(st, v, l.span);
+                    }
                 }
             }
             Stmt::Assign {
@@ -216,6 +220,38 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn check_type_expr_single_value(&mut self, st: &FnState, ty: &TypeExpr) {
+        match ty {
+            TypeExpr::Named { .. } => {}
+            TypeExpr::Array { len, elem, .. } => {
+                if let Some(len_expr) = len {
+                    self.check_expr_single_value(st, len_expr, len_expr.span());
+                }
+                self.check_type_expr_single_value(st, elem);
+            }
+            TypeExpr::Slice { elem, .. }
+            | TypeExpr::Pointer { to: elem, .. }
+            | TypeExpr::Option { elem, .. }
+            | TypeExpr::Chan { elem, .. } => {
+                self.check_type_expr_single_value(st, elem);
+            }
+            TypeExpr::Map { key, value, .. } => {
+                self.check_type_expr_single_value(st, key);
+                self.check_type_expr_single_value(st, value);
+            }
+            TypeExpr::Fn {
+                params, results, ..
+            } => {
+                for p in params {
+                    self.check_type_expr_single_value(st, &p.ty);
+                }
+                for r in results {
+                    self.check_type_expr_single_value(st, r);
+                }
+            }
+        }
+    }
+
     fn check_expr_single_value(&mut self, st: &FnState, expr: &Expr, span: Span) {
         self.check_multi_value_bind(st, expr, 1, span);
         self.check_subexprs_single_value(st, expr);
@@ -223,7 +259,17 @@ impl<'a> Checker<'a> {
 
     fn check_subexprs_single_value(&mut self, st: &FnState, expr: &Expr) {
         match unwrap_parens_and_move(expr) {
-            Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => {}
+            Expr::Ident { .. } | Expr::Lit { .. } => {}
+            Expr::FnLit {
+                params, results, ..
+            } => {
+                for p in params {
+                    self.check_type_expr_single_value(st, &p.ty);
+                }
+                for r in results {
+                    self.check_type_expr_single_value(st, &r.ty);
+                }
+            }
             Expr::Binary { lhs, rhs, .. } => {
                 self.check_expr_single_value(st, lhs, lhs.span());
                 self.check_expr_single_value(st, rhs, rhs.span());
@@ -282,12 +328,22 @@ impl<'a> Checker<'a> {
                     self.check_expr_single_value(st, &f.value, f.span);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some(e) = elem {
+                    self.check_type_expr_single_value(st, e);
+                }
                 for item in items {
                     self.check_expr_single_value(st, item, item.span());
                 }
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } => {
+                self.check_type_expr_single_value(st, key);
+                self.check_type_expr_single_value(st, value);
                 for (k, v) in entries {
                     self.check_expr_single_value(st, k, k.span());
                     self.check_expr_single_value(st, v, v.span());
@@ -391,15 +447,31 @@ impl<'a> Checker<'a> {
                     TypeShape::Array(..) => Some(BindSourceBound::Exact(1)),
                     _ => None,
                 },
-                _ => None,
+                _ => match self.composite_type_expr(st, base).map(|t| self.peel_pointer_and_alias(&t)) {
+                    Some(TypeExpr::Map { .. }) => Some(BindSourceBound::AtMost(2)),
+                    Some(TypeExpr::Slice { .. } | TypeExpr::Array { .. }) => Some(BindSourceBound::Exact(1)),
+                    _ => None,
+                },
             },
             _ => None,
         }
     }
 
+    fn is_unshadowed_pkg(&self, st: &FnState, pkg: &str) -> bool {
+        self.lookup_binding(st, pkg).is_none()
+            && !st.type_params.contains(pkg)
+            && !self.structs.contains_key(pkg)
+            && !self.enums.contains_key(pkg)
+            && !self.type_aliases.contains_key(pkg)
+            && !self.consts.contains_key(pkg)
+    }
+
     fn forwarded_tuple_arity(&self, st: &FnState, callee: &Expr, arg: &Expr) -> Option<usize> {
         match unwrap_parens_and_move(callee) {
             Expr::Ident { name, .. } => {
+                if st.type_params.contains(name.as_str()) {
+                    return None;
+                }
                 if self.lookup_binding(st, name).is_some() {
                     if let Some(TypeExpr::Fn { params, .. }) = self.resolve_fn_callee_ty(st, callee)
                     {
@@ -474,6 +546,9 @@ impl<'a> Checker<'a> {
         };
         match unwrap_parens_and_move(callee) {
             Expr::Ident { name, .. } => {
+                if st.type_params.contains(name.as_str()) {
+                    return None;
+                }
                 // 1. Local bindings (fn values, closures, parameters, aliases)
                 if self.lookup_binding(st, name).is_some() {
                     if let Some(TypeExpr::Fn { results, .. }) =
@@ -485,8 +560,14 @@ impl<'a> Checker<'a> {
                 }
                 // 2. Direct call to a file-local top-level function
                 let head = Self::base_named_type_str(name);
-                let decl = self.fns.get(name.as_str()).or_else(|| self.fns.get(head))?;
-                Some((name.clone(), decl.results.len()))
+                if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                    return Some((name.clone(), decl.results.len()));
+                }
+                // 3. File-level `const` bound to a function / closure
+                if let Some(TypeExpr::Fn { results, .. }) = self.resolve_fn_callee_ty(st, callee) {
+                    return Some((name.clone(), results.len()));
+                }
+                None
             }
             Expr::FnLit { results, .. } => Some(("fn".to_string(), results.len())),
             Expr::Field {
@@ -497,11 +578,13 @@ impl<'a> Checker<'a> {
                 let head = Self::base_named_type_str(method_name);
                 // 1. Unshadowed package call (`strconv.parse_int(...)`, etc.)
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens_and_move(base) {
-                    if self.lookup_binding(st, pkg).is_none() {
+                    if self.lookup_binding(st, pkg).is_none() && !st.type_params.contains(pkg.as_str()) && !self.consts.contains_key(pkg.as_str()) {
                         let full = format!("{pkg}.{head}");
                         if let Some(decl) = self.fns.get(full.as_str()) {
                             return Some((format!("{pkg}.{method_name}"), decl.results.len()));
                         }
+                    }
+                    if self.is_unshadowed_pkg(st, pkg.as_str()) {
                         if let Some(count) = foreign::package_result_count(pkg.as_str(), head) {
                             return Some((format!("{pkg}.{method_name}"), count));
                         }
@@ -550,7 +633,14 @@ impl<'a> Checker<'a> {
     }
 
     fn resolve_fn_callee_ty(&self, st: &FnState, expr: &Expr) -> Option<TypeExpr> {
-        if let Some(ty) = self.ty_of_expr(st, expr) {
+        self.resolve_fn_callee_ty_at(st, expr, 0)
+    }
+
+    fn resolve_fn_callee_ty_at(&self, st: &FnState, expr: &Expr, depth: usize) -> Option<TypeExpr> {
+        if depth > 32 {
+            return None;
+        }
+        if let Some(ty) = self.composite_type_expr(st, expr) {
             let resolved = self.resolve_type_alias(&ty);
             if matches!(resolved, TypeExpr::Fn { .. }) {
                 return Some(resolved);
@@ -558,6 +648,9 @@ impl<'a> Checker<'a> {
         }
         match unwrap_parens_and_move(expr) {
             Expr::Ident { name, span } => {
+                if st.type_params.contains(name.as_str()) {
+                    return None;
+                }
                 if let Some((params, results, _)) = st.closure_defs.get(name.as_str()) {
                     return Some(TypeExpr::Fn {
                         params: params.clone(),
@@ -589,8 +682,19 @@ impl<'a> Checker<'a> {
                         });
                     }
                 }
-                if let Some(cval) = self.const_values.get(name.as_str()) {
-                    return self.resolve_fn_callee_ty(st, cval);
+                if self.lookup_binding(st, name).is_none() {
+                    let head = Self::base_named_type_str(name);
+                    if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                        return Some(TypeExpr::Fn {
+                            params: decl.params.clone(),
+                            results: decl.results.iter().map(|r| r.ty.clone()).collect(),
+                            span: *span,
+                        });
+                    }
+                    if let Some(cval) = self.const_values.get(name.as_str()) {
+                        let empty_st = FnState::default();
+                        return self.resolve_fn_callee_ty_at(&empty_st, cval, depth + 1);
+                    }
                 }
                 None
             }
@@ -600,44 +704,60 @@ impl<'a> Checker<'a> {
                 } = unwrap_parens_and_move(base)
                 {
                     if let Some(first) = items.first() {
-                        return self.resolve_fn_callee_ty(st, first);
+                        return self.resolve_fn_callee_ty_at(st, first, depth + 1);
                     }
                 }
                 let base_ty = match unwrap_parens_and_move(base) {
                     Expr::Ident { name, .. } => {
                         let root = crate::freeze::resolve_alias(st, name);
-                        self.lookup_binding(st, &root)
-                            .and_then(|b| b.ty.clone())
-                            .or_else(|| {
-                                self.const_values
-                                    .get(root.as_str())
-                                    .and_then(|cv| match unwrap_parens_and_move(cv) {
-                                        Expr::SliceLit {
-                                            elem: None,
-                                            items,
-                                            span,
-                                        } => items
-                                            .first()
-                                            .and_then(|f| self.resolve_fn_callee_ty(st, f))
-                                            .map(|elem| TypeExpr::Slice {
-                                                elem: Box::new(elem),
-                                                span: *span,
-                                            }),
-                                        _ => self.ty_of_expr(st, cv),
-                                    })
-                            })
+                        if st.type_params.contains(root.as_str()) {
+                            None
+                        } else if let Some(b) = self.lookup_binding(st, &root) {
+                            b.ty.clone()
+                        } else {
+                            let empty_st = FnState::default();
+                            self.const_values
+                                .get(root.as_str())
+                                .and_then(|cv| match unwrap_parens_and_move(cv) {
+                                    Expr::SliceLit {
+                                        elem: None,
+                                        items,
+                                        span,
+                                    } => items
+                                        .first()
+                                        .and_then(|f| {
+                                            self.resolve_fn_callee_ty_at(&empty_st, f, depth + 1)
+                                        })
+                                        .map(|elem| TypeExpr::Slice {
+                                            elem: Box::new(elem),
+                                            span: *span,
+                                        }),
+                                    _ => self.ty_of_expr(&empty_st, cv),
+                                })
+                        }
                     }
-                    _ => self.ty_of_expr(st, base),
+                    _ => self.composite_type_expr(st, base),
                 }?;
-                match self.resolve_type_alias(&base_ty) {
+                match self.peel_pointer_and_alias(&base_ty) {
                     TypeExpr::Slice { elem, .. }
                     | TypeExpr::Array { elem, .. }
                     | TypeExpr::Map { value: elem, .. } => Some(self.resolve_type_alias(&elem)),
                     _ => None,
                 }
             }
+            Expr::Field { base, name, span } => {
+                let base_ty = self.composite_type_expr(st, base)?;
+                if let Some((_, fty)) = self.struct_fields_for_type(&base_ty).and_then(|fs| fs.into_iter().find(|(n, _)| n == name)) {
+                    return Some(self.resolve_type_alias(&fty));
+                }
+                let rb = Self::base_named_type(&self.peel_pointer_and_alias(&base_ty))?;
+                let decl = self.method_decls.get(&(rb, Self::base_named_type_str(name).to_string()))?;
+                Some(TypeExpr::Fn { params: decl.params.clone(), results: decl.results.iter().map(|r| r.ty.clone()).collect(), span: *span })
+            }
             Expr::Call { callee, .. } => {
-                if let Some(TypeExpr::Fn { results, .. }) = self.resolve_fn_callee_ty(st, callee) {
+                if let Some(TypeExpr::Fn { results, .. }) =
+                    self.resolve_fn_callee_ty_at(st, callee, depth + 1)
+                {
                     return results.first().map(|r| self.resolve_type_alias(r));
                 }
                 None
@@ -653,6 +773,9 @@ impl<'a> Checker<'a> {
         match unwrap_parens(callee) {
             Expr::FnLit { results, .. } => results.len() >= 2,
             Expr::Ident { name, .. } => {
+                if st.type_params.contains(name.as_str()) {
+                    return false;
+                }
                 if let Some(b) = self.lookup_binding(st, name) {
                     return b
                         .ty
@@ -672,7 +795,7 @@ impl<'a> Checker<'a> {
                 ..
             } => {
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
-                    if self.lookup_binding(st, pkg).is_none() {
+                    if self.is_unshadowed_pkg(st, pkg.as_str()) {
                         let head = Self::base_named_type_str(method_name);
                         let full = format!("{pkg}.{head}");
                         if self.fns.contains_key(full.as_str())
@@ -909,4 +1032,3 @@ impl<'a> Checker<'a> {
         }
     }
 }
-
