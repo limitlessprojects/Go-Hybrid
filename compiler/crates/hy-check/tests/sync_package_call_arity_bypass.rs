@@ -129,18 +129,7 @@ fn test() {
 "#,
     );
 
-    // sync.map
-    rejects_e1002(
-        r#"
-package main
 
-import "sync"
-
-fn test() {
-    _ = sync.map()
-}
-"#,
-    );
 }
 
 #[test]

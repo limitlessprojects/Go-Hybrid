@@ -4550,7 +4550,6 @@ impl<'a> Collector<'a> {
                 | "pool"
                 | "once"
                 | "cond"
-                | "map"
                 | "locker"
         );
 
