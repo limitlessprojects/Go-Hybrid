@@ -96,12 +96,30 @@ fn const_initializers_and_shadowed_error_results_reject_e2011() {
             "local composite const initializer with `?` inside main",
             "fn main() {\n    const xs = []int{val()?}\n    fmt.println(len(xs))\n}\n",
         ),
-        (
-            "user struct shadowing predeclared error in fn result",
-            "struct error {}\n\nfn bad() (int, error) {\n    x := val()?\n    return x, error{}\n}\n\nfn main() {\n    _, _ = bad()\n}\n",
-        ),
     ] {
         let r = with_helpers(src);
         assert_eq!(e2011(&r), 1, "{label} must reject with HYB-E2011: {:?}", r.diagnostics);
     }
+
+    // `struct error` shadows the predeclared error for every result in the
+    // file. The landing spot rejects `?` inside `bad`, and the operand check
+    // also rejects `val()` — its `(int, error)` is that same user struct, not
+    // a trailing builtin error.
+    let src = "struct error {}\n\nfn bad() (int, error) {\n    x := val()?\n    return x, error{}\n}\n\nfn main() {\n    _, _ = bad()\n}\n";
+    let r = with_helpers(src);
+    let msgs: Vec<&str> = r
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error && d.code == "HYB-E2011")
+        .map(|d| d.message.as_str())
+        .collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("has none")),
+        "landing spot must reject shadowed `error` result: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("do not end in `error`")),
+        "operand must reject `val()` once `error` is a user struct: {msgs:?}"
+    );
+    assert_eq!(msgs.len(), 2, "unexpected HYB-E2011 set: {msgs:?}");
 }
