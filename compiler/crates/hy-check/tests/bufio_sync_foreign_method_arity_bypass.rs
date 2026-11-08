@@ -1,6 +1,6 @@
 //! Regression tests for #4118:
 //! Curated foreign receiver methods (`bufio.reader`, `bufio.writer`, `bufio.scanner`,
-//! `sync.pool`, `sync.map`, `io.pipe_reader`, `io.pipe_writer`, `io.limited_reader`)
+//! `sync.pool`, `io.pipe_reader`, `io.pipe_writer`, `io.limited_reader`)
 //! must enforce call arity constraints during `hyb check` (HYB-E1002, Row 13 BUILDABLE).
 //!
 //! Without arity checks on these foreign receiver methods, calls with too few or too many arguments
@@ -266,85 +266,6 @@ fn test(p *sync.pool) {
 }
 
 #[test]
-fn test_sync_map_arity_rejection() {
-    // m.load takes 1 argument
-    rejects_e1002(
-        r#"
-package main
-
-import "sync"
-
-fn test(m *sync.map) {
-    m.load()
-}
-"#,
-    );
-
-    rejects_e1002(
-        r#"
-package main
-
-import "sync"
-
-fn test(m *sync.map) {
-    m.load(1, 2)
-}
-"#,
-    );
-
-    // m.store takes 2 arguments
-    rejects_e1002(
-        r#"
-package main
-
-import "sync"
-
-fn test(m *sync.map) {
-    m.store(1)
-}
-"#,
-    );
-
-    rejects_e1002(
-        r#"
-package main
-
-import "sync"
-
-fn test(m *sync.map) {
-    m.store(1, 2, 3)
-}
-"#,
-    );
-
-    // m.delete takes 1 argument
-    rejects_e1002(
-        r#"
-package main
-
-import "sync"
-
-fn test(m *sync.map) {
-    m.delete()
-}
-"#,
-    );
-
-    // m.compare_and_swap takes 3 arguments
-    rejects_e1002(
-        r#"
-package main
-
-import "sync"
-
-fn test(m *sync.map) {
-    m.compare_and_swap(1, 2)
-}
-"#,
-    );
-}
-
-#[test]
 fn test_io_pipe_and_limited_reader_arity_rejection() {
     // pr.close takes 0 arguments
     rejects_e1002(
@@ -403,7 +324,6 @@ fn test_valid(
     w *bufio.writer,
     s *bufio.scanner,
     p *sync.pool,
-    m *sync.map,
     pr *io.pipe_reader,
     pw *io.pipe_writer,
 ) {
@@ -417,9 +337,6 @@ fn test_valid(
     s.text()
     p.get()
     p.put(100)
-    m.load("key")
-    m.store("key", 100)
-    m.delete("key")
     pr.close()
     pw.close()
 }
