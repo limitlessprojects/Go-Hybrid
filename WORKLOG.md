@@ -619,3 +619,13 @@
   - Mixed tighten+loosen ⇒ corpus/differential tripwire movement possible; full battery mandatory. No dup on main (diff self-evident). Next tick: merge → commit → battery → land/evidence per gates.
 - Suites on disk: **483** (unchanged this tick). Corpus 135/135. Differential FULL AGREEMENT.
 - Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 156 — 2026-11-08 21:10 +08 (cron tick, Job 487193)
+
+- Cold sandbox; main pulled clean (`01651478`). pr-4088 local ref lost to rollback (unpushed refs don't persist) — refetched, head unchanged `dc6f7721`, pre-review from S155 held.
+- **#4088 (wminno, fixes #4068) LANDED → merge commit `14c8e916`.**
+  - Battery: workspace 493 suites / 3169 passed / 0 failed; 484 files = 484 Running lines (1:1, +9 inline); new suite standalone 11/11. Corpus 135/135 with tripwire RATES UNCHANGED (1.5%/2.2%) — paired tighten+loosen nets zero corpus movement. Differential FULL 45/45 + 90/90.
+  - Pushed `01651478..14c8e916`, ls-remote asserted. Landing reply posted (comment 6721951929). Issue #4068 auto-closed.
+- Suites on disk: **484**. Corpus 135/135. Differential FULL AGREEMENT.
+- Next queue: #4093 (marhabynova), #4095/#4109/#4117 (jpereyra243-byte), #4105 (mischievousdeveloper), #4107/#4111/#4113/#4115 (dextermos-dev arity band — check overlap vs landed #4087 fmt arm + #4088 resolve changes), flood #4117–#4152 — top-down by created. Also watch #4097 for author's escaped-quote fix.
+- Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
