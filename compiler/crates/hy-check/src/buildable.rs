@@ -4590,8 +4590,6 @@ impl<'a> Collector<'a> {
                 | "header"
                 | "cookie"
                 | "transport"
-                | "handler"
-                | "handler_func"
                 | "serve_mux"
                 | "round_tripper"
                 | "response_writer"
