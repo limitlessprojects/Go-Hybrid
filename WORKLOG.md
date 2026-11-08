@@ -601,3 +601,21 @@
 - Suites on disk: **483**. Corpus 135/135. Differential FULL AGREEMENT.
 - Next queue: #4085/#4097/#4099/#4101 (bradwue313 — fmt append + arity family; check overlap vs #4087 before landing), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115 (dextermos-dev buildable arity band — dedupe carefully against #4087's fmt arm), flood #4117–#4152 — top-down by created.
 - Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 155 — 2026-11-08 20:10 +08 (cron tick, Job 487193)
+
+- Cold sandbox; main pulled clean (`736d2d8f`).
+- **#4085 (bradwue313, also fixes #4076) — VERIFIED DUP, hall-of-fame reply, kept open (comment 6721330559).**
+  - Method: ran author's suite verbatim on bare main — 3/4, the 1 failure was the author's fixture using `Receiver` (mixed case → HYB-E0001 at parse, before type-check). After `Receiver`→`receiver` substitution: 4/4 green. Zero residue; #4081+#4084 cover all surfaces. Third independent implementation of #4076; first-lander keeps the issue.
+  - Tree hygiene note: the temp checkout for this check staged the test file and blocked the next trial merge ("local changes would be overwritten") — `git reset` + rm before merging, not `git checkout --`.
+- **#4097 (bradwue313, fixes #4096, fmt append family) — GATE FAIL, not landed (evidence reply 6721346368).**
+  - Trial merge clean; `cargo check -p hy-check` fails: buildable.rs:7967 `"write \`fmt.appendf(b, "%s", ...)\`"` embeds bare double quotes → Rust 2021 "prefix `s` is unknown" + E0425. Only bare-quote line in the PR; sibling fix-its escape correctly. append/appendln/appendf arms otherwise sound and complementary to #4087 (no overlap; dst rejects Str/RawStr literals, appendf format slot accepts strings). Author asked to push the one-line escape fix for a re-run.
+  - MERGE_RC=2 earlier was the #4085 residue file, not a real conflict — verified clean after reset.
+- **#4088 (wminno, fixes #4068) PRE-REVIEWED for next tick** (head `dc6f7721`, resolve.rs +40/-10, 141-line test file):
+  1. MatchPattern::Path 2+ segments → check_type_name(joined) (E1001 under-fire fix; pkg-qualified and declared-enum qualifiers stay accepted).
+  2. dotted-type roots `option`/`set` added to pass-set (over-fire fix).
+  3. Unparseable type args: deleted plain-ident fallback, fail-open documented (`fn(c chan<- int)` alias-grammar case).
+  4. Type-position bracket args `run_bracketed_type_args(.., false→true)` (`set[undef]{}` under-fire fix).
+  - Mixed tighten+loosen ⇒ corpus/differential tripwire movement possible; full battery mandatory. No dup on main (diff self-evident). Next tick: merge → commit → battery → land/evidence per gates.
+- Suites on disk: **483** (unchanged this tick). Corpus 135/135. Differential FULL AGREEMENT.
+- Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
