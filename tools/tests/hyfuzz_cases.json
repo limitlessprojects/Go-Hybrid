@@ -1,0 +1,21 @@
+{
+  "tool": "tools/fuzz/hyfuzz.py",
+  "cases": [
+    {
+      "name": "utf8_replacement_decoding_in_check_one",
+      "encoding": "utf-8",
+      "errors": "replace",
+      "expected_bad": null
+    },
+    {
+      "name": "empty_or_directory_hy_corpus_rejected",
+      "entries": ["subdir.hy/", "empty.hy"],
+      "expected_exit": "no corpus programs found"
+    },
+    {
+      "name": "invalid_failures_dir_rejected_upfront",
+      "failures_dir": ["", "existing-regular-file"],
+      "expected_exit": 2
+    }
+  ]
+}
