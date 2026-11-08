@@ -4554,6 +4554,19 @@ impl<'a> Collector<'a> {
             );
             return;
         }
+        // #4018: In Go specification (§Conversions), type conversions T(x) take
+        // exactly one argument without variadic spread `...`.
+        if args[0].spread {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in type conversion to `{}` — Go refuses `cannot use ... in type conversion to {}` (HYB-E1002)",
+                    name, name
+                ),
+                "a type conversion has the form `T(x)`: exactly one argument without variadic spread",
+            );
+            return;
+        }
         let arg = &args[0].value;
         self.check_single_value_position(arg, "a type conversion", /*binding_position=*/ false);
 
@@ -8322,14 +8335,30 @@ impl<'a> Collector<'a> {
     /// Family E1–E5 (#425): extend `HYB-E2005` (`BUILTIN-ARGS`) from literals
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
-        // #2701: among the built-ins only `append` is variadic; every other
+        // #2701, #4013: among the built-ins only `append` is variadic; every other
         // built-in rejects the `...` spread form (`invalid use of ... with
         // built-in <name>`). `append` is handled in its own arm below, where a
         // spread argument is legal.
         if matches!(
             name,
-            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
-                | "real" | "imag" | "complex"
+            "len"
+                | "cap"
+                | "close"
+                | "delete"
+                | "min"
+                | "max"
+                | "clear"
+                | "copy"
+                | "real"
+                | "imag"
+                | "complex"
+                | "panic"
+                | "print"
+                | "println"
+                | "make"
+                | "new"
+                | "recover"
+                | "some"
         ) && args.iter().any(|a| a.spread)
         {
             self.emit_e1002(
