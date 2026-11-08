@@ -8668,6 +8668,76 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if pkg == "json" && self.lookup_kind(pkg).is_none() {
+                        let method = name.as_str();
+                        if matches!(
+                            method,
+                            "decoder"
+                                | "encoder"
+                                | "raw_message"
+                                | "delim"
+                                | "number"
+                                | "marshaler"
+                                | "unmarshaler"
+                                | "syntax_error"
+                                | "unmarshal_type_error"
+                                | "unsupported_type_error"
+                                | "unsupported_value_error"
+                                | "marshaler_error"
+                        ) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot call non-function `json.{}` (package type or interface) (HYB-E1002)",
+                                    name
+                                ),
+                                &format!("`json.{}` is a type, not a callable function", name),
+                            );
+                        } else if matches!(
+                            method,
+                            "marshal"
+                                | "marshal_indent"
+                                | "unmarshal"
+                                | "new_decoder"
+                                | "new_encoder"
+                                | "compact"
+                                | "html_escape"
+                                | "indent"
+                                | "valid"
+                        ) {
+                            if args.iter().any(|a| a.spread) {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "cannot use `...` in call to non-variadic function `json.{}` (HYB-E1002)",
+                                        name
+                                    ),
+                                    &format!("`json.{}` does not accept variadic `...` arguments", name),
+                                );
+                            } else {
+                                let (expected_min, expected_max, sig_hint) = match method {
+                                    "marshal" | "new_decoder" | "new_encoder" | "valid" => (1, 1, "(v)"),
+                                    "unmarshal" | "compact" | "html_escape" => (2, 2, "(data, v)"),
+                                    "marshal_indent" => (3, 3, "(v, prefix, indent)"),
+                                    "indent" => (4, 4, "(dst, src, prefix, indent)"),
+                                    _ => (0, usize::MAX, ""),
+                                };
+                                if args.len() < expected_min || args.len() > expected_max {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`json.{}` requires exactly {} argument(s) `{}`, got {} (HYB-E1002)",
+                                            name,
+                                            expected_min,
+                                            sig_hint,
+                                            args.len()
+                                        ),
+                                        &format!("write `json.{}{}`", name, sig_hint),
+                                    );
+                                }
+                            }
+                        }
+                    }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
