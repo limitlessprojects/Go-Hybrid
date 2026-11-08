@@ -4604,7 +4604,7 @@ impl<'a> Collector<'a> {
             self.emit_e1002(
                 span,
                 format!("cannot call non-function `http.{member}` (HYB-E1002)"),
-                format!("`http.{member}` is a type, variable, or constant; remove call parentheses or invoke a function"),
+                "remove call parentheses or invoke a function",
             );
             return;
         }
@@ -4623,7 +4623,7 @@ impl<'a> Collector<'a> {
                 self.emit_e1002(
                     span,
                     format!("`http.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
-                    format!("provide exactly {expected} {noun} to `http.{member}`"),
+                    &format!("provide exactly {expected} {noun} to `http.{member}`"),
                 );
             }
         }
