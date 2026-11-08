@@ -4536,6 +4536,168 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_os_package_call(&mut self, pkg: &str, member: &str, args: &[CallArg], span: Span) {
+        if pkg != "os" {
+            return;
+        }
+
+        // Special 0-arg lowerings for package variables (#3863)
+        if matches!(member, "args" | "stdout" | "stderr" | "stdin") {
+            if !args.is_empty() {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`os.{}` takes no arguments, got {} (HYB-E1002)",
+                        member,
+                        args.len()
+                    ),
+                    &format!("write `os.{}` (package variable, not a function)", member),
+                );
+            }
+            return;
+        }
+
+        // Non-callable types, variables, and constants in package os
+        let is_non_callable = matches!(
+            member,
+            "file"
+                | "file_info"
+                | "file_mode"
+                | "dir_entry"
+                | "path_error"
+                | "link_error"
+                | "syscall_error"
+                | "process"
+                | "process_state"
+                | "proc_attr"
+                | "signal"
+                | "dev_null"
+                | "interrupt"
+                | "kill"
+                | "err_invalid"
+                | "err_permission"
+                | "err_exist"
+                | "err_not_exist"
+                | "err_closed"
+                | "err_no_deadline"
+                | "err_deadline_exceeded"
+                | "path_separator"
+                | "path_list_separator"
+                | "o_rdonly"
+                | "o_wronly"
+                | "o_rdwr"
+                | "o_append"
+                | "o_create"
+                | "o_excl"
+                | "o_sync"
+                | "o_trunc"
+                | "mode_dir"
+                | "mode_append"
+                | "mode_exclusive"
+                | "mode_temporary"
+                | "mode_symlink"
+                | "mode_device"
+                | "mode_named_pipe"
+                | "mode_socket"
+                | "mode_setuid"
+                | "mode_setgid"
+                | "mode_char_device"
+                | "mode_sticky"
+                | "mode_irregular"
+                | "mode_type"
+                | "mode_perm"
+                | "seek_set"
+                | "seek_cur"
+                | "seek_end"
+        );
+        if is_non_callable {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot call `os.{}` - `os.{}` is a package type, variable, or constant, not a function (HYB-E1002)",
+                    member, member
+                ),
+                "do not invoke package types, variables, or constants as functions",
+            );
+            return;
+        }
+
+        let want: Option<usize> = match member {
+            // 0 args
+            "clearenv" | "environ" | "executable" | "getegid" | "geteuid"
+            | "getgid" | "getgroups" | "getpagesize" | "getpid" | "getppid"
+            | "getuid" | "getwd" | "hostname" | "pipe" | "temp_dir"
+            | "user_cache_dir" | "user_config_dir" | "user_home_dir" => Some(0),
+
+            // 1 arg
+            "chdir" | "create" | "dir_fs" | "exit" | "expand_env"
+            | "find_process" | "getenv" | "is_exist" | "is_not_exist"
+            | "is_path_separator" | "is_permission" | "is_timeout"
+            | "lookup_env" | "lstat" | "open" | "read_dir" | "read_file"
+            | "readlink" | "remove" | "remove_all" | "stat" | "unsetenv" => Some(1),
+
+            // 2 args
+            "chmod" | "copy_fs" | "create_temp" | "expand" | "link"
+            | "mkdir" | "mkdir_all" | "mkdir_temp" | "new_file" | "rename"
+            | "same_file" | "setenv" | "symlink" | "truncate" => Some(2),
+
+            // 3 args
+            "chown" | "chtimes" | "lchown" | "open_file" | "start_process"
+            | "write_file" => Some(3),
+
+            _ => None,
+        };
+
+        let Some(want_arity) = want else {
+            return;
+        };
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic `os.{}` (HYB-E1002)",
+                    member
+                ),
+                "`os` package functions are non-variadic; pass discrete arguments",
+            );
+            return;
+        }
+
+        let got = args.len();
+        if got != want_arity {
+            let msg = if got < want_arity {
+                format!(
+                    "function `os.{}` takes {} argument{} but is called with {} - Go refuses `not enough arguments in call to os.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            } else {
+                format!(
+                    "function `os.{}` takes {} argument{} but is called with {} - Go refuses `too many arguments in call to os.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            };
+            self.emit_e1002(
+                span,
+                msg,
+                &format!(
+                    "pass exactly {} argument{} to `os.{}`",
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    member
+                ),
+            );
+        }
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -7779,6 +7941,7 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+
                     if pkg == "time"
                         && self.lookup_kind(pkg).is_none()
                         && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
@@ -7817,20 +7980,8 @@ impl<'a> Collector<'a> {
                             }
                         }
                     }
-                    if pkg == "os"
-                        && self.lookup_kind(pkg).is_none()
-                        && matches!(name.as_str(), "args" | "stdout" | "stderr" | "stdin")
-                        && !args.is_empty()
-                    {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "`os.{}` takes no arguments, got {} (HYB-E1002)",
-                                name,
-                                args.len()
-                            ),
-                            &format!("write `os.{}` (package variable, not a function)", name),
-                        );
+                    if pkg == "os" && self.lookup_kind(pkg).is_none() {
+                        self.check_os_package_call(pkg, name, args, span);
                     }
                     if pkg == "hex"
                         && self.lookup_kind(pkg).is_none()
