@@ -7690,6 +7690,12 @@ impl<'a> Collector<'a> {
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
                     if pkg == "errors"
+                        && self.lookup_kind(pkg).is_none()
+                        && name != "wrap"
+                    {
+                        self.check_errors_call_buildable(name, args, span);
+                    }
+                    if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
                     {
@@ -8269,6 +8275,46 @@ impl<'a> Collector<'a> {
     /// #3572: `errors.wrap(err, message)` lowers to `fmt.Errorf("%s: %w", message, err)`.
     /// Reject operands whose resolved kind can never be an `error` (argument 0) or
     /// a `string` (argument 1) with HYB-E1002 (SPEC-LANGUAGE E2).
+    fn check_errors_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "err_unsupported" => {
+                self.emit_e1002(
+                    span,
+                    "cannot call non-function package variable `errors.err_unsupported` (HYB-E1002)".to_string(),
+                    "write `errors.err_unsupported` (package error variable, not a function)",
+                );
+            }
+            "new" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("`errors.new` takes exactly 1 string argument `(text)`, got {} (HYB-E1002)", args.len()),
+                        "pass 1 string argument to `errors.new` (e.g., `errors.new(\"message\")`)",
+                    );
+                }
+            }
+            "unwrap" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("`errors.unwrap` takes exactly 1 error argument `(err)`, got {} (HYB-E1002)", args.len()),
+                        "pass 1 error argument to `errors.unwrap`",
+                    );
+                }
+            }
+            "is" | "as" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("`errors.{}` takes exactly 2 arguments, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 2 arguments to `errors.{}`", name),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn check_errors_wrap_operands(&mut self, args: &[CallArg]) {
         let ek = self.kind_of_expr(&args[0].value);
         if matches!(
