@@ -1,1 +1,0 @@
-(exit 0, stdout = the input file's bytes verbatim; on missing file: stderr "cat: open <file>: no such file or directory", exit 1)
