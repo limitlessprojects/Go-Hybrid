@@ -34,6 +34,7 @@ mod constconv;
 mod rangebind;
 mod shapes;
 mod zeroinit;
+pub mod witness;
 use shapes::{
     import_path_of, lookup_conversion, lookup_rust_crate, lookup_unbound_crate, Conversion,
 };
@@ -169,6 +170,18 @@ impl EmitError {
 pub fn emit_go(file: &File) -> Result<String, EmitError> {
     let mut em = Emitter::new();
     em.emit_file(file)
+}
+
+/// Emit Go source plus the issue #3930 witness proof: returns the same Go
+/// source as `emit_go` together with a proof.json body recording every
+/// `task`/`send` concurrency site (source span + printed sub-AST hash).
+/// The verifier in `hyb build --emit-proof` recomputes these from a fresh
+/// parse and fails closed on any mismatch.
+pub fn emit_go_with_proof(file: &File) -> Result<(String, String), EmitError> {
+    let mut em = Emitter::new();
+    let go = em.emit_file(file)?;
+    let proof = crate::witness::build_proof(std::mem::take(&mut em.witnesses));
+    Ok((go, crate::witness::proof_json(&proof)))
 }
 
 /// Emit as an importable PACKAGE (example 09's adoption story):
@@ -478,8 +491,10 @@ pub(crate) fn is_package_root(name: &str) -> bool {
             | "errors"
             | "sync"
             | "bufio"
+            | "net"
             | "http"
             | "httptest"
+            | "url"
             | "json"
             | "atomic"
             | "filepath"
@@ -656,10 +671,19 @@ pub struct Emitter {
     local_vars: BTreeSet<String>,
     /// Functions whose first result is a pointer type.
     ptr_returning_fns: BTreeSet<String>,
+    /// Functions, associated functions, and user methods whose first value
+    /// result resolves to a user struct (`make_stats` / `box.make_stats` /
+    /// `box.get_stats` → `"pool_stats"`).
+    pub(crate) fn_ret_struct: BTreeMap<String, String>,
     /// N5 (zeroinit.rs): non-generic user struct → its declared fields,
-    /// and user type alias → its target, for zero values that allocate.
+    /// generic user struct → (type_params, declared fields) for expected-type
+    /// propagation into nested fields, and user type alias → its target.
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
+    n5_generic_structs: BTreeMap<String, (Vec<TypeParam>, Vec<FieldDecl>)>,
     n5_aliases: BTreeMap<String, TypeExpr>,
+    /// IR witness table (issue #3930): concurrency-site witnesses in
+    /// emission order; drained by `emit_go_with_proof`.
+    pub(crate) witnesses: Vec<crate::witness::Witness>,
 }
 
 pub(crate) struct ScopeSnapshot {
@@ -707,9 +731,12 @@ impl Emitter {
             loan_aliases: BTreeMap::new(),
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
+            fn_ret_struct: BTreeMap::new(),
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
+            n5_generic_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
+            witnesses: Vec::new(),
         }
     }
 
@@ -831,8 +858,18 @@ impl Emitter {
             .decls
             .iter()
             .filter_map(|d| match d {
-                Decl::Struct(s) if s.type_params.is_empty() => {
+                Decl::Struct(s) => {
                     Some((s.name.clone(), s.fields.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        self.n5_generic_structs = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Struct(s) if !s.type_params.is_empty() => {
+                    Some((s.name.clone(), (s.type_params.clone(), s.fields.clone())))
                 }
                 _ => None,
             })
@@ -849,6 +886,29 @@ impl Emitter {
             .fns()
             .filter(|f| f.results.first().is_some_and(|r| self.is_pointer_ty(&r.ty)))
             .map(|f| f.name.clone())
+            .collect();
+        self.fn_ret_struct = file
+            .fns()
+            .filter_map(|f| {
+                if result_shape(&f.results).0 == 0 {
+                    return None;
+                }
+                let ret_sn = f
+                    .results
+                    .first()
+                    .and_then(|r| base_ty_name(&r.ty))
+                    .and_then(|n| self.resolve_to_struct_name(&n))
+                    .map(str::to_string)?;
+                let key = match &f.receiver {
+                    None => f.name.clone(),
+                    Some(recv) => {
+                        let recv_sn = base_ty_name(&recv.ty)
+                            .and_then(|n| self.resolve_to_struct_name(&n))?;
+                        format!("{recv_sn}.{}", f.name)
+                    }
+                };
+                Some((key, ret_sn))
+            })
             .collect();
         self.fn_shapes = file
             .fns()
@@ -877,7 +937,14 @@ impl Emitter {
                 // made the ? hoister emit `hyT0, hyErr1 := step()` against a
                 // `func ... error` (assignment mismatch, accepted-then-fails-go-build).
                 let value_count = if err { f.results.len() - 1 } else { f.results.len() };
-                (f.name.clone(), (value_count, err, kind, ptr_params))
+                let key = match &f.receiver {
+                    Some(recv) => base_ty_name(&recv.ty)
+                        .and_then(|n| self.resolve_to_struct_name(&n))
+                        .map(|sn| format!("{sn}.{}", f.name))
+                        .unwrap_or_else(|| f.name.clone()),
+                    None => f.name.clone(),
+                };
+                (key, (value_count, err, kind, ptr_params))
             })
             .collect();
 
@@ -923,7 +990,8 @@ impl Emitter {
                     // import set ("net/http" → root "http"; the body says
                     // `http.X`, and import_path_of maps the line back).
                     let root = path.split('/').next_back().unwrap_or(path);
-                    self.explicit_imports.insert(root.to_string(), path.clone());
+                    let resolved = import_path_of(path);
+                    self.explicit_imports.insert(root.to_string(), resolved);
                     self.imports.insert(root.to_string());
                 }
                 Decl::Const(c) => self.emit_file_const(c)?,
@@ -968,7 +1036,7 @@ impl Emitter {
             // root spelling — Go's package name for those imports.
             for root in active_imports {
                 let path = if let Some(p) = self.explicit_imports.get(root) {
-                    p.clone()
+                    import_path_of(p)
                 } else if shapes::RUST_CRATES
                     .iter()
                     .any(|c| c.binding_root == root.as_str())
