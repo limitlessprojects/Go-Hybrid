@@ -17,11 +17,12 @@ fn error_codes(r: &CheckResult) -> Vec<String> {
 #[test]
 fn test_addr_of_assign_target_simple_rejected() {
     let src = r#"
-package main
-
 fn main() {
     x := 1
-    &x = 2
+    if true {
+        &x = 2
+    }
+    _ = x
 }
 "#;
     let r = check(src);
@@ -37,11 +38,12 @@ fn main() {
 #[test]
 fn test_addr_of_assign_target_compound_add_rejected() {
     let src = r#"
-package main
-
 fn main() {
     x := 10
-    &x += 5
+    if true {
+        &x += 5
+    }
+    _ = x
 }
 "#;
     let r = check(src);
@@ -57,11 +59,12 @@ fn main() {
 #[test]
 fn test_addr_of_assign_target_compound_mul_rejected() {
     let src = r#"
-package main
-
 fn main() {
     x := 10
-    &x *= 2
+    if true {
+        &x *= 2
+    }
+    _ = x
 }
 "#;
     let r = check(src);
@@ -77,11 +80,12 @@ fn main() {
 #[test]
 fn test_addr_of_assign_target_inc_dec_rejected() {
     let src = r#"
-package main
-
 fn main() {
     x := 10
-    &x++
+    if true {
+        &x++
+    }
+    _ = x
 }
 "#;
     let r = check(src);
@@ -97,16 +101,17 @@ fn main() {
 #[test]
 fn test_addr_of_field_assign_target_rejected() {
     let src = r#"
-package main
-
-type point struct {
+struct point {
     x int
     y int
 }
 
 fn main() {
     pt := point{x: 1, y: 2}
-    &pt.x = 42
+    if true {
+        &pt.x = 42
+    }
+    _ = pt
 }
 "#;
     let r = check(src);
@@ -122,11 +127,12 @@ fn main() {
 #[test]
 fn test_addr_of_index_assign_target_rejected() {
     let src = r#"
-package main
-
 fn main() {
     arr := [2]int{1, 2}
-    &arr[0] = 10
+    if true {
+        &arr[0] = 10
+    }
+    _ = arr
 }
 "#;
     let r = check(src);
@@ -142,12 +148,12 @@ fn main() {
 #[test]
 fn test_addr_of_parallel_assign_target_rejected() {
     let src = r#"
-package main
-
 fn main() {
     a := 1
     b := 2
-    &a, b = 10, 20
+    if true {
+        &a, b = 10, 20
+    }
     _ = a
     _ = b
 }
@@ -165,9 +171,7 @@ fn main() {
 #[test]
 fn test_valid_assignments_accepted_control() {
     let src = r#"
-package main
-
-type point struct {
+struct point {
     x int
     y int
 }
@@ -183,6 +187,8 @@ fn main() {
     arr[0] = 5
     p := &x
     _ = p
+    _ = pt
+    _ = arr
 }
 "#;
     let r = check(src);
