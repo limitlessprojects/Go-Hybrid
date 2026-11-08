@@ -1230,6 +1230,13 @@ impl<'a> Collector<'a> {
                 let bk = self.kind_of_expr(base);
                 self.struct_field_type_name(&bk, name)
             }
+            Expr::Index { base, .. } => {
+                let b_name = self.typed_value_type_name(base);
+                b_name.and_then(|bn| {
+                    let resolved = self.resolve_sized_array_spelling(&bn);
+                    parse_sized_array(&resolved).map(|(_, elem)| elem.to_string())
+                })
+            }
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
             _ => None,
         }
@@ -1309,10 +1316,24 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #2771 — two KNOWN and DIFFERENT sized-array spellings. Slices, named
-    /// types and unparsed lengths fail open so aliases never false-reject.
+    fn resolve_sized_array_spelling<'b>(&'b self, s: &'b str) -> std::borrow::Cow<'b, str> {
+        let mut cur = s;
+        while let Some(alias_ty) = self.ck.type_aliases.get(cur) {
+            match alias_ty {
+                TypeExpr::Array { .. } => return std::borrow::Cow::Owned(alias_ty.render()),
+                TypeExpr::Named { name, .. } => cur = name.as_str(),
+                _ => break,
+            }
+        }
+        std::borrow::Cow::Borrowed(s)
+    }
+
+    /// #2771 / #1591 — two KNOWN and DIFFERENT sized-array spellings. Slices, named
+    /// types and unparsed lengths fail open so non-array aliases never false-reject.
     fn sized_array_names_differ(&self, a: Option<&str>, b: Option<&str>) -> bool {
-        matches!((a, b), (Some(x), Some(y))
+        let a = a.map(|s| self.resolve_sized_array_spelling(s));
+        let b = b.map(|s| self.resolve_sized_array_spelling(s));
+        matches!((a.as_deref(), b.as_deref()), (Some(x), Some(y))
             if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
     }
 
