@@ -4536,6 +4536,199 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_io_package_call(&mut self, pkg: &str, member: &str, args: &[CallArg], span: Span) {
+        if pkg != "io" {
+            return;
+        }
+
+        // Non-callable error values, constants, and global variables in package io
+        let is_non_callable = matches!(
+            member,
+            "eof"
+                | "err_closed_pipe"
+                | "err_no_progress"
+                | "err_short_buffer"
+                | "err_short_write"
+                | "err_unexpected_eof"
+                | "discard"
+                | "seek_start"
+                | "seek_current"
+                | "seek_end"
+        );
+        if is_non_callable {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot call `io.{}` - `io.{}` is a package variable/constant, not a function (HYB-E1002)",
+                    member, member
+                ),
+                "do not invoke package variables or error values as functions",
+            );
+            return;
+        }
+
+        let want: Option<usize> = match member {
+            "pipe" => Some(0),
+            "read_all" | "nop_closer" => Some(1),
+            "copy" | "read_full" | "write_string" | "limit_reader" | "tee_reader" => Some(2),
+            "copy_n" | "copy_buffer" | "read_at_least" | "new_section_reader" => Some(3),
+            _ => None,
+        };
+
+        let Some(want_arity) = want else {
+            return;
+        };
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic `io.{}` (HYB-E1002)",
+                    member
+                ),
+                "`io` package functions are non-variadic; pass discrete arguments",
+            );
+            return;
+        }
+
+        let got = args.len();
+        if got != want_arity {
+            let msg = if got < want_arity {
+                format!(
+                    "function `io.{}` takes {} argument{} but is called with {} - Go refuses `not enough arguments in call to io.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            } else {
+                format!(
+                    "function `io.{}` takes {} argument{} but is called with {} - Go refuses `too many arguments in call to io.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            };
+            self.emit_e1002(
+                span,
+                msg,
+                &format!(
+                    "pass exactly {} argument{} to `io.{}`",
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    member
+                ),
+            );
+        }
+    }
+
+    fn check_os_package_call(&mut self, pkg: &str, member: &str, args: &[CallArg], span: Span) {
+        if pkg != "os" {
+            return;
+        }
+
+        // Non-callable stream handles, variables, constants, and flags in package os
+        let is_non_callable = matches!(
+            member,
+            "stdin"
+                | "stdout"
+                | "stderr"
+                | "args"
+                | "dev_null"
+                | "interrupt"
+                | "kill"
+                | "path_separator"
+                | "path_list_separator"
+        ) || member.starts_with("o_")
+            || member.starts_with("mode_");
+
+        if is_non_callable {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot call `os.{}` - `os.{}` is a package variable/constant, not a function (HYB-E1002)",
+                    member, member
+                ),
+                "do not invoke package variables, constants, or file mode flags as functions",
+            );
+            return;
+        }
+
+        let want: Option<usize> = match member {
+            // 0 args
+            "getwd" | "hostname" | "getpid" | "getppid" | "getuid" | "geteuid" | "getgid"
+            | "getegid" | "getgroups" | "getpagesize" | "temp_dir" | "user_cache_dir"
+            | "user_config_dir" | "user_home_dir" | "pipe" | "environ" | "clearenv"
+            | "executable" => Some(0),
+
+            // 1 arg
+            "open" | "create" | "read_file" | "remove" | "remove_all" | "stat" | "lstat"
+            | "getenv" | "unsetenv" | "exit" | "chdir" | "read_dir" | "is_exist"
+            | "is_not_exist" | "is_permission" | "is_timeout" | "readlink" => Some(1),
+
+            // 2 args
+            "mkdir" | "mkdir_all" | "rename" | "chmod" | "setenv" | "lookup_env"
+            | "same_file" | "link" | "symlink" | "truncate" => Some(2),
+
+            // 3 args
+            "write_file" | "chown" | "lchown" | "open_file" => Some(3),
+
+            _ => None,
+        };
+
+        let Some(want_arity) = want else {
+            return;
+        };
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic `os.{}` (HYB-E1002)",
+                    member
+                ),
+                "`os` package functions are non-variadic; pass discrete arguments",
+            );
+            return;
+        }
+
+        let got = args.len();
+        if got != want_arity {
+            let msg = if got < want_arity {
+                format!(
+                    "function `os.{}` takes {} argument{} but is called with {} - Go refuses `not enough arguments in call to os.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            } else {
+                format!(
+                    "function `os.{}` takes {} argument{} but is called with {} - Go refuses `too many arguments in call to os.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            };
+            self.emit_e1002(
+                span,
+                msg,
+                &format!(
+                    "pass exactly {} argument{} to `os.{}`",
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    member
+                ),
+            );
+        }
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -7689,6 +7882,10 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        self.check_io_package_call(pkg, name, args, span);
+                        self.check_os_package_call(pkg, name, args, span);
+                    }
                     if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
@@ -7779,6 +7976,7 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+
                     if pkg == "time"
                         && self.lookup_kind(pkg).is_none()
                         && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
