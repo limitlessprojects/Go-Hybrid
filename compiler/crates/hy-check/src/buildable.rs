@@ -7846,6 +7846,82 @@ impl<'a> Collector<'a> {
                             "write `hex.encode(data)` (SPEC M5 hex encoding)",
                         );
                     }
+                    if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
+                        let method = name.as_str();
+                        if matches!(method, "printf" | "sprintf" | "eprintf" | "errorf") {
+                            if args.is_empty() {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`fmt.{}` requires at least 1 format string argument `(format[, ...])`, got 0 (HYB-E1002)",
+                                        name
+                                    ),
+                                    &format!("write `fmt.{}(\"%s\", ...)`", name),
+                                );
+                            } else {
+                                let bare = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.{}` requires a string format argument, found non-string literal (HYB-E1002)",
+                                            name
+                                        ),
+                                        &format!("pass a string literal or expression as format to `fmt.{}`", name),
+                                    );
+                                }
+                            }
+                        } else if method == "fprintf" {
+                            if args.len() < 2 {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`fmt.fprintf` requires at least 2 arguments `(w, format[, ...])`, got {} (HYB-E1002)",
+                                        args.len()
+                                    ),
+                                    "write `fmt.fprintf(w, \"%s\", ...)`",
+                                );
+                            } else {
+                                let bare = unwrap_parens(&args[1].value);
+                                if matches!(
+                                    bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.fprintf` requires a string format second argument, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string literal or expression as format to `fmt.fprintf`",
+                                    );
+                                }
+                            }
+                        } else if matches!(method, "fprint" | "fprintln") && args.is_empty() {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`fmt.{}` requires at least 1 destination writer argument `(w[, ...])`, got 0 (HYB-E1002)",
+                                    name
+                                ),
+                                &format!("write `fmt.{}(w, ...)`", name),
+                            );
+                        }
+                    }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
