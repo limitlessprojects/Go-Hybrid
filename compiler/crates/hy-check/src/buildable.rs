@@ -9072,7 +9072,7 @@ impl<'a> Collector<'a> {
         if matches!(
             name,
             "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
-                | "real" | "imag" | "complex"
+                | "panic" | "print" | "println" | "real" | "imag" | "complex" | "new"
         ) && args.iter().any(|a| a.spread)
         {
             self.emit_e1002(
