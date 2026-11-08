@@ -4536,6 +4536,190 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_strings_package_call(&mut self, pkg: &str, member: &str, args: &[CallArg], span: Span) {
+        if pkg != "strings" {
+            return;
+        }
+
+        // Non-callable types in package strings
+        let is_non_callable = matches!(
+            member,
+            "reader" | "replacer"
+        );
+        if is_non_callable {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot call `strings.{}` - `strings.{}` is a package type, not a function (HYB-E1002)",
+                    member, member
+                ),
+                "do not invoke package types as functions; construct them with struct literal or factory function",
+            );
+            return;
+        }
+
+        // `strings.new_replacer` is variadic in Go: `NewReplacer(oldnew ...string) *Replacer`
+        if member == "new_replacer" {
+            return;
+        }
+
+        let want: Option<usize> = match member {
+            // 0 args (constructor lowering: strings.builder() -> strings.Builder{})
+            "builder" => Some(0),
+
+            // 1 arg
+            "clone" | "fields" | "new_reader" | "title" | "to_lower" | "to_upper" | "to_title"
+            | "trim_space" => Some(1),
+
+            // 2 args
+            "compare" | "contains" | "contains_any" | "contains_rune" | "contains_func"
+            | "count" | "cut" | "cut_prefix" | "cut_suffix" | "equal_fold" | "fields_func"
+            | "has_prefix" | "has_suffix" | "index" | "index_any" | "index_byte" | "index_func"
+            | "index_rune" | "join" | "last_index" | "last_index_any" | "last_index_byte"
+            | "last_index_func" | "map" | "repeat" | "split" | "split_after" | "to_lower_special"
+            | "to_title_special" | "to_upper_special" | "to_valid_utf8" | "trim" | "trim_func"
+            | "trim_left" | "trim_left_func" | "trim_prefix" | "trim_right" | "trim_right_func"
+            | "trim_suffix" => Some(2),
+
+            // 3 args
+            "replace_all" | "split_n" | "split_after_n" => Some(3),
+
+            // 4 args
+            "replace" => Some(4),
+
+            _ => None,
+        };
+
+        let Some(want_arity) = want else {
+            return;
+        };
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic `strings.{}` (HYB-E1002)",
+                    member
+                ),
+                "`strings` package functions are non-variadic; pass discrete arguments",
+            );
+            return;
+        }
+
+        let got = args.len();
+        if got != want_arity {
+            let msg = if got < want_arity {
+                format!(
+                    "function `strings.{}` takes {} argument{} but is called with {} - Go refuses `not enough arguments in call to strings.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            } else {
+                format!(
+                    "function `strings.{}` takes {} argument{} but is called with {} - Go refuses `too many arguments in call to strings.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            };
+            self.emit_e1002(
+                span,
+                msg,
+                &format!(
+                    "pass exactly {} argument{} to `strings.{}`",
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    member
+                ),
+            );
+        }
+    }
+
+    fn check_bytes_package_call(&mut self, pkg: &str, member: &str, args: &[CallArg], span: Span) {
+        if pkg != "bytes" {
+            return;
+        }
+
+        let want: Option<usize> = match member {
+            // 1 arg
+            "new_buffer" | "new_buffer_string" | "new_reader" | "fields"
+            | "runes" | "title" | "to_lower" | "to_upper" | "to_title" | "trim_space" => Some(1),
+
+            // 2 args
+            "compare" | "contains" | "contains_any" | "contains_rune" | "contains_func"
+            | "count" | "cut" | "cut_prefix" | "cut_suffix" | "equal" | "equal_fold"
+            | "fields_func" | "has_prefix" | "has_suffix" | "index" | "index_any"
+            | "index_byte" | "index_func" | "index_rune" | "join" | "last_index"
+            | "last_index_any" | "last_index_byte" | "last_index_func" | "map" | "repeat"
+            | "split" | "split_after" | "to_lower_special" | "to_title_special"
+            | "to_upper_special" | "to_valid_utf8" | "trim" | "trim_func" | "trim_left"
+            | "trim_left_func" | "trim_prefix" | "trim_right" | "trim_right_func"
+            | "trim_suffix" => Some(2),
+
+            // 3 args
+            "replace_all" | "split_n" | "split_after_n" => Some(3),
+
+            // 4 args
+            "replace" => Some(4),
+
+            _ => None,
+        };
+
+        let Some(want_arity) = want else {
+            return;
+        };
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic `bytes.{}` (HYB-E1002)",
+                    member
+                ),
+                "`bytes` package functions are non-variadic; pass discrete arguments",
+            );
+            return;
+        }
+
+        let got = args.len();
+        if got != want_arity {
+            let msg = if got < want_arity {
+                format!(
+                    "function `bytes.{}` takes {} argument{} but is called with {} - Go refuses `not enough arguments in call to bytes.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            } else {
+                format!(
+                    "function `bytes.{}` takes {} argument{} but is called with {} - Go refuses `too many arguments in call to bytes.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            };
+            self.emit_e1002(
+                span,
+                msg,
+                &format!(
+                    "pass exactly {} argument{} to `bytes.{}`",
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    member
+                ),
+            );
+        }
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -7689,6 +7873,10 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        self.check_strings_package_call(pkg, name, args, span);
+                        self.check_bytes_package_call(pkg, name, args, span);
+                    }
                     if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
@@ -7779,6 +7967,7 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+
                     if pkg == "time"
                         && self.lookup_kind(pkg).is_none()
                         && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
