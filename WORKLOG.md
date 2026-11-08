@@ -486,3 +486,136 @@
 - Stalled-watch: #3942/#3949/#3918 zero author movement (updated_at == our replies).
 - Next queue: #3815/#3817/#3819 (aswadi), #3814 (Burapa-J arith fold), #3820/#3831/#3841-#3849 band, then #4015+ flood; watch #3825 for post-#3811 residue.
 - Suites 472 -> 473 integration files (+2 new suites this tick, one per PR). Both pushes remote-asserted; replies 201 x2; zero silent closes.
+
+## Session 142 — 2026-11-08 01:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef5b68); toolchains restored; approve 4/4 (4994 left); scan skipped (quota doctrine).
+- **2 landed**:
+  - **#3858** -> `011823c9` (Burapa-J, fixes #3857): tuple.rs check_type_expr_single_value — array-length TypeExprs walked in Local/FnLit/SliceLit/MapLit positions; FnLit out of skip-list; file-const fn callees resolved in static_result_count; is_unshadowed_pkg shadow guards. Extended suite 5 tests; corpus 135; differential FULL.
+  - **#3860** -> `6af66ee8` (Burapa-J, fixes #3859): shape_carries_handle_at set[T] element inspection + unresolved-generic fail-closed; call_shape type-param Unknown; package calls refuse struct/enum/alias/const/typeparam shadowing. Extended suite 12 tests; corpus 135; differential FULL.
+- Queue reality check: aswadi band (#3815/#3817/#3819) and #3820-#3857 old band no longer open (maintainer-processed); oldest open now starts #3858 (landed), then #3861/#3864/#3867/#3883-#3899. Correction: S141 worklog's "#3814 Burapa-J arith" was wrong — #3814 is an issue; the PR is #3843 (also no longer open).
+- Count correction: integration-file counts in the #3811/#3813 commits (472/473) understated by one each — actual 473/474 (arithmetic drift, zero coverage gaps; all suites ran all ticks). Today verified 474 .rs on disk == 474 binaries in log == all green. Disclosed in #3860 landing reply.
+- Two transient env faults this tick: first #3860 battery exited 101 with dropped stderr (clean re-run green); both remote-asserted; replies 201 x2; zero silent closes.
+- Next queue: #3861 (dextermos-dev range_iter shadows), #3864/#3897 (buildable member lowerings — possible dup pair, check), #3867 (const_init type-param shadows), #3883-#3899 band, then #4015+ flood.
+
+## Session 143 — 2026-11-08 02:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef6979); toolchains restored; approve 5/5 (4991 left); scan skipped (quota doctrine).
+- **2 landed**:
+  - **#3861** -> `057c711e` (dextermos-dev, fixes #3853): range_iter const bounds under file-scope FnState (caller-local shadows blocked), untyped-const initializer recursion, alias-resolved conversion callees, typed_int_bound depth cap (>32 -> None, const-cycle termination), enum/type-param set-iterable guards. New suite (2 tests) -> 475 integration files; corpus 135; differential FULL.
+  - **#3864** -> `914700f5` (bradwue313, fixes #3863): MemberSpecial arity/operand validation — time.milliseconds/seconds/minutes/hours (1 numeric arg), os.args/stdout/stderr/stdin (0 args), hex.encode (1 slice arg), all shadow-guarded. New suite (6 tests) -> 476 integration files; corpus 135; differential FULL. First-to-land vs #3897 (dextermos-dev, same title) noted in reply — hall-of-fame candidate after residue review.
+- **ENOSPC incident (2nd in 3 ticks)**: first #3864 battery died "No space left on device" — target dir 94% (accumulates across ticks under /home/z); trimmed incremental/examples/stale rlibs to 83% (1.7G free), full battery re-run clean. TODO-next-tick: post-battery trim discipline (rm incremental + examples after each battery) to stop recurrence.
+- Both pushes remote-asserted; replies 201 x2; zero silent closes.
+- Next queue: #3867 (dextermos-dev const_init type-param shadows), #3883 (Burapa-J E3011), #3885/#3886 (gorky117), #3890 (ryder777777 --race tooling), #3892/#3894 (Burapa-J), #3897 (dup-pair residue review vs landed #3864).
+
+## Session 144 — 2026-11-08 03:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef7788, 4th consecutive); toolchains restored; approve 5/5 (4994 left); scan skipped (quota doctrine). Tick opened to find S143 already landed by the parallel run (#3861/#3864 @ 1c84ad17) — continued the queue per first-to-land, no re-work.
+- **1 landed, 1 residue-resolved**:
+  - **#3867** -> `3d88bd5f` (dextermos-dev, fixes #3851): const_init.rs FnState threading through all six const-init verdict sites — conversion callee (`s.type_params.contains(ty_name)`), conversion target + alias-resolved target, string conversion target, Expr::Ident, is_const_allowed_ty (entry + resolved + Primitive/Str fast path). Fail-closed toward not-constant. New suite (2 tests) -> 477 integration files; trial merge clean; workspace 486 suites/3102 passed/0 failed; corpus 135/135 tripwire clean; differential 45/45+90/90 FULL. Note: two-point diff initially showed S143's landed code as PR deletions (fork-point artifact) — three-dot diff used for true patch scope. Reply 201.
+  - **#3897 residue review closed** (dextermos-dev, same title as landed #3864): full test suite run unmodified on landed main — 5/5 pass, every specified behavior already enforced; #3864 is a strict superset (additionally rejects RawStr/Char operands). Zero residue. Hall-of-fame reply (independent-implementation credit, dup court alongside #3864, bounty stays with first-to-land #3864); PR kept open, no silent close. Reply 201.
+- **ENOSPC discipline enacted (S143 TODO)**: post-battery trim executed — disk hit 97% (332M free) during this tick, trimmed incremental/examples/stale rlibs -> 90% (1.0G free). Target/debug/deps 4.5G is the main body; keep the trim ritual after every battery.
+- Zero silent closes; both replies 201; push remote-asserted (3d88bd5f == ls-remote).
+- Next queue: #3883 (Burapa-J E3011 outer-move rebinds), #3885/#3886 (gorky117 any-conversions / real-imag), #3890 (ryder777777 --race tooling), #3892/#3894 (Burapa-J loans/sendability), then #4015+ flood. Stalled-watch unchanged: #3942/#3949/#3918.
+- Suites 476 -> 477 integration files (+1: issue_3851_const_init_type_param_shadow).
+
+## Session 145 — 2026-11-08 04:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef8598, 5th consecutive); toolchains restored; approve 5/5 (4995 left); scan skipped (quota doctrine).
+- **2 landed**:
+  - **#3883** -> `daf32dd4` (Burapa-J, fixes #3882): closures.rs pre-defer peers extended to For-Iterate + Match-arm binders (sever on non-self-read, link may-share refs), mark_nested_overwritten/sync_nested_moves around bind_match_arm, task callee + send channel target now move-checked. Extended suite (3 tests) -> 477 files; workspace 486/3103/0; corpus 135; differential FULL. Reply 201.
+  - **#3885** -> `2ad4d1e2` (gorky117-cell, fixes #2482): conversion_kinds_conflict new arm (other, Interface) -> conflict (any->concrete rejected, Unknown fail-open kept); (Pointer, Interface) false-arm removed (pointers now reject, matches Go `(*int)(a)` assertion requirement). New suite 11 tests -> 478 files; workspace 487/3114/0; corpus 135; differential FULL. Reply 201 + count-correction reply (commit said 477, actual 478 — disclosed per S142 errata discipline).
+- **ENOSPC incident (3rd tick running, discipline working as designed)**: #3885 first battery died at link stage (cc/ld, disk 93%, target 5.5G after #3883 battery) — trimmed incremental/examples/stale test binaries to 83% (1.7G free), full re-run green. Env fault disclosed in merge commit. Post-battery trim now ritual per S143 TODO.
+- Count discipline note: #3885 commit-message count slip (477 vs 478) caught by post-merge ls check and disclosed on the PR thread — on-disk count was correct at battery time, zero coverage gaps.
+- Zero silent closes; 3 replies 201; both pushes remote-asserted (daf32dd4, 2ad4d1e2 == ls-remote).
+- Next queue: #3886 (gorky117 real/imag Float kind — fetched, not started, next tick lead), #3890 (ryder777777 --race tooling), #3892/#3894 (Burapa-J), then #4015+ flood. Stalled-watch unchanged: #3942/#3949/#3918.
+- Suites 477 -> 478 integration files (+1: any_conversion_soundness_2482).
+
+## Session 146 — 2026-11-08 05:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef93a9, 6th consecutive); toolchains restored; approve 5/5 (4973 left); scan skipped (quota doctrine).
+- **2 landed**:
+  - **#3886** -> `979c472a` (gorky117-cell, fixes #3072/#3061/#3077): real/imag -> OpKind::Float result kind; real/imag/complex spread blacklist; operand validation (Str/Bool/Slice/Array/Map/Chan/Struct/Pointer/Fn/Interface rejected, Unknown/Int fail-open). New suite 11 tests -> 479 files; workspace 488/3125/0; corpus 135; differential FULL. Reply 201.
+  - **#3890** -> `93e4625f` (ryder777777): hyb build --race (-race + CGO_ENABLED=1, bridge param, bench-overhead pinned false) + differential --race (DATA RACE check before exit-code branch, documented_race frame-narrow matching, default-off byte-identical) + 8 python tests. In-merge fixup disclosed: USAGE string conflict with #3950's --emit-proof union-resolved inside merge commit. Full battery incl. first real --race end-to-end run (45/45 cgo race build FULL). Reply 201.
+- #3890 merge conflict handled per union doctrine (single hunk, USAGE only); python suite 29/29 after resolve.
+- Zero silent closes; 2 replies 201; both pushes remote-asserted (979c472a, 93e4625f == ls-remote); post-battery trim kept disk healthy (no ENOSPC this tick).
+- Next queue: #3892/#3894 (Burapa-J loans/sendability), then #4015+ flood. Stalled-watch unchanged: #3942/#3949/#3918.
+- Suites 479 integration files (+1: builtin_complex_soundness_3072; #3890 python-side only).
+
+## Session 147 — 2026-11-08 06:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef9a1b, 7th consecutive); toolchains restored; approve 4/4 (4994 left); scan skipped (quota doctrine).
+- **1 landed, 1 fully-reviewed-pending-battery**:
+  - **#3892** -> `a3f88231` (Burapa-J, fixes #3891): loans.rs — check_a2_conflict + map-slot conflict now consult effective_loan_last (loop-extended window) instead of raw l.last; alias source unwrap extends to Move wrappers (`q := move p` no longer skips extension); diagnostic reports eff_last. Extended suite 8/8 (3 new fixtures: loop-carried O8 E3102, loop-carried A2 E3101, move-alias window); workspace 488/3126/0; corpus 135; differential FULL. Reply 201.
+  - **#3894** (Burapa-J, sendability) diff reviewed end-to-end this tick, battery deferred (budget): set[T] element recursion in all three shape_holds_* walkers (user-set-struct guard respected), Unproven-tp arm moved from top-level match to fallback tail (more precise classification wins first), spawn-callee + static-arg-inference shadow sets extended (type-param/struct/enum/alias), fn type_params defined in const env, match-arm binders resolve enum variant payload for chan-dir checks (new resolve_enum_arm_dir_ty). 2 new tests in callee_and_nil (nested set/callee/enum-dir rejects E3001/E3005/E3008/E3009 + sendable control). Branch pr-3894 fetched locally; battery next tick is first action.
+- Zero silent closes; reply 201; push remote-asserted (a3f88231 == ls-remote); disk trimmed, no ENOSPC.
+- Next queue: #3894 battery+land (ready), then #4015+ flood. Stalled-watch unchanged: #3942/#3949/#3918.
+- Suites 479 integration files (unchanged; #3892 extends existing suite).
+
+## Session 148 — 2026-11-08 09:10 UTC+8 tick (07:10/08:10 ticks did not fire; no parallel work lost)
+- env cold-recycled (rootfs c-6aefcbe9, 8th consecutive); toolchains restored; approve 6/6 (4994 left); scan skipped (quota doctrine).
+- **1 landed**:
+  - **#3894** -> `6c1a0602` (Burapa-J, fixes #3893): sendability.rs — set[T] element recursion in all three shape_holds_* walkers (user-set guard respected); Unproven-tp arm moved to fallback tail (precise E3001 etc. win first); spawn-callee + static-arg shadow sets extended (tp/struct/enum/alias); fn type_params in const env; match-arm binders resolve enum variant payload via new resolve_enum_arm_dir_ty (E3008/E3009 see inside enum matches). Extended suite 20/20; workspace 488/3128/0; corpus 135; differential FULL. Battery executed this tick per S147 plan (branch ref preserved across cold recycle). Reply 201.
+- Queue refresh (desc order): flood is real — #4081-#4117, 20 open PRs: Yumihariii #4081 (sendability directional foreign chan), Burapa-J #4083/#4091, seenorht #4084/#4087, bradwue313 #4085/#4097/#4099/#4101, wminno #4088, marhabynova #4093, jpereyra243-byte #4095/#4109/#4117, mischievousdeveloper #4105, dextermos-dev #4107/#4111/#4113/#4115 (arity band), spikes/ #4089 excluded per ledger.
+- Next queue: #4081 battery+land (oldest open), then #4083, #4084, #4085... top-down by created. Stalled-watch unchanged: #3942/#3949/#3918.
+- Suites 479 integration files (unchanged; #3894 extends existing suite). Zero silent closes; push remote-asserted (6c1a0602 == ls-remote).
+
+## Session 150 — 2026-11-08 14:10 +08 (cron tick, Job 487193)
+
+- Cold sandbox; main still `a1490f03` (12:10 tick did not run in parallel — S149's failed start consumed it).
+- Triage scan killed by shell recycling twice (400/1140 stall); queue refreshed via API instead. New flood mapped: #4117–#4152 (today). Old S148 queue intact: #4081–#4116 all open.
+- **#4081 (Yumihariii, fixes #4076) LANDED → merge commit `6c7af266`.**
+  - Probe-first body honored: of the issue's four forms, method-receiver cases already reject on main; PR scoped to the two live foreign gaps (`close(time.after(..))` zero-diag Accept; send caught only by generic E3005).
+  - foreign.rs `package_result_chan_ty`: `("time","after"|"After")` → `<-chan time.Time`; sendability.rs consults after local-fn miss, `known_package` guard, fail direction unchanged. Insertion point verified semantically (unbound package root + local-fn miss).
+  - Merge clean (no conflicts). Battery: workspace 489 suites / 3136 passed / 0 failed, 480 on-disk files = 480 Running lines (1:1, +9 inline), new suite 8/8 standalone; corpus 135/135 tripwire clear; differential FULL 45/45 + 90/90.
+  - Pushed `a1490f03..6c7af266`, ls-remote asserted. Landing reply posted (comment 6718390970), bounty rail per BOUNTY.md tiers / discussion #295. Issue #4076 auto-closed.
+  - Notes: first cargo attempt ran from repo root (no Cargo.toml) — workspace lives in `compiler/`; differential_loop.py takes no positional mode arg (FULL is default). Triage scan background jobs need setsid/nohup next tick.
+  - Post-battery trim: target 4.6G removed, disk 90%→42%.
+- Suites on disk: **480** integration files. Corpus 135/135. Differential FULL AGREEMENT.
+- Next queue: #4083 (Burapa-J, const_overflow local float fold), then #4084/#4087 (seenorht), #4085/#4097/#4099/#4101 (bradwue313), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115, then today's #4117–#4152 flood — top-down by created.
+- Track-3 spikes #336–#474 untouched (review window 2026-12-01). Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 152 — 2026-11-08 16:10 +08 (cron tick, Job 487193)
+
+- Cold sandbox. **S151's local commits were lost to persistent-volume rollback** (73bcc32b/f609ec61 absent, reflog reset to S150). Lesson recorded: unpushed local commits do not survive tick boundaries reliably; review state survives only in the PR thread (status comment did its job). Re-fetch + re-merge cost ~1 min — cheap; prefer redo over WIP refs unless diff review itself is at risk.
+- **#4083 (Burapa-J, fixes #4082) LANDED → merge commit `ef78ff1f`.**
+  - Patch identical to S151's reviewed head (`782c02e4`, 203+/46-), merge clean again.
+  - Battery (new chunked strategy, no background jobs): single-call `cargo test --no-run` completed in one 570s window (BUILD_RC=0), then single-call test run — 490 suites / 3140 passed / 0 failed; 481 on-disk files = 481 Running lines (1:1, +9 inline); new suite standalone 4/4. Corpus 135/135 tripwire clear. Differential FULL 45/45 + 90/90.
+  - Pushed `b2131a7a..ef78ff1f`, ls-remote asserted. Landing reply posted (comment 6719151543), supersedes S151 status comment. Issue #4082 auto-closed.
+- Suites on disk: **481** integration files. Corpus 135/135. Differential FULL AGREEMENT.
+- Next queue: #4084/#4087 (seenorht), #4085/#4097/#4099/#4101 (bradwue313), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115, then flood #4117–#4152 — top-down by created.
+- Track-3 spikes #336–#474 untouched (2026-12-01 window). Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 153 — 2026-11-08 17:10 +08 (cron tick, Job 487193)
+
+- Cold sandbox; main pulled clean (`78c33284`).
+- **#4084 (seenorht, also fixes #4076) LANDED → merge commit `84398676` — landed as verified SUPERSET supplement, not dup.**
+  - Dup protocol applied with judgment: #4081 won #4076's primary forms (after); #4084's diff showed real remaining fail-open surfaces (time.tick close, new_timer/new_ticker pointers, timer.c/ticker.c field dirs) → validated as increment, not rework. #4081's package_result_chan_ty table kept behind the new hardcoded arms (merged-tree verified both layers, same direction for shared case).
+  - Battery: workspace 491 suites / 3145 passed / 0 failed; 482 files = 482 Running lines (1:1, +9 inline); both 4076 suites coexist green 8/8 + 5/5 standalone. Corpus 135/135 tripwire clear. Differential FULL 45/45 + 90/90.
+  - Pushed `78c33284..84398676`, ls-remote asserted. Landing reply posted (comment 6719705276) with explicit #4081-relationship paragraph + nit on time.time vs time.Time spelling. PR kept open→merged; issue #4076 stays credited to #4081.
+- Suites on disk: **482**. Corpus 135/135. Differential FULL AGREEMENT.
+- Next queue: #4087 (seenorht), #4085/#4097/#4099/#4101 (bradwue313), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115, flood #4117–#4152 — top-down by created.
+- Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 154 — 2026-11-08 19:10 +08 (cron tick, Job 487193; 18:10 did not fire)
+
+- Cold sandbox; main pulled clean (`586dc06d`).
+- **#4087 (seenorht, fixes #4086) LANDED → merge commit `e83ccf81`.**
+  - fmt printf-family arity + non-string-format-literal validation (HYB-E1002, Row 13). Dup-check clean (no printf/sprintf/errorf handling on main); #3598 os-shadow arm (7721) and #3864 hex arm verified co-present — three complementary fmt arms.
+  - Battery: workspace 492 suites / 3158 passed / 0 failed; 483 files = 483 Running lines (1:1, +9 inline); new suite standalone 13/13 (PR body said 11 — noted in reply). Corpus 135/135 tripwire clear. Differential FULL 45/45 + 90/90.
+  - Pushed `586dc06d..e83ccf81`, ls-remote asserted. Landing reply posted (comment 6720788150). Issue #4086 auto-closed.
+- Suites on disk: **483**. Corpus 135/135. Differential FULL AGREEMENT.
+- Next queue: #4085/#4097/#4099/#4101 (bradwue313 — fmt append + arity family; check overlap vs #4087 before landing), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115 (dextermos-dev buildable arity band — dedupe carefully against #4087's fmt arm), flood #4117–#4152 — top-down by created.
+- Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 155 — 2026-11-08 20:10 +08 (cron tick, Job 487193)
+
+- Cold sandbox; main pulled clean (`736d2d8f`).
+- **#4085 (bradwue313, also fixes #4076) — VERIFIED DUP, hall-of-fame reply, kept open (comment 6721330559).**
+  - Method: ran author's suite verbatim on bare main — 3/4, the 1 failure was the author's fixture using `Receiver` (mixed case → HYB-E0001 at parse, before type-check). After `Receiver`→`receiver` substitution: 4/4 green. Zero residue; #4081+#4084 cover all surfaces. Third independent implementation of #4076; first-lander keeps the issue.
+  - Tree hygiene note: the temp checkout for this check staged the test file and blocked the next trial merge ("local changes would be overwritten") — `git reset` + rm before merging, not `git checkout --`.
+- **#4097 (bradwue313, fixes #4096, fmt append family) — GATE FAIL, not landed (evidence reply 6721346368).**
+  - Trial merge clean; `cargo check -p hy-check` fails: buildable.rs:7967 `"write \`fmt.appendf(b, "%s", ...)\`"` embeds bare double quotes → Rust 2021 "prefix `s` is unknown" + E0425. Only bare-quote line in the PR; sibling fix-its escape correctly. append/appendln/appendf arms otherwise sound and complementary to #4087 (no overlap; dst rejects Str/RawStr literals, appendf format slot accepts strings). Author asked to push the one-line escape fix for a re-run.
+  - MERGE_RC=2 earlier was the #4085 residue file, not a real conflict — verified clean after reset.
+- **#4088 (wminno, fixes #4068) PRE-REVIEWED for next tick** (head `dc6f7721`, resolve.rs +40/-10, 141-line test file):
+  1. MatchPattern::Path 2+ segments → check_type_name(joined) (E1001 under-fire fix; pkg-qualified and declared-enum qualifiers stay accepted).
+  2. dotted-type roots `option`/`set` added to pass-set (over-fire fix).
+  3. Unparseable type args: deleted plain-ident fallback, fail-open documented (`fn(c chan<- int)` alias-grammar case).
+  4. Type-position bracket args `run_bracketed_type_args(.., false→true)` (`set[undef]{}` under-fire fix).
+  - Mixed tighten+loosen ⇒ corpus/differential tripwire movement possible; full battery mandatory. No dup on main (diff self-evident). Next tick: merge → commit → battery → land/evidence per gates.
+- Suites on disk: **483** (unchanged this tick). Corpus 135/135. Differential FULL AGREEMENT.
+- Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
