@@ -222,6 +222,33 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
     }
 }
 
+/// TypeExpr result of a curated package-level call whose channel
+/// *direction* must be visible to the sendability walker (#4076).
+/// `time.after(d)` is Go's `time.After`: it returns `<-chan Time`,
+/// receive-only. The `TypeShape::Chan` entry in `package_result` above
+/// carries no direction, and `dir_ty_of_expr` needs a `TypeExpr` — without
+/// this arm, `close(time.after(..))` and `time.after(..) <- v` resolve to
+/// `None` and both HYB-E3009 / HYB-E3008 checks fail open on programs
+/// whose Go emit cannot compile (GUARANTEES.md row 13 BUILDABLE).
+pub(crate) fn package_result_chan_ty(
+    pkg: &str,
+    method: &str,
+    span: hy_diag::Span,
+) -> Option<hy_syntax::TypeExpr> {
+    use hy_syntax::{ChanDir, TypeExpr};
+    match (pkg, method) {
+        ("time", "after" | "After") => Some(TypeExpr::Chan {
+            dir: ChanDir::Recv,
+            elem: Box::new(TypeExpr::Named {
+                name: "time.Time".to_string(),
+                span,
+            }),
+            span,
+        }),
+        _ => None,
+    }
+}
+
 /// Static result count of a foreign package-level call returning multiple
 /// values in Go (`(T, error)`, `(before, after, found)`, etc.) when not
 /// unwrapped with `?` (#380 / T23 `HYB-E2002`).
