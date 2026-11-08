@@ -4984,6 +4984,146 @@ impl<'a> Collector<'a> {
         self.check_method_arg_types(&recv_kind, name, &args[1..]);
     }
 
+    fn foreign_recv_type(&self, base: &Expr, bk: &OpKind) -> Option<String> {
+        match bk {
+            OpKind::Foreign(ref n) => Some(n.clone()),
+            OpKind::Pointer(ref inner) => match &**inner {
+                OpKind::Foreign(ref n) => Some(n.clone()),
+                _ => None,
+            },
+            _ => {
+                let bare = unwrap_parens(base);
+                if let Expr::Ident { name: ref id_name, .. } = bare {
+                    if let Some(tn) = self.lookup_type_name(id_name) {
+                        let cleaned = tn.trim_start_matches('*').trim();
+                        if cleaned.contains('.') {
+                            return Some(cleaned.to_string());
+                        }
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    fn check_foreign_method_arity(
+        &mut self,
+        recv_type: &str,
+        method: &str,
+        args: &[CallArg],
+        span: Span,
+    ) {
+        let clean_recv = recv_type.trim_start_matches('*').trim();
+        let norm = match clean_recv {
+            "sync.mutex" | "sync.Mutex" => Some("sync.Mutex"),
+            "sync.rwmutex" | "sync.RWMutex" | "sync.rw_mutex" => Some("sync.RWMutex"),
+            "sync.wait_group" | "sync.WaitGroup" | "sync.waitgroup" => Some("sync.WaitGroup"),
+            "sync.once" | "sync.Once" => Some("sync.Once"),
+            "sync.cond" | "sync.Cond" => Some("sync.Cond"),
+            "sync.pool" | "sync.Pool" => Some("sync.Pool"),
+            "time.ticker" | "time.Ticker" => Some("time.Ticker"),
+            "time.timer" | "time.Timer" => Some("time.Timer"),
+            "strings.builder" | "strings.Builder" => Some("strings.Builder"),
+            "bytes.buffer" | "bytes.Buffer" => Some("bytes.Buffer"),
+            "bufio.reader" | "bufio.Reader" => Some("bufio.Reader"),
+            "bufio.writer" | "bufio.Writer" => Some("bufio.Writer"),
+            "bufio.scanner" | "bufio.Scanner" => Some("bufio.Scanner"),
+            _ => None,
+        };
+        let Some(curated) = norm else {
+            return;
+        };
+
+        let want: Option<usize> = match (curated, method) {
+            // sync
+            ("sync.Mutex", "lock" | "unlock" | "try_lock") => Some(0),
+            ("sync.RWMutex", "lock" | "unlock" | "try_lock" | "rlock" | "runlock" | "try_rlock") => Some(0),
+            ("sync.WaitGroup", "done" | "wait") => Some(0),
+            ("sync.WaitGroup", "add") => Some(1),
+            ("sync.Once", "do") => Some(1),
+            ("sync.Cond", "wait" | "signal" | "broadcast") => Some(0),
+            ("sync.Pool", "get") => Some(0),
+            ("sync.Pool", "put") => Some(1),
+
+            // time
+            ("time.Ticker", "stop") => Some(0),
+            ("time.Ticker", "reset") => Some(1),
+            ("time.Timer", "stop") => Some(0),
+            ("time.Timer", "reset") => Some(1),
+
+            // strings & bytes
+            ("strings.Builder", "reset" | "string" | "len" | "cap") => Some(0),
+            ("strings.Builder", "grow" | "write_string" | "write_byte" | "write_rune") => Some(1),
+            ("bytes.Buffer", "reset" | "string" | "bytes" | "len" | "cap" | "unread_byte" | "unread_rune") => Some(0),
+            ("bytes.Buffer", "truncate" | "grow" | "write_byte" | "write_rune" | "write_string") => Some(1),
+
+            // bufio
+            ("bufio.Reader", "buffered" | "read_byte" | "read_line" | "read_rune" | "size" | "unread_byte" | "unread_rune") => Some(0),
+            ("bufio.Reader", "discard" | "peek" | "read" | "read_bytes" | "read_slice" | "read_string" | "reset" | "write_to") => Some(1),
+            ("bufio.Writer", "available" | "available_buffer" | "buffered" | "flush" | "size") => Some(0),
+            ("bufio.Writer", "read_from" | "reset" | "write" | "write_byte" | "write_rune" | "write_string") => Some(1),
+            ("bufio.Scanner", "bytes" | "err" | "scan" | "text") => Some(0),
+            ("bufio.Scanner", "split") => Some(1),
+            ("bufio.Scanner", "buffer") => Some(2),
+
+            _ => None,
+        };
+
+        let Some(want_arity) = want else {
+            return;
+        };
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic method `{}.{}` (HYB-E1002)",
+                    curated, method
+                ),
+                &format!("methods on `{}` are non-variadic; pass discrete arguments", curated),
+            );
+            return;
+        }
+
+        let got = args.len();
+        if got != want_arity {
+            let msg = if got < want_arity {
+                format!(
+                    "method `{}` on `{}` takes {} argument{} but is called with {} - Go refuses `not enough arguments in call to {}.{}` (HYB-E1002)",
+                    method,
+                    curated,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    curated,
+                    method
+                )
+            } else {
+                format!(
+                    "method `{}` on `{}` takes {} argument{} but is called with {} - Go refuses `too many arguments in call to {}.{}` (HYB-E1002)",
+                    method,
+                    curated,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    curated,
+                    method
+                )
+            };
+            self.emit_e1002(
+                span,
+                msg,
+                &format!(
+                    "pass exactly {} argument{} to `{}.{}`",
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    curated,
+                    method
+                ),
+            );
+        }
+    }
+
     fn check_method_arity(&mut self, bk: &OpKind, name: &str, args: &[CallArg], span: Span) {
         // #880: a generic receiver carries its type arguments (`cache[int]`,
         // `*lru_cache[k, v]`) while `method_decls` is keyed by the *base*
@@ -7779,6 +7919,7 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+
                     if pkg == "time"
                         && self.lookup_kind(pkg).is_none()
                         && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
@@ -8017,6 +8158,9 @@ impl<'a> Collector<'a> {
                             ),
                             "declare the method on that type, or call something that exists",
                         );
+                    }
+                    if let Some(ref recv_ty) = self.foreign_recv_type(base, &bk) {
+                        self.check_foreign_method_arity(recv_ty, name, args, span);
                     }
                 }
                 if has_method {
