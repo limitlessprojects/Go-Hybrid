@@ -42,3 +42,22 @@ fn rejects_closure_local_and_param_map_or_string_sub_stores() {
     );
     assert!(v == Verdict::Accept && !h);
 }
+
+#[test]
+fn rejects_inferred_ptr_array_hops_and_addrof_unaddressable_places() {
+    for src in [
+        "struct holder { n int }\nfn main() {\n pm := &[2]map[string]holder{map[string]holder{\"a\": holder{n: 1}}, map[string]holder{}}\n pm[0][\"a\"].n = 2\n}\n",
+        "struct holder { n int }\nfn main() {\n pm := &[2]map[string]holder{map[string]holder{\"a\": holder{n: 1}}, map[string]holder{}}\n n := &pm[0][\"a\"].n\n _ = n\n}\n",
+        "fn main() {\n ps := &[2]string{\"ab\", \"cd\"}\n ps[0][0] = 65\n}\n",
+        "fn main() {\n ps := &[2]string{\"ab\", \"cd\"}\n b := &ps[0][0]\n _ = b\n}\n",
+        "fn main() {\n s := \"hi\"\n var p *byte\n &s[0] = p\n}\n",
+    ] {
+        let (verdict, hit) = has_e2010(src);
+        assert!(verdict == Verdict::Reject && hit, "expected HYB-E2010 for:\n{src}");
+    }
+    let (v, h) = has_e2010(
+        "struct holder { n int }\nfn main() {\n pm := &[2]map[string]holder{map[string]holder{\"a\": holder{n: 1}}, map[string]holder{}}\n pm[0][\"a\"] = holder{n: 3}\n h := &pm[0][\"a\"]\n h.n = 4\n}\n",
+    );
+    assert!(v == Verdict::Accept && !h);
+}
+
