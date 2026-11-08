@@ -897,7 +897,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
     )
 }
 
-fn normalize_go_ident_to_snake(name: &str) -> String {
+pub(crate) fn normalize_go_ident_to_snake(name: &str) -> String {
     if name.chars().all(|c| !c.is_ascii_uppercase()) {
         return name.to_string();
     }
