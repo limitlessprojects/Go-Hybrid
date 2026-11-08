@@ -4536,6 +4536,138 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_io_package_call(&mut self, pkg: &str, member: &str, args: &[CallArg], span: Span) {
+        if pkg != "io" {
+            return;
+        }
+
+        // Non-callable types, variables, and constants in package io
+        let is_non_callable = matches!(
+            member,
+            "eof"
+                | "err_closed_pipe"
+                | "err_no_progress"
+                | "err_short_buffer"
+                | "err_short_write"
+                | "err_unexpected_eof"
+                | "discard"
+                | "seek_start"
+                | "seek_current"
+                | "seek_end"
+                | "reader"
+                | "writer"
+                | "closer"
+                | "read_writer"
+                | "read_closer"
+                | "write_closer"
+                | "read_write_closer"
+                | "read_seeker"
+                | "read_seek_closer"
+                | "write_seeker"
+                | "read_write_seeker"
+                | "reader_from"
+                | "writer_to"
+                | "reader_at"
+                | "writer_at"
+                | "byte_reader"
+                | "byte_scanner"
+                | "byte_writer"
+                | "rune_reader"
+                | "rune_scanner"
+                | "string_writer"
+                | "limited_reader"
+                | "section_reader"
+                | "offset_writer"
+                | "pipe_reader"
+                | "pipe_writer"
+                | "seeker"
+        );
+        if is_non_callable {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot call `io.{}` - `io.{}` is a package type, variable, or constant, not a function (HYB-E1002)",
+                    member, member
+                ),
+                "do not invoke package types, variables, or constants as functions",
+            );
+            return;
+        }
+
+        // Variadic functions in package io
+        if matches!(member, "multi_reader" | "multi_writer") {
+            return;
+        }
+
+        let want: Option<usize> = match member {
+            // 0 args
+            "pipe" => Some(0),
+
+            // 1 arg
+            "read_all" | "nop_closer" => Some(1),
+
+            // 2 args
+            "copy" | "limit_reader" | "read_full" | "tee_reader" | "write_string" => Some(2),
+
+            // 3 args
+            "copy_buffer" | "copy_n" | "read_at_least" => Some(3),
+
+            // 4 args
+            "new_section_reader" => Some(4),
+
+            _ => None,
+        };
+
+        let Some(want_arity) = want else {
+            return;
+        };
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic `io.{}` (HYB-E1002)",
+                    member
+                ),
+                "`io` package functions are non-variadic; pass discrete arguments",
+            );
+            return;
+        }
+
+        let got = args.len();
+        if got != want_arity {
+            let msg = if got < want_arity {
+                format!(
+                    "function `io.{}` takes {} argument{} but is called with {} - Go refuses `not enough arguments in call to io.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            } else {
+                format!(
+                    "function `io.{}` takes {} argument{} but is called with {} - Go refuses `too many arguments in call to io.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            };
+            self.emit_e1002(
+                span,
+                msg,
+                &format!(
+                    "pass exactly {} argument{} to `io.{}`",
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    member
+                ),
+            );
+        }
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -7689,6 +7821,9 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        self.check_io_package_call(pkg, name, args, span);
+                    }
                     if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
@@ -7779,6 +7914,7 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+
                     if pkg == "time"
                         && self.lookup_kind(pkg).is_none()
                         && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
