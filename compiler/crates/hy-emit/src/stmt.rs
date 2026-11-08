@@ -49,7 +49,7 @@ impl Emitter {
                 self.push(&text);
                 Ok(())
             }
-            Stmt::Send { chan, value, .. } => {
+            Stmt::Send { chan, value, span, .. } => {
                 // `move` markers drop here: ownership transfer is a CHECKER
                 // concept; Go sends the value either way.
                 if Self::expr_has_hoistable_try(value) {
@@ -61,6 +61,8 @@ impl Emitter {
                 let ch = self.emit_expr(chan, 0)?;
                 let v = self.emit_expr(value, 0)?;
                 self.push(&format!("{} <- {}", ch, v));
+                self.witnesses
+                    .push(crate::witness::witness_send(chan, value, *span));
                 Ok(())
             }
             Stmt::If {
@@ -72,7 +74,7 @@ impl Emitter {
             } => self.emit_if(init.as_deref(), cond, then, otherwise.as_deref()),
             Stmt::For { kind, body, .. } => self.emit_for(kind, body),
             Stmt::Return { values, .. } => self.emit_return(values),
-            Stmt::Task { callee, args, .. } => {
+            Stmt::Task { callee, args, span, .. } => {
                 // task → go (spawn sites were checked by Tier-0; emission is
                 // a plain goroutine). Route through emit_call so argument
                 // variadic spread (`...`), pointer parameter auto-addressing,
@@ -80,6 +82,8 @@ impl Emitter {
                 self.hoist_tries_call(callee, args)?;
                 let call = self.emit_call(callee, args)?;
                 self.push(&format!("go {}", call));
+                self.witnesses
+                    .push(crate::witness::witness_task(callee, args, *span));
                 Ok(())
             }
             Stmt::Managed {
@@ -1066,7 +1070,7 @@ impl Emitter {
     /// convention (1, true). None = unknown → callers keep today's shape.
     fn call_results(&self, e: &Expr) -> Option<(usize, bool)> {
         let callee = match e {
-            Expr::Try { operand, .. } => match operand.as_ref() {
+            Expr::Try { operand, .. } => match Self::peel_parens(operand) {
                 Expr::Call { callee, .. } => callee.as_ref(),
                 _ => return None,
             },
@@ -1311,6 +1315,7 @@ impl Emitter {
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
         let e = Self::peel_parens(e);
+        if let Expr::Move { operand, .. } | Expr::AddrOf { operand, .. } | Expr::Unary { op: UnOp::Addr, operand, .. } = e { return self.binding_kind_of(operand); }
         if let Expr::Ident { name, .. } = e {
             return self.bindings.get(name).copied().unwrap_or(BindingKind::Plain);
         }
@@ -1331,7 +1336,7 @@ impl Emitter {
             }
         }
         let (call, args) = match e {
-            Expr::Try { operand, .. } => match operand.as_ref() {
+            Expr::Try { operand, .. } => match Self::peel_parens(operand) {
                 Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
                 _ => return BindingKind::Plain,
             },
@@ -1367,21 +1372,41 @@ impl Emitter {
         // binding resolves through the shape table (Batch I, corpus 13:
         // `s := summary(doc)?` — s.set normalizes like any rust-call
         // result).
-        if let Expr::Ident { name, .. } = call {
-            if let Some((_, _, Some(kind), _)) = self.fn_shapes.get(name.as_str()) {
-                return *kind;
+        let callee_base = match Self::peel_parens(call) {
+            Expr::Index { base, .. } => Self::peel_parens(base),
+            other => other,
+        };
+        let fn_name = match callee_base {
+            Expr::Ident { name, .. } => Some(name.split('[').next().unwrap_or(name).to_string()),
+            Expr::Field { base, name, .. } => {
+                let head = name.split('[').next().unwrap_or(name);
+                if let Some(recv_sn) = self.user_struct_name_of(base) {
+                    Some(format!("{recv_sn}.{head}"))
+                } else if matches!(Self::peel_parens(base), Expr::Ident { .. }) && !self.local_vars.contains(&Self::peel_parens(base).render()) {
+                    Some(format!("{}.{head}", Self::peel_parens(base).render()))
+                } else {
+                    None
+                }
             }
+            _ => None,
+        };
+        if let Some(fn_head) = fn_name.as_deref().filter(|h| !self.local_vars.contains(*h)) {
+            if let Some((_, _, Some(kind), _)) = self.fn_shapes.get(fn_head) { return *kind; }
         }
         // make(chan …) → Chan (single-var range emits the value directly).
         // Only classify as Chan if the first argument is a channel type.
         // make([]T, n) (SliceLit) and make(map[K]V) (MapLit) must remain Plain
         // so single-var range binds elements/keys rather than channel values.
-        if matches!(Self::peel_parens(call), Expr::Ident { name, .. } if name == "make") {
+        if matches!(Self::peel_parens(call), Expr::Ident { name, .. } if (name == "make" || name == "new") && !self.local_vars.contains(name.as_str()) && !self.fn_shapes.contains_key(name.as_str())) {
             return match args.first().map(|a| Self::peel_parens(&a.value)) {
-                Some(Expr::Ident { name, .. }) => self
-                    .n5_aliases
-                    .get(name)
-                    .and_then(|t| self.binding_kind_of_ty(t))
+                Some(Expr::Ident { name, span }) => self
+                    .binding_kind_of_ty(&TypeExpr::Named { name: name.clone(), span: *span })
+                    .unwrap_or(BindingKind::Plain),
+                Some(Expr::Field { base, name, span }) if matches!(Self::peel_parens(base), Expr::Ident { .. }) => self
+                    .binding_kind_of_ty(&TypeExpr::Named { name: format!("{}.{name}", base.render()), span: *span })
+                    .unwrap_or(BindingKind::Plain),
+                Some(Expr::Index { base, index, span }) => self
+                    .binding_kind_of_ty(&TypeExpr::Named { name: format!("{}[{}]", base.render(), index.render()), span: *span })
                     .unwrap_or(BindingKind::Plain),
                 Some(v) => self.binding_kind_of(v),
                 None => BindingKind::Plain,
@@ -1698,7 +1723,7 @@ impl Emitter {
             PlaceKind::Field { base, name } => {
                 let f = self.n5_structs.get(self.user_struct_name_of_place(base)?)?.iter().find(|f| &f.name == name)?;
                 let fty = super::base_ty_name(self.resolve_type_alias(&f.ty))?;
-                self.struct_fields.get_key_value(fty.as_str()).map(|(k, _)| k.as_str())
+                self.resolve_to_struct_name(&fty)
             }
             _ => None,
         }
@@ -2608,27 +2633,47 @@ impl Emitter {
                         self.indent += 1;
                         self.push(&format!("{} = true", matched));
                         let breads = bind.is_some_and(|b| b != "_" && !greads && crate::rangebind::body_reads(&arm.body, b));
+                        let mut wraps_body = false;
                         if let Some(b) = bind {
                             if breads {
                                 self.push(&format!("{} := {}.val", b, temp));
+                                wraps_body = arm_body_redefines_binding(&arm.body, b);
                             } else if !greads {
                                 self.local_vars.remove(b);
                             }
                         }
+                        if wraps_body {
+                            self.push("{");
+                            self.indent += 1;
+                        }
                         self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                        if wraps_body {
+                            self.indent -= 1;
+                            self.push("}");
+                        }
                         self.indent -= 1;
                         self.push("}");
                     } else {
                         self.push(&format!("{} = true", matched));
                         let breads = bind.is_some_and(|b| b != "_" && crate::rangebind::body_reads(&arm.body, b));
+                        let mut wraps_body = false;
                         if let Some(b) = bind {
                             if breads {
                                 self.push(&format!("{} := {}.val", b, temp));
+                                wraps_body = arm_body_redefines_binding(&arm.body, b);
                             } else {
                                 self.local_vars.remove(b);
                             }
                         }
+                        if wraps_body {
+                            self.push("{");
+                            self.indent += 1;
+                        }
                         self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                        if wraps_body {
+                            self.indent -= 1;
+                            self.push("}");
+                        }
                     }
                     Ok(())
                 })();
@@ -2692,12 +2737,25 @@ impl Emitter {
                             self.push(&format!("if {} {{", gt));
                             self.indent += 1;
                             let prebound = prebound_guard_var.as_deref() == Some(binding.as_str());
-                            if *binding != "_" && !prebound && crate::rangebind::body_reads(&arm.body, binding) {
+                            let injects = *binding != "_"
+                                && !prebound
+                                && crate::rangebind::body_reads(&arm.body, binding);
+                            let wraps_body =
+                                injects && arm_body_redefines_binding(&arm.body, binding);
+                            if injects {
                                 self.push(&format!("{} := {}.val", binding, temp));
                             } else if !prebound {
                                 self.local_vars.remove(*binding);
                             }
+                            if wraps_body {
+                                self.push("{");
+                                self.indent += 1;
+                            }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                            if wraps_body {
+                                self.indent -= 1;
+                                self.push("}");
+                            }
                             self.indent -= 1;
                             chain_opened = true;
                             Ok(false)
@@ -2798,15 +2856,25 @@ impl Emitter {
                             self.push(&format!("if {} {{", gt));
                             self.indent += 1;
                             self.push(&format!("{} = true", matched_temp));
-                            if *binding != "_"
+                            let injects = *binding != "_"
                                 && !guard_reads
-                                && crate::rangebind::body_reads(&arm.body, binding)
-                            {
+                                && crate::rangebind::body_reads(&arm.body, binding);
+                            let wraps_body =
+                                injects && arm_body_redefines_binding(&arm.body, binding);
+                            if injects {
                                 self.push(&format!("{} := {}.val", binding, temp));
                             } else if !guard_reads {
                                 self.local_vars.remove(*binding);
                             }
+                            if wraps_body {
+                                self.push("{");
+                                self.indent += 1;
+                            }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                            if wraps_body {
+                                self.indent -= 1;
+                                self.push("}");
+                            }
                             self.indent -= 1;
                             self.push("}");
                         }
@@ -2900,15 +2968,25 @@ impl Emitter {
                     self.push(&format!("if {} {{", gt));
                     self.indent += 1;
                     self.push(&format!("{} = true", matched_temp));
-                    if *binding != "_"
+                    let injects = *binding != "_"
                         && !guard_reads
-                        && crate::rangebind::body_reads(&arm.body, binding)
-                    {
+                        && crate::rangebind::body_reads(&arm.body, binding);
+                    let wraps_body =
+                        injects && arm_body_redefines_binding(&arm.body, binding);
+                    if injects {
                         self.push(&format!("{} := {}.val", binding, temp));
                     } else if !guard_reads {
                         self.local_vars.remove(*binding);
                     }
+                    if wraps_body {
+                        self.push("{");
+                        self.indent += 1;
+                    }
                     self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                    if wraps_body {
+                        self.indent -= 1;
+                        self.push("}");
+                    }
                     self.indent -= 1;
                     self.push("}");
                     Ok(())
