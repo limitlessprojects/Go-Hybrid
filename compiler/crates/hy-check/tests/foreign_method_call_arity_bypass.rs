@@ -1,6 +1,6 @@
 //! Regression tests for #4100:
-//! Curated foreign receiver methods (`sync.Mutex`, `sync.RWMutex`, `sync.WaitGroup`,
-//! `sync.Once`, `time.Ticker`, `time.Timer`, `strings.Builder`, `bytes.Buffer`) must
+//! Curated foreign receiver methods (`sync.mutex`, `sync.rwmutex`, `sync.wait_group`,
+//! `sync.once`, `time.ticker`, `time.timer`, `strings.builder`, `bytes.buffer`) must
 //! enforce call arity and operand constraints during `hyb check` (HYB-E1002, Row 13 BUILDABLE).
 //!
 //! Without arity checks on foreign receiver methods, calls with too few or too many arguments
@@ -50,7 +50,7 @@ fn accepts(src: &str) {
 
 #[test]
 fn test_sync_mutex_arity_rejection() {
-    // sync.Mutex.lock, unlock, try_lock take 0 arguments
+    // sync.mutex.lock, unlock, try_lock take 0 arguments
     rejects_e1002(
         r#"
 package main
@@ -58,7 +58,7 @@ package main
 import "sync"
 
 fn main() {
-    let mut mu sync.Mutex;
+    let mut mu sync.mutex;
     mu.lock(1);
 }
 "#,
@@ -71,7 +71,7 @@ package main
 import "sync"
 
 fn main() {
-    let mut mu sync.Mutex;
+    let mut mu sync.mutex;
     mu.unlock(1, 2);
 }
 "#,
@@ -84,7 +84,7 @@ package main
 import "sync"
 
 fn main() {
-    let mut mu sync.Mutex;
+    let mut mu sync.mutex;
     mu.try_lock(true);
 }
 "#,
@@ -101,7 +101,7 @@ package main
 import "sync"
 
 fn main() {
-    let mut wg sync.WaitGroup;
+    let mut wg sync.wait_group;
     wg.add();
 }
 "#,
@@ -114,7 +114,7 @@ package main
 import "sync"
 
 fn main() {
-    let mut wg sync.WaitGroup;
+    let mut wg sync.wait_group;
     wg.add(1, 2);
 }
 "#,
@@ -127,7 +127,7 @@ package main
 import "sync"
 
 fn main() {
-    let mut wg sync.WaitGroup;
+    let mut wg sync.wait_group;
     wg.add("invalid");
 }
 "#,
@@ -141,7 +141,7 @@ package main
 import "sync"
 
 fn main() {
-    let mut wg sync.WaitGroup;
+    let mut wg sync.wait_group;
     wg.done(42);
 }
 "#,
@@ -154,7 +154,7 @@ package main
 import "sync"
 
 fn main() {
-    let mut wg sync.WaitGroup;
+    let mut wg sync.wait_group;
     wg.wait("timeout");
 }
 "#,
@@ -171,7 +171,7 @@ package main
 import "sync"
 
 fn main() {
-    let mut once sync.Once;
+    let mut once sync.once;
     once.do();
 }
 "#,
@@ -184,7 +184,7 @@ package main
 import "sync"
 
 fn main() {
-    let mut once sync.Once;
+    let mut once sync.once;
     once.do(fn() {}, 42);
 }
 "#,
@@ -200,7 +200,7 @@ package main
 
 import "time"
 
-fn test(t *time.Ticker) {
+fn test(t *time.ticker) {
     t.stop(1);
 }
 "#,
@@ -213,7 +213,7 @@ package main
 
 import "time"
 
-fn test(t *time.Ticker) {
+fn test(t *time.ticker) {
     t.reset();
 }
 "#,
@@ -225,7 +225,7 @@ package main
 
 import "time"
 
-fn test(t *time.Ticker) {
+fn test(t *time.ticker) {
     t.reset("10s");
 }
 "#,
@@ -238,7 +238,7 @@ package main
 
 import "time"
 
-fn test(t *time.Timer) {
+fn test(t *time.timer) {
     t.stop(1);
 }
 "#,
@@ -251,7 +251,7 @@ package main
 
 import "time"
 
-fn test(t *time.Timer) {
+fn test(t *time.timer) {
     t.reset();
 }
 "#,
@@ -268,16 +268,16 @@ import "sync"
 import "time"
 
 fn main() {
-    let mut mu sync.Mutex;
+    let mut mu sync.mutex;
     mu.lock();
     mu.unlock();
 
-    let mut wg sync.WaitGroup;
+    let mut wg sync.wait_group;
     wg.add(1);
     wg.done();
     wg.wait();
 
-    let mut once sync.Once;
+    let mut once sync.once;
     once.do(fn() {});
 }
 "#,
