@@ -9072,7 +9072,7 @@ impl<'a> Collector<'a> {
         if matches!(
             name,
             "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
-                | "real" | "imag" | "complex"
+                | "real" | "imag" | "complex" | "some"
         ) && args.iter().any(|a| a.spread)
         {
             self.emit_e1002(
@@ -9086,6 +9086,21 @@ impl<'a> Collector<'a> {
             return;
         }
         match name {
+            "some" => {
+                if args.len() != 1 {
+                    let word = if args.is_empty() { "not enough" } else { "too many" };
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "{} arguments in call to built-in `some` (expected 1, got {}) (HYB-E1002)",
+                            word,
+                            args.len()
+                        ),
+                        "`some(v)` takes exactly 1 argument (the value to wrap in an option)",
+                    );
+                    return;
+                }
+            }
             "make" => {
                 for arg in args.iter().skip(1) {
                     if matches!(unwrap_parens(&arg.value), Expr::Lit { .. }) {
