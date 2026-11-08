@@ -99,7 +99,7 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
         "flate2.writer" => Some(TypeShape::OwnHandle("flate2.writer".into())),
         _ => {
             let root = name.split('.').next().unwrap_or("");
-            if BUILTIN_PACKAGES.contains(&root) {
+            if is_curated_package_root(root) {
                 Some(TypeShape::ForeignOpaque(name.to_string()))
             } else {
                 None
@@ -121,7 +121,23 @@ pub(crate) fn is_iterable_handle(name: &str) -> bool {
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
-        ("serde_json", "parse") | ("serde_json", "new_object") | ("flate2", "new_writer") => {
+        ("serde_json", "parse" | "new_object" | "new_array")
+        | ("flate2", "new_writer")
+        | (
+            "json" | "encoding/json",
+            "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder",
+        )
+        | (
+            "httptest" | "net/http/httptest",
+            "new_server"
+                | "new_tls_server"
+                | "new_unstarted_server"
+                | "new_recorder"
+                | "NewServer"
+                | "NewTLSServer"
+                | "NewUnstartedServer"
+                | "NewRecorder",
+        ) => {
             CallMode::Produce
         }
         ("serde_json", "to_string_pretty")
@@ -129,7 +145,7 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
         | ("serde_json", "get")
         | ("serde_json", "int")
         | ("serde_json", "string") => CallMode::Borrow,
-        ("serde_json", "set") | ("serde_json", "remove") => CallMode::Mutate,
+        ("serde_json", "set" | "remove" | "push_string" | "array_push_string") => CallMode::Mutate,
         ("flate2", "write") => CallMode::Mutate,
         ("flate2", "finish") => CallMode::Consume,
         _ => CallMode::Safe,
@@ -158,12 +174,14 @@ pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
 /// Result shape of a package-level call (for defines / loop variables).
 pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
     match (pkg, method) {
-        ("serde_json", "parse") | ("serde_json", "new_object") => {
+        ("serde_json", "parse" | "new_object" | "new_array") => {
             TypeShape::OwnHandle("serde_json.value".into())
         }
         ("flate2", "new_writer") => TypeShape::OwnHandle("flate2.writer".into()),
         ("serde_json", "array" | "get") => TypeShape::BorrowHandle("serde_json.view".into()),
-        ("serde_json", "int") | ("flate2", "write") => TypeShape::Primitive,
+        ("serde_json", "int" | "push_string" | "array_push_string") | ("flate2", "write") => {
+            TypeShape::Primitive
+        }
         ("flate2", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
         ("serde_json", "to_string_pretty") | ("serde_json", "string") | ("strings", "join") => {
             TypeShape::Str
@@ -177,9 +195,28 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
         // `atomic.load_pointer` / `atomic.swap_pointer` return an
         // unsafe.Pointer to arbitrary state — not a primitive (row 11)
-        ("atomic", "load_pointer" | "swap_pointer") => TypeShape::Unknown,
+        ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
+        ("json" | "encoding/json", "new_decoder" | "NewDecoder") => {
+            TypeShape::ForeignOpaque("json.decoder".into())
+        }
+        ("json" | "encoding/json", "new_encoder" | "NewEncoder") => {
+            TypeShape::ForeignOpaque("json.encoder".into())
+        }
+        (
+            "httptest" | "net/http/httptest",
+            "new_server"
+                | "new_tls_server"
+                | "new_unstarted_server"
+                | "NewServer"
+                | "NewTLSServer"
+                | "NewUnstartedServer",
+        ) => TypeShape::ForeignOpaque("httptest.server".into()),
+        (
+            "httptest" | "net/http/httptest",
+            "new_recorder" | "NewRecorder",
+        ) => TypeShape::ForeignOpaque("httptest.response_recorder".into()),
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -311,28 +348,407 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
         return CallMode::Safe;
     }
     match (recv_type, method) {
+        // #2200 / foreign-surface drift: this list must be a SUBSET of
+        // hy-emit's SHAPES members for the same key (shapes.rs, "serde_json.value":
+        // array, int, string, set, push_string) and of the Go methods the
+        // vendored binding actually ships (runtime/go/jsonbinding: Array, Int,
+        // String, Set, PushString). `get`, `remove` and `to_string_pretty` are
+        // NOT methods on a Value — they are package-level names (and only
+        // `to_string_pretty` is in the pinned binding surface at all). Blessing
+        // them here made `doc.get("a")` pass `hyb check` and then fail
+        // `go build` with `doc.Get undefined (type jsonbinding.Value has no
+        // field or method Get)`. Keep the two tables in lockstep by hand:
+        // hy-check does not depend on hy-emit (that would be a crate cycle), so
+        // no automated cross-crate pin is possible. The same-surface tests in
+        // `tests/foreign_method_surface.rs` cover the checker side.
         (
             "serde_json.value" | "serde_json.view",
-            "array" | "get" | "int" | "string" | "to_string_pretty",
+            "array" | "int" | "string",
         ) => CallMode::Borrow,
-        ("serde_json.value" | "serde_json.view", "set" | "remove") => CallMode::Mutate,
+        ("serde_json.value" | "serde_json.view", "set" | "push_string") => CallMode::Mutate,
         ("flate2.writer", "write") => CallMode::Mutate,
         ("flate2.writer", "finish") => CallMode::Consume,
         _ => CallMode::Unknown,
     }
 }
 
+/// The COMPLETE method surface of a foreign handle type, or `None` when
+/// `recv_type` is not a handle this module models.
+///
+/// `method_mode`/`method_result` are deliberately fail-open (`Unknown`), which
+/// is right for shapes the checker cannot see — but a handle whose binding is
+/// vendored in `runtime/go/` is perfectly visible, and Go will reject any name
+/// outside its surface at `go build` with `<recv>.<Name> undefined (type
+/// <T> has no field or method <Name>)`. Returning the surface here lets a
+/// caller fail CLOSED on those exact names instead of blessing them (#2200).
+///
+/// This list is the single source of truth for handle METHODS. It must stay a
+/// subset of `hy-emit`'s SHAPES members for the matching key, and of the Go
+/// methods `runtime/go/*binding` actually ships. That agreement is maintained
+/// by hand: `hy-check` cannot depend on `hy-emit` without a crate cycle, so
+/// there is no automated cross-crate pin.
+pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'static str]> {
+    /// `serde_json.value`: jsonbinding.Value — Array, Int, String, Set,
+    /// PushString. Package-level `Parse`/`NewObject`/`NewArray`/
+    /// `ToStringPretty` are functions, NOT methods, and `Get`/`Remove` are
+    /// not shipped at all.
+    const SERDE_JSON_VALUE: &[&str] = &["array", "int", "string", "set", "push_string"];
+    /// `flate2.writer`: the A7 consume-mode fixture (deliberately unbound,
+    /// see UNBOUND_RUST_CRATES — the surface is still pinned so the checker
+    /// does not invent names).
+    const FLATE2_WRITER: &[&str] = &["write", "finish"];
+    /// `sync.Mutex` — the predeclared Go type's own methods. Hybrid spells
+    /// them lowercased; `sync.mutex` resolves to `ForeignOpaque`, which made
+    /// `s.mu.totally_fake()` pass `hyb check` and die in `go build` with
+    /// `type "sync".Mutex has no field or method totally_fake`. Same bug
+    /// class as #2200, different handle.
+    const SYNC_MUTEX: &[&str] = &["lock", "unlock", "try_lock"];
+    /// `sync.RWMutex`.
+    const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
+    const SYNC_WAIT_GROUP: &[&str] = &["add", "done", "wait"];
+    const SYNC_ONCE: &[&str] = &["do"];
+    const BYTES_BUFFER: &[&str] = &[
+        "write", "write_byte", "write_rune", "write_string", "write_to",
+        "read", "read_byte", "read_bytes", "read_from", "read_rune", "read_string",
+        "next", "grow", "reset", "string", "bytes", "len", "cap", "truncate",
+        "unread_byte", "unread_rune",
+    ];
+    const STRINGS_BUILDER: &[&str] = &[
+        "write", "write_byte", "write_rune", "write_string",
+        "grow", "reset", "string", "len", "cap",
+    ];
+    const SYNC_COND: &[&str] = &["wait", "signal", "broadcast"];
+    const SYNC_POOL: &[&str] = &["get", "put"];
+    const SYNC_MAP: &[&str] = &[
+        "load",
+        "store",
+        "delete",
+        "load_or_store",
+        "load_and_delete",
+        "range",
+        "compare_and_swap",
+        "compare_and_delete",
+        "swap",
+    ];
+    const TIME_TICKER: &[&str] = &["stop", "reset"];
+    const TIME_TIMER: &[&str] = &["stop", "reset"];
+    /// `bufio.Reader` — Go standard library buffered reader methods.
+    const BUFIO_READER: &[&str] = &[
+        "buffered",
+        "discard",
+        "peek",
+        "read",
+        "read_byte",
+        "read_bytes",
+        "read_line",
+        "read_rune",
+        "read_slice",
+        "read_string",
+        "reset",
+        "size",
+        "unread_byte",
+        "unread_rune",
+        "write_to",
+    ];
+    /// `bufio.Writer` — Go standard library buffered writer methods.
+    const BUFIO_WRITER: &[&str] = &[
+        "available",
+        "available_buffer",
+        "buffered",
+        "flush",
+        "read_from",
+        "reset",
+        "size",
+        "write",
+        "write_byte",
+        "write_rune",
+        "write_string",
+    ];
+    /// `bufio.Scanner` — Go standard library buffered scanner methods.
+    const BUFIO_SCANNER: &[&str] = &[
+        "buffer",
+        "bytes",
+        "err",
+        "scan",
+        "split",
+        "text",
+    ];
+    /// `os.File` — standard library file handle. Go defines 24 methods on `*os.File`.
+    const OS_FILE: &[&str] = &[
+        "chdir",
+        "chmod",
+        "chown",
+        "close",
+        "fd",
+        "name",
+        "read",
+        "read_at",
+        "read_dir",
+        "read_from",
+        "readdir",
+        "readdirnames",
+        "seek",
+        "set_deadline",
+        "set_read_deadline",
+        "set_write_deadline",
+        "stat",
+        "sync",
+        "syscall_conn",
+        "truncate",
+        "write",
+        "write_at",
+        "write_string",
+        "write_to",
+    ];
+    /// `io.PipeReader`.
+    const IO_PIPE_READER: &[&str] = &["close", "close_with_error", "read"];
+    /// `io.PipeWriter`.
+    const IO_PIPE_WRITER: &[&str] = &["close", "close_with_error", "write"];
+    /// `io.SectionReader`.
+    const IO_SECTION_READER: &[&str] = &["outer", "read", "read_at", "seek", "size"];
+    /// `io.LimitedReader`.
+    const IO_LIMITED_READER: &[&str] = &["read"];
+    /// `io.OffsetWriter`.
+    const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
+    const HTTP_CLIENT: &[&str] = &[
+        "close_idle_connections",
+        "do",
+        "get",
+        "head",
+        "post",
+        "post_form",
+    ];
+    const HTTP_REQUEST: &[&str] = &[
+        "add_cookie",
+        "clone",
+        "context",
+        "cookie",
+        "cookies",
+        "form_file",
+        "form_value",
+        "multipart_reader",
+        "parse_form",
+        "parse_multipart_form",
+        "path_value",
+        "post_form_value",
+        "proto_at_least",
+        "referer",
+        "set_path_value",
+        "user_agent",
+        "with_context",
+        "write",
+        "write_proxy",
+    ];
+    const HTTP_RESPONSE: &[&str] = &[
+        "cookies",
+        "location",
+        "proto_at_least",
+        "write",
+    ];
+    const HTTP_SERVER: &[&str] = &[
+        "close",
+        "listen_and_serve",
+        "listen_and_serve_tls",
+        "register_on_shutdown",
+        "serve",
+        "serve_tls",
+        "set_keep_alives_enabled",
+        "shutdown",
+    ];
+    const HTTP_COOKIE: &[&str] = &["string", "valid"];
+    const URL_URL: &[&str] = &[
+        "escaped_fragment",
+        "escaped_path",
+        "hostname",
+        "is_abs",
+        "join_path",
+        "marshal_binary",
+        "port",
+        "query",
+        "redacted",
+        "request_uri",
+        "resolve_reference",
+        "string",
+        "unmarshal_binary",
+    ];
+    const JSON_DECODER: &[&str] = &[
+        "buffered",
+        "decode",
+        "disallow_unknown_fields",
+        "input_offset",
+        "more",
+        "token",
+        "use_number",
+    ];
+    const JSON_ENCODER: &[&str] = &["encode", "set_escape_html", "set_indent"];
+    const JSON_RAW_MESSAGE: &[&str] = &["marshal_json", "unmarshal_json"];
+    const HTTPTEST_SERVER: &[&str] = &[
+        "client",
+        "close",
+        "close_client_connections",
+        "start",
+        "start_tls",
+    ];
+    const HTTPTEST_RESPONSE_RECORDER: &[&str] = &[
+        "flush",
+        "header",
+        "result",
+        "write",
+        "write_header",
+        "write_string",
+    ];
+    const OS_PROCESS: &[&str] = &[
+        "kill",
+        "release",
+        "signal",
+        "wait",
+    ];
+    const OS_PROCESS_STATE: &[&str] = &[
+        "exit_code",
+        "exited",
+        "pid",
+        "string",
+        "success",
+        "sys",
+        "sys_usage",
+        "system_time",
+        "user_time",
+    ];
+    const STRINGS_READER: &[&str] = &[
+        "len",
+        "read",
+        "read_at",
+        "read_byte",
+        "read_rune",
+        "reset",
+        "seek",
+        "size",
+        "unread_byte",
+        "unread_rune",
+        "write_to",
+    ];
+    const NET_IP: &[&str] = &[
+        "default_mask",
+        "equal",
+        "is_global_unicast",
+        "is_interface_local_multicast",
+        "is_link_local_multicast",
+        "is_link_local_unicast",
+        "is_loopback",
+        "is_multicast",
+        "is_private",
+        "is_unspecified",
+        "marshal_text",
+        "mask",
+        "string",
+        "to16",
+        "to4",
+        "unmarshal_text",
+    ];
+    const NET_IP_NET: &[&str] = &["contains", "network", "string"];
+    const NET_IP_MASK: &[&str] = &["size", "string"];
+    const NET_TCP_ADDR: &[&str] = &["addr_port", "network", "string"];
+    const NET_UDP_ADDR: &[&str] = &["addr_port", "network", "string"];
+    const NET_UNIX_ADDR: &[&str] = &["network", "string"];
+    const NET_IP_ADDR: &[&str] = &["network", "string"];
+    match recv_type {
+        "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
+        "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
+        "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
+        "sync.once" | "sync.Once" => Some(SYNC_ONCE),
+        "bytes.buffer" | "bytes.Buffer" => Some(BYTES_BUFFER),
+        "strings.builder" | "strings.Builder" => Some(STRINGS_BUILDER),
+        "sync.cond" | "sync.Cond" => Some(SYNC_COND),
+        "sync.pool" | "sync.Pool" => Some(SYNC_POOL),
+        "sync.map" | "sync.Map" => Some(SYNC_MAP),
+        "time.ticker" | "time.Ticker" => Some(TIME_TICKER),
+        "time.timer" | "time.Timer" => Some(TIME_TIMER),
+        "bufio.reader" | "bufio.Reader" => Some(BUFIO_READER),
+        "bufio.writer" | "bufio.Writer" => Some(BUFIO_WRITER),
+        "bufio.scanner" | "bufio.Scanner" => Some(BUFIO_SCANNER),
+        "os.file" | "os.File" => Some(OS_FILE),
+        "io.pipe_reader" | "io.PipeReader" => Some(IO_PIPE_READER),
+        "io.pipe_writer" | "io.PipeWriter" => Some(IO_PIPE_WRITER),
+        "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
+        "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
+        "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
+        "http.client" | "http.Client" => Some(HTTP_CLIENT),
+        "http.request" | "http.Request" => Some(HTTP_REQUEST),
+        "http.response" | "http.Response" => Some(HTTP_RESPONSE),
+        "http.server" | "http.Server" => Some(HTTP_SERVER),
+        "http.cookie" | "http.Cookie" => Some(HTTP_COOKIE),
+        "url.url" | "url.URL" => Some(URL_URL),
+        "json.decoder" | "json.Decoder" => Some(JSON_DECODER),
+        "json.encoder" | "json.Encoder" => Some(JSON_ENCODER),
+        "json.raw_message" | "json.rawmessage" | "json.RawMessage" => Some(JSON_RAW_MESSAGE),
+        "httptest.server" | "httptest.Server" => Some(HTTPTEST_SERVER),
+        "httptest.response_recorder"
+        | "httptest.responserecorder"
+        | "httptest.ResponseRecorder" => Some(HTTPTEST_RESPONSE_RECORDER),
+        "os.process" | "os.Process" => Some(OS_PROCESS),
+        "os.process_state" | "os.processstate" | "os.ProcessState" => Some(OS_PROCESS_STATE),
+        "strings.reader" | "strings.Reader" => Some(STRINGS_READER),
+        "net.ip" | "net.IP" => Some(NET_IP),
+        "net.ip_net" | "net.ipnet" | "net.IPNet" => Some(NET_IP_NET),
+        "net.ip_mask" | "net.ipmask" | "net.IPMask" => Some(NET_IP_MASK),
+        "net.tcp_addr" | "net.tcpaddr" | "net.TCPAddr" => Some(NET_TCP_ADDR),
+        "net.udp_addr" | "net.udpaddr" | "net.UDPAddr" => Some(NET_UDP_ADDR),
+        "net.unix_addr" | "net.unixaddr" | "net.UnixAddr" => Some(NET_UNIX_ADDR),
+        "net.ip_addr" | "net.ipaddr" | "net.IPAddr" => Some(NET_IP_ADDR),
+        // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
+        // depending on context: ranging `doc.array(k)` yields element
+        // `jsonbinding.Value` handles (real methods), while the `array` result
+        // itself binds to a plain `[]jsonbinding.Value` slice with no methods
+        // at all (`len(v)` is the call form, not `v.len()`). The checker
+        // cannot tell the two apart from the shape alone, so rejecting names
+        // here would break legal element code — view stays fail-open.
+        "serde_json.value" => Some(SERDE_JSON_VALUE),
+        "flate2.writer" => Some(FLATE2_WRITER),
+        // NOTE: atomics are deliberately NOT gated here, and this is a
+        // deliberate regression-free choice, not an oversight.
+        //
+        // `receiver_type_name` collapses every `TypeShape::Atomic` to the single
+        // key `"atomic.int"` (shape.rs) — the shape carries no element type, so
+        // the checker cannot tell `atomic.bool` from `atomic.int64`. Their Go
+        // surfaces genuinely differ: `Bool` has {Load, Store, Swap,
+        // CompareAndSwap} while the integer atomics add {Add, And, Or}. No
+        // single list is correct for both:
+        //   * the union blesses `atomic.Bool.Add`, which Go lacks (#2200's own
+        //     bug class, left open), and
+        //   * the intersection rejects `atomic.Int64.And`/`Or`, which Go has
+        //     since 1.23 and which `go build` accepts (a NEW false rejection).
+        //
+        // Pinning this correctly needs `TypeShape::Atomic` to carry its element
+        // type — a change to the shape model, not to this table — so atomics
+        // keep their existing fail-open behaviour here and are tracked
+        // separately. This keeps the #2200 fix to the handles whose surface is
+        // actually knowable.
+        _ => None,
+    }
+}
+
 /// Result shape of a method call on a typed receiver.
 pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
     match (recv_type, method) {
-        ("serde_json.value" | "serde_json.view", "array" | "get") => {
+        ("serde_json.value" | "serde_json.view", "array") => {
             // element views: iterating the result yields borrow handles
             TypeShape::BorrowHandle("serde_json.view".into())
         }
-        ("serde_json.value" | "serde_json.view", "int") => TypeShape::Primitive,
-        ("serde_json.value" | "serde_json.view", "string" | "to_string_pretty") => TypeShape::Str,
+        ("serde_json.value" | "serde_json.view", "int" | "push_string") => TypeShape::Primitive,
+        ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        ("url.url" | "url.URL", "query") => TypeShape::ForeignOpaque("url.values".into()),
+        ("http.request" | "http.Request", "cookies") | ("http.response" | "http.Response", "cookies") => {
+            TypeShape::Slice(Box::new(TypeShape::ForeignOpaque("http.cookie".into())))
+        }
+        ("http.request" | "http.Request", "cookie") => TypeShape::ForeignOpaque("http.cookie".into()),
+        ("http.response" | "http.Response", "location") => TypeShape::ForeignOpaque("url.url".into()),
+        ("strings.reader" | "strings.Reader", "len" | "size") => TypeShape::Primitive,
+        ("sync.mutex" | "sync.Mutex", "try_lock")
+        | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
+            TypeShape::Primitive
+        }
         // scalar atomics only ("atomic.int" is receiver_type_name's key for
         // TypeShape::Atomic): load/swap/add yield the scalar. A non-scalar
         // atomic's `load()` / `swap()` returns a pointer / `any` — Unknown,
@@ -360,6 +776,7 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "sync"
             | "sync/atomic"
             | "atomic"
+            | "bytes"
             | "bufio"
             | "net"
             | "net/http"
@@ -436,6 +853,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "errors"
             | "sync"
             | "atomic"
+            | "bytes"
             | "bufio"
             | "net"
             | "http"
@@ -904,7 +1322,7 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
             "mutex"
                 | "rw_mutex"
                 | "rwmutex"
-                | "wait_group"
+                | "wait_group" | "waitgroup"
                 | "once"
                 | "cond"
                 | "map"
@@ -954,6 +1372,49 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "swap_uint64"
                 | "swap_uintptr"
                 | "swap_pointer"
+        ),
+        "bytes" => matches!(
+            m,
+            "new_buffer"
+                | "new_buffer_string"
+                | "new_reader"
+                | "compare"
+                | "contains"
+                | "contains_any"
+                | "contains_rune"
+                | "count"
+                | "cut"
+                | "equal"
+                | "equal_fold"
+                | "fields"
+                | "has_prefix"
+                | "has_suffix"
+                | "index"
+                | "index_any"
+                | "index_byte"
+                | "index_rune"
+                | "join"
+                | "last_index"
+                | "last_index_any"
+                | "last_index_byte"
+                | "repeat"
+                | "replace"
+                | "replace_all"
+                | "runes"
+                | "split"
+                | "split_after"
+                | "split_after_n"
+                | "split_n"
+                | "title"
+                | "to_lower"
+                | "to_title"
+                | "to_upper"
+                | "trim"
+                | "trim_left"
+                | "trim_prefix"
+                | "trim_right"
+                | "trim_space"
+                | "trim_suffix"
         ),
         "bufio" => matches!(
             m,

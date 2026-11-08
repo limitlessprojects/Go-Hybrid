@@ -1,0 +1,25 @@
+{
+  "tool": "worker/script.py",
+  "cases": [
+    {
+      "name": "runner_invocation_shell_quotes_work_paths",
+      "work_dir": "work dir's path",
+      "expected_exit": 0
+    },
+    {
+      "name": "unsafe_repo_or_sha_rejected_before_clone",
+      "invalid_inputs": [
+        {"repo": "--upload-pack=evil"},
+        {"sha": "-f"},
+        {"sha": "../outside"},
+        {"sha": "HEAD; echo pwn"}
+      ],
+      "expected_exit": 2
+    },
+    {
+      "name": "missing_or_false_summary_fails_closed_on_zero_rc",
+      "summaries": [null, "[]", {"ok": false}],
+      "expected_exit": 1
+    }
+  ]
+}
