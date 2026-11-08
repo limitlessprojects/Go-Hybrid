@@ -1305,7 +1305,13 @@ impl<'a> Checker<'a> {
                 target = MatchTarget::NonOption(lit_name.to_string());
             } else {
                 let shape = self.shape_of_expr(st, subject);
-                if !matches!(shape, TypeShape::Unknown) {
+                if let TypeShape::Enum(Some(ref ename)) = shape {
+                    if let Some(vs) = self.enums.get(ename.as_str()) {
+                        target = MatchTarget::Enum(ename.clone(), vs.clone());
+                    } else {
+                        target = MatchTarget::NonOption(shape.render());
+                    }
+                } else if !matches!(shape, TypeShape::Unknown) {
                     target = MatchTarget::NonOption(shape.render());
                 }
             }
