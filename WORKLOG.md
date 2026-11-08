@@ -545,3 +545,11 @@
 - Zero silent closes; reply 201; push remote-asserted (a3f88231 == ls-remote); disk trimmed, no ENOSPC.
 - Next queue: #3894 battery+land (ready), then #4015+ flood. Stalled-watch unchanged: #3942/#3949/#3918.
 - Suites 479 integration files (unchanged; #3892 extends existing suite).
+
+## Session 148 — 2026-11-08 09:10 UTC+8 tick (07:10/08:10 ticks did not fire; no parallel work lost)
+- env cold-recycled (rootfs c-6aefcbe9, 8th consecutive); toolchains restored; approve 6/6 (4994 left); scan skipped (quota doctrine).
+- **1 landed**:
+  - **#3894** -> `6c1a0602` (Burapa-J, fixes #3893): sendability.rs — set[T] element recursion in all three shape_holds_* walkers (user-set guard respected); Unproven-tp arm moved to fallback tail (precise E3001 etc. win first); spawn-callee + static-arg shadow sets extended (tp/struct/enum/alias); fn type_params in const env; match-arm binders resolve enum variant payload via new resolve_enum_arm_dir_ty (E3008/E3009 see inside enum matches). Extended suite 20/20; workspace 488/3128/0; corpus 135; differential FULL. Battery executed this tick per S147 plan (branch ref preserved across cold recycle). Reply 201.
+- Queue refresh (desc order): flood is real — #4081-#4117, 20 open PRs: Yumihariii #4081 (sendability directional foreign chan), Burapa-J #4083/#4091, seenorht #4084/#4087, bradwue313 #4085/#4097/#4099/#4101, wminno #4088, marhabynova #4093, jpereyra243-byte #4095/#4109/#4117, mischievousdeveloper #4105, dextermos-dev #4107/#4111/#4113/#4115 (arity band), spikes/ #4089 excluded per ledger.
+- Next queue: #4081 battery+land (oldest open), then #4083, #4084, #4085... top-down by created. Stalled-watch unchanged: #3942/#3949/#3918.
+- Suites 479 integration files (unchanged; #3894 extends existing suite). Zero silent closes; push remote-asserted (6c1a0602 == ls-remote).
