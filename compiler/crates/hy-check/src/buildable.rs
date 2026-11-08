@@ -4984,6 +4984,165 @@ impl<'a> Collector<'a> {
         self.check_method_arg_types(&recv_kind, name, &args[1..]);
     }
 
+    fn foreign_recv_type(&self, base: &Expr, bk: &OpKind) -> Option<String> {
+        match bk {
+            OpKind::Foreign(ref n) => Some(n.clone()),
+            OpKind::Pointer(ref inner) => match &**inner {
+                OpKind::Foreign(ref n) => Some(n.clone()),
+                _ => None,
+            },
+            _ => {
+                let bare = unwrap_parens(base);
+                if let Expr::Ident { name: ref id_name, .. } = bare {
+                    if let Some(tn) = self.lookup_type_name(id_name) {
+                        let cleaned = tn.trim_start_matches('*').trim();
+                        if cleaned.contains('.') {
+                            return Some(cleaned.to_string());
+                        }
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    fn check_foreign_method_arity(
+        &mut self,
+        recv_type: &str,
+        method: &str,
+        args: &[CallArg],
+        span: Span,
+    ) {
+        let clean_recv = recv_type.trim_start_matches('*').trim();
+        let norm = match clean_recv {
+            "sync.mutex" | "sync.Mutex" => Some("sync.Mutex"),
+            "sync.rwmutex" | "sync.RWMutex" | "sync.rw_mutex" => Some("sync.RWMutex"),
+            "sync.wait_group" | "sync.WaitGroup" | "sync.waitgroup" => Some("sync.WaitGroup"),
+            "sync.once" | "sync.Once" => Some("sync.Once"),
+            "sync.cond" | "sync.Cond" => Some("sync.Cond"),
+            "time.ticker" | "time.Ticker" => Some("time.Ticker"),
+            "time.timer" | "time.Timer" => Some("time.Timer"),
+            "strings.builder" | "strings.Builder" => Some("strings.Builder"),
+            "bytes.buffer" | "bytes.Buffer" => Some("bytes.Buffer"),
+            _ => None,
+        };
+        let Some(curated) = norm else {
+            return;
+        };
+
+        let want: Option<usize> = match (curated, method) {
+            ("sync.Mutex", "lock" | "unlock" | "try_lock") => Some(0),
+            ("sync.RWMutex", "lock" | "unlock" | "try_lock" | "rlock" | "runlock" | "try_rlock") => Some(0),
+            ("sync.WaitGroup", "done" | "wait") => Some(0),
+            ("sync.WaitGroup", "add") => Some(1),
+            ("sync.Once", "do") => Some(1),
+            ("sync.Cond", "wait" | "signal" | "broadcast") => Some(0),
+            ("time.Ticker", "stop") => Some(0),
+            ("time.Ticker", "reset") => Some(1),
+            ("time.Timer", "stop") => Some(0),
+            ("time.Timer", "reset") => Some(1),
+            ("strings.Builder", "reset" | "string" | "len" | "cap") => Some(0),
+            ("strings.Builder", "grow" | "write_string" | "write_byte" | "write_rune") => Some(1),
+            ("bytes.Buffer", "reset" | "string" | "bytes" | "len" | "cap" | "unread_byte" | "unread_rune") => Some(0),
+            ("bytes.Buffer", "truncate" | "grow" | "write_byte" | "write_rune" | "write_string") => Some(1),
+            _ => None,
+        };
+
+        let Some(want_arity) = want else {
+            return;
+        };
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic method `{}.{}` (HYB-E1002)",
+                    curated, method
+                ),
+                &format!("methods on `{}` are non-variadic; pass discrete arguments", curated),
+            );
+            return;
+        }
+
+        let got = args.len();
+        if got != want_arity {
+            let msg = if got < want_arity {
+                format!(
+                    "method `{}` on `{}` takes {} argument{} but is called with {} — Go refuses `not enough arguments in call to {}.{}` (HYB-E1002)",
+                    method,
+                    curated,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    curated,
+                    method
+                )
+            } else {
+                format!(
+                    "method `{}` on `{}` takes {} argument{} but is called with {} — Go refuses `too many arguments in call to {}.{}` (HYB-E1002)",
+                    method,
+                    curated,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    curated,
+                    method
+                )
+            };
+            self.emit_e1002(
+                span,
+                msg,
+                &format!("call `{}.{}` with {} argument{}", curated, method, want_arity, if want_arity == 1 { "" } else { "s" }),
+            );
+            return;
+        }
+
+        if got == 1 {
+            let bare = unwrap_parens(&args[0].value);
+            if curated == "sync.WaitGroup" && method == "add" {
+                if matches!(
+                    bare,
+                    Expr::Lit {
+                        kind: LitKind::Str(_)
+                            | LitKind::RawStr(_)
+                            | LitKind::Bool(_)
+                            | LitKind::Char(_)
+                            | LitKind::Nil
+                            | LitKind::Float(_),
+                        ..
+                    }
+                ) {
+                    self.emit_e1002(
+                        span,
+                        "method `add` on `sync.WaitGroup` requires an integer delta argument, found non-integer literal (HYB-E1002)".to_string(),
+                        "pass an integer delta (e.g. `wg.add(1)` or `wg.add(-1)`)",
+                    );
+                }
+            } else if (curated == "time.Ticker" || curated == "time.Timer") && method == "reset" {
+                if matches!(
+                    bare,
+                    Expr::Lit {
+                        kind: LitKind::Str(_)
+                            | LitKind::RawStr(_)
+                            | LitKind::Bool(_)
+                            | LitKind::Char(_)
+                            | LitKind::Nil,
+                        ..
+                    }
+                ) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "method `reset` on `{}` requires a duration argument, found non-duration literal (HYB-E1002)",
+                            curated
+                        ),
+                        &format!("pass a duration expression (e.g. `d.reset(time.seconds(1))`) to `{}.reset`", curated),
+                    );
+                }
+            }
+        }
+    }
+
     fn check_method_arity(&mut self, bk: &OpKind, name: &str, args: &[CallArg], span: Span) {
         // #880: a generic receiver carries its type arguments (`cache[int]`,
         // `*lru_cache[k, v]`) while `method_decls` is keyed by the *base*
@@ -7779,6 +7938,7 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+
                     if pkg == "time"
                         && self.lookup_kind(pkg).is_none()
                         && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
@@ -7817,6 +7977,91 @@ impl<'a> Collector<'a> {
                             }
                         }
                     }
+                    if pkg == "time" && self.lookup_kind(pkg).is_none() {
+                        let method = name.as_str();
+                        if method == "now" {
+                            if !args.is_empty() {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`time.now` takes 0 arguments, got {} (HYB-E1002)",
+                                        args.len()
+                                    ),
+                                    "write `time.now()`",
+                                );
+                            }
+                        } else if matches!(method, "sleep" | "after" | "tick") {
+                            if args.len() != 1 {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`time.{}` takes exactly 1 duration argument `(d)`, got {} (HYB-E1002)",
+                                        name,
+                                        args.len()
+                                    ),
+                                    &format!("write `time.{}(time.seconds(1))`", name),
+                                );
+                            } else {
+                                let bare = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Str(_)
+                                            | LitKind::RawStr(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`time.{}` requires a duration argument, found non-duration literal (HYB-E1002)",
+                                            name
+                                        ),
+                                        &format!("pass a duration expression to `time.{}`", name),
+                                    );
+                                }
+                            }
+                        } else if matches!(method, "since" | "until") {
+                            if args.len() != 1 {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`time.{}` takes exactly 1 time argument `(t)`, got {} (HYB-E1002)",
+                                        name,
+                                        args.len()
+                                    ),
+                                    &format!("write `time.{}(t)`", name),
+                                );
+                            } else {
+                                let bare = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Str(_)
+                                            | LitKind::RawStr(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`time.{}` requires a `time.Time` argument, found literal (HYB-E1002)",
+                                            name
+                                        ),
+                                        &format!("pass a `time.Time` expression to `time.{}`", name),
+                                    );
+                                }
+                            }
+                        }
+                    }
                     if pkg == "os"
                         && self.lookup_kind(pkg).is_none()
                         && matches!(name.as_str(), "args" | "stdout" | "stderr" | "stdin")
@@ -7845,6 +8090,93 @@ impl<'a> Collector<'a> {
                             ),
                             "write `hex.encode(data)` (SPEC M5 hex encoding)",
                         );
+                    }
+                    if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
+                        let method = name.as_str();
+                        if matches!(method, "append" | "appendln") {
+                            if args.is_empty() {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`fmt.{}` requires at least 1 destination byte slice argument `(b[, ...])`, got 0 (HYB-E1002)",
+                                        name
+                                    ),
+                                    &format!("write `fmt.{}(buf, ...)`", name),
+                                );
+                            } else {
+                                let bare = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil
+                                            | LitKind::Str(_),
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.{}` requires a byte slice destination argument, found non-slice literal (HYB-E1002)",
+                                            name
+                                        ),
+                                        &format!("pass a byte slice `[]byte` as destination to `fmt.{}`", name),
+                                    );
+                                }
+                            }
+                        } else if method == "appendf" {
+                            if args.len() < 2 {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`fmt.appendf` requires at least 2 arguments `(b, format[, ...])`, got {} (HYB-E1002)",
+                                        args.len()
+                                    ),
+                                    "write `fmt.appendf(buf, \"%s\", ...)`",
+                                );
+                            } else {
+                                let dest_bare = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    dest_bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil
+                                            | LitKind::Str(_),
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.appendf` requires a byte slice destination argument, found non-slice literal (HYB-E1002)".to_string(),
+                                        "pass a byte slice `[]byte` as destination to `fmt.appendf`",
+                                    );
+                                }
+                                let fmt_bare = unwrap_parens(&args[1].value);
+                                if matches!(
+                                    fmt_bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.appendf` requires a string format argument, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string literal or expression as format to `fmt.appendf`",
+                                    );
+                                }
+                            }
+                        }
                     }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
@@ -7941,6 +8273,9 @@ impl<'a> Collector<'a> {
                             ),
                             "declare the method on that type, or call something that exists",
                         );
+                    }
+                    if let Some(ref recv_ty) = self.foreign_recv_type(base, &bk) {
+                        self.check_foreign_method_arity(recv_ty, name, args, span);
                     }
                 }
                 if has_method {
