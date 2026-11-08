@@ -5414,6 +5414,211 @@ impl<'a> Collector<'a> {
         Some(m)
     }
 
+    fn check_sha3_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "digest256" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`sha3.digest256` takes exactly 1 argument `(data)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `sha3.digest256(data)` (SPEC M6 sha3 binding)",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "data" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`sha3.digest256` has no parameter named `{}` (params: data) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `data`",
+                        );
+                    }
+                }
+            }
+            "stream_checksum" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`sha3.stream_checksum` takes exactly 2 arguments `(iters, seed)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `sha3.stream_checksum(iters, seed)` (SPEC M6 sha3 binding)",
+                    );
+                } else {
+                    for a in args {
+                        if let Some(ref n) = a.name {
+                            if n != "iters" && n != "seed" {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`sha3.stream_checksum` has no parameter named `{}` (params: iters, seed) (HYB-E1002)",
+                                        n
+                                    ),
+                                    "pass arguments by position or use valid parameter names `iters` and `seed`",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn check_regex_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "is_match" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`regex.is_match` takes exactly 2 arguments `(pattern, text)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `regex.is_match(pattern, text)` (SPEC M6 regex binding)",
+                    );
+                } else {
+                    for a in args {
+                        if let Some(ref n) = a.name {
+                            if n != "pattern" && n != "text" {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`regex.is_match` has no parameter named `{}` (params: pattern, text) (HYB-E1002)",
+                                        n
+                                    ),
+                                    "pass arguments by position or use valid parameter names `pattern` and `text`",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            "is_valid" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`regex.is_valid` takes exactly 1 argument `(pattern)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `regex.is_valid(pattern)` (SPEC M6 regex binding)",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "pattern" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`regex.is_valid` has no parameter named `{}` (params: pattern) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `pattern`",
+                        );
+                    }
+                }
+            }
+            "compile" | "match_string" => {
+                self.emit_e1002(
+                    span,
+                    format!("cannot call unpinned symbol `regex.{}` (HYB-E1002)", name),
+                    &format!(
+                        "`regex.{}` is not in the pinned binding surface; use `regex.is_match` or `regex.is_valid`",
+                        name
+                    ),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn check_serde_json_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "value" => {
+                self.emit_e1002(
+                    span,
+                    "cannot call non-function package type `serde_json.value` (HYB-E1002)".to_string(),
+                    "use `serde_json.value` as a type or struct field, not a function",
+                );
+            }
+            "parse" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`serde_json.parse` takes exactly 1 argument `(data)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `serde_json.parse(data)` (SPEC M5 serde_json binding)",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "data" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`serde_json.parse` has no parameter named `{}` (params: data) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `data`",
+                        );
+                    }
+                }
+            }
+            "new_object" => {
+                if !args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`serde_json.new_object` takes no arguments, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `serde_json.new_object()` (SPEC M5 serde_json binding)",
+                    );
+                }
+            }
+            "new_array" => {
+                if !args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`serde_json.new_array` takes no arguments, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `serde_json.new_array()` (SPEC M5 serde_json binding)",
+                    );
+                }
+            }
+            "to_string_pretty" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`serde_json.to_string_pretty` takes exactly 1 argument `(v)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `serde_json.to_string_pretty(v)` (SPEC M5 serde_json binding)",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "v" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`serde_json.to_string_pretty` has no parameter named `{}` (params: v) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `v`",
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// #2834: a method-expression call `pt.get(recv, args...)` was
     /// never checked (the type-name base has no kind, so every method/field
     /// check failed open): `pt.get(1)` and `pt.get()` passed `hyb check` and
@@ -8668,6 +8873,21 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if (pkg == "sha3" || pkg == "rust/sha3")
+                        && self.lookup_kind(pkg).is_none()
+                    {
+                        self.check_sha3_call_buildable(name, args, span);
+                    }
+                    if (pkg == "regex" || pkg == "rust/regex")
+                        && self.lookup_kind(pkg).is_none()
+                    {
+                        self.check_regex_call_buildable(name, args, span);
+                    }
+                    if (pkg == "serde_json" || pkg == "rust/serde_json")
+                        && self.lookup_kind(pkg).is_none()
+                    {
+                        self.check_serde_json_call_buildable(name, args, span);
+                    }
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
