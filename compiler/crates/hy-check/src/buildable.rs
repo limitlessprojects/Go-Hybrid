@@ -4558,7 +4558,7 @@ impl<'a> Collector<'a> {
             self.emit_e1002(
                 span,
                 format!("cannot call non-function `sync.{member}` (HYB-E1002)"),
-                format!("`sync.{member}` is a type; create an instance or remove call parentheses"),
+                "remove call parentheses or create an instance",
             );
             return;
         }
@@ -4574,7 +4574,7 @@ impl<'a> Collector<'a> {
                 self.emit_e1002(
                     span,
                     format!("`sync.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
-                    format!("provide exactly {expected} {noun} to `sync.{member}`"),
+                    &format!("provide exactly {expected} {noun} to `sync.{member}`"),
                 );
             }
         }
@@ -4648,7 +4648,7 @@ impl<'a> Collector<'a> {
             self.emit_e1002(
                 span,
                 format!("cannot call non-function `http.{member}` (HYB-E1002)"),
-                format!("`http.{member}` is a type, variable, or constant; remove call parentheses or invoke a function"),
+                "remove call parentheses or invoke a function",
             );
             return;
         }
@@ -4667,7 +4667,7 @@ impl<'a> Collector<'a> {
                 self.emit_e1002(
                     span,
                     format!("`http.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
-                    format!("provide exactly {expected} {noun} to `http.{member}`"),
+                    &format!("provide exactly {expected} {noun} to `http.{member}`"),
                 );
             }
         }
