@@ -1,5 +1,30 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — triage board target (2026-11-06)
+
+- Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.
+
+## Contributor validation — installer upgrade rollback (2026-11-06)
+
+- On base `c3c78c0`, a valid candidate followed by a payload `cp` failure removed the installed runtime and CLI before the copy. New offline regressions fail on baseline for runtime/CLI copy and promotion failures. The installer stages both payloads on the install filesystem, backs up existing paths, restores them if promotion fails, and retains rollback data if restoration itself fails. `test_install_checksums.py`: 9/9, including old launcher execution and file/mode snapshots after injected failures. Shell installer change; compiler suite not run. Hosted CI, review, and any bounty award remain pending.
+## Contributor validation — Markdown angle destinations (2026-11-06)
+
+- On base `c3c78c0`, angle-delimited CommonMark destinations in `GUARANTEES.md` evidence were not recognized when they contained spaces; `.hy` paths also retained the delimiters and failed resolution. Regression tests fail on baseline and now cover spaces, parentheses, fragments, titles, external/empty targets, missing paths, and corpus verdicts. Focused suite: 11/11; claims check: 20 rows / 14 links / 0 issues; registration, conflict-marker, and diff checks pass. Tooling-only change; compiler suite not run. Hosted CI, review, and any bounty award remain pending.
+## Contributor validation — relative runtime Cargo target paths (2026-11-07)
+
+- `hyb` probes explicit `CARGO_TARGET_DIR` paths relative to its caller, but builds the runtime with Cargo's working directory set to `runtime/rust/hyrt`. Resolve that environment value to an absolute path before launching Cargo so both operations use the same directory; absolute paths and the unset crate-local default are preserved.
+- On base `fca2f63a`, the four new real CLI regressions have two relative-path failures and two passing absolute/unset controls. After the fix, all four pass, including caller/target paths containing spaces and second-invocation cache reuse. A separate smoke with real pinned Cargo and a dependency-free Rust staticlib also passes all four cases. On `4cda40a`, macOS x86_64 / Rust 1.99.0 / Go 1.26.9 validation passes: compiler workspace 2945/2945, corpus 135/135, differential 45/45 build-and-run + 90/90 reject, registration/conflict/census/changed-test-format/whitespace guards. Hosted CI and maintainer review remain pending; details in `spikes/relative-runtime-target-dir/RESULTS.md`.
+## Contributor validation — preserve build sidecar source (2026-11-07)
+
+- On base `fca2f63`, `hyb build good.hy -o app --emit-go` overwrites an existing hand-written or non-UTF-8 `app.go`. The implicit sidecar now refuses unmarked/unreadable existing content before Go compilation and marks new output with a basename-only generated header. The emitter and bridge input are unchanged.
+- Legacy unmarked build output requires a one-time explicit migration: choose another `-o` path or verify and move the old generated artifact. Six real CLI regressions cover preservation with and without `--emit-go`, non-UTF-8 bytes, legacy output, new headers, and repeated updates. The original four tests all fail before the fix.
+- Pinned macOS Go 1.26.9 / Rust 1.99.0: compiler workspace 2947 passed, 0 failed/ignored; corpus 135/135 (managed tripwire not fired); differential 45/45 build-and-run + 90/90 reject. The initial differential run lacked runtime Cargo dependencies; fetching the locked dependencies and rerunning offline passed without source changes. Test registration, conflict-marker, new-test formatting and changed-file whitespace checks pass. Hosted CI and maintainer review remain pending.
+
+## Contributor validation — Actions watch workflow selection (2026-11-05)
+
+- `job.py actions watch` now queries the heavy workflow before pagination, so newer CI runs cannot hide dispatched heavy jobs. Explicit run IDs still inspect the requested workflow. No compiler or language behavior changes.
+- On base `c716aeb`, the three new offline regressions produce two failures and one passing explicit-ID control; after the fix all three pass. The Windows job suite has the same ten environment errors and seven skips before (92 tests) and after (95 tests): unavailable make/POSIX shell and fixture commit identities rejected by a host Git hook. Test registration, conflict-marker and whitespace guards pass. Linux follow-up (isolated WSL Alpine 3.24, Python 3.14.10, GNU make, Git 2.54): `python3 -B -m unittest discover -s tools -p "test_job*.py" -v` passes all 95 tests with no skips in 9.049s; no source or test changes were needed. Hosted CI and maintainer review remain pending.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - Contributor amendment (2026-11-03, #3437): nested elided slice literals now delegate to array/slice slot checking or untyped inference for interface/unknown slots, including map keys and values. Regression pin in `compiler/crates/hy-check/tests/elided_untyped_slice_slots_3437.rs`; `make corpus` 130/130 and `cargo test --workspace` pass.
