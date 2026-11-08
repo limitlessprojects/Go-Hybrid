@@ -94,6 +94,7 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
         return Some(TypeShape::Unknown);
     }
     match name {
+        "error" => Some(TypeShape::ForeignOpaque("error".into())),
         "serde_json.value" => Some(TypeShape::OwnHandle("serde_json.value".into())),
         "serde_json.view" => Some(TypeShape::BorrowHandle("serde_json.view".into())),
         "flate2.writer" => Some(TypeShape::OwnHandle("flate2.writer".into())),
@@ -651,7 +652,13 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const NET_UDP_ADDR: &[&str] = &["addr_port", "network", "string"];
     const NET_UNIX_ADDR: &[&str] = &["network", "string"];
     const NET_IP_ADDR: &[&str] = &["network", "string"];
+    const BUILTIN_ERROR: &[&str] = &["error"];
+    const NET_ADDR: &[&str] = &["network", "string"];
+    const NET_ERROR: &[&str] = &["error", "temporary", "timeout"];
     match recv_type {
+        "error" | "errors.error" => Some(BUILTIN_ERROR),
+        "net.addr" | "net.Addr" => Some(NET_ADDR),
+        "net.error" | "net.Error" => Some(NET_ERROR),
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
@@ -744,6 +751,10 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         }
         ("http.request" | "http.Request", "cookie") => TypeShape::ForeignOpaque("http.cookie".into()),
         ("http.response" | "http.Response", "location") => TypeShape::ForeignOpaque("url.url".into()),
+        ("error" | "errors.error", "error") => TypeShape::Str,
+        ("net.addr" | "net.Addr", "network" | "string") => TypeShape::Str,
+        ("net.error" | "net.Error", "error") => TypeShape::Str,
+        ("net.error" | "net.Error", "temporary" | "timeout") => TypeShape::Primitive,
         ("strings.reader" | "strings.Reader", "len" | "size") => TypeShape::Primitive,
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
