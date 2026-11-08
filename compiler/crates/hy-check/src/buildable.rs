@@ -4536,6 +4536,276 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_sync_package_call(&mut self, pkg: &str, member: &str, args: &[CallArg], span: Span) {
+        if pkg != "sync" {
+            return;
+        }
+
+        // Non-callable types in package sync
+        let is_non_callable = matches!(
+            member,
+            "mutex"
+                | "rw_mutex"
+                | "wait_group"
+                | "pool"
+                | "once"
+                | "cond"
+                | "map"
+                | "locker"
+        );
+
+        if is_non_callable {
+            self.emit_e1002(
+                span,
+                format!("cannot call non-function `sync.{member}` (HYB-E1002)"),
+                format!("`sync.{member}` is a type; create an instance or remove call parentheses"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_cond" => Some(1),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`sync.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    format!("provide exactly {expected} {noun} to `sync.{member}`"),
+                );
+            }
+        }
+    }
+
+    fn check_http_package_call(&mut self, pkg: &str, member: &str, args: &[CallArg], span: Span) {
+        if pkg != "http" {
+            return;
+        }
+
+        // Non-callable types, variables, and constants in package net/http
+        let is_non_callable = matches!(
+            member,
+            "status_ok"
+                | "status_created"
+                | "status_accepted"
+                | "status_no_content"
+                | "status_moved_permanently"
+                | "status_found"
+                | "status_see_other"
+                | "status_not_modified"
+                | "status_temporary_redirect"
+                | "status_permanent_redirect"
+                | "status_bad_request"
+                | "status_unauthorized"
+                | "status_forbidden"
+                | "status_not_found"
+                | "status_method_not_allowed"
+                | "status_conflict"
+                | "status_gone"
+                | "status_internal_server_error"
+                | "status_not_implemented"
+                | "status_bad_gateway"
+                | "status_service_unavailable"
+                | "status_gateway_timeout"
+                | "method_get"
+                | "method_head"
+                | "method_post"
+                | "method_put"
+                | "method_patch"
+                | "method_delete"
+                | "method_connect"
+                | "method_options"
+                | "method_trace"
+                | "default_client"
+                | "default_serve_mux"
+                | "err_server_closed"
+                | "err_no_cookie"
+                | "err_no_location"
+                | "err_handler_timeout"
+                | "err_missing_file"
+                | "err_not_supported"
+                | "request"
+                | "response"
+                | "client"
+                | "server"
+                | "header"
+                | "cookie"
+                | "transport"
+                | "handler"
+                | "handler_func"
+                | "serve_mux"
+                | "round_tripper"
+                | "response_writer"
+                | "flusher"
+                | "hijacker"
+                | "close_notifier"
+        );
+
+        if is_non_callable {
+            self.emit_e1002(
+                span,
+                format!("cannot call non-function `http.{member}` (HYB-E1002)"),
+                format!("`http.{member}` is a type, variable, or constant; remove call parentheses or invoke a function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "get" | "head" | "detect_content_type" | "parse_time" | "status_text" => Some(1),
+            "post_form" | "listen_and_serve" | "set_cookie" | "not_found" | "handle" | "handle_func" | "serve" => Some(2),
+            "post" | "serve_file" | "error" | "new_request" => Some(3),
+            "redirect" | "listen_and_serve_tls" | "serve_tls" | "new_request_with_context" => Some(4),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`http.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    format!("provide exactly {expected} {noun} to `http.{member}`"),
+                );
+            }
+        }
+    }
+
+    fn check_net_package_call(&mut self, pkg: &str, member: &str, args: &[CallArg], span: Span) {
+        if pkg != "net" {
+            return;
+        }
+
+        // Non-callable types, variables, and constants in package net
+        let is_non_callable = matches!(
+            member,
+            "conn"
+                | "listener"
+                | "packet_conn"
+                | "addr"
+                | "dialer"
+                | "listen_config"
+                | "resolver"
+                | "ip"
+                | "ip_mask"
+                | "ip_net"
+                | "ip_addr"
+                | "ip_conn"
+                | "tcp_addr"
+                | "tcp_conn"
+                | "tcp_listener"
+                | "udp_addr"
+                | "udp_conn"
+                | "unix_addr"
+                | "unix_conn"
+                | "unix_listener"
+                | "interface"
+                | "hardware_addr"
+                | "buffers"
+                | "error"
+                | "addr_error"
+                | "dns_config_error"
+                | "dns_error"
+                | "invalid_addr_error"
+                | "op_error"
+                | "parse_error"
+                | "unknown_network_error"
+                | "err_closed"
+                | "err_write_to_connected"
+                | "ipv4len"
+                | "ipv6len"
+                | "default_resolver"
+        );
+        if is_non_callable {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot call `net.{}` - `net.{}` is a package type, variable, or constant, not a function (HYB-E1002)",
+                    member, member
+                ),
+                "do not invoke package types, variables, or constants as functions",
+            );
+            return;
+        }
+
+        let want: Option<usize> = match member {
+            // 0 args
+            "interfaces" | "interface_addrs" | "pipe" => Some(0),
+
+            // 1 arg
+            "split_host_port" | "lookup_addr" | "lookup_cname" | "lookup_host"
+            | "lookup_ip" | "lookup_mx" | "lookup_ns" | "lookup_txt" | "parse_cidr"
+            | "parse_ip" | "parse_mac" | "interface_by_index" | "interface_by_name"
+            | "file_conn" | "file_listener" | "file_packet_conn" => Some(1),
+
+            // 2 args
+            "listen" | "listen_packet" | "listen_tcp" | "listen_udp" | "listen_ip"
+            | "listen_unix" | "listen_unixgram" | "dial" | "join_host_port"
+            | "lookup_port" | "cidr_mask" | "resolve_ip_addr" | "resolve_tcp_addr"
+            | "resolve_udp_addr" | "resolve_unix_addr" => Some(2),
+
+            // 3 args
+            "dial_timeout" | "dial_tcp" | "dial_udp" | "dial_ip" | "dial_unix"
+            | "lookup_srv" => Some(3),
+
+            // 4 args
+            "ipv4" | "ipv4_mask" => Some(4),
+
+            _ => None,
+        };
+
+        let Some(want_arity) = want else {
+            return;
+        };
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic `net.{}` (HYB-E1002)",
+                    member
+                ),
+                "`net` package functions are non-variadic; pass discrete arguments",
+            );
+            return;
+        }
+
+        let got = args.len();
+        if got != want_arity {
+            let msg = if got < want_arity {
+                format!(
+                    "function `net.{}` takes {} argument{} but is called with {} - Go refuses `not enough arguments in call to net.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            } else {
+                format!(
+                    "function `net.{}` takes {} argument{} but is called with {} - Go refuses `too many arguments in call to net.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            };
+            self.emit_e1002(
+                span,
+                msg,
+                &format!(
+                    "pass exactly {} argument{} to `net.{}`",
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    member
+                ),
+            );
+        }
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -7689,6 +7959,11 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        self.check_net_package_call(pkg, name, args, span);
+                        self.check_http_package_call(pkg, name, args, span);
+                        self.check_sync_package_call(pkg, name, args, span);
+                    }
                     if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
@@ -7779,6 +8054,7 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+
                     if pkg == "time"
                         && self.lookup_kind(pkg).is_none()
                         && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
