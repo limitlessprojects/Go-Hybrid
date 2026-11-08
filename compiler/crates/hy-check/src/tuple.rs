@@ -14,8 +14,9 @@
 //! bindings / aliases (including type-aliased `fn` types), declared and
 //! inline closures, user-defined struct methods, indirect `fn`-typed callees
 //! (struct fields, array/slice/map elements, higher-order calls), and curated
-//! foreign package calls. `?`-unwrapped calls stay permissive (unwrapping the
-//! error produces a single value).
+//! foreign package calls. `?`-unwrapped calls unwrap the trailing `error`:
+//! multi-value calls yielding N results produce N-1 values and are
+//! checked against target binding counts.
 
 use crate::foreign;
 use crate::model::{unwrap_parens, Binding, Checker, FnState, TypeShape};
@@ -539,12 +540,18 @@ impl<'a> Checker<'a> {
     }
 
     /// `Some((callee, result count))` when `expr` is a direct or indirect call
-    /// with a statically known result count (excluding `?`-unwrapped calls).
+    /// with a statically known result count (including `?`-unwrapped calls).
     fn static_result_count(&self, st: &FnState, expr: &Expr) -> Option<(String, usize)> {
-        let Expr::Call { callee, .. } = unwrap_parens_and_move(expr) else {
+        let mut is_try = false;
+        let mut cur = unwrap_parens_and_move(expr);
+        while let Expr::Try { operand, .. } = cur {
+            is_try = true;
+            cur = unwrap_parens_and_move(operand);
+        }
+        let Expr::Call { callee, .. } = cur else {
             return None;
         };
-        match unwrap_parens_and_move(callee) {
+        let (name, count) = match unwrap_parens_and_move(callee) {
             Expr::Ident { name, .. } => {
                 if st.type_params.contains(name.as_str()) {
                     return None;
@@ -629,6 +636,14 @@ impl<'a> Checker<'a> {
                 }
                 None
             }
+        }?;
+        if is_try {
+            if count <= 1 {
+                return None;
+            }
+            Some((format!("{name}?"), count - 1))
+        } else {
+            Some((name, count))
         }
     }
 
