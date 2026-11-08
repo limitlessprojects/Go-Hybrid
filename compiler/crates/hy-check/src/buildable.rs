@@ -8246,7 +8246,7 @@ impl<'a> Collector<'a> {
                             &format!("write `os.{}` (package variable, not a function)", name),
                         );
                     }
-                    if pkg == "hex" && self.lookup_kind(pkg).is_none() {
+                    if (pkg == "hex" || pkg == "encoding/hex") && self.lookup_kind(pkg).is_none() {
                         // Full encoding/hex call surface — every member the
                         // member table in foreign.rs blesses, with the arity
                         // of the Go name it lowers to (`to_go_name`: snake
