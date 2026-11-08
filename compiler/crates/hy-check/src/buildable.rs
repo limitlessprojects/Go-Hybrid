@@ -4536,6 +4536,91 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_sort_package_call(&mut self, pkg: &str, member: &str, args: &[CallArg], span: Span) {
+        if pkg != "sort" {
+            return;
+        }
+
+        // Non-callable types in package sort
+        let is_non_callable = matches!(
+            member,
+            "interface" | "int_slice" | "float64_slice" | "string_slice"
+        );
+        if is_non_callable {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot call `sort.{}` - `sort.{}` is a package type, not a function (HYB-E1002)",
+                    member, member
+                ),
+                "do not invoke package types as functions; construct them with type conversion or struct literal",
+            );
+            return;
+        }
+
+        let want: Option<usize> = match member {
+            // 1 arg
+            "ints" | "ints_are_sorted" | "float64s" | "float64s_are_sorted"
+            | "strings" | "strings_are_sorted" | "sort" | "stable"
+            | "is_sorted" | "reverse" => Some(1),
+
+            // 2 args
+            "search" | "search_ints" | "search_float64s" | "search_strings"
+            | "slice" | "slice_is_sorted" | "slice_stable" | "find" => Some(2),
+
+            _ => None,
+        };
+
+        let Some(want_arity) = want else {
+            return;
+        };
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic `sort.{}` (HYB-E1002)",
+                    member
+                ),
+                "`sort` package functions are non-variadic; pass discrete arguments",
+            );
+            return;
+        }
+
+        let got = args.len();
+        if got != want_arity {
+            let msg = if got < want_arity {
+                format!(
+                    "function `sort.{}` takes {} argument{} but is called with {} - Go refuses `not enough arguments in call to sort.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            } else {
+                format!(
+                    "function `sort.{}` takes {} argument{} but is called with {} - Go refuses `too many arguments in call to sort.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            };
+            self.emit_e1002(
+                span,
+                msg,
+                &format!(
+                    "pass exactly {} argument{} to `sort.{}`",
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    member
+                ),
+            );
+        }
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -7689,6 +7774,9 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        self.check_sort_package_call(pkg, name, args, span);
+                    }
                     if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
@@ -7779,6 +7867,7 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+
                     if pkg == "time"
                         && self.lookup_kind(pkg).is_none()
                         && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
