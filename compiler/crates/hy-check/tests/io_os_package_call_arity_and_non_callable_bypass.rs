@@ -2,7 +2,7 @@
 //! `io` and `os` package functions must enforce call arity constraints, and package
 //! variables/constants must not be callable as functions during `hyb check` (HYB-E1002, Row 13 BUILDABLE).
 //!
-//! Without call validation, invocations of non-callable package values (like `io.eof()` or `os.stdout()`)
+//! Without call validation, invocations of non-callable package values (like `io.eof()` or `os.dev_null()`)
 //! and calls with invalid arities passed `hyb check` with 0 diagnostics and subsequently failed `go build`.
 
 use hy_check::{check_file, CheckResult, Verdict};
@@ -91,33 +91,7 @@ fn test() {
 
 #[test]
 fn test_os_non_callable_rejection() {
-    // os.stdin is an *os.File variable, not a function
-    rejects_e1002(
-        r#"
-package main
-
-import "os"
-
-fn test() {
-    os.stdin()
-}
-"#,
-    );
-
-    // os.stdout is an *os.File variable
-    rejects_e1002(
-        r#"
-package main
-
-import "os"
-
-fn test() {
-    os.stdout()
-}
-"#,
-    );
-
-    // os.dev_null is a constant
+    // os.dev_null is a constant string, not a function
     rejects_e1002(
         r#"
 package main
@@ -130,7 +104,7 @@ fn test() {
 "#,
     );
 
-    // os.args is a slice variable
+    // os.interrupt is an os.Signal variable
     rejects_e1002(
         r#"
 package main
@@ -138,7 +112,20 @@ package main
 import "os"
 
 fn test() {
-    os.args()
+    os.interrupt()
+}
+"#,
+    );
+
+    // os.o_rdonly is an integer constant
+    rejects_e1002(
+        r#"
+package main
+
+import "os"
+
+fn test() {
+    os.o_rdonly()
 }
 "#,
     );
@@ -225,6 +212,32 @@ fn test() {
 "#,
     );
 
+    // os.stdin takes 0 arguments (#3863 special member call)
+    rejects_e1002(
+        r#"
+package main
+
+import "os"
+
+fn test() {
+    os.stdin(1)
+}
+"#,
+    );
+
+    // os.stdout takes 0 arguments
+    rejects_e1002(
+        r#"
+package main
+
+import "os"
+
+fn test() {
+    os.stdout("err")
+}
+"#,
+    );
+
     // os.exit requires 1 argument
     rejects_e1002(
         r#"
@@ -279,6 +292,9 @@ fn test(r io.reader, w io.writer) {
     io.copy(w, r)
     os.getwd()
     os.open("test.txt")
+    os.stdin()
+    os.stdout()
+    os.args()
     os.exit(0)
 }
 "#,

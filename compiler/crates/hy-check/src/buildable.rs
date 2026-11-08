@@ -4633,11 +4633,7 @@ impl<'a> Collector<'a> {
         // Non-callable stream handles, variables, constants, and flags in package os
         let is_non_callable = matches!(
             member,
-            "stdin"
-                | "stdout"
-                | "stderr"
-                | "args"
-                | "dev_null"
+            "dev_null"
                 | "interrupt"
                 | "kill"
                 | "path_separator"
@@ -4658,8 +4654,9 @@ impl<'a> Collector<'a> {
         }
 
         let want: Option<usize> = match member {
-            // 0 args
-            "getwd" | "hostname" | "getpid" | "getppid" | "getuid" | "geteuid" | "getgid"
+            // 0 args (includes #3863 special member calls args, stdout, stderr, stdin)
+            "args" | "stdout" | "stderr" | "stdin"
+            | "getwd" | "hostname" | "getpid" | "getppid" | "getuid" | "geteuid" | "getgid"
             | "getegid" | "getgroups" | "getpagesize" | "temp_dir" | "user_cache_dir"
             | "user_config_dir" | "user_home_dir" | "pipe" | "environ" | "clearenv"
             | "executable" => Some(0),
