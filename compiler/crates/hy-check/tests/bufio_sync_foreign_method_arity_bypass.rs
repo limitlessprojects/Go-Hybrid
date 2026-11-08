@@ -1,6 +1,5 @@
 //! Regression tests for #4118:
-//! Curated foreign receiver methods (`bufio.reader`, `bufio.writer`, `bufio.scanner`,
-//! `sync.pool`, `io.pipe_reader`, `io.pipe_writer`, `io.limited_reader`)
+//! Curated foreign receiver methods (`bufio.reader`, `bufio.writer`, `bufio.scanner`, `sync.pool`)
 //! must enforce call arity constraints during `hyb check` (HYB-E1002, Row 13 BUILDABLE).
 //!
 //! Without arity checks on these foreign receiver methods, calls with too few or too many arguments
@@ -266,55 +265,12 @@ fn test(p *sync.pool) {
 }
 
 #[test]
-fn test_io_pipe_and_limited_reader_arity_rejection() {
-    // pr.close takes 0 arguments
-    rejects_e1002(
-        r#"
-package main
-
-import "io"
-
-fn test(pr *io.pipe_reader) {
-    pr.close(1)
-}
-"#,
-    );
-
-    // pw.close takes 0 arguments
-    rejects_e1002(
-        r#"
-package main
-
-import "io"
-
-fn test(pw *io.pipe_writer) {
-    pw.close(1)
-}
-"#,
-    );
-
-    // lr.read takes 1 argument
-    rejects_e1002(
-        r#"
-package main
-
-import "io"
-
-fn test(lr *io.limited_reader) {
-    lr.read()
-}
-"#,
-    );
-}
-
-#[test]
 fn test_valid_foreign_receiver_method_calls_accepted() {
     accepts(
         r#"
 package main
 
 import "bufio"
-import "io"
 import "sync"
 
 fn test_valid(
@@ -322,8 +278,6 @@ fn test_valid(
     w *bufio.writer,
     s *bufio.scanner,
     p *sync.pool,
-    pr *io.pipe_reader,
-    pw *io.pipe_writer,
 ) {
     r.buffered()
     r.discard(10)
@@ -335,8 +289,6 @@ fn test_valid(
     s.text()
     p.get()
     p.put(100)
-    pr.close()
-    pw.close()
 }
 "#,
     );

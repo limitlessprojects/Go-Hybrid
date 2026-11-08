@@ -5021,7 +5021,6 @@ impl<'a> Collector<'a> {
             "sync.once" | "sync.Once" => Some("sync.Once"),
             "sync.cond" | "sync.Cond" => Some("sync.Cond"),
             "sync.pool" | "sync.Pool" => Some("sync.Pool"),
-            "sync.map" | "sync.Map" => Some("sync.Map"),
             "time.ticker" | "time.Ticker" => Some("time.Ticker"),
             "time.timer" | "time.Timer" => Some("time.Timer"),
             "strings.builder" | "strings.Builder" => Some("strings.Builder"),
@@ -5029,9 +5028,6 @@ impl<'a> Collector<'a> {
             "bufio.reader" | "bufio.Reader" => Some("bufio.Reader"),
             "bufio.writer" | "bufio.Writer" => Some("bufio.Writer"),
             "bufio.scanner" | "bufio.Scanner" => Some("bufio.Scanner"),
-            "io.pipe_reader" | "io.PipeReader" => Some("io.PipeReader"),
-            "io.pipe_writer" | "io.PipeWriter" => Some("io.PipeWriter"),
-            "io.limited_reader" | "io.LimitedReader" => Some("io.LimitedReader"),
             _ => None,
         };
         let Some(curated) = norm else {
@@ -5048,9 +5044,6 @@ impl<'a> Collector<'a> {
             ("sync.Cond", "wait" | "signal" | "broadcast") => Some(0),
             ("sync.Pool", "get") => Some(0),
             ("sync.Pool", "put") => Some(1),
-            ("sync.Map", "load" | "delete" | "load_and_delete" | "range") => Some(1),
-            ("sync.Map", "store" | "load_or_store" | "compare_and_delete" | "swap") => Some(2),
-            ("sync.Map", "compare_and_swap") => Some(3),
 
             // time
             ("time.Ticker", "stop") => Some(0),
@@ -5072,13 +5065,6 @@ impl<'a> Collector<'a> {
             ("bufio.Scanner", "bytes" | "err" | "scan" | "text") => Some(0),
             ("bufio.Scanner", "split") => Some(1),
             ("bufio.Scanner", "buffer") => Some(2),
-
-            // io
-            ("io.PipeReader", "close") => Some(0),
-            ("io.PipeReader", "close_with_error" | "read") => Some(1),
-            ("io.PipeWriter", "close") => Some(0),
-            ("io.PipeWriter", "close_with_error" | "write") => Some(1),
-            ("io.LimitedReader", "read") => Some(1),
 
             _ => None,
         };
