@@ -1693,6 +1693,18 @@ impl<'a> Collector<'a> {
         self.file_consts.get(name).cloned()
     }
 
+    /// For `fmt` printf-family format operands: the kind label when `e` is
+    /// statically known to have a non-`string` kind, `None` otherwise.
+    /// `Str` (legit), `Unknown` (unresolvable), and `Interface` (`any`,
+    /// which Go accepts as a printf operand) stay permissive — mirroring the
+    /// conservative accept-side shape used everywhere in this file.
+    fn nonstring_format_kind(&self, e: &Expr) -> Option<String> {
+        match self.kind_of_expr(e) {
+            OpKind::Str | OpKind::Unknown | OpKind::Interface => None,
+            k => Some(k.label()),
+        }
+    }
+
     /// A `for`-iterate or `select`-receive binding is elided to `_` at
     /// emission when completely untouched, but if the body assigns to it
     /// (`v = ...`) without ever reading it, the emitter must keep the binding
@@ -7879,6 +7891,17 @@ impl<'a> Collector<'a> {
                                         ),
                                         &format!("pass a string literal or expression as format to `fmt.{}`", name),
                                     );
+                                } else if let Some(kind_label) =
+                                    self.nonstring_format_kind(bare)
+                                {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.{}` requires a string format argument, found non-string ({}) (HYB-E1002)",
+                                            name, kind_label
+                                        ),
+                                        &format!("pass a string literal or expression as format to `fmt.{}`", name),
+                                    );
                                 }
                             }
                         } else if method == "fprintf" {
@@ -7907,6 +7930,17 @@ impl<'a> Collector<'a> {
                                     self.emit_e1002(
                                         span,
                                         "`fmt.fprintf` requires a string format second argument, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string literal or expression as format to `fmt.fprintf`",
+                                    );
+                                } else if let Some(kind_label) =
+                                    self.nonstring_format_kind(bare)
+                                {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.fprintf` requires a string format second argument, found non-string ({}) (HYB-E1002)",
+                                            kind_label
+                                        ),
                                         "pass a string literal or expression as format to `fmt.fprintf`",
                                     );
                                 }
