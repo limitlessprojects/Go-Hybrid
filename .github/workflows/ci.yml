@@ -35,6 +35,7 @@ jobs:
           # link that does not resolve, or a doc edited out of step with the table.
           python3 tools/check_guarantees.py
           python3 -m unittest discover -s tools -p test_check_guarantees.py -v
+          python3 -m unittest discover -s tools -p test_triage_board_target.py -v
           python3 -m unittest discover -s tools -p test_author_repro_verdict.py -v
           python3 -m unittest discover -s tools -p test_shepherd_gate.py -v
           python3 -m unittest discover -s tools -p test_shepherd_verify_assert.py -v
@@ -132,6 +133,7 @@ jobs:
           python3 tests/test_install_runtime.py
           python3 tests/test_install_checksums.py
           python3 tests/test_install_upgrade.py
+          python3 tests/test_install_release_tag.py
 
   # The compiler (lands with MVP-0): pinned toolchains, full test suite,
   # corpus verdict agreement, and the walking-skeleton examples end-to-end.

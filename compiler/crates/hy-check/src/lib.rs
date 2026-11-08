@@ -52,6 +52,7 @@ mod buildable;
 mod const_overflow;
 mod closures;
 mod elided_literal;
+mod go_keyword_names;
 mod emit_guard;
 mod foreign;
 mod freeze;
@@ -70,7 +71,7 @@ mod try_context;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
-use hy_syntax::{Decl, Expr, File, FnDecl, ForKind, SelectArmKind, Stmt};
+use hy_syntax::{Decl, Expr, File, FnDecl, ForKind, SelectArmKind, Stmt, TypeExpr};
 use model::{Binding, Checker, FnState, MANAGED_CATEGORIES, TypeShape};
 
 /// The result of checking one file.
@@ -122,6 +123,9 @@ pub fn check_file(file: &File) -> CheckResult {
     // composite element slot is HYB-E1002 here, not an `emitter (MVP-0):
     // not yet supported` refusal at `hyb build`.
     ck.check_elided_struct_literals();
+    // Row 13: a declaration named `default` (the one unreserved Go keyword)
+    // cannot be spelled in the emitted Go.
+    ck.check_go_keyword_names();
 
     // E4 (HYB-E2011): `?` lands only in an error-result fn/closure, `main`,
     // or an E11 handler closure — lexical, like `return`.
@@ -734,10 +738,11 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     );
                     let is_chan = matches!(ck.shape_of_expr(&st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
-                    for (name, shape) in vars.iter().zip(shapes) {
+                    let var_tys = ck.iterate_var_tys(&st, expr, vars.len());
+                    for ((name, shape), var_ty) in vars.iter().zip(shapes).zip(var_tys) {
                         let is_ref = shape.is_reference_alias();
                         let may_share = ck.shape_may_share(&shape);
-                        ck.define_binding(&mut st, name, shape, None, false, managed, false);
+                        ck.define_binding(&mut st, name, shape, var_ty, false, managed, false);
                         if !is_chan {
                             if may_share {
                                 ck.record_may_share(&mut st, name, expr);
@@ -770,7 +775,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         hi,
                         format!("the range bound `{}`", hi.render()),
                     );
-                    ck.define_binding(&mut st, var, TypeShape::Primitive, None, false, managed, false);
+                    let range_ty = ck.typed_int_bound(&st, lo).or_else(|| ck.typed_int_bound(&st, hi)).map(|name| TypeExpr::Named { name, span: lo.span() });
+                    ck.define_binding(&mut st, var, TypeShape::Primitive, range_ty, false, managed, false);
                 }
                 ForKind::While { cond } => {
                     ck.mark_move_in_value(
