@@ -553,3 +553,18 @@
 - Queue refresh (desc order): flood is real — #4081-#4117, 20 open PRs: Yumihariii #4081 (sendability directional foreign chan), Burapa-J #4083/#4091, seenorht #4084/#4087, bradwue313 #4085/#4097/#4099/#4101, wminno #4088, marhabynova #4093, jpereyra243-byte #4095/#4109/#4117, mischievousdeveloper #4105, dextermos-dev #4107/#4111/#4113/#4115 (arity band), spikes/ #4089 excluded per ledger.
 - Next queue: #4081 battery+land (oldest open), then #4083, #4084, #4085... top-down by created. Stalled-watch unchanged: #3942/#3949/#3918.
 - Suites 479 integration files (unchanged; #3894 extends existing suite). Zero silent closes; push remote-asserted (6c1a0602 == ls-remote).
+
+## Session 150 — 2026-11-08 14:10 +08 (cron tick, Job 487193)
+
+- Cold sandbox; main still `a1490f03` (12:10 tick did not run in parallel — S149's failed start consumed it).
+- Triage scan killed by shell recycling twice (400/1140 stall); queue refreshed via API instead. New flood mapped: #4117–#4152 (today). Old S148 queue intact: #4081–#4116 all open.
+- **#4081 (Yumihariii, fixes #4076) LANDED → merge commit `6c7af266`.**
+  - Probe-first body honored: of the issue's four forms, method-receiver cases already reject on main; PR scoped to the two live foreign gaps (`close(time.after(..))` zero-diag Accept; send caught only by generic E3005).
+  - foreign.rs `package_result_chan_ty`: `("time","after"|"After")` → `<-chan time.Time`; sendability.rs consults after local-fn miss, `known_package` guard, fail direction unchanged. Insertion point verified semantically (unbound package root + local-fn miss).
+  - Merge clean (no conflicts). Battery: workspace 489 suites / 3136 passed / 0 failed, 480 on-disk files = 480 Running lines (1:1, +9 inline), new suite 8/8 standalone; corpus 135/135 tripwire clear; differential FULL 45/45 + 90/90.
+  - Pushed `a1490f03..6c7af266`, ls-remote asserted. Landing reply posted (comment 6718390970), bounty rail per BOUNTY.md tiers / discussion #295. Issue #4076 auto-closed.
+  - Notes: first cargo attempt ran from repo root (no Cargo.toml) — workspace lives in `compiler/`; differential_loop.py takes no positional mode arg (FULL is default). Triage scan background jobs need setsid/nohup next tick.
+  - Post-battery trim: target 4.6G removed, disk 90%→42%.
+- Suites on disk: **480** integration files. Corpus 135/135. Differential FULL AGREEMENT.
+- Next queue: #4083 (Burapa-J, const_overflow local float fold), then #4084/#4087 (seenorht), #4085/#4097/#4099/#4101 (bradwue313), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115, then today's #4117–#4152 flood — top-down by created.
+- Track-3 spikes #336–#474 untouched (review window 2026-12-01). Stale-watch #3942/#3949/#3918 unchanged.

@@ -3468,6 +3468,18 @@ impl<'a> Checker<'a> {
                                     .first()
                                     .map(|r| Self::substitute_type_params(&r.ty, &subst));
                             }
+                            // #4076: a curated foreign call with a directional
+                            // channel result (`time.after` → `<-chan`) must
+                            // resolve here; otherwise the call falls through
+                            // to the bare package name (→ `None`) and the
+                            // close/send direction checks fail open.
+                            if self.known_package(root) {
+                                if let Some(ty) =
+                                    crate::foreign::package_result_chan_ty(root, head, *span)
+                                {
+                                    return Some(ty);
+                                }
+                            }
                         }
                     }
                     let base_ty = self.dir_ty_of_expr(base, env)?;
