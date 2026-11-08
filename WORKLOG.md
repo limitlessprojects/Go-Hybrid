@@ -629,3 +629,16 @@
 - Suites on disk: **484**. Corpus 135/135. Differential FULL AGREEMENT.
 - Next queue: #4093 (marhabynova), #4095/#4109/#4117 (jpereyra243-byte), #4105 (mischievousdeveloper), #4107/#4111/#4113/#4115 (dextermos-dev arity band — check overlap vs landed #4087 fmt arm + #4088 resolve changes), flood #4117–#4152 — top-down by created. Also watch #4097 for author's escaped-quote fix.
 - Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 158 — 2026-11-09 01:10 +08 (cron tick, Job 487193; 22:10 sandbox-fail, 23:10/00:10 did not fire)
+
+- Cold sandbox; main pulled clean (`ce6219cd`).
+- **#4093 (marhabynova, fixes #4092) LANDED → merge commit `6ae4a862` — with IN-MERGE UNION disclosed.**
+  - fmt scan-family (scanf/sscanf/fscanf/sscan/sscanln/fscan/fscanln) arity + operand validation, HYB-E1002, same guard/fail-direction as #4087. Fix-its correctly escaped (no #4097 repeat).
+  - Trial merge conflicted: both #4087 and #4093 insert at the same hex-branch anchor. Resolved by side-by-side splice of both chains in the shared fmt guard (disjoint method-name sets); 3 duplicated git common-tail lines removed; `cargo check` green pre-battery. Procedure that worked: extract both complete blocks via depth-walk from each parent blob, rebuild from main version + inserted PR block (avoid hand-unstitching git's interleaved conflict hunks; balance assertion caught a stray -1 splice attempt first).
+  - Battery: workspace 494 suites / 3183 passed / 0 failed; 485 files = 485 Running lines (1:1, +9 inline); new suite standalone 14/14. Corpus 135/135 tripwire clear. Differential FULL 45/45 + 90/90.
+  - Pushed `ce6219cd..6ae4a862`, ls-remote asserted. Landing reply posted (comment 6724581497). Issue #4092 auto-closed.
+- Suites on disk: **485**. Corpus 135/135. Differential FULL AGREEMENT.
+- fmt family coverage on main: printf (#4087) + scan (#4093); append (#4097) still pending author's escaped-quote fix.
+- Next queue: #4095/#4109/#4117 (jpereyra243-byte), #4105 (mischievousdeveloper), #4107/#4111/#4113/#4115 (dextermos-dev arity band — dedupe vs landed fmt arms), flood #4117–#4152 — top-down by created.
+- Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
