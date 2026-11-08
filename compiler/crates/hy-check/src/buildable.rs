@@ -4536,6 +4536,103 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_strconv_package_call(&mut self, pkg: &str, member: &str, args: &[CallArg], span: Span) {
+        if pkg != "strconv" {
+            return;
+        }
+
+        // Non-callable types, variables, and constants in package strconv
+        let is_non_callable = matches!(
+            member,
+            "int_size" | "err_range" | "err_syntax" | "num_error"
+        );
+        if is_non_callable {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot call `strconv.{}` - `strconv.{}` is a package constant, variable, or type, not a function (HYB-E1002)",
+                    member, member
+                ),
+                "do not invoke non-callable package members as functions",
+            );
+            return;
+        }
+
+        let want: Option<usize> = match member {
+            // 1 arg
+            "atoi" | "itoa" | "parse_bool" | "format_bool" | "can_backquote"
+            | "is_graphic" | "is_print" | "quote" | "quote_rune"
+            | "quote_rune_to_ascii" | "quote_rune_to_graphic" | "quote_to_ascii"
+            | "quote_to_graphic" | "quoted_prefix" | "unquote" => Some(1),
+
+            // 2 args
+            "parse_complex" | "parse_float" | "format_int" | "format_uint"
+            | "append_bool" | "append_quote" | "append_quote_rune"
+            | "append_quote_rune_to_ascii" | "append_quote_rune_to_graphic"
+            | "append_quote_to_ascii" | "append_quote_to_graphic" | "unquote_char" => Some(2),
+
+            // 3 args
+            "parse_int" | "parse_uint" | "append_int" | "append_uint" => Some(3),
+
+            // 4 args
+            "format_complex" | "format_float" => Some(4),
+
+            // 5 args
+            "append_float" => Some(5),
+
+            _ => None,
+        };
+
+        let Some(want_arity) = want else {
+            return;
+        };
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic `strconv.{}` (HYB-E1002)",
+                    member
+                ),
+                "`strconv` package functions are non-variadic; pass discrete arguments",
+            );
+            return;
+        }
+
+        let got = args.len();
+        if got != want_arity {
+            let msg = if got < want_arity {
+                format!(
+                    "function `strconv.{}` takes {} argument{} but is called with {} - Go refuses `not enough arguments in call to strconv.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            } else {
+                format!(
+                    "function `strconv.{}` takes {} argument{} but is called with {} - Go refuses `too many arguments in call to strconv.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            };
+            self.emit_e1002(
+                span,
+                msg,
+                &format!(
+                    "pass exactly {} argument{} to `strconv.{}`",
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    member
+                ),
+            );
+        }
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -7689,6 +7786,9 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        self.check_strconv_package_call(pkg, name, args, span);
+                    }
                     if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
@@ -7779,6 +7879,7 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+
                     if pkg == "time"
                         && self.lookup_kind(pkg).is_none()
                         && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
