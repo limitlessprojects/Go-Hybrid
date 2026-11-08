@@ -568,3 +568,25 @@
 - Suites on disk: **480** integration files. Corpus 135/135. Differential FULL AGREEMENT.
 - Next queue: #4083 (Burapa-J, const_overflow local float fold), then #4084/#4087 (seenorht), #4085/#4097/#4099/#4101 (bradwue313), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115, then today's #4117–#4152 flood — top-down by created.
 - Track-3 spikes #336–#474 untouched (review window 2026-12-01). Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 152 — 2026-11-08 16:10 +08 (cron tick, Job 487193)
+
+- Cold sandbox. **S151's local commits were lost to persistent-volume rollback** (73bcc32b/f609ec61 absent, reflog reset to S150). Lesson recorded: unpushed local commits do not survive tick boundaries reliably; review state survives only in the PR thread (status comment did its job). Re-fetch + re-merge cost ~1 min — cheap; prefer redo over WIP refs unless diff review itself is at risk.
+- **#4083 (Burapa-J, fixes #4082) LANDED → merge commit `ef78ff1f`.**
+  - Patch identical to S151's reviewed head (`782c02e4`, 203+/46-), merge clean again.
+  - Battery (new chunked strategy, no background jobs): single-call `cargo test --no-run` completed in one 570s window (BUILD_RC=0), then single-call test run — 490 suites / 3140 passed / 0 failed; 481 on-disk files = 481 Running lines (1:1, +9 inline); new suite standalone 4/4. Corpus 135/135 tripwire clear. Differential FULL 45/45 + 90/90.
+  - Pushed `b2131a7a..ef78ff1f`, ls-remote asserted. Landing reply posted (comment 6719151543), supersedes S151 status comment. Issue #4082 auto-closed.
+- Suites on disk: **481** integration files. Corpus 135/135. Differential FULL AGREEMENT.
+- Next queue: #4084/#4087 (seenorht), #4085/#4097/#4099/#4101 (bradwue313), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115, then flood #4117–#4152 — top-down by created.
+- Track-3 spikes #336–#474 untouched (2026-12-01 window). Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 153 — 2026-11-08 17:10 +08 (cron tick, Job 487193)
+
+- Cold sandbox; main pulled clean (`78c33284`).
+- **#4084 (seenorht, also fixes #4076) LANDED → merge commit `84398676` — landed as verified SUPERSET supplement, not dup.**
+  - Dup protocol applied with judgment: #4081 won #4076's primary forms (after); #4084's diff showed real remaining fail-open surfaces (time.tick close, new_timer/new_ticker pointers, timer.c/ticker.c field dirs) → validated as increment, not rework. #4081's package_result_chan_ty table kept behind the new hardcoded arms (merged-tree verified both layers, same direction for shared case).
+  - Battery: workspace 491 suites / 3145 passed / 0 failed; 482 files = 482 Running lines (1:1, +9 inline); both 4076 suites coexist green 8/8 + 5/5 standalone. Corpus 135/135 tripwire clear. Differential FULL 45/45 + 90/90.
+  - Pushed `78c33284..84398676`, ls-remote asserted. Landing reply posted (comment 6719705276) with explicit #4081-relationship paragraph + nit on time.time vs time.Time spelling. PR kept open→merged; issue #4076 stays credited to #4081.
+- Suites on disk: **482**. Corpus 135/135. Differential FULL AGREEMENT.
+- Next queue: #4087 (seenorht), #4085/#4097/#4099/#4101 (bradwue313), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115, flood #4117–#4152 — top-down by created.
+- Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
