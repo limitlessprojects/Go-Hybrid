@@ -4987,7 +4987,10 @@ impl<'a> Collector<'a> {
     fn foreign_recv_type(&self, base: &Expr, bk: &OpKind) -> Option<String> {
         match bk {
             OpKind::Foreign(ref n) => Some(n.clone()),
-            OpKind::Pointer(box OpKind::Foreign(ref n)) => Some(n.clone()),
+            OpKind::Pointer(ref inner) => match &**inner {
+                OpKind::Foreign(ref n) => Some(n.clone()),
+                _ => None,
+            },
             _ => {
                 let bare = unwrap_parens(base);
                 if let Expr::Ident { name: ref id_name, .. } = bare {
