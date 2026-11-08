@@ -3289,6 +3289,20 @@ impl<'a> Checker<'a> {
             }
             Expr::Field { base, name, .. } => {
                 let base_ty = self.dir_ty_of_expr(base, env)?;
+                if let Some(bname) = Self::base_named_type(&base_ty) {
+                    if (bname == "time.timer" || bname == "time.Timer" || bname == "time.ticker" || bname == "time.Ticker")
+                        && (name == "c" || name == "C")
+                    {
+                        return Some(TypeExpr::Chan {
+                            dir: hy_syntax::ChanDir::Recv,
+                            elem: Box::new(TypeExpr::Named {
+                                name: "time.time".to_string(),
+                                span: expr.span(),
+                            }),
+                            span: expr.span(),
+                        });
+                    }
+                }
                 self.struct_fields_for_type(&base_ty)
                     .and_then(|fs| fs.into_iter().find(|(n, _)| n == name))
                     .map(|(_, t)| t)
@@ -3460,6 +3474,34 @@ impl<'a> Checker<'a> {
                     let head = Self::base_named_type_str(name);
                     if let Expr::Ident { name: root, .. } = unwrap_parens(base) {
                         if !env.is_bound(root) {
+                            if (root == "time" || root == "time.time") && matches!(head, "after" | "tick") {
+                                return Some(TypeExpr::Chan {
+                                    dir: hy_syntax::ChanDir::Recv,
+                                    elem: Box::new(TypeExpr::Named {
+                                        name: "time.time".to_string(),
+                                        span: *span,
+                                    }),
+                                    span: *span,
+                                });
+                            }
+                            if root == "time" && matches!(head, "new_timer" | "NewTimer") {
+                                return Some(TypeExpr::Pointer {
+                                    to: Box::new(TypeExpr::Named {
+                                        name: "time.timer".to_string(),
+                                        span: *span,
+                                    }),
+                                    span: *span,
+                                });
+                            }
+                            if root == "time" && matches!(head, "new_ticker" | "NewTicker") {
+                                return Some(TypeExpr::Pointer {
+                                    to: Box::new(TypeExpr::Named {
+                                        name: "time.ticker".to_string(),
+                                        span: *span,
+                                    }),
+                                    span: *span,
+                                });
+                            }
                             let full = format!("{}.{}", root, head);
                             if let Some(f) = self.fns.get(full.as_str()) {
                                 let subst = self.fn_subst_for_call(f, name, None, args, env, true);
@@ -3467,6 +3509,18 @@ impl<'a> Checker<'a> {
                                     .results
                                     .first()
                                     .map(|r| Self::substitute_type_params(&r.ty, &subst));
+                            }
+                            // #4076: a curated foreign call with a directional
+                            // channel result (`time.after` → `<-chan`) must
+                            // resolve here; otherwise the call falls through
+                            // to the bare package name (→ `None`) and the
+                            // close/send direction checks fail open.
+                            if self.known_package(root) {
+                                if let Some(ty) =
+                                    crate::foreign::package_result_chan_ty(root, head, *span)
+                                {
+                                    return Some(ty);
+                                }
                             }
                         }
                     }
