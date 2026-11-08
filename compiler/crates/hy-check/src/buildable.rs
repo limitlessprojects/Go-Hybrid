@@ -734,6 +734,11 @@ struct Collector<'a> {
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
     set_elem_scopes: Vec<HashMap<String, Option<String>>>,
+    /// Map bindings -> their declared predeclared numeric key scalar (`"int32"`),
+    /// scoped like `scalar_scopes` and `set_elem_scopes` so inferred map
+    /// bindings (`m := map[int32]V{...}`, `m := make(map[int32]V)`), map type
+    /// aliases, and shadowed inner bindings resolve accurately.
+    map_key_scopes: Vec<HashMap<String, Option<&'static str>>>,
     /// One layer per open scope, tracking `for ... in` element bindings
     /// whose kind is copy-semantics storage (`struct`/`array`). The emitter
     /// lowers them to Go's `for _, x := range xs`, so writes through the
@@ -811,6 +816,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             kind_scopes: Vec::new(),
             type_name_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
+            map_key_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
@@ -884,6 +890,7 @@ impl<'a> Collector<'a> {
         self.scalar_scopes.push(HashMap::new());
         self.container_elem_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
+        self.map_key_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
     }
 
@@ -894,6 +901,7 @@ impl<'a> Collector<'a> {
         self.scalar_scopes.pop();
         self.container_elem_scopes.pop();
         self.set_elem_scopes.pop();
+        self.map_key_scopes.pop();
         self.copy_var_scopes.pop();
     }
 
@@ -1021,6 +1029,9 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.set_elem_scopes.last_mut() {
                 top.insert(name.to_string(), None);
             }
+            if let Some(top) = self.map_key_scopes.last_mut() {
+                top.insert(name.to_string(), None);
+            }
         }
     }
 
@@ -1029,6 +1040,29 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.set_elem_scopes.last_mut() {
                 top.insert(name.to_string(), elem);
             }
+        }
+    }
+
+    fn bind_map_key_scalar(&mut self, name: &str, key_scalar: Option<&'static str>) {
+        if name != "_" && key_scalar.is_some() {
+            if let Some(top) = self.map_key_scopes.last_mut() {
+                top.insert(name.to_string(), key_scalar);
+            }
+        }
+    }
+
+    fn map_key_scalar_of_ty(&self, ty: &TypeExpr, depth: usize) -> Option<&'static str> {
+        if depth > 8 {
+            return None;
+        }
+        match ty {
+            TypeExpr::Map { key, .. } => self.scalar_of_ty(key),
+            TypeExpr::Named { name, .. } => {
+                let base = Checker::base_named_type_str(name.trim());
+                let target = self.ck.type_aliases.get(base)?;
+                self.map_key_scalar_of_ty(target, depth + 1)
+            }
+            _ => None,
         }
     }
 
@@ -1981,6 +2015,7 @@ impl<'a> Collector<'a> {
             let ces = self.container_elem_scalar_of_ty(&p.ty);
             self.set_container_elem_scalar(&p.name, ces);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
+            self.bind_map_key_scalar(&p.name, self.map_key_scalar_of_ty(&p.ty, 0));
             self.bind_type_name(&p.name, p.ty.render());
         }
         for r in &f.results {
@@ -1992,6 +2027,7 @@ impl<'a> Collector<'a> {
                 self.set_scalar(rname, rs);
                 let ces = self.container_elem_scalar_of_ty(&r.ty);
                 self.set_container_elem_scalar(rname, ces);
+                self.bind_map_key_scalar(rname, self.map_key_scalar_of_ty(&r.ty, 0));
                 self.bind_type_name(rname, r.ty.render());
             }
         }
@@ -2207,6 +2243,7 @@ impl<'a> Collector<'a> {
                 _ => None,
             })
             .collect();
+        let map_keys = self.infer_local_map_keys(l);
         if let Some(t) = &l.ty {
             let tname = t.render();
             for name in &l.names {
@@ -2225,8 +2262,14 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        for ((((name, kind), scalar), set_elem), container_elem_scalar) in
-            l.names.iter().zip(kinds).zip(scalars).zip(set_elems).zip(container_elem_scalars)
+        for (((((name, kind), scalar), set_elem), container_elem_scalar), map_key) in
+            l.names
+                .iter()
+                .zip(kinds)
+                .zip(scalars)
+                .zip(set_elems)
+                .zip(container_elem_scalars)
+                .zip(map_keys)
         {
             // #1031: a same-scope `:=` re-define keeps the EXISTING variable
             // (and its type) in Go, so only a fresh binding takes the
@@ -2239,6 +2282,7 @@ impl<'a> Collector<'a> {
             if fresh || l.ty.is_some() {
                 self.set_scalar(name, scalar);
                 self.set_container_elem_scalar(name, container_elem_scalar);
+                self.bind_map_key_scalar(name, map_key);
             }
             self.bind_set_elem(name, set_elem);
             if !track_read {
@@ -3117,6 +3161,7 @@ impl<'a> Collector<'a> {
                     let ces = self.container_elem_scalar_of_ty(&p.ty);
                     self.set_container_elem_scalar(&p.name, ces);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
+                    self.bind_map_key_scalar(&p.name, self.map_key_scalar_of_ty(&p.ty, 0));
                     self.bind_type_name(&p.name, p.ty.render());
                 }
                 for r in results {
@@ -3128,6 +3173,7 @@ impl<'a> Collector<'a> {
                         self.set_scalar(rname, rs);
                         let ces = self.container_elem_scalar_of_ty(&r.ty);
                         self.set_container_elem_scalar(rname, ces);
+                        self.bind_map_key_scalar(rname, self.map_key_scalar_of_ty(&r.ty, 0));
                         self.bind_type_name(rname, r.ty.render());
                     }
                 }
@@ -6653,12 +6699,115 @@ impl<'a> Collector<'a> {
         None
     }
 
+    fn infer_local_map_keys(&self, l: &LocalDecl) -> Vec<Option<&'static str>> {
+        let n = l.names.len();
+        if let Some(ty) = &l.ty {
+            return vec![self.map_key_scalar_of_ty(ty, 0); n];
+        }
+        if n == l.values.len() {
+            return l
+                .values
+                .iter()
+                .map(|v| self.map_key_scalar_name(Some(v)))
+                .collect();
+        }
+        if n >= 2 && l.values.len() == 1 {
+            if let Expr::Call { callee, .. } = unwrap_parens(&l.values[0]) {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if self.lookup_kind(name).is_none() {
+                        if let Some(f) = self.ck.fns.get(name.as_str()) {
+                            if f.receiver.is_none()
+                                && f.type_params.is_empty()
+                                && f.results.len() == n
+                            {
+                                return f
+                                    .results
+                                    .iter()
+                                    .map(|r| self.map_key_scalar_of_ty(&r.ty, 0))
+                                    .collect();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        vec![None; n]
+
+    }
+
     /// #3292: the declared key scalar of a map-typed base, when it is a
     /// predeclared numeric spelling. Anything else (named type, unresolved)
     /// gives None and the caller fails open.
     fn map_key_scalar_name(&self, base: Option<&Expr>) -> Option<&'static str> {
-        let key = self.map_key_type_name(base)?;
-        canonical_numeric_name(&key)
+        let base = unwrap_parens(base?);
+        match base {
+            Expr::Ident { name, .. } => {
+                for layer in self.map_key_scopes.iter().rev() {
+                    if let Some(s) = layer.get(name) {
+                        return *s;
+                    }
+                }
+                None
+            }
+            Expr::MapLit { key, .. } => self.scalar_of_ty(key),
+            Expr::StructLit { ty: Some(t), .. } => self.map_key_scalar_of_ty(t, 0),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                if self
+                    .ck
+                    .struct_type_params
+                    .get(base_name)
+                    .is_some_and(|tp| !tp.is_empty())
+                {
+                    return None;
+                }
+                let fields = self.ck.structs.get(base_name)?;
+                fields
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .and_then(|(_, fty)| self.map_key_scalar_of_ty(fty, 0))
+            }
+            Expr::Call { callee, args, .. } => match unwrap_parens(callee) {
+                Expr::Ident { name, .. } if self.lookup_kind(name).is_none() => {
+                    if name == "make" {
+                        let first = args.first()?;
+                        match unwrap_parens(&first.value) {
+                            Expr::MapLit { key, .. } => self.scalar_of_ty(key),
+                            Expr::StructLit { ty: Some(t), .. } => self.map_key_scalar_of_ty(t, 0),
+                            Expr::Ident { name: tname, .. } => {
+                                let base = Checker::base_named_type_str(tname.trim());
+                                let target = self.ck.type_aliases.get(base)?;
+                                self.map_key_scalar_of_ty(target, 0)
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        let f = self.ck.fns.get(name.as_str())?;
+                        if f.receiver.is_some()
+                            || !f.type_params.is_empty()
+                            || f.results.len() != 1
+                        {
+                            return None;
+                        }
+                        self.map_key_scalar_of_ty(&f.results[0].ty, 0)
+                    }
+                }
+                Expr::Field { base, name, .. } => {
+                    let bk = self.kind_of_expr(base);
+                    let sname = self.struct_base_name(&bk)?;
+                    let m = self.ck.method_decls.get(&(sname, name.clone()))?;
+                    if !m.type_params.is_empty() || m.results.len() != 1 {
+                        return None;
+                    }
+                    self.map_key_scalar_of_ty(&m.results[0].ty, 0)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+
     }
 
     fn check_index_kind(
