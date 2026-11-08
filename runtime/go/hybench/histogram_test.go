@@ -1,6 +1,9 @@
 package hybench
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestRecordsAndRanks(t *testing.T) {
 	h := New()
@@ -79,5 +82,32 @@ func TestSummaryShape(t *testing.T) {
 	want := "workload-a p50="
 	if len(line) < len(want) || line[:len(want)] != want {
 		t.Fatalf("summary shape drifted: %q", line)
+	}
+}
+
+func TestHighMagnitudeMinNaNAndBucketClamp(t *testing.T) {
+	h := New()
+	high := int64(1)<<62 + 12345
+	h.Record(high)
+	if got := h.ValueAt(0); got != high {
+		t.Fatalf("ValueAt(0) for sample >= 1<<62 = %d, want %d", got, high)
+	}
+	if got := h.ValueAt(math.NaN()); got != 0 {
+		t.Fatalf("ValueAt(NaN) = %d, want 0", got)
+	}
+
+	u := New()
+	for i := 0; i < 100; i++ {
+		u.Record(3000)
+	}
+	if u.P50() != 3000 || u.P99() != 3000 || u.ValueAt(1.0) != 3000 {
+		t.Fatalf("uniform samples above 1024 exceeded maxVal: p50=%d p99=%d max=%d",
+			u.P50(), u.P99(), u.ValueAt(1.0))
+	}
+
+	top := New()
+	top.Record(math.MaxInt64)
+	if top.P50() != math.MaxInt64 || top.P99() != math.MaxInt64 {
+		t.Fatalf("MaxInt64 bucket reconstruction drifted: p50=%d p99=%d", top.P50(), top.P99())
 	}
 }

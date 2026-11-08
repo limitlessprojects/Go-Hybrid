@@ -1270,8 +1270,15 @@ sendability check-sites exactly like statement sends (C5).
 
 `default` is contextual at a select arm head (`default:`), including after
 an unbraced preceding arm. It is not an additional LX3 reserved word:
-ordinary identifier uses, such as a channel named `default`, remain legal.
+ordinary identifier uses, such as a channel named `default`, still parse.
 Corpus 24 pins the nonblocking fallback; parser tests pin this distinction.
+It is still a Go keyword, though, and the emitter spells names verbatim, so
+the checker rejects every DECLARATION named `default` with `HYB-E1002`. That
+covers locals, params, named results, receivers, type params, fn, method,
+struct, alias, and const names, struct fields, loop variables, select-receive
+names, match bindings, and closure params. Without the rule each of these
+fails gofmt / `go build` (`expected '}', found 'default'`; GUARANTEES
+Row 13). An undeclared use is already `HYB-E1001`.
 
 ### 8.4 Sendability check-sites — the complete list
 

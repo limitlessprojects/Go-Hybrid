@@ -12,7 +12,10 @@
 use crate::const_overflow::ConstFold;
 use crate::model::{unwrap_parens, unwrap_parens_and_move, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{ChanDir, Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
+use hy_syntax::{
+    AssignOp, ChanDir, Expr, ForKind, LitKind, LocalKind, Place, PlaceKind, SelectArmKind, Stmt,
+    UnOp,
+};
 use std::collections::{HashMap, HashSet};
 
 impl<'a> Checker<'a> {
@@ -35,7 +38,8 @@ impl<'a> Checker<'a> {
                     .map(|(k, _)| k.clone()),
             );
         }
-        self.check_stmt_builtin_args_inner(st, stmt, /*deep=*/ false);
+        let mut cst = st.clone();
+        self.check_stmt_builtin_args_inner(&mut cst, stmt, /*deep=*/ false);
         self.zd_defined.clear();
     }
 
@@ -65,21 +69,44 @@ impl<'a> Checker<'a> {
         );
     }
 
-    fn check_stmt_builtin_args_inner(&mut self, st: &FnState, stmt: &Stmt, deep: bool) {
+    fn check_stmt_builtin_args_inner(&mut self, st: &mut FnState, stmt: &Stmt, deep: bool) {
         match stmt {
             Stmt::Local(l) => {
                 for v in &l.values {
                     self.check_expr_builtin_args(st, v);
                 }
+                if deep {
+                    let (imm, is_let, pre) = (l.kind == LocalKind::Const, l.kind == LocalKind::Let, st.clone());
+                    for (i, n) in l.names.iter().enumerate() {
+                        let v = l.values.get(i);
+                        let s = v.map(|e| self.shape_of_expr(&pre, e)).filter(|s| !matches!(s, TypeShape::Unknown))
+                            .or_else(|| l.ty.as_ref().map(|t| self.shape_of_type(t))).unwrap_or(TypeShape::Unknown);
+                        self.define_binding(st, n, s, v.and_then(|e| self.ty_of_expr(&pre, e)).or_else(|| l.ty.clone()), imm, false, is_let);
+                        if let Some(e) = v { Self::track_deep_rhs(st, n, e); }
+                    }
+                }
             }
             Stmt::Assign {
-                targets, values, ..
+                targets, op, values, ..
             } => {
                 for t in targets {
                     self.check_place_builtin_args(st, t);
                 }
                 for v in values {
                     self.check_expr_builtin_args(st, v);
+                }
+                if deep && matches!(op, AssignOp::Assign) && targets.len() == values.len() {
+                    let pre = st.clone();
+                    for (t, v) in targets.iter().zip(values) {
+                        if let PlaceKind::Ident(n) = &t.kind {
+                            let (s, ty) = (self.shape_of_expr(&pre, v), self.ty_of_expr(&pre, v));
+                            if let Some(b) = st.env_lookup_mut(n) {
+                                if !matches!(s, TypeShape::Unknown) { b.shape = s; }
+                                if ty.is_some() || b.ty.is_none() { b.ty = ty; }
+                            }
+                            Self::track_deep_rhs(st, n, v);
+                        }
+                    }
                 }
             }
             Stmt::Expr { expr, .. } => self.check_expr_builtin_args(st, expr),
@@ -206,10 +233,12 @@ impl<'a> Checker<'a> {
         match expr {
             Expr::Call { callee, args, span } => {
                 self.check_expr_builtin_args(st, callee);
+                let unshadowed = |s: &Self, n: &str| {
+                    !s.fns.contains_key(n) && s.lookup_binding(st, n).is_none() && !s.zd_defined.contains(n) && !s.closure_bound.iter().any(|c| c.contains(n))
+                };
                 let is_type_arg_builtin = matches!(
                     unwrap_parens(callee),
-                    Expr::Ident { name, .. }
-                        if (name == "make" || name == "new") && !self.fns.contains_key(name.as_str())
+                    Expr::Ident { name, .. } if (name == "make" || name == "new") && unshadowed(self, name)
                 );
                 for (i, a) in args.iter().enumerate() {
                     if is_type_arg_builtin && i == 0 {
@@ -218,7 +247,9 @@ impl<'a> Checker<'a> {
                     self.check_expr_builtin_args(st, &a.value);
                 }
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
-                    self.check_builtin_call(name, args, *span);
+                    if unshadowed(self, name) {
+                        self.check_builtin_call(st, name, args, *span);
+                    }
                 }
                 // W-016 M3: a closure that writes a captured binding and is
                 // passed to a foreign Go call is the A5 escape perimeter
@@ -281,10 +312,16 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::FnLit { params, body, .. } => {
+            Expr::FnLit { params, results, body, .. } => {
                 self.push_closure_bound(params, body);
+                let mut cst = st.clone();
+                for (n, ty) in params.iter().map(|p| (&p.name, &p.ty)).chain(
+                    results.iter().filter_map(|r| r.name.as_ref().filter(|n| *n != "_").map(|n| (n, &r.ty))),
+                ) {
+                    self.define_binding(&mut cst, n, self.shape_of_type(ty), Some(ty.clone()), false, false, false);
+                }
                 for stmt in &body.stmts {
-                    self.check_stmt_builtin_args_inner(st, stmt, /*deep=*/ true);
+                    self.check_stmt_builtin_args_inner(&mut cst, stmt, /*deep=*/ true);
                 }
                 self.pop_closure_bound();
             }
@@ -292,12 +329,12 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_builtin_call(&mut self, name: &str, args: &[hy_syntax::CallArg], span: Span) {
+    fn check_builtin_call(&mut self, st: &FnState, name: &str, args: &[hy_syntax::CallArg], span: Span) {
         if self.fns.contains_key(name) {
             return;
         }
         match name {
-            "make" => self.check_make_args(args, span),
+            "make" => self.check_make_args(st, args, span),
             "len" => self.check_len_cap_args("len", args, span, /*cap=*/ false),
             "cap" => self.check_len_cap_args("cap", args, span, /*cap=*/ true),
             "delete" => {
@@ -502,7 +539,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_make_args(&mut self, args: &[hy_syntax::CallArg], span: Span) {
+    fn check_make_args(&mut self, st: &FnState, args: &[hy_syntax::CallArg], span: Span) {
         if args.is_empty() {
             self.emit_builtin(
                 span,
@@ -575,7 +612,7 @@ impl<'a> Checker<'a> {
         }
         let mut evaluated_sizes = Vec::new();
         for arg in args.iter().skip(1) {
-            match self.classify_make_size(&arg.value) {
+            match self.classify_make_size(st, &arg.value) {
                 MakeSize::Ok(v) => evaluated_sizes.push(Some(v)),
                 MakeSize::NonLiteral => evaluated_sizes.push(None),
                 MakeSize::Negative => {
@@ -679,8 +716,9 @@ impl<'a> Checker<'a> {
         let site_sa = self.enclosing_fn(span).map(|f| self.state_at(f, Some(span)));
         let eff_sa;
         let sa = match &site_sa { Some(s) => s, None => { eff_sa = StateAt::new(st.clone()); &eff_sa } };
-        if !self.is_foreign_escape_callee(&sa.st, callee) { return; }
-        let Some(name) = args.iter().find_map(|a| self.arg_closure_captured_write(st, &a.value).or_else(|| (!self.closure_bound.is_empty()).then(|| self.arg_closure_captured_write(&sa.st, &a.value)).flatten()).or_else(|| self.expr_escape_root(sa, Some(span), &a.value, 0))) else { return; };
+        let direct = self.callee_reaches_foreign(sa, Some(span), callee, &[], &[], 0, &mut HashSet::new());
+        let name = direct.then(|| args.iter().find_map(|a| self.arg_closure_captured_write(st, &a.value).or_else(|| (!self.closure_bound.is_empty()).then(|| self.arg_closure_captured_write(&sa.st, &a.value)).flatten()).or_else(|| self.expr_escape_root(sa, Some(span), &a.value, 0)))).flatten().or_else(|| self.paired_caller_escape_root(sa, span, callee, args));
+        let Some(name) = name else { return; };
         self.diags.push(
             Diagnostic::error(
                 "HYB-E3013",
@@ -722,8 +760,102 @@ impl<'a> Checker<'a> {
         false
     }
 
+    fn collect_block_calls<'b>(b: &'b hy_syntax::Block, out: &mut Vec<crate::walk::CallRef<'b>>) {
+        for (s, _) in crate::walk::flatten(b).stmts {
+            crate::walk::own_calls(s, out); if let Stmt::For { kind: ForKind::Iterate { expr, .. }, .. } = s { crate::walk::expr_calls(expr, out); }
+            let mut fls = Vec::new(); crate::walk::own_fnlits(s, &mut fls); for fl in fls { if let Expr::FnLit { body, .. } = fl { Self::collect_block_calls(body, out); } }
+        }
+    }
+    fn fn_call_sites(&self, tf: &hy_syntax::FnDecl) -> Vec<(StateAt, Span, Vec<(String, Expr)>)> {
+        let mut sites = Vec::new();
+        for cf in self.file.fns() {
+            let Some(cb) = &cf.body else { continue }; let mut calls = Vec::new(); Self::collect_block_calls(cb, &mut calls);
+            for cr in calls.into_iter().filter(|cr| !self.in_managed_at(cr.span)) { match (tf.receiver.as_ref(), unwrap_parens_and_move(cr.callee)) {
+                (None, Expr::Ident { name, .. }) if name == &tf.name || Self::base_named_type_str(name) == tf.name => {
+                    let cs_sa = self.state_at(cf, Some(cr.span)); if self.lookup_binding(&cs_sa.st, name).is_none() { sites.push((cs_sa, cr.span, tf.params.iter().enumerate().filter_map(|(i, p)| cr.args.get(i).map(|a| (p.name.clone(), a.value.clone()))).collect())); }
+                }
+                (Some(r), Expr::Field { base, name, .. }) => {
+                    let (cs_sa, b) = (self.state_at(cf, Some(cr.span)), unwrap_parens_and_move(base));
+                    if self.resolve_method_decl(&cs_sa.st, b, name).is_some_and(|(d, _, _)| d.span == tf.span) {
+                        let mut bnd: Vec<_> = tf.params.iter().enumerate().filter_map(|(i, p)| cr.args.get(i).map(|a| (p.name.clone(), a.value.clone()))).collect();
+                        bnd.push((r.name.clone(), b.clone())); sites.push((cs_sa, cr.span, bnd));
+                    }
+                }
+                _ => {}
+            } }
+        }
+        sites
+    }
+    fn paired_caller_escape_root(&self, sa: &StateAt, span: Span, callee: &Expr, args: &[hy_syntax::CallArg]) -> Option<String> {
+        if self.is_foreign_escape_callee(&sa.st, callee) { return None; }
+        let ef = self.enclosing_fn(span)?; let mut phits = Vec::new();
+        for a in args { self.expr_method_escape(sa, Some(span), &a.value, &[], 0, None, &mut HashSet::new(), &mut phits); }
+        if !phits.iter().any(|h| matches!(h, EscapeHit::Param(..))) { return None; }
+        for (cs_sa, cs_sp, bound) in self.fn_call_sites(ef) {
+            let b_refs: Vec<_> = bound.iter().map(|(n, e)| (n.as_str(), &cs_sa, Some(cs_sp), e)).collect();
+            if self.callee_reaches_foreign(sa, Some(span), callee, &[], &b_refs, 0, &mut HashSet::new()) {
+                for h in &phits { if let EscapeHit::Param(pn, rem) = h { if let Some((_, ae)) = bound.iter().find(|(k, _)| k == pn) { if let Some((r, _)) = self.resolve_esc_hits(&cs_sa, Some(cs_sp), ae, rem, 1, None, &[], false, &[]) { return Some(r); } } } }
+            }
+        }
+        None
+    }
+    fn callee_reaches_foreign(&self, sa: &StateAt, cspan: Option<Span>, expr: &Expr, proj: &[Proj], bound: &[(&str, &StateAt, Option<Span>, &Expr)], dep: usize, seen: &mut EscapeSeen) -> bool {
+        if dep > 16 { return false; }
+        let e = unwrap_parens_and_move(expr); if proj.is_empty() && self.is_foreign_escape_callee(&sa.st, e) { return true; }
+        match e {
+            Expr::AddrOf { operand: o, .. } | Expr::Unary { op: UnOp::Addr, operand: o, .. } => self.callee_reaches_foreign(sa, cspan, o, proj, bound, dep + 1, seen),
+            Expr::Ident { name, .. } => {
+                if let Some(cv) = self.const_values.get(name.as_str()) { return self.callee_reaches_foreign(sa, cspan, cv, proj, bound, dep + 1, seen); }
+                let Some((sp, ef)) = cspan.and_then(|sp| self.enclosing_fn(sp).map(|f| (sp, f))) else { return false; };
+                if !seen.insert((sp.start.line, sp.start.col, name.clone(), proj.to_vec())) { return false; }
+                let Some(b) = &ef.body else { return false; }; let mut defs = Vec::new(); let (killed, fl) = Self::collect_reaching(&b.stmts, Some(sp), name, proj, 0, &mut defs);
+                for (rv, rsp, rp) in defs { let mut d_sa = self.state_at(ef, Some(rsp)); if let Some(fsp) = Self::innermost_fnlit(b, rsp) { d_sa.merge_decls(sa, Some(fsp)); } if self.callee_reaches_foreign(&d_sa, Some(rsp), rv, &rp, bound, dep + 1, seen) { return true; } }
+                if killed { return false; }
+                if let Some((_, b_sa, b_sp, b_ex)) = bound.iter().find(|(n, ..)| *n == name) { return self.callee_reaches_foreign(b_sa, *b_sp, b_ex, proj, &[], dep + 1, seen); }
+                if fl == 2 {
+                    let (mut calls, mut fls) = (Vec::new(), Vec::new()); Self::collect_block_calls(b, &mut calls); for (s, _) in crate::walk::flatten(b).stmts { crate::walk::own_fnlits(s, &mut fls); }
+                    let Some((fsp, p_idx)) = fls.into_iter().filter_map(|fl| match fl { Expr::FnLit { params, results, body, .. } if span_contains(body.span, sp) => params.iter().position(|p| p.name == *name).map(|i| (fn_span(params, results, body), i)), _ => None }).last() else { return false; };
+                    return calls.into_iter().filter(|cr| !self.in_managed_at(cr.span)).any(|cr| (match unwrap_parens_and_move(cr.callee) { Expr::FnLit { params, results, body, .. } => fn_span(params, results, body) == fsp, Expr::Ident { name: cn, .. } => { let mut ds = Vec::new(); let _ = Self::collect_reaching(&b.stmts, Some(cr.span), cn, &[], 0, &mut ds); ds.into_iter().any(|(rv, _, _)| matches!(unwrap_parens_and_move(rv), Expr::FnLit { params, results, body, .. } if fn_span(params, results, body) == fsp)) } _ => false }) && cr.args.get(p_idx).is_some_and(|a| self.callee_reaches_foreign(&self.state_at(ef, Some(cr.span)), Some(cr.span), &a.value, proj, bound, dep + 1, seen)));
+                }
+                bound.is_empty() && (ef.params.iter().any(|p| p.name == *name) || ef.receiver.as_ref().is_some_and(|r| r.name == *name)) && self.fn_call_sites(ef).into_iter().any(|(cs_sa, cs_sp, cbnd)| cbnd.into_iter().find(|(k, _)| k == name).is_some_and(|(_, ae)| self.callee_reaches_foreign(&cs_sa, Some(cs_sp), &ae, proj, &[], dep + 1, seen)))
+            }
+            Expr::StructLit { fields, .. } => match proj.first() { None => fields.iter().any(|f| self.callee_reaches_foreign(sa, cspan, &f.value, &[], bound, dep + 1, seen)), Some(Proj::Field(k)) => fields.iter().filter(|f| f.name == *k).any(|f| self.callee_reaches_foreign(sa, cspan, &f.value, &proj[1..], bound, dep + 1, seen)), _ => false },
+            Expr::SliceLit { items, .. } => match proj.first() { None => items.iter().any(|it| self.callee_reaches_foreign(sa, cspan, it, &[], bound, dep + 1, seen)), Some(Proj::Index(Some(k))) if k.parse::<usize>().is_ok() => k.parse::<usize>().ok().and_then(|i| items.get(i)).is_some_and(|it| self.callee_reaches_foreign(sa, cspan, it, &proj[1..], bound, dep + 1, seen)), Some(Proj::Index(_)) => items.iter().any(|it| self.callee_reaches_foreign(sa, cspan, it, &proj[1..], bound, dep + 1, seen)), _ => false },
+            Expr::MapLit { entries, .. } => match proj.first() { None => entries.iter().any(|(_, v)| self.callee_reaches_foreign(sa, cspan, v, &[], bound, dep + 1, seen)), Some(Proj::Index(pk)) => entries.iter().filter(|(k, _)| pk.as_deref().map_or(true, |pk| const_idx(k).map_or(true, |ck| ck == pk))).any(|(_, v)| self.callee_reaches_foreign(sa, cspan, v, &proj[1..], bound, dep + 1, seen)), _ => false },
+            Expr::Field { base, name, .. } => self.callee_reaches_foreign(sa, cspan, base, &prepend_proj(Proj::Field(name.clone()), proj), bound, dep + 1, seen),
+            Expr::Index { base, index, .. } => self.callee_reaches_foreign(sa, cspan, base, &prepend_proj(Proj::Index(const_idx(index)), proj), bound, dep + 1, seen),
+            Expr::Call { callee: inner_c, args: inner_args, .. } => {
+                let c = unwrap_parens_and_move(inner_c);
+                if let Expr::Ident { name, .. } = c { if self.lookup_binding(&sa.st, name).is_none() && !self.fns.contains_key(name.as_str()) {
+                    if name == "some" || (inner_args.len() == 1 && self.type_aliases.contains_key(Self::base_named_type_str(name))) { return inner_args.first().is_some_and(|a| self.callee_reaches_foreign(sa, cspan, &a.value, proj, bound, dep + 1, seen)); }
+                    if name == "append" { return match proj.first() { Some(Proj::Index(_)) => inner_args.first().is_some_and(|a| self.callee_reaches_foreign(sa, cspan, &a.value, &prepend_proj(Proj::Index(None), &proj[1..]), bound, dep + 1, seen)) || inner_args.iter().skip(1).any(|a| self.callee_reaches_foreign(sa, cspan, &a.value, &proj[1..], bound, dep + 1, seen)), None => inner_args.iter().any(|a| self.callee_reaches_foreign(sa, cspan, &a.value, &[], bound, dep + 1, seen)), _ => false }; }
+                } }
+                let ((t_idx, sub_proj), mut targets) = (match proj.first() { Some(Proj::Tuple(k)) => (*k, &proj[1..]), _ => (0, proj) }, Vec::<(&hy_syntax::FnDecl, &[hy_syntax::Param], &[hy_syntax::FnResult], &hy_syntax::Block, Option<(&hy_syntax::Receiver, &Expr)>, bool)>::new());
+                match c {
+                    Expr::FnLit { params, results, body, .. } => if let Some(ef) = cspan.and_then(|sp| self.enclosing_fn(sp)) { targets.push((ef, params, results, body, None, false)); },
+                    Expr::Ident { name, .. } if self.lookup_binding(&sa.st, name).is_some() => if let Some((sp, ef)) = cspan.and_then(|sp| self.enclosing_fn(sp).map(|f| (sp, f))) { if let Some(eb) = &ef.body { let mut ds = Vec::new(); let _ = Self::collect_reaching(&eb.stmts, Some(sp), name, &[], 0, &mut ds); for (rv, _, _) in ds { if let Expr::FnLit { params, results, body, .. } = unwrap_parens_and_move(rv) { targets.push((ef, params, results, body, None, false)); } } } },
+                    Expr::Ident { name, .. } => if let Some(&d) = self.fns.get(name.as_str()).or_else(|| self.fns.get(Self::base_named_type_str(name))) { if let Some(b) = &d.body { targets.push((d, &d.params, &d.results, b, None, true)); } },
+                    Expr::Field { base, name, .. } => { let b = unwrap_parens_and_move(base); if let Some((d, _, _)) = self.resolve_method_decl(&sa.st, b, name) { if let Some(bd) = &d.body { targets.push((d, &d.params, &d.results, bd, d.receiver.as_ref().map(|r| (r, b)), true)); } } }
+                    _ => {}
+                }
+                for (ef, params, results, body, recv_b, is_decl) in targets {
+                    let (cfn_sp, mut c_bnd) = (fn_span(params, results, body), params.iter().enumerate().filter_map(|(i, p)| inner_args.get(i).map(|a| (p.name.as_str(), sa, cspan, &a.value))).collect::<Vec<_>>());
+                    if let Some((r, rb)) = recv_b { c_bnd.push((r.name.as_str(), sa, cspan, rb)); }
+                    if !is_decl { for &(bn, bsa, bsp, bex) in bound { if !c_bnd.iter().any(|(n, ..)| *n == bn) { c_bnd.push((bn, bsa, bsp, bex)); } } }
+                    for (s, _) in crate::walk::flatten(body).stmts {
+                        let Stmt::Return { values, span: rspan } = s else { continue }; let mut r_sa = self.state_at(ef, Some(*rspan)); if !is_decl { r_sa.merge_decls(sa, Some(cfn_sp)); }
+                        if !values.is_empty() { let (rv, rp) = if values.len() == 1 && results.len() > 1 && matches!(proj.first(), Some(Proj::Tuple(_))) { (&values[0], proj) } else { let Some(v) = values.get(t_idx) else { continue }; (v, sub_proj) }; if self.callee_reaches_foreign(&r_sa, Some(*rspan), rv, rp, &c_bnd, dep + 1, &mut HashSet::new()) { return true; } }
+                        else if let Some(rn) = results.get(t_idx).and_then(|r| r.name.as_deref()) { if self.callee_reaches_foreign(&r_sa, Some(*rspan), &Expr::Ident { name: rn.to_string(), span: *rspan }, sub_proj, &c_bnd, dep + 1, &mut HashSet::new()) { return true; } }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     fn arg_closure_captured_write(&self, st: &FnState, arg: &Expr) -> Option<String> {
-        match unwrap_parens(arg) {
+        match unwrap_parens_and_move(arg) {
             Expr::FnLit {
                 params,
                 results,
@@ -794,7 +926,7 @@ impl<'a> Checker<'a> {
                                 if info.is_some() { for sm in scopes.iter_mut().rev().take_while(|sm| sm.contains_key(name)) { sm.insert(name.clone(), info.clone()); } }
                             }
                             PlaceKind::Index { .. } | PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } if alias.as_ref().is_some_and(|(_, p)| self.place_writes_shared(&sa.st, t, *p)) => return alias.map(|(c, _)| c),
-                            PlaceKind::Field { .. } if alias.is_none() => if let Some((c, _)) = classify(values.get(i).or_else(|| values.first()), scopes.last().unwrap(), &sa) { for sm in scopes.iter_mut().rev().take_while(|sm| sm.contains_key(root)) { sm.insert(root.to_string(), Some((c.clone(), false))); } },
+                            PlaceKind::Field { .. } | PlaceKind::Index { .. } if alias.is_none() => if let Some((c, _)) = classify(values.get(i).or_else(|| values.first()), scopes.last().unwrap(), &sa) { for sm in scopes.iter_mut().rev().take_while(|sm| sm.contains_key(root)) { sm.insert(root.to_string(), Some((c.clone(), false))); } },
                             _ => {}
                         }
                     }
@@ -1085,7 +1217,19 @@ impl<'a> Checker<'a> {
             _ => false,
         }, 0)
     }
+    fn track_deep_rhs(st: &mut FnState, name: &str, val: &Expr) {
+        st.aliases.remove(name);
+        st.closure_defs.remove(name);
+        match unwrap_parens_and_move(val) {
+            Expr::Ident { name: src, .. } if src != name => { st.aliases.insert(name.to_string(), src.clone()); }
+            Expr::FnLit { params, results, body, .. } => {
+                st.closure_defs.insert(name.to_string(), (params.clone(), results.clone(), body.clone()));
+            }
+            _ => {}
+        }
+    }
 }
+
 type Orig = (String, Span); type Origs = Vec<Orig>; type ScopeMap = HashMap<String, Option<(Orig, bool)>>;
 #[derive(Clone)] struct CallerFrame { args: Vec<(String, Expr)>, sa: StateAt, esc_span: Option<Span>, seed_origins: Vec<(Orig, Orig)>, strict: bool, is_decl: bool }
 type Seed = (ScopeMap, usize, Span, Vec<(Orig, Orig)>, bool, StateAt, Vec<CallerFrame>); type OuterCtx<'b> = (&'b [(Orig, Orig)], bool, Option<Span>, &'b [CallerFrame]);
@@ -1137,7 +1281,7 @@ enum MakeSize {
 }
 
 impl<'a> Checker<'a> {
-fn classify_make_size(&self, e: &Expr) -> MakeSize {
+fn classify_make_size(&self, st: &FnState, e: &Expr) -> MakeSize {
     let bare = unwrap_parens(e);
     match bare {
         Expr::Lit { kind, .. } => match kind {
@@ -1167,10 +1311,7 @@ fn classify_make_size(&self, e: &Expr) -> MakeSize {
         {
             MakeSize::BadLiteral("float")
         }
-        _ if expr_mentions_bound(bare, &self.zd_defined, &self.closure_bound) => {
-            MakeSize::NonLiteral
-        }
-        _ => match self.const_int_fold_expr(bare, None) {
+        _ => match self.fold_make_const_int(bare, Some(st), 0) {
             ConstFold::Val(n) if n < 0 => MakeSize::Negative,
             ConstFold::Val(n) if n > i64::MAX as i128 => MakeSize::Overflow,
             ConstFold::Val(n) => MakeSize::Ok(n),
@@ -1179,23 +1320,230 @@ fn classify_make_size(&self, e: &Expr) -> MakeSize {
         },
     }
 }
+
+fn is_unshadowed_in_make(&self, name: &str, st: Option<&FnState>) -> bool {
+    !self.fns.contains_key(name)
+        && !self.zd_defined.contains(name)
+        && !self.closure_bound.iter().any(|c| c.contains(name))
+        && st.is_none_or(|s| self.lookup_binding(s, name).is_none())
 }
 
-fn expr_mentions_bound(
-    e: &Expr,
-    fn_bound: &std::collections::HashSet<String>,
-    closure_sets: &[std::collections::HashSet<String>],
-) -> bool {
-    match unwrap_parens(e) {
-        Expr::Ident { name, .. } => {
-            fn_bound.contains(name) || closure_sets.iter().any(|s| s.contains(name))
+fn fold_make_const_int(&self, e: &Expr, st: Option<&FnState>, depth: u32) -> ConstFold {
+    if depth >= 16 {
+        return ConstFold::NotConst;
+    }
+    match unwrap_parens_and_move(e) {
+        Expr::Ident { name, span: id_span } => {
+            if self.zd_defined.contains(name.as_str())
+                || self.closure_bound.iter().any(|c| c.contains(name.as_str()))
+            {
+                return ConstFold::NotConst;
+            }
+            if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                let Some(init_expr) = sight.constant_initializer() else {
+                    return ConstFold::NotConst;
+                };
+                if sight.ty.as_ref().is_some_and(|ty| self.is_non_int_type(ty)) {
+                    return ConstFold::NotConst;
+                }
+                if (sight.pos.line, sight.pos.col) == (id_span.start.line, id_span.start.col) {
+                    return ConstFold::NotConst;
+                }
+                return self.fold_make_const_int(init_expr, st, depth + 1);
+            }
+            if st.is_some_and(|s| s.env_lookup(name).is_some()) {
+                return ConstFold::NotConst;
+            }
+            if let Some(v) = self.const_values.get(name.as_str()) {
+                return self.fold_make_const_int(v, None, depth + 1);
+            }
+            ConstFold::NotConst
         }
-        Expr::Unary { operand, .. } => expr_mentions_bound(operand, fn_bound, closure_sets),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => match self.fold_make_const_int(operand, st, depth + 1) {
+            ConstFold::Val(v) => v.checked_neg().map(ConstFold::Val).unwrap_or(ConstFold::TooBig),
+            other => other,
+        },
+        Expr::Binary { op, lhs, rhs, .. } => {
+            let l = self.fold_make_const_int(lhs, st, depth + 1);
+            let r = self.fold_make_const_int(rhs, st, depth + 1);
+            crate::const_overflow::fold_bin(*op, l, r)
+        }
+        Expr::Call { callee, args, .. } if args.iter().all(|a| !a.spread) => {
+            let Expr::Ident { name, .. } = unwrap_parens_and_move(callee) else {
+                return ConstFold::NotConst;
+            };
+            if !self.is_unshadowed_in_make(name, st) {
+                return ConstFold::NotConst;
+            }
+            if args.len() == 1 {
+                let arg = &args[0].value;
+                if name == "len" {
+                    if let Some(n) = self.fold_make_const_str_len(arg, st, depth + 1) {
+                        return ConstFold::Val(n);
+                    }
+                    if let Some(n) = self.fold_make_const_arr_len(arg, st) {
+                        return ConstFold::Val(n);
+                    }
+                    return ConstFold::NotConst;
+                }
+                if name == "cap" {
+                    if let Some(n) = self.fold_make_const_arr_len(arg, st) {
+                        return ConstFold::Val(n);
+                    }
+                    return ConstFold::NotConst;
+                }
+                if let Some((lo, hi)) = crate::const_overflow::fixed_width_int_range(name) {
+                    return match self.fold_make_const_int(arg, st, depth + 1) {
+                        ConstFold::Val(v) => ConstFold::Val(wrap_make_int(v, lo, hi)),
+                        other => other,
+                    };
+                }
+            }
+            if (name == "min" || name == "max") && !args.is_empty() {
+                let mut acc: Option<i128> = None;
+                for a in args {
+                    match self.fold_make_const_int(&a.value, st, depth + 1) {
+                        ConstFold::Val(v) => {
+                            acc = Some(match acc {
+                                None => v,
+                                Some(cur) if name == "min" => cur.min(v),
+                                Some(cur) => cur.max(v),
+                            });
+                        }
+                        other => return other,
+                    }
+                }
+                if let Some(v) = acc {
+                    return ConstFold::Val(v);
+                }
+            }
+            ConstFold::NotConst
+        }
+        other => self.const_int_fold_at(other, st, depth + 1),
+    }
+}
+
+fn fold_make_const_str_len(&self, e: &Expr, st: Option<&FnState>, depth: u32) -> Option<i128> {
+    if depth >= 16 {
+        return None;
+    }
+    match unwrap_parens_and_move(e) {
+        Expr::Lit {
+            kind: LitKind::Str(s) | LitKind::RawStr(s),
+            ..
+        } => Some(s.len() as i128),
+        Expr::Binary {
+            op: hy_syntax::BinOp::Add,
+            lhs,
+            rhs,
+            ..
+        } => {
+            let l = self.fold_make_const_str_len(lhs, st, depth + 1)?;
+            let r = self.fold_make_const_str_len(rhs, st, depth + 1)?;
+            l.checked_add(r)
+        }
+        Expr::Ident { name, span: id_span } => {
+            if self.zd_defined.contains(name.as_str())
+                || self.closure_bound.iter().any(|c| c.contains(name.as_str()))
+            {
+                return None;
+            }
+            if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                let init_expr = sight.constant_initializer()?;
+                if (sight.pos.line, sight.pos.col) == (id_span.start.line, id_span.start.col) {
+                    return None;
+                }
+                return self.fold_make_const_str_len(init_expr, st, depth + 1);
+            }
+            if st.is_some_and(|s| s.env_lookup(name).is_some()) {
+                return None;
+            }
+            let v = self.const_values.get(name.as_str())?;
+            self.fold_make_const_str_len(v, None, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+fn fold_make_const_arr_len(&self, e: &Expr, _st: Option<&FnState>) -> Option<i128> {
+    let bare = unwrap_parens_and_move(e);
+    if !Self::is_go_const_len_cap_operand(bare, &self.fns) {
+        return None;
+    }
+    if let Expr::Ident { name, .. } = bare {
+        if self.closure_bound.iter().any(|c| c.contains(name.as_str())) {
+            return None;
+        }
+    }
+    self.const_array_len_at(bare, bare.span().start, 0)
+}
+
+fn is_go_const_len_cap_operand(e: &Expr, fns: &HashMap<String, &'a hy_syntax::FnDecl>) -> bool {
+    let bare = unwrap_parens_and_move(e);
+    if let Some(op) = crate::model::as_addr_of(bare) {
+        return Self::is_go_const_len_cap_operand(op, fns);
+    }
+    match bare {
+        Expr::Ident { .. } | Expr::Lit { .. } => true,
+        Expr::Unary { operand, .. } => Self::is_go_const_len_cap_operand(operand, fns),
         Expr::Binary { lhs, rhs, .. } => {
-            expr_mentions_bound(lhs, fn_bound, closure_sets)
-                || expr_mentions_bound(rhs, fn_bound, closure_sets)
+            Self::is_go_const_len_cap_operand(lhs, fns)
+                && Self::is_go_const_len_cap_operand(rhs, fns)
+        }
+        Expr::Field { base, .. } => Self::is_go_const_len_cap_operand(base, fns),
+        Expr::Index { base, index, .. } => {
+            Self::is_go_const_len_cap_operand(base, fns)
+                && Self::is_go_const_len_cap_operand(index, fns)
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            Self::is_go_const_len_cap_operand(base, fns)
+                && lo.as_ref().is_none_or(|x| Self::is_go_const_len_cap_operand(x, fns))
+                && hi.as_ref().is_none_or(|x| Self::is_go_const_len_cap_operand(x, fns))
+        }
+        Expr::StructLit { fields, .. } => fields
+            .iter()
+            .all(|f| Self::is_go_const_len_cap_operand(&f.value, fns)),
+        Expr::SliceLit { items, .. } => items
+            .iter()
+            .all(|it| Self::is_go_const_len_cap_operand(it, fns)),
+        Expr::MapLit { entries, .. } => entries.iter().all(|(k, v)| {
+            Self::is_go_const_len_cap_operand(k, fns)
+                && Self::is_go_const_len_cap_operand(v, fns)
+        }),
+        Expr::Call { callee, args, .. } => {
+            let Expr::Ident { name, .. } = unwrap_parens_and_move(callee) else {
+                return false;
+            };
+            if fns.contains_key(name.as_str()) {
+                return false;
+            }
+            (crate::const_overflow::fixed_width_int_range(name).is_some()
+                || matches!(name.as_str(), "len" | "cap" | "min" | "max"))
+                && args
+                    .iter()
+                    .all(|a| !a.spread && Self::is_go_const_len_cap_operand(&a.value, fns))
         }
         _ => false,
+    }
+}
+}
+
+fn wrap_make_int(v: i128, lo: i128, hi: i128) -> i128 {
+    let span = hi.wrapping_sub(lo);
+    let bits = (span as u128).wrapping_add(1).trailing_zeros();
+    if bits == 0 || bits > 64 {
+        return v;
+    }
+    let len = 1i128 << bits;
+    let masked = v & (len - 1);
+    if lo < 0 && (masked >> (bits - 1)) & 1 == 1 {
+        masked - len
+    } else {
+        masked
     }
 }
 
