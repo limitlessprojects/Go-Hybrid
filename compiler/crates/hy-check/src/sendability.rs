@@ -163,12 +163,6 @@ impl<'a> Checker<'a> {
                     )],
                 })
             }
-            shape if self.shape_holds_unproven_type_param(shape, &mut Vec::new()) => {
-                Outcome::Unproven(UnprovenInfo {
-                    value: name.to_string(),
-                    reason: "it carries an unresolved generic type parameter whose sendability class cannot be proven at this boundary (O4.9)".to_string(),
-                })
-            }
             shape => {
                 let fallback_ty = if b.ty.is_none() {
                     match shape {
@@ -219,6 +213,12 @@ impl<'a> Checker<'a> {
                         None => {}
                     }
                 }
+                if self.shape_holds_unproven_type_param(shape, &mut Vec::new()) {
+                    return Outcome::Unproven(UnprovenInfo {
+                        value: name.to_string(),
+                        reason: "it carries an unresolved generic type parameter whose sendability class cannot be proven at this boundary (O4.9)".to_string(),
+                    });
+                }
                 Outcome::Ok
             }
         }
@@ -235,6 +235,7 @@ impl<'a> Checker<'a> {
         seen: &mut Vec<String>,
     ) -> bool {
         match shape {
+            TypeShape::Unknown => true,
             TypeShape::Slice(e) | TypeShape::Array(e) | TypeShape::Pointer(e) => {
                 self.shape_holds_unproven_type_param(e, seen)
             }
@@ -247,6 +248,14 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
+                if !self.structs.contains_key("set") {
+                    if let Some(("set", args)) = Self::parse_generic_type_args(sname) {
+                        if args.len() == 1 {
+                            return self
+                                .shape_holds_unproven_type_param(&self.shape_of_type(&args[0]), seen);
+                        }
+                    }
+                }
                 if self.struct_has_unresolved_type_param(sname) {
                     return true;
                 }
@@ -254,7 +263,8 @@ impl<'a> Checker<'a> {
                     return false;
                 };
                 fields.iter().any(|(_, ty)| {
-                    self.shape_holds_unproven_type_param(&self.shape_of_type(ty), seen)
+                    !matches!(ty, hy_syntax::TypeExpr::Named { name, .. } if name == "any")
+                        && self.shape_holds_unproven_type_param(&self.shape_of_type(ty), seen)
                 })
             }
             _ => false,
@@ -280,6 +290,13 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
+                if !self.structs.contains_key("set") {
+                    if let Some(("set", args)) = Self::parse_generic_type_args(sname) {
+                        if args.len() == 1 {
+                            return self.shape_holds_closure(&self.shape_of_type(&args[0]), seen);
+                        }
+                    }
+                }
                 let Some(fields) = self.struct_fields_for_sname(sname) else {
                     return false;
                 };
@@ -312,6 +329,14 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
+                if !self.structs.contains_key("set") {
+                    if let Some(("set", args)) = Self::parse_generic_type_args(sname) {
+                        if args.len() == 1 {
+                            return self
+                                .shape_holds_unmovable_leaf(&self.shape_of_type(&args[0]), seen);
+                        }
+                    }
+                }
                 let Some(fields) = self.struct_fields_for_sname(sname) else {
                     return false;
                 };
@@ -448,6 +473,9 @@ impl<'a> Checker<'a> {
                 if let Some(root) = op.root_ident() {
                     return self.classify_move_ident(st, root);
                 }
+            }
+            if matches!(op, Expr::StructLit { .. } | Expr::SliceLit { .. } | Expr::MapLit { .. }) {
+                return self.classify_value(st, op);
             }
             return Outcome::Ok;
         }
@@ -816,6 +844,16 @@ impl<'a> Checker<'a> {
                         name
                     ));
                 }
+                if st.type_params.contains(name.as_str())
+                    || self.structs.contains_key(name.as_str())
+                    || self.enums.contains_key(name.as_str())
+                    || self.type_aliases.contains_key(name.as_str())
+                {
+                    return CalleeVerdict::Unproven(format!(
+                        "the spawn callee `{}` resolved to a type name or type parameter that is not a declared top-level `fn` — the spawn-callee proof (O4.0) only covers declared fns",
+                        name
+                    ));
+                }
                 if self.fns.contains_key(name) {
                     return CalleeVerdict::Proven;
                 }
@@ -842,8 +880,13 @@ impl<'a> Checker<'a> {
     ) -> Option<Vec<TypeShape>> {
         match unwrap_parens(callee) {
             Expr::Ident { name, .. } => {
-                if self.lookup_binding(st, name).is_some() {
-                    return None; // shadowed by a local binding — not a static fn call
+                if self.lookup_binding(st, name).is_some()
+                    || st.type_params.contains(name.as_str())
+                    || self.structs.contains_key(name.as_str())
+                    || self.enums.contains_key(name.as_str())
+                    || self.type_aliases.contains_key(name.as_str())
+                {
+                    return None; // shadowed by a local binding or type — not a static fn call
                 }
                 let f = self.fns.get(name)?;
                 if f.params.len() != argc {
@@ -1134,9 +1177,23 @@ impl<'a> Checker<'a> {
     /// target is a channel (callers then run the value check-site as
     /// usual); false emits the diagnostic and the caller skips the value
     /// check (the site is ill-typed — no cascade).
+    fn send_target_shape(&self, st: &FnState, chan: &Expr) -> TypeShape {
+        if let Expr::Index { base, .. } = unwrap_parens_and_move(chan) {
+            if let TypeShape::Pointer(inner) = self.send_target_shape(st, base) {
+                if let TypeShape::Array(elem) | TypeShape::Slice(elem) = *inner {
+                    return *elem;
+                }
+            }
+        }
+        self.shape_of_expr(st, chan)
+    }
+
     pub(crate) fn check_send_target(&mut self, st: &FnState, chan: &Expr, span: Span) -> bool {
-        match self.shape_of_expr(st, chan) {
+        match self.send_target_shape(st, chan) {
             TypeShape::Chan(_) => {
+                if self.diags.iter().any(|d| d.code == "HYB-E3008" && d.span == span) {
+                    return false;
+                }
                 if let Some(ty) = self.ty_of_expr(st, chan) {
                     let resolved = self.resolve_type_alias(&ty);
                     if matches!(
@@ -1624,12 +1681,23 @@ impl<'a> Checker<'a> {
                 }
                 Outcome::Managed { desc, risky } => {
                     // only values not safe-by-type are the trust surface
-                    if risky {
+                    if risky && !managed_descs.contains(&desc) {
                         managed_descs.push(desc);
                     }
                 }
                 Outcome::Rejected(info) => rejects.push(info),
                 Outcome::Unproven(info) => unprovens.push(info),
+            }
+            for (name, _) in &moves {
+                match self.classify_move_ident(st, name) {
+                    Outcome::Ok => {}
+                    Outcome::Managed { desc, risky } if risky && !managed_descs.contains(&desc) => managed_descs.push(desc),
+                    Outcome::Managed { .. } => {}
+                    Outcome::Rejected(info) if !rejects.iter().any(|r| r.value == info.value) => rejects.push(info),
+                    Outcome::Rejected(_) => {}
+                    Outcome::Unproven(info) if !unprovens.iter().any(|u| u.value == info.value || u.reason.contains(&info.reason)) => unprovens.push(info),
+                    Outcome::Unproven(_) => {}
+                }
             }
         }
 
@@ -1790,6 +1858,9 @@ impl<'a> Checker<'a> {
         let mut env = const_env.clone();
         env.push();
         env.push_results(f.results.iter().map(|r| r.ty.clone()).collect());
+        for tp in &f.type_params {
+            env.define(&tp.name, None);
+        }
         if let Some(r) = &f.receiver {
             env.define(&r.name, Some(r.ty.clone()));
         }
@@ -2025,22 +2096,28 @@ impl<'a> Checker<'a> {
             }
             Stmt::Match { subject, arms, .. } => {
                 self.walk_expr_chan_dir(subject, env);
-                let opt_elem_ty = self
+                let subj_ty = self
                     .dir_ty_of_expr(subject, env)
-                    .map(|t| self.resolve_type_alias(&t))
-                    .and_then(|t| match t {
-                        TypeExpr::Option { elem, .. } => Some(*elem),
-                        _ => None,
-                    });
+                    .map(|t| self.resolve_type_alias(&t));
                 for arm in arms {
                     env.push();
                     if let MatchPattern::Path {
+                        segments,
                         binding: Some(bname),
-                        ..
                     } = &arm.pattern
                     {
                         if bname != "_" {
-                            env.define(bname, opt_elem_ty.clone());
+                            let is_opt_some = matches!(segments.as_slice(), [s] if s == "some")
+                                || matches!(segments.as_slice(), [p, s] if p == "option" && s == "some");
+                            let arm_ty = if is_opt_some {
+                                match &subj_ty {
+                                    Some(TypeExpr::Option { elem, .. }) => Some((**elem).clone()),
+                                    _ => None,
+                                }
+                            } else {
+                                self.resolve_enum_arm_dir_ty(subj_ty.as_ref(), segments)
+                            };
+                            env.define(bname, arm_ty);
                         }
                     }
                     if let Some(g) = &arm.guard {
@@ -2946,6 +3023,37 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn resolve_enum_arm_dir_ty(
+        &self,
+        subj_ty: Option<&hy_syntax::TypeExpr>,
+        segments: &[String],
+    ) -> Option<hy_syntax::TypeExpr> {
+        let vname = segments.last()?.as_str();
+        let subj_name = match subj_ty {
+            Some(hy_syntax::TypeExpr::Named { name, .. }) => Some(name.as_str()),
+            _ => None,
+        };
+        let enum_base = if segments.len() == 2 {
+            Some(segments[0].as_str())
+        } else {
+            subj_name.map(Self::base_named_type_str)
+        };
+        for d in &self.file.decls {
+            let hy_syntax::Decl::Enum(ed) = d else {
+                continue;
+            };
+            if let Some(eb) = enum_base {
+                if ed.name != eb {
+                    continue;
+                }
+            }
+            if let Some(v) = ed.variants.iter().find(|v| v.name == vname) {
+                return v.payload.clone();
+            }
+        }
+        None
+    }
+
     fn resolve_const_dir_ty(&self, name: &str, env: &ChanDirEnv) -> Option<hy_syntax::TypeExpr> {
         let c = self.file.decls.iter().rev().find_map(|d| match d {
             hy_syntax::Decl::Const(c) if c.name == name => Some(c),
@@ -3095,7 +3203,7 @@ impl<'a> Checker<'a> {
         env: &ChanDirEnv,
     ) -> Option<Vec<hy_syntax::TypeExpr>> {
         use hy_syntax::TypeExpr;
-        match unwrap_parens(expr) {
+        match unwrap_parens_and_move(expr) {
             Expr::Receive { chan, span } => {
                 let chan_ty = self.dir_ty_of_expr(chan, env)?;
                 if let TypeExpr::Chan { elem, .. } = self.resolve_type_alias(&chan_ty) {
@@ -3424,6 +3532,9 @@ impl<'a> Checker<'a> {
                             _ => None,
                         });
                     }
+                    if name == "new" && !self.fns.contains_key("new") && args.len() == 1 {
+                        return Some(TypeExpr::Pointer { to: Box::new(Self::type_arg_as_type_expr(&args[0].value)?), span: *span });
+                    }
                     let head = Self::base_named_type_str(name);
                     if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
                         let subst = self.fn_subst_for_call(f, name, None, args, env, true);
@@ -3451,6 +3562,18 @@ impl<'a> Checker<'a> {
                                     .results
                                     .first()
                                     .map(|r| Self::substitute_type_params(&r.ty, &subst));
+                            }
+                            // #4076: a curated foreign call with a directional
+                            // channel result (`time.after` → `<-chan`) must
+                            // resolve here; otherwise the call falls through
+                            // to the bare package name (→ `None`) and the
+                            // close/send direction checks fail open.
+                            if self.known_package(root) {
+                                if let Some(ty) =
+                                    crate::foreign::package_result_chan_ty(root, head, *span)
+                                {
+                                    return Some(ty);
+                                }
                             }
                         }
                     }
@@ -3506,6 +3629,33 @@ impl<'a> Checker<'a> {
                         None
                     }
                 }
+            },
+            _ => None,
+        }
+    }
+
+    fn type_arg_as_type_expr(expr: &Expr) -> Option<hy_syntax::TypeExpr> {
+        use hy_syntax::TypeExpr;
+        let unwrapped = unwrap_parens(expr);
+        match unwrapped {
+            Expr::StructLit { ty: Some(t), fields, .. } if fields.is_empty() => Some(t.clone()),
+            Expr::SliceLit { elem: Some(t), items, span } if items.is_empty() => Some(
+                unwrapped.as_array_lit().map(|(_, _, a)| a.clone()).unwrap_or_else(|| TypeExpr::Slice { elem: t.clone(), span: *span }),
+            ),
+            Expr::MapLit { key, value, entries, span } if entries.is_empty() => {
+                Some(TypeExpr::Map { key: key.clone(), value: value.clone(), span: *span })
+            }
+            Expr::Ident { name, span } => Some(TypeExpr::Named { name: name.clone(), span: *span }),
+            Expr::Field { base, name, span } => match unwrap_parens(base) {
+                Expr::Ident { name: pkg, .. } => Some(TypeExpr::Named { name: format!("{pkg}.{name}"), span: *span }),
+                _ => None,
+            },
+            Expr::Index { base, index, span, .. } => match unwrap_parens(base) {
+                Expr::Ident { name: bname, .. } => Some(TypeExpr::Named {
+                    name: format!("{bname}[{}]", Self::type_arg_as_type_expr(index)?.render()),
+                    span: *span,
+                }),
+                _ => None,
             },
             _ => None,
         }

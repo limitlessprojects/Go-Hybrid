@@ -11,11 +11,16 @@
 //! result-less closure inside `main` was ACCEPTED and BUILT, its `?` writing
 //! main's hidden exit error and returning from the closure only — `main`
 //! kept running after the error (E3b: never a silent swallow).
+//!
+//! The operand half (E3 "calls only" / E4 "`?` on a non-error call" and
+//! "`?` on option") is also HYB-E2011: `1?`, `x.f?`, `foo()?` when `foo`
+//! returns a non-error result, and `opt()?` when `opt` returns `option[T]`
+//! all passed check and then failed `go build` with an assignment mismatch.
 
 use crate::model::{unwrap_parens, Checker};
-use hy_diag::Diagnostic;
+use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    Block, Decl, Expr, File, FnResult, ForKind, InterpPart, LocalKind, MatchPattern, Param,
+    Block, Decl, Expr, File, FnDecl, FnResult, ForKind, InterpPart, LocalKind, MatchPattern, Param,
     PlaceKind, SelectArmKind, Stmt, TypeExpr,
 };
 
@@ -24,9 +29,23 @@ use hy_syntax::{
 /// Log entry" — keep in sync with hy-emit's `CONVERSIONS[..].propagate`.
 const E11_PROPAGATING_TARGETS: &[&str] = &["http.handler"];
 
-fn is_builtin_error_type(ck: &Checker<'_>, ty: &TypeExpr) -> bool {
-    let resolved = ck.resolve_type_alias(ty);
-    if !matches!(&resolved, TypeExpr::Named { name, .. } if name == "error")
+fn is_builtin_error_type(ck: &Checker<'_>, ty: &TypeExpr, type_params: &[String]) -> bool {
+    let mut cur = ty.clone();
+    for _ in 0..8 {
+        let TypeExpr::Named { name, .. } = &cur else {
+            return false;
+        };
+        if type_params.iter().any(|tp| tp == name) {
+            return false;
+        }
+        if let Some(next) = ck.type_aliases.get(name.as_str()) {
+            cur = next.clone();
+        } else {
+            break;
+        }
+    }
+    if !matches!(&cur, TypeExpr::Named { name, .. } if name == "error")
+        || type_params.iter().any(|tp| tp == "error")
         || ck.structs.contains_key("error")
         || ck.struct_type_params.contains_key("error")
         || ck.enums.contains_key("error")
@@ -38,8 +57,45 @@ fn is_builtin_error_type(ck: &Checker<'_>, ty: &TypeExpr) -> bool {
     })
 }
 
-fn results_end_in_error(ck: &Checker<'_>, results: &[FnResult]) -> bool {
-    results.last().is_some_and(|r| is_builtin_error_type(ck, &r.ty))
+fn results_end_in_error(ck: &Checker<'_>, results: &[FnResult], type_params: &[String]) -> bool {
+    results
+        .last()
+        .is_some_and(|r| is_builtin_error_type(ck, &r.ty, type_params))
+}
+
+fn collect_receiver_type_params(ty: &TypeExpr, out: &mut Vec<String>) {
+    match ty {
+        TypeExpr::Pointer { to, .. } => collect_receiver_type_params(to, out),
+        TypeExpr::Named { name, .. } => {
+            if let Some((_, rest)) = name.split_once('[') {
+                if let Some(inner) = rest.strip_suffix(']') {
+                    for part in inner.split(',') {
+                        let tp = part.trim();
+                        if !tp.is_empty() && tp != "_" {
+                            out.push(tp.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Type-parameter names that shadow `error` on this callable. Same collection
+/// as the `Decl::Fn` walk: declared params (skipping `_`), then receiver
+/// params parsed out of the receiver type (`fn (h holder[error]) ...`).
+fn fn_decl_type_param_names(f: &FnDecl) -> Vec<String> {
+    let mut type_params = Vec::new();
+    for tp in &f.type_params {
+        if !tp.name.is_empty() && tp.name != "_" {
+            type_params.push(tp.name.clone());
+        }
+    }
+    if let Some(r) = &f.receiver {
+        collect_receiver_type_params(&r.ty, &mut type_params);
+    }
+    type_params
 }
 
 fn is_e11_result_type(ck: &Checker<'_>, results: &[FnResult], http_unshadowed: bool) -> bool {
@@ -54,8 +110,21 @@ fn is_e11_result_type(ck: &Checker<'_>, results: &[FnResult], http_unshadowed: b
         )
 }
 
-fn fnlit_has_valid_e11_signature(ck: &Checker<'_>, params: &[Param], results: &[FnResult]) -> bool {
-    if !results.is_empty() || params.len() != 2 || params[0].name == "_" {
+fn fnlit_has_valid_e11_signature(
+    ck: &Checker<'_>,
+    params: &[Param],
+    results: &[FnResult],
+    http_unshadowed: bool,
+) -> bool {
+    if !http_unshadowed
+        || !results.is_empty()
+        || params.len() != 2
+        || params[0].name == "_"
+        || params[0].name.is_empty()
+        || params[0].name == "http"
+        || params[1].name == "http"
+        || params[0].name == params[1].name
+    {
         return false;
     }
     let w_ok = matches!(&params[0].ty, TypeExpr::Named { name, .. } if name.is_empty())
@@ -71,8 +140,11 @@ fn fnlit_has_valid_e11_signature(ck: &Checker<'_>, params: &[Param], results: &[
 /// What the enclosing function or closure offers a `?`.
 #[derive(Clone, Copy)]
 enum Ctx<'a> {
-    /// `main`, an error-result fn/closure, or an E11 handler closure.
+    /// `main` or an error-result fn/closure.
     Ok,
+    /// An E11 `http.handler` closure whose writer parameter is the first binding
+    /// in `scopes[fnlit_scope_idx]` (valid only while `http` and writer stay unshadowed).
+    E11Handler { fnlit_scope_idx: usize },
     /// No landing spot; the &str names the enclosing callable for the message.
     NoErrorResult(&'a str),
 }
@@ -80,6 +152,7 @@ enum Ctx<'a> {
 struct TryWalker<'a, 'b> {
     ck: &'b mut Checker<'a>,
     scopes: Vec<Vec<String>>,
+    type_params: Vec<String>,
     return_e11: bool,
 }
 
@@ -105,7 +178,16 @@ impl<'a, 'b> TryWalker<'a, 'b> {
             || self.ck.consts.contains_key(pkg)
             || self.ck.type_aliases.contains_key(pkg)
             || self.ck.file.decls.iter().any(|d| matches!(d, Decl::Const(c) if c.name == pkg))
+            || self.type_params.iter().any(|tp| tp == pkg)
             || self.scopes.iter().any(|s| s.iter().any(|n| n == pkg)))
+    }
+    fn is_writer_shadowed_since(&self, fnlit_scope_idx: usize) -> bool {
+        let Some(writer) = self.scopes.get(fnlit_scope_idx).and_then(|s| s.first()) else {
+            return true;
+        };
+        self.scopes
+            .get(fnlit_scope_idx.saturating_add(1)..)
+            .is_some_and(|inner| inner.iter().any(|s| s.iter().any(|n| n == writer)))
     }
     fn is_e11_conversion_call(&self, callee: &Expr) -> bool {
         if let Expr::Field { base, name, .. } = callee {
@@ -120,7 +202,12 @@ impl<'a, 'b> TryWalker<'a, 'b> {
 }
 
 pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
-    let mut w = TryWalker { ck, scopes: Vec::new(), return_e11: false };
+    let mut w = TryWalker {
+        ck,
+        scopes: Vec::new(),
+        type_params: Vec::new(),
+        return_e11: false,
+    };
     for d in &file.decls {
         match d {
             Decl::Const(c) => {
@@ -134,13 +221,17 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
             Decl::TypeAlias(a) => walk_type(&mut w, &a.ty, Ctx::NoErrorResult(a.name.as_str())),
             Decl::Enum(e) => e.variants.iter().filter_map(|v| v.payload.as_ref()).for_each(|p| walk_type(&mut w, p, Ctx::NoErrorResult(e.name.as_str()))),
             Decl::Fn(f) => {
+                w.type_params = fn_decl_type_param_names(f);
                 let sig_ctx = Ctx::NoErrorResult(f.name.as_str());
                 if let Some(r) = &f.receiver {
                     walk_type(&mut w, &r.ty, sig_ctx);
                 }
                 f.params.iter().for_each(|p| walk_type(&mut w, &p.ty, sig_ctx));
                 f.results.iter().for_each(|r| walk_type(&mut w, &r.ty, sig_ctx));
-                let Some(body) = &f.body else { continue };
+                let Some(body) = &f.body else {
+                    w.type_params.clear();
+                    continue;
+                };
                 w.push_scope();
                 if let Some(r) = &f.receiver {
                     w.bind_name(&r.name);
@@ -148,7 +239,7 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
                 f.params.iter().for_each(|p| w.bind_name(&p.name));
                 f.results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| w.bind_name(n));
                 let is_main = f.name == "main" && f.receiver.is_none();
-                let ctx = if is_main || results_end_in_error(w.ck, &f.results) {
+                let ctx = if is_main || results_end_in_error(w.ck, &f.results, &w.type_params) {
                     Ctx::Ok
                 } else {
                     Ctx::NoErrorResult(f.name.as_str())
@@ -158,6 +249,7 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
                 walk_block(&mut w, body, ctx);
                 w.return_e11 = false;
                 w.pop_scope();
+                w.type_params.clear();
             }
             Decl::Import { .. } => {}
         }
@@ -174,7 +266,7 @@ fn walk_type(ck: &mut TryWalker<'_, '_>, ty: &TypeExpr, ctx: Ctx<'_>) {
         TypeExpr::Array { len, elem, .. } => {
             if let Some(l) = len {
                 let len_ctx = match ctx {
-                    Ctx::Ok => Ctx::NoErrorResult("array length"),
+                    Ctx::Ok | Ctx::E11Handler { .. } => Ctx::NoErrorResult("array length"),
                     no_err => no_err,
                 };
                 walk_expr(ck, l, len_ctx);
@@ -339,20 +431,23 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
         params.iter().for_each(|p| walk_type(ck, &p.ty, outer_ctx));
         results.iter().for_each(|r| walk_type(ck, &r.ty, outer_ctx));
         // E4: lexical, like `return` — the closure's OWN results decide.
-        let ok = if e11 {
-            fnlit_has_valid_e11_signature(ck.ck, params, results)
-        } else {
-            results_end_in_error(ck.ck, results)
-        };
-        let ctx = if ok {
+        let http_before = ck.is_unshadowed_pkg_root("http");
+        let saved_return_e11 = std::mem::replace(&mut ck.return_e11, false);
+        ck.push_scope();
+        let fnlit_scope_idx = ck.scopes.len() - 1;
+        params.iter().for_each(|p| ck.bind_name(&p.name));
+        results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| ck.bind_name(n));
+        let ctx = if e11 {
+            if fnlit_has_valid_e11_signature(ck.ck, params, results, http_before) {
+                Ctx::E11Handler { fnlit_scope_idx }
+            } else {
+                Ctx::NoErrorResult("closure")
+            }
+        } else if results_end_in_error(ck.ck, results, &ck.type_params) {
             Ctx::Ok
         } else {
             Ctx::NoErrorResult("closure")
         };
-        let saved_return_e11 = std::mem::replace(&mut ck.return_e11, false);
-        ck.push_scope();
-        params.iter().for_each(|p| ck.bind_name(&p.name));
-        results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| ck.bind_name(n));
         let http_ok = ck.is_unshadowed_pkg_root("http");
         ck.return_e11 = is_e11_result_type(ck.ck, results, http_ok);
         walk_block(ck, body, ctx);
@@ -361,10 +456,122 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
     }
 }
 
+fn is_option_type(ck: &Checker<'_>, ty: &TypeExpr) -> bool {
+    matches!(ck.resolve_type_alias(ty), TypeExpr::Option { .. })
+}
+
+/// E3/E4 operand half: `?` is postfix on an error-returning call only.
+/// Non-calls (`1?`, `x.f?`, `none?`) and known calls whose results do not
+/// end in `error` (including `option[T]`) are HYB-E2011. Unresolved /
+/// foreign / locally-shadowed callees stay fail-open — those shapes are
+/// owned by emit / other passes.
+fn check_try_operand(ck: &mut TryWalker<'_, '_>, operand: &Expr, span: Span) {
+    let op = unwrap_parens(operand);
+    let Expr::Call { callee, .. } = op else {
+        ck.ck.diags.push(
+            Diagnostic::error(
+                "HYB-E2011",
+                ck.ck.path.clone(),
+                span,
+                format!(
+                    "`?` applies only to an error-returning call (E3), but `{}` is not a call (HYB-E2011)",
+                    op.render()
+                ),
+            )
+            .with_notes(vec![
+                "E3: `v := f(args)?` unwraps a trailing `error` result; E4: `?` on a non-call or on `option` is a type error".to_string(),
+                "why: hy-emit always desugars `?` to `…, hyErr := <operand>`, so a non-call yields `assignment mismatch` / unbuildable Go (GUARANTEES Row 13)".to_string(),
+                "fix: call a function whose results end in `error`, or handle the value without `?`".to_string(),
+            ]),
+        );
+        return;
+    };
+
+    let callee = unwrap_parens(callee);
+    // Judge *this callee's* results with *its* type params, not the walker's.
+    // A file-level fn from `ck.fns` uses `fn_decl_type_param_names` (own params
+    // plus receiver params — the same list `Decl::Fn` passes). An `FnLit` has
+    // no type-param list; `walk_fnlit` judges that signature with the enclosing
+    // function's type params, which are in scope for the literal.
+    let (results, type_params): (Option<&[FnResult]>, Vec<String>) = match callee {
+        Expr::Ident { name, .. } => {
+            // A local binding shadows the file-level fn — fail open (closure
+            // values / rebinds do not always carry a recoverable signature here).
+            if ck.scopes.iter().any(|s| s.iter().any(|n| n == name)) {
+                return;
+            }
+            match ck.ck.fns.get(name.as_str()) {
+                Some(f) => (Some(f.results.as_slice()), fn_decl_type_param_names(f)),
+                None => (None, Vec::new()),
+            }
+        }
+        Expr::FnLit { results, .. } => (Some(results.as_slice()), ck.type_params.clone()),
+        _ => (None, Vec::new()), // methods / selectors / computed: fail open
+    };
+
+    let Some(results) = results else {
+        return;
+    };
+
+    if results_end_in_error(ck.ck, results, &type_params) {
+        return;
+    }
+
+    if results.len() == 1 && is_option_type(ck.ck, &results[0].ty) {
+        ck.ck.diags.push(
+            Diagnostic::error(
+                "HYB-E2011",
+                ck.ck.path.clone(),
+                span,
+                format!(
+                    "`?` on `option` is a type error — absence and failure stay distinct (E4/T20, HYB-E2011)"
+                ),
+            )
+            .with_notes(vec![
+                "E4: `?` unwraps a trailing `error`; `option[T]` uses `match` / `.unwrap()` / `.or(...)` instead".to_string(),
+                "why: hy-emit still desugars `?` as an error-pair binding, so `opt()?` fails `go build` with `assignment mismatch` (GUARANTEES Row 13)".to_string(),
+                "fix: `match opt() { some(v): …; none: … }` or `opt().or(default)`".to_string(),
+            ]),
+        );
+        return;
+    }
+
+    let label = callee.render();
+    ck.ck.diags.push(
+        Diagnostic::error(
+            "HYB-E2011",
+            ck.ck.path.clone(),
+            span,
+            format!(
+                "`?` on `{}` whose results do not end in `error` (E3/E4, HYB-E2011)",
+                label
+            ),
+        )
+        .with_notes(vec![
+            "E3: `?` unwraps a trailing `error` result from a call; E4: `?` on a non-error call is a type error".to_string(),
+            "why: hy-emit desugars `x := f()?` to `x, hyErr := f()`, so a call without a trailing `error` fails `go build` with `assignment mismatch` (GUARANTEES Row 13)".to_string(),
+            "fix: give the callee a trailing `error` result, or drop the `?` and handle the value directly".to_string(),
+        ]),
+    );
+}
+
 fn walk_expr(ck: &mut TryWalker<'_, '_>, e: &Expr, ctx: Ctx<'_>) {
     match e {
         Expr::Try { operand, span } => {
-            if let Ctx::NoErrorResult(owner) = ctx {
+            let missing_owner = match ctx {
+                Ctx::Ok => None,
+                Ctx::E11Handler { fnlit_scope_idx } => {
+                    if !ck.is_unshadowed_pkg_root("http")
+                        || ck.is_writer_shadowed_since(fnlit_scope_idx)
+                    {
+                        Some("closure")
+                    } else {
+                        None
+                    }
+                }
+                Ctx::NoErrorResult(owner) => Some(owner),
+            };
+            if let Some(owner) = missing_owner {
                 let owner_text = if owner == "closure" {
                     "this closure".to_string()
                 } else {
@@ -387,6 +594,7 @@ fn walk_expr(ck: &mut TryWalker<'_, '_>, e: &Expr, ctx: Ctx<'_>) {
                     ]),
                 );
             }
+            check_try_operand(ck, operand, *span);
             walk_expr(ck, operand, ctx);
         }
         Expr::FnLit { .. } => walk_fnlit(ck, e, false, ctx),
