@@ -4257,6 +4257,77 @@ impl<'a> Collector<'a> {
         OpKind::Pointer(Box::new(inner))
     }
 
+    fn check_time_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        // Non-callable types, variables, and constants in package time
+        let is_non_callable = matches!(
+            member,
+            "nanosecond"
+                | "microsecond"
+                | "millisecond"
+                | "second"
+                | "minute"
+                | "hour"
+                | "rfc3339"
+                | "rfc3339_nano"
+                | "rfc822"
+                | "rfc822_z"
+                | "rfc850"
+                | "rfc1123"
+                | "rfc1123_z"
+                | "stamp"
+                | "stamp_milli"
+                | "stamp_micro"
+                | "stamp_nano"
+                | "date_only"
+                | "time_only"
+                | "date_time"
+                | "layout"
+                | "ansic"
+                | "unix_date"
+                | "ruby_date"
+                | "kitchen"
+                | "duration"
+                | "time"
+                | "location"
+                | "ticker"
+                | "timer"
+                | "month"
+                | "weekday"
+                | "utc"
+                | "local"
+        );
+
+        if is_non_callable {
+            self.emit_e1002(
+                span,
+                format!("cannot call non-function `time.{member}` (HYB-E1002)"),
+                "remove call parentheses or use as a constant/type",
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "now" => Some(0),
+            "since" | "until" | "sleep" | "after" | "tick" | "new_timer" | "new_ticker"
+            | "parse_duration" | "load_location" | "unix_milli" | "unix_micro" => Some(1),
+            "parse" | "unix" | "after_func" | "fixed_zone" => Some(2),
+            "parse_in_location" => Some(3),
+            "date" => Some(8),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`time.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `time.{member}`"),
+                );
+            }
+        }
+    }
+
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -7779,6 +7850,11 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+
+                    if pkg == "time" && self.lookup_kind(pkg).is_none() {
+                        self.check_time_package_call(name.as_str(), args, span);
+                    }
+
                     if pkg == "time"
                         && self.lookup_kind(pkg).is_none()
                         && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
