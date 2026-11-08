@@ -197,6 +197,25 @@ impl Parser {
         Err(ParseErr)
     }
 
+    /// Record a parse error anchored at token `at` WITHOUT unwinding: the
+    /// caller keeps the node it already built, so recovery does not swallow
+    /// the following statement (the declaration itself is complete enough to
+    /// keep parsing; only its shape is wrong).
+    fn report_at(&mut self, at: usize, msg: impl Into<String>) {
+        let span = Span::point(self.toks[at].span.start);
+        self.diags.push(Diagnostic::error(
+            PARSE_ERR_CODE,
+            self.path.clone(),
+            span,
+            format!(
+                "parse error: {} (at {}:{})",
+                msg.into(),
+                span.start.line,
+                span.start.col
+            ),
+        ));
+    }
+
     fn expect_punct(&mut self, p: &str) -> PResult<()> {
         if self.eat_punct(p) {
             Ok(())
@@ -386,7 +405,13 @@ impl Parser {
         let start = self.pos;
         self.bump(); // const
         let name = self.expect_ident()?;
-        let ty = self.opt_type_after_name()?;
+        // The type annotation must sit on the declaration's line (LX9):
+        // `const k` / `int = 3` on the next line is not `const k int = 3`.
+        let ty = if self.same_line_as_prev() {
+            self.opt_type_after_name()?
+        } else {
+            None
+        };
         self.expect_punct("=")?;
         let value = self.parse_expr(true)?;
         Ok(ConstDecl {
@@ -734,7 +759,7 @@ impl Parser {
                 let params = self.parse_params()?;
                 self.expect_punct(")")?;
                 let mut results = Vec::new();
-                while self.is_type_start() {
+                while self.is_type_start() && self.same_line_as_prev() {
                     results.push(self.parse_type()?);
                 }
                 TypeExpr::Fn {
@@ -1056,8 +1081,41 @@ impl Parser {
         }
     }
 
+    /// Is `panic` (the current token) the SPEC §1.3 `PanicStmt` prefix form
+    /// `panic Expression`?
+    ///
+    /// A string literal operand was the only shape recognised, so
+    /// `panic msg`, `panic err`, `panic 42` or `panic f()` fell through to
+    /// `parse_simple_stmt`: the bare `panic` became one expression statement
+    /// and the operand a second one. `hyb check` accepted that, and the
+    /// emitter printed `panic` and the operand on two lines, which `go build`
+    /// refuses (`panic (built-in) must be called`).
+    ///
+    /// Any token that can only START an operand counts, as long as it sits on
+    /// the same source line as `panic` (statements are newline-delimited, so
+    /// a following line is a separate statement). Tokens that could continue
+    /// an expression whose operand is a user binding named `panic` (`(`,
+    /// `[`, `.`, binary operators, assignment) are left to the ordinary
+    /// statement parser, so a call `panic(x)` and a shadowed `panic` are
+    /// unchanged.
     fn panic_prefix_follows(&self) -> bool {
-        matches!(self.nth(1), Tok::StrChunk(_)) || matches!(self.nth(1), Tok::RawStr(_))
+        match self.nth(1) {
+            Tok::StrChunk(_) | Tok::RawStr(_) => true,
+            Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::CharLit(_) => {
+                self.next_on_same_line()
+            }
+            Tok::Kw(k) if matches!(*k, "true" | "false" | "move") => self.next_on_same_line(),
+            Tok::Punct("!") => self.next_on_same_line(),
+            _ => false,
+        }
+    }
+
+    /// Does the token after the current one start on the line the current
+    /// token ends on?
+    fn next_on_same_line(&self) -> bool {
+        let next = self.pos + 1;
+        next < self.toks.len()
+            && self.toks[next].span.start.line == self.toks[self.pos].span.end.line
     }
 
     /// `let`/`var`/`const` local. `let x := e` and `let x = e` both normalize
@@ -1065,10 +1123,50 @@ impl Parser {
     fn parse_local(&mut self, kind: LocalKind, start: usize) -> PResult<Stmt> {
         self.bump(); // let / var / const
         let name = self.expect_ident()?;
-        let ty = self.opt_type_after_name()?;
+        // Statements are newline-separated (LX9): a type annotation must start
+        // on the declaration's own line. Without this, `var x` followed by
+        // `fmt.println(x)` on the next line parsed as `var x fmt.println` +
+        // a parenthesized expression statement, and `var x` / `x = 1` as
+        // `var x x = 1` — `hyb check` accepted both and `go build` failed.
+        let ty = if self.same_line_as_prev() {
+            self.opt_type_after_name()?
+        } else {
+            None
+        };
         let mut values = Vec::new();
         if self.eat_punct(":=") || self.eat_punct("=") {
             values = self.parse_expr_list(true)?;
+        }
+        // SPEC-LANGUAGE §1.3: `LetDecl = "let" Ident "=" Expr`,
+        // `ConstDecl = "const" Ident [Type] "=" Expr`,
+        // `VarDecl = "var" Ident Type ["=" Expr]`. A declaration missing the
+        // part its grammar requires has no Go lowering (the emitter refuses
+        // it), so it is a parse error here rather than an accepted program
+        // that cannot build (GUARANTEES Row 13).
+        if values.is_empty() {
+            match kind {
+                LocalKind::Let => self.report_at(
+                    start,
+                    format!(
+                        "`let {name}` needs an initializer — write `let {name} = <expr>` \
+                         (or `var {name} T` for a zero-valued mutable variable)"
+                    ),
+                ),
+                LocalKind::Const => self.report_at(
+                    start,
+                    format!(
+                        "`const {name}` needs an initializer — write `const {name} = <expr>`"
+                    ),
+                ),
+                LocalKind::Var if ty.is_none() => self.report_at(
+                    start,
+                    format!(
+                        "`var {name}` needs a type or an initializer — write `var {name} T` \
+                         or `var {name} = <expr>` (the type must be on the same line)"
+                    ),
+                ),
+                _ => {}
+            }
         }
         Ok(Stmt::Local(LocalDecl {
             kind,

@@ -33,6 +33,8 @@
 //!     (issue #201: incomparable `==`, package-level redeclarations,
 //!     invalid receivers, negative shift counts, bad array lengths).
 //!   * this file    — Pass B: the per-statement driver and the verdict.
+//!   * `elided_literal.rs` — HYB-E1002: a type-elided struct literal `{...}`
+//!     outside a composite element slot the emitter can fill (Row 13).
 //!   * `builtins.rs` — HYB-E2001 defer-non-call + HYB-E2005 builtin args (issue #187).
 //!
 //! Tier-0 discipline (O4.9, rule FC — human directive 2026-10-13): the
@@ -49,6 +51,8 @@ mod arith;
 mod buildable;
 mod const_overflow;
 mod closures;
+mod elided_literal;
+mod go_keyword_names;
 mod emit_guard;
 mod foreign;
 mod freeze;
@@ -63,10 +67,11 @@ mod walk;
 mod builtins;
 mod range_iter;
 mod recv;
+mod try_context;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
-use hy_syntax::{Decl, Expr, File, FnDecl, ForKind, SelectArmKind, Stmt};
+use hy_syntax::{Decl, Expr, File, FnDecl, ForKind, SelectArmKind, Stmt, TypeExpr};
 use model::{Binding, Checker, FnState, MANAGED_CATEGORIES, TypeShape};
 
 /// The result of checking one file.
@@ -113,6 +118,18 @@ pub fn check_file(file: &File) -> CheckResult {
     // declaration-signature expressions (array lengths) at file level; each
     // function body inside check_fn below.
     ck.check_file_undefined_names();
+
+    // GUARANTEES Row 13: a type-elided struct literal (`{x: 1}`) outside a
+    // composite element slot is HYB-E1002 here, not an `emitter (MVP-0):
+    // not yet supported` refusal at `hyb build`.
+    ck.check_elided_struct_literals();
+    // Row 13: a declaration named `default` (the one unreserved Go keyword)
+    // cannot be spelled in the emitted Go.
+    ck.check_go_keyword_names();
+
+    // E4 (HYB-E2011): `?` lands only in an error-result fn/closure, `main`,
+    // or an E11 handler closure — lexical, like `return`.
+    try_context::check_try_contexts(&mut ck, file);
 
     let fns: Vec<&FnDecl> = file.fns().collect();
     for f in fns {
@@ -301,10 +318,11 @@ fn build_tables(ck: &mut Checker<'_>) {
                 }
                 ck.check_expr_emit_guard(&FnState::default(), &c.value);
                 ck.check_composite_nils(&FnState::default(), &c.value);
-                ck.check_expr_builtin_args(&c.value);
+                ck.check_expr_builtin_args(&FnState::default(), &c.value);
+                ck.check_const_multi_value(&c.value);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
-                ck.check_const_init_is_constant(&c.name, &c.value, None);
+                ck.check_const_init_is_constant(&c.name, c.ty.as_ref(), &c.value, None);
             }
             Decl::Struct(s) => {
                 for f in &s.fields {
@@ -347,9 +365,15 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // first segments stay exempt (resolve.rs Field arm).
     ck.check_fn_undefined_names(f);
 
-    // environment seed: receiver + params
+    // environment seed: receiver + params + active generic type parameters
     let mut st = FnState::default();
+    for tp in &f.type_params {
+        st.type_params.insert(tp.name.clone());
+    }
     if let Some(r) = &f.receiver {
+        for rtp in ck.receiver_type_params(&r.ty) {
+            st.type_params.insert(rtp);
+        }
         let base_shape = ck.shape_of_type(&r.ty);
         let (shape, ty) = if r.is_pointer {
             (
@@ -460,13 +484,20 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             TypeShape::Chan(e) => *e,
                             _ => TypeShape::Unknown,
                         };
+                        let elem_ty = ck.chan_elem_ty(&st, chan);
                         for (i, n) in names.iter().enumerate() {
-                            let shape = if i == 0 {
-                                elem.clone()
+                            let (shape, ty) = if i == 0 {
+                                (elem.clone(), elem_ty.clone())
                             } else {
-                                TypeShape::Primitive
+                                (
+                                    TypeShape::Primitive,
+                                    Some(hy_syntax::TypeExpr::Named {
+                                        name: "bool".to_string(),
+                                        span: chan.span(),
+                                    }),
+                                )
                             };
-                            ck.define_binding(&mut st, n, shape, None, false, managed, false);
+                            ck.define_binding(&mut st, n, shape, ty, false, managed, false);
                         }
                     }
                     walk::ScopeEvent::MatchBind { name, subject } => {
@@ -590,7 +621,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // misuse of make/len/cap/delete/close/new (HYB-E2005).
         // After the call/loan walk so it does not collide with upstream
         // inserts around check_uses (const-zero-divisor / LX14).
-        ck.check_stmt_builtins(stmt);
+        ck.check_stmt_builtins(&st, stmt);
 
         // Issue #411: the iterable of `for x in e` must resolve to a
         // slice/array/string/map/chan (LX13) — HYB-E2009; fail-closed
@@ -707,10 +738,11 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     );
                     let is_chan = matches!(ck.shape_of_expr(&st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
-                    for (name, shape) in vars.iter().zip(shapes) {
+                    let var_tys = ck.iterate_var_tys(&st, expr, vars.len());
+                    for ((name, shape), var_ty) in vars.iter().zip(shapes).zip(var_tys) {
                         let is_ref = shape.is_reference_alias();
                         let may_share = ck.shape_may_share(&shape);
-                        ck.define_binding(&mut st, name, shape, None, false, managed, false);
+                        ck.define_binding(&mut st, name, shape, var_ty, false, managed, false);
                         if !is_chan {
                             if may_share {
                                 ck.record_may_share(&mut st, name, expr);
@@ -743,7 +775,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         hi,
                         format!("the range bound `{}`", hi.render()),
                     );
-                    ck.define_binding(&mut st, var, TypeShape::Primitive, None, false, managed, false);
+                    let range_ty = ck.typed_int_bound(&st, lo).or_else(|| ck.typed_int_bound(&st, hi)).map(|name| TypeExpr::Named { name, span: lo.span() });
+                    ck.define_binding(&mut st, var, TypeShape::Primitive, range_ty, false, managed, false);
                 }
                 ForKind::While { cond } => {
                     ck.mark_move_in_value(
@@ -869,6 +902,14 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     call,
                     format!("the deferred call `defer {}`", call.render()),
                 );
+                let arg_borrows = match crate::model::unwrap_parens(call) {
+                    Expr::Call { args, .. } => args
+                        .iter()
+                        .map(|a| ck.expr_is_return_borrow(&st, &a.value))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                st.deferred_calls.push((call.clone(), arg_borrows));
             }
 
             // If-init Locals and blocks: already covered by the flat walk
@@ -881,6 +922,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 break;
             }
             let (for_idx, loop_end, outer_depth, lbody, pre_moved) = active_loops.pop().unwrap();
+            ck.replay_const_backedge(&st, outer_depth, lbody);
             ck.check_loop_backedge(
                 &st,
                 outer_depth,
@@ -889,6 +931,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 lbody,
                 &pre_moved,
                 &mut reported_backedge,
+                &|idx| flat.in_managed(idx),
             );
         }
     }
@@ -938,6 +981,38 @@ impl<'a> Checker<'a> {
                         .to_string(),
                 ]),
             );
+        }
+        // #1917: the reason and tickets are interpolated into a single-line
+        // `// managed` comment by the emitter. A newline or carriage return
+        // would escape the comment and inject Go code into the output.
+        if reason.contains('\n') || reason.contains('\r') {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E0003",
+                    self.path.clone(),
+                    span,
+                    "managed reason must be a single line — a newline would escape the `// managed` comment and inject Go code (HYB-E0003)",
+                )
+                .with_notes(vec![
+                    "write the reason on one line; separate points with `;` or `,`".to_string(),
+                ]),
+            );
+        }
+        for ticket in tickets {
+            if ticket.trim().is_empty() || ticket.contains('\n') || ticket.contains('\r') {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E0003",
+                        self.path.clone(),
+                        span,
+                        "managed ticket must be a non-empty single-line string (HYB-E0003)",
+                    )
+                    .with_notes(vec![
+                        "a blank or multi-line ticket would inject blank lines or code into the `// managed` comment".to_string(),
+                    ]),
+                );
+                break;
+            }
         }
         if category.is_empty() {
             self.diags.push(
@@ -1876,14 +1951,16 @@ mod tests {
     #[test]
     fn a7_borrow_by_default_and_return_transfer_accept() {
         // 12-shape: two borrow calls then a mutate — windows non-lexical.
+        // `count` declares an `error` result exactly like corpus 12's
+        // count_active: its `?` sites need one to land in (E4, HYB-E2011).
         let r = check(
             "import \"rust/serde_json\"\n\
-             fn count(doc serde_json.value) int {\n\
+             fn count(doc serde_json.value) (int, error) {\n\
                n := 0\n\
                for u in doc.array(\"users\")? {\n\
                  n += u.int(\"logins\")?\n\
                }\n\
-               return n\n\
+               return n, nil\n\
              }\n\
              fn main() {\n\
                doc := serde_json.parse(`{}`)?\n\
@@ -2077,16 +2154,18 @@ mod tests {
     fn a7_own_transfer_at_return_accepts() {
         // 13-shape: `return v` transfers the own handle OUT; the caller
         // mutates the returned handle — the transfer made it the caller's.
+        // `summary` declares an `error` result exactly like corpus 13: its
+        // `?` sites need one to land in (E4, HYB-E2011).
         let r = check(
             "import \"rust/serde_json\"\n\
-             fn summary(doc serde_json.value) serde_json.value {\n\
+             fn summary(doc serde_json.value) (serde_json.value, error) {\n\
                v := serde_json.new_object()\n\
                for u in doc.array(\"users\")? {\n\
                  if u.int(\"logins\")? > 0 {\n\
                    v.set(\"active\", 1)\n\
                  }\n\
                }\n\
-               return v\n\
+               return v, nil\n\
              }\n\
              fn main() {\n\
                doc := serde_json.parse(`{}`)?\n\

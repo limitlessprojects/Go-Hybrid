@@ -1,7 +1,7 @@
 //! The Hybrid AST — the cross-component contract between `hy-syntax`
 //! (produces), `hy-check` (consumes), and the MVP-0 emitter (consumes).
 //!
-//! Scope: the surface exercised by tests/checker-corpus/*.hy (127 programs),
+//! Scope: the surface exercised by tests/checker-corpus/*.hy (135 programs),
 //! examples/ (ten target programs), and spikes/spike6-ownership/work/*.hy
 //! (ten programs). Anything outside that surface is allowed to be
 //! unimplemented by the parser — it must produce a clean `unsupported`
@@ -239,7 +239,15 @@ impl TypeExpr {
                 ChanDir::Send => format!("chan<- {}", elem.render()),
             },
             TypeExpr::Option { elem, .. } => format!("option[{}]", elem.render()),
-            TypeExpr::Fn { .. } => "fn".to_string(),
+            TypeExpr::Fn { params, results, .. } => {
+                let ps: Vec<String> = params.iter().map(|p| p.ty.render()).collect();
+                let rs: Vec<String> = results.iter().map(|r| r.render()).collect();
+                match rs.len() {
+                    0 => format!("fn({})", ps.join(", ")),
+                    1 => format!("fn({}) {}", ps.join(", "), rs[0]),
+                    _ => format!("fn({}) ({})", ps.join(", "), rs.join(", ")),
+                }
+            }
         }
     }
 }
@@ -767,6 +775,7 @@ impl Expr {
                 ..
             } => operand.root_ident(),
             Expr::Paren { inner, .. } => inner.root_ident(),
+            Expr::Move { operand, .. } => operand.root_ident(),
             Expr::Try { operand, .. } => operand.root_ident(),
             _ => None,
         }
@@ -777,6 +786,9 @@ impl Expr {
     /// Distinguished from a slice-of-arrays literal `[][N]T{…}` by the
     /// array `TypeExpr` sharing the literal's opening `[` source position.
     pub fn as_array_lit(&self) -> Option<(Option<&Expr>, &TypeExpr, &TypeExpr)> {
+        if let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = self {
+            return inner.as_array_lit();
+        }
         if let Expr::SliceLit {
             elem: Some(t),
             span,
@@ -862,6 +874,19 @@ impl BinOp {
             BinOp::BitAnd => "&",
             BinOp::Shl => "<<",
             BinOp::Shr => ">>",
+        }
+    }
+}
+
+impl Decl {
+    pub fn span(&self) -> Span {
+        match self {
+            Decl::Import { span, .. } => *span,
+            Decl::Const(c) => c.span,
+            Decl::Struct(s) => s.span,
+            Decl::Enum(e) => e.span,
+            Decl::TypeAlias(t) => t.span,
+            Decl::Fn(f) => f.span,
         }
     }
 }
