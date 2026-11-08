@@ -590,3 +590,14 @@
 - Suites on disk: **482**. Corpus 135/135. Differential FULL AGREEMENT.
 - Next queue: #4087 (seenorht), #4085/#4097/#4099/#4101 (bradwue313), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115, flood #4117–#4152 — top-down by created.
 - Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 154 — 2026-11-08 19:10 +08 (cron tick, Job 487193; 18:10 did not fire)
+
+- Cold sandbox; main pulled clean (`586dc06d`).
+- **#4087 (seenorht, fixes #4086) LANDED → merge commit `e83ccf81`.**
+  - fmt printf-family arity + non-string-format-literal validation (HYB-E1002, Row 13). Dup-check clean (no printf/sprintf/errorf handling on main); #3598 os-shadow arm (7721) and #3864 hex arm verified co-present — three complementary fmt arms.
+  - Battery: workspace 492 suites / 3158 passed / 0 failed; 483 files = 483 Running lines (1:1, +9 inline); new suite standalone 13/13 (PR body said 11 — noted in reply). Corpus 135/135 tripwire clear. Differential FULL 45/45 + 90/90.
+  - Pushed `586dc06d..e83ccf81`, ls-remote asserted. Landing reply posted (comment 6720788150). Issue #4086 auto-closed.
+- Suites on disk: **483**. Corpus 135/135. Differential FULL AGREEMENT.
+- Next queue: #4085/#4097/#4099/#4101 (bradwue313 — fmt append + arity family; check overlap vs #4087 before landing), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115 (dextermos-dev buildable arity band — dedupe carefully against #4087's fmt arm), flood #4117–#4152 — top-down by created.
+- Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
