@@ -166,7 +166,7 @@ package main
 import "sync"
 
 fn test() {
-    var m sync.Mutex
+    var m sync.mutex
     _ = sync.new_cond(&m, &m)
 }
 "#,
@@ -182,7 +182,7 @@ package main
 import "sync"
 
 fn test() {
-    var m sync.Mutex
+    var m sync.mutex
     _ = sync.new_cond(&m)
 }
 "#,
