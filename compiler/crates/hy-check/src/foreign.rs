@@ -544,6 +544,16 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "string_var", "text_var", "uint", "uint_var", "uint64", "uint64_var",
         "var", "visit", "visit_all",
     ];
+    /// `http.Flusher` — standard library HTTP response flusher interface.
+    const HTTP_FLUSHER: &[&str] = &["flush"];
+    /// `http.Hijacker` — standard library HTTP connection hijacker interface.
+    const HTTP_HIJACKER: &[&str] = &["hijack"];
+    /// `http.Pusher` — standard library HTTP/2 server push interface.
+    const HTTP_PUSHER: &[&str] = &["push"];
+    /// `http.FileSystem` — standard library HTTP file system interface.
+    const HTTP_FILE_SYSTEM: &[&str] = &["open"];
+    /// `http.File` — standard library HTTP file handle interface.
+    const HTTP_FILE: &[&str] = &["close", "read", "readdir", "seek", "stat"];
     const URL_URL: &[&str] = &[
         "escaped_fragment",
         "escaped_path",
@@ -670,6 +680,11 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "http.round_tripper" | "http.roundtripper" | "http.RoundTripper" => Some(HTTP_ROUND_TRIPPER),
         "context.context" | "context.Context" => Some(CONTEXT_CONTEXT),
         "flag.flag_set" | "flag.flagset" | "flag.FlagSet" => Some(FLAG_FLAG_SET),
+        "http.flusher" | "http.Flusher" => Some(HTTP_FLUSHER),
+        "http.hijacker" | "http.Hijacker" => Some(HTTP_HIJACKER),
+        "http.pusher" | "http.Pusher" => Some(HTTP_PUSHER),
+        "http.file_system" | "http.filesystem" | "http.FileSystem" => Some(HTTP_FILE_SYSTEM),
+        "http.file" | "http.File" => Some(HTTP_FILE),
         "url.url" | "url.URL" => Some(URL_URL),
         "json.decoder" | "json.Decoder" => Some(JSON_DECODER),
         "json.encoder" | "json.Encoder" => Some(JSON_ENCODER),
