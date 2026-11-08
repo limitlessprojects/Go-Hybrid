@@ -57,9 +57,8 @@ package main
 
 import "sync"
 
-fn main() {
-    let mut mu sync.mutex;
-    mu.lock(1);
+fn test(mu *sync.mutex) {
+    mu.lock(1)
 }
 "#,
     );
@@ -70,9 +69,8 @@ package main
 
 import "sync"
 
-fn main() {
-    let mut mu sync.mutex;
-    mu.unlock(1, 2);
+fn test(mu *sync.mutex) {
+    mu.unlock(1, 2)
 }
 "#,
     );
@@ -83,9 +81,8 @@ package main
 
 import "sync"
 
-fn main() {
-    let mut mu sync.mutex;
-    mu.try_lock(true);
+fn test(mu *sync.mutex) {
+    mu.try_lock(true)
 }
 "#,
     );
@@ -100,9 +97,8 @@ package main
 
 import "sync"
 
-fn main() {
-    let mut wg sync.wait_group;
-    wg.add();
+fn test(wg *sync.wait_group) {
+    wg.add()
 }
 "#,
     );
@@ -113,9 +109,8 @@ package main
 
 import "sync"
 
-fn main() {
-    let mut wg sync.wait_group;
-    wg.add(1, 2);
+fn test(wg *sync.wait_group) {
+    wg.add(1, 2)
 }
 "#,
     );
@@ -126,9 +121,8 @@ package main
 
 import "sync"
 
-fn main() {
-    let mut wg sync.wait_group;
-    wg.add("invalid");
+fn test(wg *sync.wait_group) {
+    wg.add("invalid")
 }
 "#,
     );
@@ -140,9 +134,8 @@ package main
 
 import "sync"
 
-fn main() {
-    let mut wg sync.wait_group;
-    wg.done(42);
+fn test(wg *sync.wait_group) {
+    wg.done(42)
 }
 "#,
     );
@@ -153,9 +146,8 @@ package main
 
 import "sync"
 
-fn main() {
-    let mut wg sync.wait_group;
-    wg.wait("timeout");
+fn test(wg *sync.wait_group) {
+    wg.wait("timeout")
 }
 "#,
     );
@@ -170,9 +162,8 @@ package main
 
 import "sync"
 
-fn main() {
-    let mut once sync.once;
-    once.do();
+fn test(once *sync.once) {
+    once.do()
 }
 "#,
     );
@@ -183,9 +174,8 @@ package main
 
 import "sync"
 
-fn main() {
-    let mut once sync.once;
-    once.do(fn() {}, 42);
+fn test(once *sync.once) {
+    once.do(fn() {}, 42)
 }
 "#,
     );
@@ -201,7 +191,7 @@ package main
 import "time"
 
 fn test(t *time.ticker) {
-    t.stop(1);
+    t.stop(1)
 }
 "#,
     );
@@ -214,7 +204,7 @@ package main
 import "time"
 
 fn test(t *time.ticker) {
-    t.reset();
+    t.reset()
 }
 "#,
     );
@@ -226,7 +216,7 @@ package main
 import "time"
 
 fn test(t *time.ticker) {
-    t.reset("10s");
+    t.reset("10s")
 }
 "#,
     );
@@ -239,7 +229,7 @@ package main
 import "time"
 
 fn test(t *time.timer) {
-    t.stop(1);
+    t.stop(1)
 }
 "#,
     );
@@ -252,7 +242,7 @@ package main
 import "time"
 
 fn test(t *time.timer) {
-    t.reset();
+    t.reset()
 }
 "#,
     );
@@ -265,20 +255,16 @@ fn test_valid_foreign_receiver_methods_accepted() {
 package main
 
 import "sync"
-import "time"
 
-fn main() {
-    let mut mu sync.mutex;
-    mu.lock();
-    mu.unlock();
+fn test(mu *sync.mutex, wg *sync.wait_group, once *sync.once) {
+    mu.lock()
+    mu.unlock()
 
-    let mut wg sync.wait_group;
-    wg.add(1);
-    wg.done();
-    wg.wait();
+    wg.add(1)
+    wg.done()
+    wg.wait()
 
-    let mut once sync.once;
-    once.do(fn() {});
+    once.do(fn() {})
 }
 "#,
     );
