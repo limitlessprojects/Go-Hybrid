@@ -81,20 +81,29 @@ impl<'a> Checker<'a> {
                         self.kw_block(b);
                     }
                 }
-                Decl::Import { .. } | Decl::Enum(_) => {}
+                Decl::Import { .. } => {}
+                Decl::Enum(e) => {
+                    self.kw_name(&e.name, "enum", e.span);
+                    for v in &e.variants {
+                        if let Some(ty) = &v.payload {
+                            self.kw_type(ty);
+                        }
+                    }
+                }
             }
         }
     }
 
     fn kw_name(&mut self, name: &str, what: &str, span: Span) {
-        if name == "none" {
+        if name == "none" || name.split('.').any(|seg| seg == "none") {
             self.diags.push(
                 Diagnostic::error(
                     "HYB-E1002",
                     self.path.clone(),
                     span,
                     format!(
-                        "{what} named `none` — `none` is Hybrid's option constructor, so hy-emit                          cannot treat the name as an ordinary binding and `hyb build` fails (HYB-E1002)"
+                        "{what} named `none` — `none` is Hybrid's option constructor, so hy-emit \
+                         cannot treat the name as an ordinary binding and `hyb build` fails (HYB-E1002)"
                     ),
                 )
                 .with_notes(vec![
@@ -104,7 +113,7 @@ impl<'a> Checker<'a> {
             );
             return;
         }
-        if name != GO_ONLY_KEYWORD {
+        if name != GO_ONLY_KEYWORD && !name.split('.').any(|seg| seg == GO_ONLY_KEYWORD) {
             return;
         }
         self.diags.push(
