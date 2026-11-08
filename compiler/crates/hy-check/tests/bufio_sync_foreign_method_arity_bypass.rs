@@ -313,11 +313,9 @@ fn test_valid_foreign_receiver_method_calls_accepted() {
         r#"
 package main
 
-import (
-    "bufio"
-    "io"
-    "sync"
-)
+import "bufio"
+import "io"
+import "sync"
 
 fn test_valid(
     r *bufio.reader,
