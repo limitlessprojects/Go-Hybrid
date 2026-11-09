@@ -714,3 +714,15 @@
 **State**: main `30206b57` untouched this session (trial merge aborted before push). Suites/corpus/differential reflect S165's green run (486 suites, 139/139, FULL AGREEMENT); no full battery on pure main this tick (battery interrupted by cargo fail-fast at the #4202 suite after 131 green suites).
 
 **Scouted next**: #4196 (deletes landed suite — priority, review deletions line-by-line), #4198, #4199, #4221 (Sora1916 nursery cancellation). Pending author fixes: #4202/#4201 (suite-only controls), #4206 (markers+CRLF+allowlist), #4097 (quotes), #4217 (allowlist re-target), #4219 (wallet+curated), #4215/#4213/#4211 (allowlist re-target).
+
+## Session 167 — 2026-11-09 18:10 UTC+8 — 1 landed
+
+**Landed #4196** (9xj89gzrtw-hue, fixes #4195, `e5ea7dce` → merge `a0b15b78`, pushed + remote-asserted, reply 6737609691):
+- Extends the landed #4087 printf/fprintf guard from non-string *literals* to statically-known non-string *expressions* (`nonstring_format_kind`: Str/Unknown/Interface permissive; +34 buildable.rs, +69 suite in the existing fmt_special_member_calls file — 7 new tests, controls properly read bindings, no #4202-family flaw).
+- **Base-staleness lesson recorded**: two-point diff vs PR-reported base 1e8673b4 showed −340 (fmt_scan_family suite −176, WORKLOG −13) — pure artifact; true merge-base is ce6219cd (pre-#4093), real patch purely additive. Rule reinforced: **always compute the true merge-base before judging deletions** (third instance of the pattern: #4206, #4202/#4201 base 1e8673b4, now #4196).
+- Battery: merge gate auto-clean (#4093 suite verified intact in merged tree); workspace 3198/0, 486=486 1:1; corpus 139/139 tripwire not fired; differential FULL AGREEMENT 47/47 + 92/92.
+- **Ops lesson — differential 0/47 false alarm**: ran differential_loop without go in PATH → accept-side 0/47 while reject-side 92/92; full env rerun → FULL AGREEMENT. The loop fails accept-side silently when `go build` is unavailable; always export the full env before the differential gate.
+
+**Ops**: cold rootfs again; rustup-init/go both needed FOREGROUND installs this tick (background setsid jobs killed by sandbox ~3 attempts — install.log stuck at "downloading installer" with dead processes; foreground completed both in ~2-4 min). **triage scan+approve dead again (0 bytes, process dead) — 5 failures across 2 ticks; standing rule: queue via direct API + worklog scouting, retry scan only if a chunked/foreground mode appears.**
+
+**Scouted next**: #4198 (jpereyra243-byte, http.response_writer+round_tripper curated method surfaces, fixes #4197, net/http allowlist-✓, head 8b647245, base stale 1e8673b4), #4199 (tmclaos T23/E2002 multi-value try unwraps — non-arity, full read), #4221 (Sora1916 nursery cancellation). Pending author fixes: #4202/#4201 (suite controls), #4206, #4097, #4217, #4219, #4215/#4213/#4211.
