@@ -12,6 +12,7 @@ class SSAOp(Enum):
     LOCAL_ADDR = "OpLocalAddr"
     LOAD = "OpLoad"
     STORE = "OpStore"
+    STORE_WB = "OpStoreWB"
     ADD = "OpAdd64"
     SUB = "OpSub64"
     MUL = "OpMul64"
@@ -30,6 +31,11 @@ class SSAOp(Enum):
     FIELD_ADDR = "OpFieldAddr"
     BRANCH = "OpBranch"
     BRANCH_COND = "OpBranchCond"
+    SELECT = "OpSelect"
+    DEFER = "OpDefer"
+    RECOVER = "OpRecover"
+    BREAK = "OpBreak"
+    CONTINUE = "OpContinue"
     RETURN = "OpReturn"
 
 
@@ -74,11 +80,73 @@ class SSABlock:
 
 
 @dataclass
+class FrameSlot:
+    name: str
+    offset: int
+    size: int
+    is_ptr: bool
+    stack_certified: bool
+
+
+class GCStackMap:
+    @staticmethod
+    def generate_bitmap(slots: List[FrameSlot]) -> Tuple[int, str]:
+        sorted_slots = sorted(slots, key=lambda s: s.offset)
+        mask = 0
+        bits = []
+        for i, slot in enumerate(sorted_slots):
+            if slot.is_ptr:
+                mask |= (1 << i)
+                bits.append("1")
+            else:
+                bits.append("0")
+        return mask, "".join(reversed(bits)) if bits else "0"
+
+    @staticmethod
+    def verify_safepoint_trace(slots: List[FrameSlot], live_ptrs: Set[str]) -> bool:
+        for slot in slots:
+            if slot.name in live_ptrs and not slot.is_ptr:
+                return False
+            if slot.is_ptr and slot.name not in live_ptrs and slot.stack_certified:
+                pass
+        return True
+
+
+class SSAVersionAdapter:
+    SUPPORTED_VERSIONS = ("1.21", "1.22", "1.26.9")
+
+    def __init__(self, target_go_version: str = "1.26.9"):
+        if target_go_version not in self.SUPPORTED_VERSIONS:
+            raise ValueError(f"Unsupported Go toolchain version: {target_go_version}")
+        self.target_go_version = target_go_version
+
+    def map_op(self, op: SSAOp) -> str:
+        if self.target_go_version == "1.21":
+            if op == SSAOp.CONST_INT:
+                return "OpConst64"
+            if op == SSAOp.STORE_WB:
+                return "OpStore"
+        elif self.target_go_version == "1.22":
+            if op == SSAOp.CONST_INT:
+                return "OpConst64"
+        return op.value
+
+    def validate_abi(self, fn: SSAFunction) -> bool:
+        for b in fn.blocks:
+            for v in b.values:
+                mapped = self.map_op(v.op)
+                if not mapped:
+                    return False
+        return True
+
+
+@dataclass
 class SSAFunction:
     name: str
     blocks: List[SSABlock] = field(default_factory=list)
     entry: Optional[SSABlock] = None
     next_id: int = 1
+    frame_slots: List[FrameSlot] = field(default_factory=list)
 
     def new_value(self, op: SSAOp, val_type: str, args: Optional[List[SSAValue]] = None,
                   aux_int: Optional[int] = None, aux_float: Optional[float] = None,
@@ -156,6 +224,7 @@ class HyAssign(HyStmt):
     expr: HyExpr
     is_owned: bool = False
     escapes: bool = False
+    is_ptr: bool = False
 
 @dataclass
 class HyIf(HyStmt):
@@ -174,16 +243,42 @@ class HyChanSend(HyStmt):
     val: HyExpr
 
 @dataclass
+class HyDefer(HyStmt):
+    expr: HyExpr
+
+@dataclass
+class HyBreak(HyStmt):
+    label: Optional[str] = None
+
+@dataclass
+class HyContinue(HyStmt):
+    label: Optional[str] = None
+
+@dataclass
+class HySelect(HyStmt):
+    cases: List[Tuple[Optional[HyStmt], List[HyStmt]]]
+    default_stmts: Optional[List[HyStmt]] = None
+
+@dataclass
+class HyStructAlloc(HyStmt):
+    var_name: str
+    fields: List[Tuple[str, HyExpr, bool]]
+    is_owned: bool = True
+    escapes: bool = False
+
+@dataclass
 class HyReturn(HyStmt):
     expr: Optional[HyExpr] = None
 
 
 class SSALoweringEngine:
-    def __init__(self):
+    def __init__(self, write_barriers_active: bool = False):
         self.heap_allocations: int = 0
         self.stack_allocations: int = 0
         self.revoked_certificates: int = 0
         self.syntax_errors: int = 0
+        self.write_barriers_active: bool = write_barriers_active
+        self.write_barriers_count: int = 0
 
     def lower_function(self, name: str, stmts: List[HyStmt]) -> SSAFunction:
         fn = SSAFunction(name=name)
@@ -201,18 +296,37 @@ class SSALoweringEngine:
         for stmt in stmts:
             if isinstance(stmt, HyAssign):
                 val = self._lower_expr(fn, curr_block, stmt.expr, curr_env)
+                is_ptr = stmt.is_ptr or val.val_type.startswith("*") or val.val_type.startswith("chan")
+
                 if stmt.is_owned and not stmt.escapes:
-                    slot = fn.new_value(
+                    slot_val = fn.new_value(
                         SSAOp.LOCAL_ADDR,
                         val_type=f"*{val.val_type}",
                         aux_str=stmt.var_name,
                         stack_certified=True
                     )
-                    curr_block.add_value(slot)
-                    store = fn.new_value(SSAOp.STORE, "void", args=[slot, val])
+                    curr_block.add_value(slot_val)
+
+                    store_op = SSAOp.STORE
+                    if is_ptr and self.write_barriers_active:
+                        store_op = SSAOp.STORE_WB
+                        self.write_barriers_count += 1
+
+                    store = fn.new_value(store_op, "void", args=[slot_val, val])
                     curr_block.add_value(store)
                     curr_env[stmt.var_name] = val
                     self.stack_allocations += 1
+
+                    slot_offset = len(fn.frame_slots) * 8
+                    fn.frame_slots.append(
+                        FrameSlot(
+                            name=stmt.var_name,
+                            offset=slot_offset,
+                            size=8,
+                            is_ptr=is_ptr,
+                            stack_certified=True
+                        )
+                    )
                 elif stmt.is_owned and stmt.escapes:
                     self.revoked_certificates += 1
                     self.heap_allocations += 1
@@ -220,11 +334,110 @@ class SSALoweringEngine:
                 else:
                     curr_env[stmt.var_name] = val
 
+            elif isinstance(stmt, HyStructAlloc):
+                if stmt.is_owned and not stmt.escapes:
+                    struct_slot = fn.new_value(
+                        SSAOp.LOCAL_ADDR,
+                        val_type="*struct",
+                        aux_str=stmt.var_name,
+                        stack_certified=True
+                    )
+                    curr_block.add_value(struct_slot)
+                    self.stack_allocations += 1
+
+                    for f_name, f_expr, f_is_ptr in stmt.fields:
+                        f_val = self._lower_expr(fn, curr_block, f_expr, curr_env)
+                        f_addr = fn.new_value(SSAOp.FIELD_ADDR, f"*{f_val.val_type}", args=[struct_slot], aux_str=f_name)
+                        curr_block.add_value(f_addr)
+
+                        s_op = SSAOp.STORE
+                        if f_is_ptr and self.write_barriers_active:
+                            s_op = SSAOp.STORE_WB
+                            self.write_barriers_count += 1
+                        curr_block.add_value(fn.new_value(s_op, "void", args=[f_addr, f_val]))
+
+                        fn.frame_slots.append(
+                            FrameSlot(
+                                name=f"{stmt.var_name}.{f_name}",
+                                offset=len(fn.frame_slots) * 8,
+                                size=8,
+                                is_ptr=f_is_ptr,
+                                stack_certified=True
+                            )
+                        )
+                    curr_env[stmt.var_name] = struct_slot
+                else:
+                    self.revoked_certificates += 1
+                    self.heap_allocations += 1
+                    make_op = fn.new_value(SSAOp.STRUCT_MAKE, "struct", aux_str=stmt.var_name)
+                    curr_block.add_value(make_op)
+                    curr_env[stmt.var_name] = make_op
+
             elif isinstance(stmt, HyChanSend):
                 ch_val = self._lower_expr(fn, curr_block, stmt.chan, curr_env)
                 send_val = self._lower_expr(fn, curr_block, stmt.val, curr_env)
                 send_op = fn.new_value(SSAOp.CHAN_SEND, "void", args=[ch_val, send_val])
                 curr_block.add_value(send_op)
+
+            elif isinstance(stmt, HyDefer):
+                def_val = self._lower_expr(fn, curr_block, stmt.expr, curr_env)
+                curr_block.add_value(fn.new_value(SSAOp.DEFER, "void", args=[def_val]))
+
+            elif isinstance(stmt, HyBreak):
+                curr_block.add_value(fn.new_value(SSAOp.BREAK, "void", aux_str=stmt.label))
+
+            elif isinstance(stmt, HyContinue):
+                curr_block.add_value(fn.new_value(SSAOp.CONTINUE, "void", aux_str=stmt.label))
+
+            elif isinstance(stmt, HySelect):
+                sel_block = fn.new_block(f"b_select_{curr_block.name}")
+                merge_block = fn.new_block(f"b_sel_merge_{curr_block.name}")
+                curr_block.successors.append(sel_block)
+                sel_block.predecessors.append(curr_block)
+                curr_block.add_value(fn.new_value(SSAOp.BRANCH, "void"))
+
+                sel_op = fn.new_value(SSAOp.SELECT, "void", aux_int=len(stmt.cases))
+                sel_block.add_value(sel_op)
+
+                case_envs = []
+                for i, (comm_stmt, body_stmts) in enumerate(stmt.cases):
+                    c_block = fn.new_block(f"b_case_{i}_{sel_block.name}")
+                    sel_block.successors.append(c_block)
+                    c_block.predecessors.append(sel_block)
+                    c_env = dict(curr_env)
+                    if comm_stmt:
+                        c_block, c_env = self._lower_stmts(fn, c_block, [comm_stmt], c_env)
+                    c_exit, c_exit_env = self._lower_stmts(fn, c_block, body_stmts, c_env)
+                    c_exit.successors.append(merge_block)
+                    merge_block.predecessors.append(c_exit)
+                    c_exit.add_value(fn.new_value(SSAOp.BRANCH, "void"))
+                    case_envs.append(c_exit_env)
+
+                if stmt.default_stmts is not None:
+                    def_block = fn.new_block(f"b_default_{sel_block.name}")
+                    sel_block.successors.append(def_block)
+                    def_block.predecessors.append(sel_block)
+                    def_exit, def_env = self._lower_stmts(fn, def_block, stmt.default_stmts, curr_env)
+                    def_exit.successors.append(merge_block)
+                    merge_block.predecessors.append(def_exit)
+                    def_exit.add_value(fn.new_value(SSAOp.BRANCH, "void"))
+                    case_envs.append(def_env)
+
+                if case_envs:
+                    all_case_vars = set()
+                    for ce in case_envs:
+                        all_case_vars.update(ce.keys())
+                    for vname in all_case_vars:
+                        vals = [ce.get(vname, curr_env.get(vname)) for ce in case_envs]
+                        if any(v is None for v in vals):
+                            continue
+                        if len(set(v.id for v in vals)) > 1:
+                            val_type = vals[0].val_type
+                            phi = fn.new_value(SSAOp.PHI, val_type, args=vals, aux_str=vname)
+                            merge_block.add_value(phi)
+                            curr_env[vname] = phi
+
+                curr_block = merge_block
 
             elif isinstance(stmt, HyIf):
                 cond_val = self._lower_expr(fn, curr_block, stmt.cond, curr_env)

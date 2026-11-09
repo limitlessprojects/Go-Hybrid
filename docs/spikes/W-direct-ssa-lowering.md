@@ -18,11 +18,12 @@ We built a runnable spike in `spikes/w-direct-ssa-emit/`:
 1. It lowers arithmetic, basic data types, diamond branching with phi nodes, loops with back-edges, and channel operations into SSA blocks (`spikes/w-direct-ssa-emit/ssa_lowering.py`).
 2. It verifies that owned values receive stack certificates, while values whose addresses escape lose their certificate and register as heap allocations.
 3. It confirms that Go keywords like `interface`, `default`, and `select` produce zero naming conflicts in SSA form.
-4. All 15 unit tests pass locally (`python -m unittest discover -s spikes/w-direct-ssa-emit/tests -v`).
+4. All 25 unit tests pass locally (`python -m unittest discover -s spikes/w-direct-ssa-emit/tests -v`).
 
 Milestone 2 plan:
-- Test 1: If emitted Go SSA with stack certificates causes `cmd/compile` to call `runtime.newobject`, the zero-allocation claim is falsified.
-- Test 2: Measure compile times comparing direct SSA generation against text formatting and `go/parser` re-parsing.
+- Gate 1 (Toolchain Stability): Test lowering against multiple Go compiler versions via an independent SSA IR adapter layer to prevent version breakage.
+- Gate 2 (Memory Soundness): Verify stack frame pointer bitmaps (`GCStackMap`) and write barrier generation (`OpStoreWB`) to ensure runtime GC safety.
+- Gate 3 (Allocation Threshold): Benchmark heap allocation reduction and compile throughput vs standard and pragma-annotated text generation.
 
 ### Cost honesty
 This approach deprecates `compiler/crates/hy-emit` and replaces text templates with an SSA bridge. During the transition, `hy-ssa` can run behind a compiler flag (`hyb build --target=go-ssa`) so both paths can be compared before removing text emission.
