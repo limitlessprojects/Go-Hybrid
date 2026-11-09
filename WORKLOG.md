@@ -642,3 +642,35 @@
 - fmt family coverage on main: printf (#4087) + scan (#4093); append (#4097) still pending author's escaped-quote fix.
 - Next queue: #4095/#4109/#4117 (jpereyra243-byte), #4105 (mischievousdeveloper), #4107/#4111/#4113/#4115 (dextermos-dev arity band — dedupe vs landed fmt arms), flood #4117–#4152 — top-down by created.
 - Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
+## Session 161 — 2026-11-09 09:10 UTC+8 — 1 landed, 1 accident repaired
+
+**Landed #4204** (dextermos-dev, fixes #4203, `b8b1e48b` → merge `a95dddf2`, pushed + remote-asserted):
+- io package call arity + 19 non-callable symbol rejects under the landed fmt pattern (#4087/#4093); lookup_kind guard, fail-open unknowns. New suite io_call_buildable_soundness.rs → suites 486.
+- Battery: workspace 486/486 (1:1), corpus 137/137 tripwire not fired, differential FULL AGREEMENT.
+- **#4162 (Sora1916) = different patch-id, independent io implementation → first-come-first-served honored by battery order; hall-of-fame reply posted (comment 6729945605), PR kept open for supplement-or-subset disposition** (predecessors #4084/#4085).
+
+**ACCIDENT — session-159 trim deleted tracked examples/ (28 files) and the worklog `git add -A` pushed the deletions (`30d4ebf0`)**: caught by the battery gate itself (parse_all.rs examples_01_02_03_parse "No such file or directory"). Restored byte-identical from afc41e90 and pushed as `00bfd96a` (pure repair commit, disclosed in its message). **Discipline corrected: post-battery trims must exclude git-tracked paths — from now on trim only `/home/z/go-hybrid-target/debug/incremental` (non-tracked), never `examples/` or anything under the repo working tree.**
+
+**Also this window**: #4206 (flate2) gate-FAILed last session (unresolved conflict markers at blob lines 8164/8170 + whole-file CRLF rewrite; evidence reply 6729165885 with two-step fix); awaiting author re-push.
+
+**Queue next**: #4202/#4201/#4199 (tmclaos), #4198 (jpereyra243-byte http.response_writer), #4196 (9xj89gzrtw-hue fmt — overlap-watch vs landed fmt arms), #4194/#4189 (SuperPiIot), then the 4140s band.
+
+## Session 162 — 2026-11-09 11:10 UTC+8 — 1 landed
+
+**Landed #4220** (dextermos-dev, `088bc752` → merge `1610d689`, pushed + remote-asserted):
+- Completes the S161 examples repair: 00bfd96a restored from afc41e90 (Session 1), which predates examples/09-go-imports-hybrid/program.hy and the whole examples/gomod-integration/ module. Author verified byte-identical from 1e8673b4; evidence chain re-audited on landing (afc41e90 lacks all 7 paths, 1e8673b4 has them, PR blob diff vs 1e8673b4 = 0 lines).
+- Battery: workspace 486/486 (1:1) incl. examples parse tests green, **test_run_examples 19/19 OK** (09 FAIL row gone), corpus 137/137 tripwire not fired, differential FULL AGREEMENT. CI Row-13 go.mod step restored.
+- Landing reply comment 6731365866. Repair arc now fully disclosed: S159 trim accident → S161 partial restore (00bfd96a) → S162 completion (1610d689).
+
+**Ops**: trim discipline held (only /home/z/go-hybrid-target/debug/incremental, no repo working tree paths).
+
+**Scouted for next tick**: #4217 (bradwue313, regexp arity, fixes #4216, head a8f09304, +22 buildable.rs / +147 tests, LF clean) — review next cycle. Queue: #4219/#4194 (SuperPiIot), #4215/#4213/#4211 (dextermos-dev arity band), #4209 (matrixneoaiagent corpus), #4202/#4201/#4199 (tmclaos), #4198, #4196 (fmt overlap-watch). #4206 still pending author escape-fix (head unchanged 7fb240fd).
+
+## Session 163 — 2026-11-09 13:10 UTC+8 — 0 landed, 1 gate fail (premise overturned)
+
+**#4217 (bradwue313, regexp arity, fixes #4216) → Gate FAIL, not landed**; head force-pushed during triage (a8f09304 → 132f204d), battery run on the pushed head:
+- Positive control failed 5×HYB-E1001 on the merge commit; `hyb check` decisive: `import "regexp"` is outside the M5 curated allowlist (which has `rust/regex`, not Go `regexp`). SPEC M5 fail-closed → every `regexp.*` program rejects at resolve, so the claimed "arity bypass" (#4216 premise) has no observable bypass; the PR's arity arm is unreachable dead code, and its reject-tests passed only because they accept any E-code.
+- Not a regression from the resolve work — pre-existing SPEC behavior. Evidence reply 6732813657 offers three landable paths: re-target allowlisted package (sort/bufio/strconv), re-target `rust/regex`, or propose allowlisting `regexp` as a separate spec-change PR.
+- Local merge `1e045b7b` reset before push; main untouched this session.
+
+**Queue next**: #4219/#4194 (SuperPiIot), #4215/#4213/#4211 (dextermos-dev arity band — check allowlist membership per package before battery, lesson from #4217), #4209 (matrixneoaiagent corpus), #4202/#4201/#4199 (tmclaos), #4198, #4196 (fmt overlap-watch). Pending author fixes: #4206 (conflict markers + CRLF), #4097 (quote escape).
