@@ -78,6 +78,25 @@ fn caller() error {
 }
 
 #[test]
+fn url_non_variadic_spread_rejected_e1002() {
+    let cases = [
+        "fn main() {\n    var xs = [\"https://example.com\"]\n    url.parse(xs...)\n}",
+        "fn main() {\n    var xs = [\"hello\"]\n    url.query_escape(xs...)\n}",
+        "fn main() {\n    var xs = [\"hello\"]\n    url.query_unescape(xs...)\n}",
+        "fn main() {\n    var xs = [\"user\", \"pass\"]\n    url.user_password(xs...)\n}",
+    ];
+    for src in cases {
+        let r = check(src);
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert!(
+            error_codes(&r).contains(&"HYB-E1002".to_string()),
+            "expected HYB-E1002 for: {src}, got: {:?}",
+            r.diagnostics
+        );
+    }
+}
+
+#[test]
 fn sort_non_callable_types_rejected_e1002() {
     let cases = [
         "fn main() { sort.int_slice() }",
@@ -128,4 +147,23 @@ fn test_sort() {
     let r = check(src);
     assert_eq!(error_codes(&r), Vec::<String>::new());
     assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn sort_non_variadic_spread_rejected_e1002() {
+    let cases = [
+        "fn main() {\n    var xs = [1, 2]\n    sort.ints(xs...)\n}",
+        "fn main() {\n    var xs = [\"a\", \"b\"]\n    sort.strings(xs...)\n}",
+        "fn main() {\n    var xs = [1.0, 2.0]\n    sort.float64s(xs...)\n}",
+        "fn main() {\n    var xs = [1, 2]\n    sort.ints_are_sorted(xs...)\n}",
+    ];
+    for src in cases {
+        let r = check(src);
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert!(
+            error_codes(&r).contains(&"HYB-E1002".to_string()),
+            "expected HYB-E1002 for: {src}, got: {:?}",
+            r.diagnostics
+        );
+    }
 }
