@@ -28,7 +28,7 @@ this file is the human-normative record.
 | A2 | handle-loan rule (spike-added): mutating-mode calls on a boundary handle conflict with live borrow-mode loans on the same handle | `HYB-E3101` |
 | A3 | map-slot borrows `&m[k]`: legal, non-lexical (creation → last use), invalidated by any map insert/delete inside the live window | `HYB-E3102` |
 | A4 | Go-heap reads are copies, not loans (positive rule; exercised by 09 / 15 / 17) | — (enabling rule) |
-| A5 | Go-API escape perimeter: values escaping into foreign Go code are outside the checked subset under the scoped-claim ruling | — (scope rule; opt-in lint TBD) |
+| A5 | Go-API escape perimeter: a closure that writes a captured mutable binding and is passed to a foreign Go call is a fourth check-site (SPEC §8.5 C9, W-016 M2/M3) | A5 / HYB-E3013 |
 | A6 | struct fields never hold borrow-handles (owned / GC / ids / own-handles only) | `HYB-E3103` |
 | A7 | handles passed to functions are borrow-by-default; own-transfer happens only at `return` and at consuming APIs | `HYB-E3003` (use-after-consume) |
 | A8 | top-level `?` exit contract — NOT exercised by this corpus (noted so nobody mistakes absence for coverage) | — |
@@ -53,7 +53,7 @@ renumbered).
 | 07 | 07-a2-mutate-during-handle-loan | REJECT | A2 | `doc.set(...)` (mutating-mode) while element-view borrow loans on `doc` are live |
 | 08 | 08-a3-map-slot-invalidated | REJECT | A3 | map INSERT inside the live `&m[k]` slot-loan window (rehash invalidation) |
 | 09 | 09-a3-map-slot-valid | ACCEPT | — | 08 with the insert moved after the loan's last use: A3's non-lexical window respected; A4 in passing |
-| 10 | 10-a5-http-handler-capture | ACCEPT (contested) | — (A5 scoped claim) | mutable value captured by a closure escaping into net/http — no Hybrid check site exists; **contested — see OQ1** |
+| 10 | 10-a5-http-handler-capture | REJECT | A5 | mutable value captured by a closure escaping into net/http — the A5 fourth check-site (HYB-E3013) rejects it; the fix is `managed("...", "interop")`, an atomic, or a const capture |
 | 11 | 11-a6-borrow-in-struct-field | REJECT | A6 | borrow-handle (`serde_json.view`) stored in a struct field — the #1 annotation-forcing shape, forbidden by rule |
 | 12 | 12-a7-borrow-by-default | ACCEPT | — | handle passed to two read calls and mutated afterwards: pins A7 borrow-by-default + A2 non-lexical windows |
 | 13 | 13-a7-own-transfer-at-return | ACCEPT | — | own handle returned out of a function; caller mutates the returned handle: the A7 return-transfer route |
@@ -72,7 +72,6 @@ renumbered).
 | 26 | 26-call-return-alias-freeze | REJECT | A1b | an alias that comes back through a function call (`alias := same(agg)`, `same` returns its map argument) is still a live alias of `agg` — the checker has no interprocedural summary proving the return is fresh, so `results <- move agg` freezes it too; the write through `alias` is use-after-move (issue #38; before the fix the call return was treated as fresh storage and the program was accepted with 0 diagnostics while `go -race` reported a DATA RACE) |
 | 27 | 27-const-write-reject | REJECT | IMMUT | a file-level `const` slice takes an element write (W1) and a whole-binding rebind (W2) while the emitter lowers the const to a package-level `var` — two spawned tasks reach the same backing array with NOTHING crossing the spawn site, so O4 never fires and `hyb check` reported 0 diagnostics against `go run -race` evidence (issue #37; T22 deep immutability — the write rejection was the missing check; the accept side is pinned in hy-check/tests/const_write.rs) |
 | 38 | 38-const-closure-alias-write-reject | REJECT | IMMUT | T22 deep immutability on the paths the first E3006 fix never walked: an element write, a rebind, and a `delete` INSIDE a closure body (flatten/uses/calls skip `FnLit` — the A5 perimeter), a write through a COPY of the const (`alias := cells` — `const_write_root` only tested the place's own root), and `delete` on a const map anywhere — all ACCEPT with 0 diagnostics on main while `go run -race` reported `WARNING: DATA RACE` for the dual-closure writer program (issue #123, the follow-up gap in paid #37's fix; the fix scans every FnLit at fn end, follows alias/may-share peers to the immutable root, and routes delete through E3006 — accept side pinned in hy-check/tests/const_write.rs) |
-
 
 
 | 28 | 28-composite-nil-reject | REJECT | N1 | a nil NESTED in a composite literal (`job{m: nil}`, map-typed field) passed with 0 diagnostics — classify_composite has no per-field type context, so the five direct-flow nil sites never saw it; the literal carries its own type context and the nil now rejects as a TYPE error at the define, at the boundary, inside `managed` too, and for map/slice literal slots (PLAN follow-up row from the external adoption audit) |
@@ -1075,3 +1074,41 @@ ACCEPT-MANAGED 2 · REJECT 86** — main's 125 plus this one.
 by the autonomous pipeline (bundles author-758 / author-827, landings
 0107658 / d0a2db5). Sibling-take credit: sonson0910's stale-base
 companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.
+| local-composite-chan-recv-accept | ACCEPT | — | — | a local bound from a composite of bidirectional channels (`sub := append(chs, ch)`) carries the composite-projected type, so a later `<-sub[0]` receive stays legal end to end — checker accept, emitted Go builds, run exits 0 (rows added in-merge; the PR missed the README's own VERDICTS.md contract) |
+| local-composite-chan-recv-reject-e2008 | REJECT | BUILDABLE | `HYB-E2008` | same shape, send-only channels: `sub` previously carried no `ty`, so `<-sub[0]` in a type position passed with 0 diagnostics; the composite_type_expr fallback in process_local projects `chan<- int` through the Index arm and the direction check fires (rows added in-merge) |
+
+### n5-zero-map-allocation-sites (the #645 follow-up, #1206 part 1) — ACCEPT
+`make([]T, n[, c])` elements (and the spare capacity a reslice exposes), `make([]map[K]V, n)` elements, and `[N]T` arrays (var, literal, const length, partial literal) are N5 zero values: their maps allocate, so the first write works instead of panicking `assignment to entry in nil map`. No check-site; ACCEPT with a byte-exact EXPECTED-OUTPUT (`spec_n5_zero_maps.rs` diffs it). Corpus: **130 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 88**.
+
+### composite-lit-inner-types (issue #3412, PR #3503) — REJECT + ACCEPT
+Composite literal elements/keys/values whose composite INNER type differs now reject HYB-E1002: `[]chan int32{ bad_chan }` with `bad_chan chan int64`, `[1][3]int{ bad_arr }` with `bad_arr [4]int`, `map[string]chan int32{ "k": bad_chan }` — all previously passed check with 0 diagnostics and failed `go build` (`cannot use ... as ... value in slice/array/map literal`). `deep_composite_conflict` in buildable.rs deep-compares the resolved composite spellings part by part at the array-item, slice-item, map-key and map-value check sites, wherever the coarse kind model collapsed container inners. Channel direction mismatches stay with the E3012 coercion layer (its single-diagnostic contract pins no double report); bare alias/named/type-parameter spellings, family mismatches and non-numeric array lengths fail open. Rows added in-merge (the PR missed the README's own VERDICTS.md contract). With this registration the corpus is **135 programs — ACCEPT 43 · ACCEPT-MANAGED 2 · REJECT 90**.
+
+-------------------------------------------------------------------------------
+
+### struct-chan-scalars-accept / struct-chan-shared-map-reject — ACCEPT + REJECT (bounty track: grow the adversarial corpus)
+
+A struct carrying a channel plus immutable scalar fields is move-sent and
+accepted; the same struct shape carrying a shared map field and a live sender
+alias is rejected when the sender writes through the alias after the move.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| struct-chan-scalars-accept | ACCEPT | — | — | channel safe-by-type + immutable scalars; owned `move`; no use after move |
+| struct-chan-shared-map-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct freezes that storage, so `m["after"] = 2` is a write through a live alias |
+
+With this registration the corpus is **137 programs — ACCEPT 44 · ACCEPT-MANAGED 2 · REJECT 91**.
+
+-------------------------------------------------------------------------------
+
+### struct-chan-scalars-send-accept / struct-chan-shared-map-send-reject — ACCEPT + REJECT (bounty track: grow the adversarial corpus)
+
+The send-site companions of the spawn-site pair: the same struct shapes crossed
+by a channel send instead of a `task` spawn, pinning that deep sendability and
+the move freeze reach the send path as well.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| struct-chan-scalars-send-accept | ACCEPT | — | — | channel safe-by-type + immutable scalars; owned `move` over `chan packet`; no use after move |
+| struct-chan-shared-map-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct over the channel freezes that storage, so `m["after"] = 2` is a write through a live alias |
+
+With this registration the corpus is **139 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 92**.
