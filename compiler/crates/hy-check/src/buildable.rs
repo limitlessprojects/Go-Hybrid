@@ -4269,6 +4269,72 @@ impl<'a> Collector<'a> {
         OpKind::Pointer(Box::new(inner))
     }
 
+
+    fn check_filepath_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "separator"
+                | "list_separator"
+                | "err_bad_pattern"
+                | "skip_all"
+                | "skip_dir"
+                | "walk_func"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `filepath.{member}`: `filepath.{member}` is a constant or type, not a function (HYB-E1002)"),
+                &format!("`filepath.{member}` is a package constant or type, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "abs" | "base" | "clean" | "dir" | "eval_symlinks" | "ext" | "from_slash"
+            | "is_abs" | "is_local" | "localize" | "split" | "split_list" | "to_slash"
+            | "volume_name" => Some(1),
+            "has_prefix" | "match" | "rel" | "walk" | "walk_dir" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`filepath.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `filepath.{member}`"),
+                );
+            }
+        }
+    }
+
+    fn check_path_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if member == "err_bad_pattern" {
+            self.emit_e1002(
+                span,
+                "cannot call `path.err_bad_pattern`: `path.err_bad_pattern` is an error variable, not a function (HYB-E1002)".to_string(),
+                "`path.err_bad_pattern` is a package variable, not a callable function",
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "base" | "clean" | "dir" | "ext" | "is_abs" | "split" => Some(1),
+            "match" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`path.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `path.{member}`"),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -7857,6 +7923,13 @@ impl<'a> Collector<'a> {
                             ),
                             "write `hex.encode(data)` (SPEC M5 hex encoding)",
                         );
+                    }
+
+                    if pkg == "filepath" && self.lookup_kind(pkg).is_none() {
+                        self.check_filepath_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "path" && self.lookup_kind(pkg).is_none() {
+                        self.check_path_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
