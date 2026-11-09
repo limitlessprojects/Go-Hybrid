@@ -78,6 +78,25 @@ fn test_filepath() {
 }
 
 #[test]
+fn filepath_non_variadic_spread_rejected_e1002() {
+    let cases = [
+        "fn main() {\n    var xs = [\"/foo/bar\"]\n    filepath.clean(xs...)\n}",
+        "fn main() {\n    var xs = [\"/foo/bar\"]\n    filepath.dir(xs...)\n}",
+        "fn main() {\n    var xs = [\"/foo/bar\"]\n    filepath.base(xs...)\n}",
+        "fn main() {\n    var xs = [\"/foo/bar\"]\n    filepath.ext(xs...)\n}",
+    ];
+    for src in cases {
+        let r = check(src);
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert!(
+            error_codes(&r).contains(&"HYB-E1002".to_string()),
+            "expected HYB-E1002 for: {src}, got: {:?}",
+            r.diagnostics
+        );
+    }
+}
+
+#[test]
 fn path_non_callable_members_rejected_e1002() {
     let r = check("fn main() { path.err_bad_pattern() }");
     assert_eq!(r.verdict, Verdict::Reject);
@@ -119,4 +138,23 @@ fn test_path() {
     let r = check(src);
     assert_eq!(error_codes(&r), Vec::<String>::new());
     assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn path_non_variadic_spread_rejected_e1002() {
+    let cases = [
+        "fn main() {\n    var xs = [\"/foo/bar\"]\n    path.clean(xs...)\n}",
+        "fn main() {\n    var xs = [\"/foo/bar\"]\n    path.dir(xs...)\n}",
+        "fn main() {\n    var xs = [\"/foo/bar\"]\n    path.base(xs...)\n}",
+        "fn main() {\n    var xs = [\"/foo/bar\"]\n    path.ext(xs...)\n}",
+    ];
+    for src in cases {
+        let r = check(src);
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert!(
+            error_codes(&r).contains(&"HYB-E1002".to_string()),
+            "expected HYB-E1002 for: {src}, got: {:?}",
+            r.diagnostics
+        );
+    }
 }
