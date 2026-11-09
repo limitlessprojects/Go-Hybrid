@@ -741,3 +741,47 @@
 **Ops**: cold rootfs; rust+go foreground installs in parallel with review work (S167 strategy held, ~4 min combined); triage scan skipped per standing rule (2-tick, 5-failure history) — queue via API + worklog; trim incremental → disk 89%.
 
 **Scouted next**: #4221 (Sora1916 nursery cancellation — non-arity, needs full read). Check for author re-pushes on #4202/#4201 (suite-only fixes are quick re-verifies). Pending: #4206, #4097, #4217, #4219, #4215/#4213/#4211, #4199.
+
+## Session 169 — 2026-11-09 21:10 UTC+8 — 1 landed, 1 gate fail round 2 (keyword case again)
+
+**Landed #4202 round 2** (tmclaos, `05afddaa` → merge `52bed580`, pushed + remote-asserted, reply 6740985282):
+- Author fixed round-1 review exactly: `_ =` reads on all control bindings + `path.match("a")` → observable `path.base("a","b")`. Battery: 3212/0 (+6 exact), 489=489 1:1, corpus 139/139, differential FULL 47/47+92/92. filepath/path arg-arity + non-callable enforcement is now main (variadic Join fail-open kept).
+
+**#4201 round 2 (re-push 17bc9a0b) → Gate FAIL again — same author flaw class resurfaced** (reply 6741110902):
+- Binding fix confirmed; conflict with the just-landed #4202 resolved by the S160 union-splice (checkout --ours + insert #4201's 2 fns + 2 dispatch arms via scripted splice with block-balance + presence assertions; cargo check green; splice script kept at scripts/splice_4201.py). 5/6 suite tests green on the resolved tree.
+- **`sort.interface()` is unrepresentable**: `interface` is a reserved keyword — parse-level E0002 under the suite's own parser-contract guard, checker E1002 unreachable (identical shape to #4202 round 1's `path.match`). One-line suite fix (drop or replace the case; int_slice/float64_slice/string_slice already cover the class). Impl remains conflict-resolved and ready — re-push lands fast.
+- Infra note: linker Bus error (signal 7) at 93% disk killed one battery run; trim incremental → 83% → retry clean. Env does not persist across tool calls — every cargo/go invocation needs the full export inline.
+
+**Ops**: cold rootfs; rust+go parallel foreground installs (~4 min); triage scan skipped per standing rule. Re-push watch paid off: heads diffed at tick open (#4202/#4201 both re-pushed at ~12:04/12:06Z).
+
+**Scouted next**: #4201 round 3 (one-line fix expected — highest priority on re-push), #4221 (Sora1916 nursery cancellation, head 0571ecbf, never read), #4199 (tmclaos, awaiting author on emitter-contract paths). Pending: #4206, #4097, #4217, #4219, #4215/#4213/#4211.
+
+## Session 170 — 2026-11-09 22:10 UTC+8 — 1 landed (#4201 round 3 closes the tmclaos url/sort arc)
+
+**Landed #4201 round 3** (tmclaos, re-push `5be5b956` → merge `43dc18bf`, pushed + remote-asserted, reply 6742569846):
+- Author applied the prescribed fix exactly: keyword-unrepresentable `sort.interface()` (parse-level, same class as #4202 round 1's `path.match`) replaced by observable `sort.float64_slice()`/`sort.string_slice()` cases; round-1 `_ =` binding reads intact. 3-round arc: controls → interface case → landed.
+- True merge-base `1e8673b4`, additive +75/+131, no dup. Conflict with the just-landed #4202 resolved via persisted `scripts/splice_4201.py` (S160 union-splice: HEAD side wholesale + 2 fns + 2 dispatch arms at original anchors; balance+presence assertions green, 4 fns/4 arms exactly once) — disclosed in the credit commit per in-merge doctrine.
+- Battery: 3218/0 (+6 = PR suite count exact), 490=490 1:1, corpus 139/139 tripwire not fired, differential FULL AGREEMENT 47/47+92/92.
+- tmclaos status: #4202 ✅ (S169), #4201 ✅ (S170), #4199 open (emitter-contract paths pending author choice).
+
+**Ops**: cold rootfs; rust toolchain survived snapshot (unchanged, default re-set); go tarball reinstalled — first attempt failed on `tar -C /home/z/tools` with the dir missing (mkdir -p first; cached /tmp/go.tgz reused on retry). Tick-open `git pull` hit an MCP frame-overflow quirk (1MiB SSE limit) — state verified via `git fetch` + `rev-parse` instead; pull-replacement pattern works. Also discovered: **another instance's worklog commit can be HEAD at tick open — always diff worklog tail against own summary assumptions before queueing.** Parallel-instance check: S169's commit found at open, no duplicated work done.
+
+**Scouted next** (API queue scan): #4240 (vandurmedries, triage chunked foreground --limit/--since-pr — the chunked mode the standing scan-stop rule awaited; landing it re-enables triage scan), #4229 (dextermos-dev, M5 allowlist expansion for log/compress*/archive* — the spec-change path offered to #4215/#4213/#4211; spec-level review needed), #4247 (SADIQ2M, arity+non-callable class, `8caebe47`), #4245/#4243 (Mekdou23, pointer-receiver/.pop() + StructLit-slice/channel-recv rejects), #4221 (Sora1916 nursery cancellation, head 0571ecbf, never read — 3rd tick scouted), #4109 (jpereyra243-byte, net/http surfaces — dup-check vs landed #4198), #3988 (Yumihariii, time.time value-method surface), #4123/#4122 (phatloi0010 const-init/guard rules). Pending author items: #4199, #4206, #4097, #4217, #4219.
+
+**State**: main `43dc18bf` == origin (pushed this tick). Suites 490, corpus 139/139, differential FULL. Disk 90% after incremental trim (998M free). triage scan skipped per standing rule (no chunked mode on main yet — #4240 would change that).
+
+## Session 171 — 2026-11-09 23:10 UTC+8 — 1 landed, 1 gate fail (surface completeness)
+
+**Landed #4249** (jpereyra243-byte, curated context.Context surface, fixes #4248, head `0bd82080` → merge `5c6eebb8`, pushed + remote-asserted, reply 6743822536):
+- Same proven #4198 family: annotation-driven (`fs`/`ctx` param types resolve via `is_curated_package_root("context")` — probe-verified that hy enforces NO import-to-use on foreign type annotations, killing the #4215-class deadness worry for annotation-driven surfaces), aliases lowercased+CamelCase, suite adds a struct-field-receiver case.
+- **Completeness verified against go1.26.9 `go doc context.Context`: exactly 4 methods (Deadline/Done/Err/Value), surface covers all 4, no keyword collisions** — no #4252-class gap. Battery: 3222/0 (+4 exact), 491=491 1:1, corpus 139/139, differential FULL 47/47+92/92.
+
+**#4252 (jpereyra243-byte, flag.FlagSet surface, fixes #4251) → Gate FAIL (review-level completeness, pre-battery)** (reply 6743721108):
+- Mechanism correct (annotation-driven, `is_curated_package_root("flag")` added, suite 3/3 on trial merge), **but `FLAG_FLAG_SET` omits `bool_func`** — `go doc flag.FlagSet.BoolFunc` exists in go1.26.9 and the name is representable (not a keyword). Probe on the trial-merged tree: `fs.bool_func("v","verbose",nil)` → HYB-E1002 false reject of a valid Go program (mirror Row-13 violation). One-line fix; `func`/`var` omissions unobservable (both reserved keywords, lexer.rs:74); Print*/SetInterspersed correctly absent from go doc (they don't exist). Re-push lands fast (merge conflict-free, rest proven green).
+- **New lesson: `go doc <Type>` on the pinned toolchain is the authoritative completeness oracle for curated surfaces — faster and harder than pkg.go.dev (offline, exact version).**
+
+**Ops**: cold rootfs; rust survived snapshot, go reinstalled from tarball. No parallel instance this tick (main `5a93dff0` at open == S170 close). Triage scan skipped per standing rule.
+
+**Scouted next**: #4247/#4254/#4256 (SADIQ2M arity band — patch-id dup-check against landed #4202/#4201 first), #4229 (dextermos-dev M5 allowlist expansion, re-pushed 15:00Z `5b11a4f2` — keystone for #4215/#4213/#4211; spec-level review), #4221 (Sora1916 nursery cancellation, 4th tick scouted, never read), #4250 (Yumihariii tools/job digest verification), #4123/#4122 (phatloi0010), gorky117-cell band (#4224/#4225/#4141/#4142/#4134/#4133...), #4240 (chunked triage mode). Pending authors: #4252 (one-line bool_func), #4199, #4206, #4097, #4217, #4219.
+
+**State**: main `5c6eebb8` == origin (pushed this tick). Suites 491, corpus 139/139, differential FULL. Disk 91% after incremental trim. jpereyra243-byte band: #4198 ✅ (S168), #4252 pending one-line fix, #4249 ✅ (S171).
