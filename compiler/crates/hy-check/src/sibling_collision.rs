@@ -116,6 +116,8 @@ impl<'a> Checker<'a> {
         // Map: declaration name -> (sibling file name, file kind)
         let mut sibling_decls: HashMap<String, (String, &'static str)> = HashMap::new();
 
+        let canon_path = std::fs::canonicalize(path).ok();
+
         for entry in entries {
             if !entry.is_file() {
                 continue;
@@ -123,6 +125,12 @@ impl<'a> Checker<'a> {
             let filename = entry.file_name().unwrap_or_default().to_string_lossy();
             if filename == current_filename {
                 continue;
+            }
+            // If entry is a symlink pointing to the current file (or vice versa), skip it.
+            if let (Some(ref cp), Ok(canon_entry)) = (&canon_path, std::fs::canonicalize(&entry)) {
+                if *cp == canon_entry {
+                    continue;
+                }
             }
 
             if filename.ends_with(".go") {
