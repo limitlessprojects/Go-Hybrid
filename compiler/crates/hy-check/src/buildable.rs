@@ -8332,6 +8332,9 @@ impl<'a> Collector<'a> {
                     if pkg == "io" && self.lookup_kind(pkg).is_none() {
                         self.check_io_call_buildable(name, args, span);
                     }
+                    if pkg == "net" && self.lookup_kind(pkg).is_none() {
+                        self.check_net_package_call(name.as_str(), args, span);
+                    }
 
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
@@ -9590,6 +9593,128 @@ impl<'a> Collector<'a> {
                     )]),
                 );
             }
+        }
+    }
+
+    fn check_net_package_call(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "err_closed"
+            | "err_write_to_connected"
+            | "default_resolver"
+            | "ipv4len"
+            | "ipv6len"
+            | "conn"
+            | "listener"
+            | "packet_conn"
+            | "addr"
+            | "dialer"
+            | "listen_config"
+            | "resolver"
+            | "ip"
+            | "ip_mask"
+            | "ip_net"
+            | "ip_addr"
+            | "ip_conn"
+            | "tcp_addr"
+            | "tcp_conn"
+            | "tcp_listener"
+            | "udp_addr"
+            | "udp_conn"
+            | "unix_addr"
+            | "unix_conn"
+            | "unix_listener"
+            | "interface"
+            | "hardware_addr"
+            | "buffers"
+            | "error"
+            | "addr_error"
+            | "dns_config_error"
+            | "dns_error"
+            | "invalid_addr_error"
+            | "op_error"
+            | "parse_error"
+            | "unknown_network_error" => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot call net.{}: package symbol is a variable, constant, or type, not a function (HYB-E1002)",
+                        name
+                    ),
+                    &format!("refer to net.{} as a value or type rather than calling it", name),
+                );
+            }
+            "dial" | "listen" | "listen_packet" | "listen_tcp" | "listen_udp" | "listen_ip"
+            | "listen_unix" | "listen_unixgram" | "join_host_port" | "lookup_port" | "cidr_mask"
+            | "resolve_ip_addr" | "resolve_tcp_addr" | "resolve_udp_addr"
+            | "resolve_unix_addr" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "net.{} takes exactly 2 arguments, got {} (HYB-E1002)",
+                            name,
+                            args.len()
+                        ),
+                        &format!("provide exactly 2 arguments to net.{}", name),
+                    );
+                }
+            }
+            "dial_timeout" | "dial_tcp" | "dial_udp" | "dial_ip" | "dial_unix" | "lookup_srv" => {
+                if args.len() != 3 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "net.{} takes exactly 3 arguments, got {} (HYB-E1002)",
+                            name,
+                            args.len()
+                        ),
+                        &format!("provide exactly 3 arguments to net.{}", name),
+                    );
+                }
+            }
+            "parse_ip" | "parse_cidr" | "parse_mac" | "split_host_port" | "lookup_addr"
+            | "lookup_cname" | "lookup_host" | "lookup_ip" | "lookup_mx" | "lookup_ns"
+            | "lookup_txt" | "file_conn" | "file_listener" | "file_packet_conn"
+            | "interface_by_index" | "interface_by_name" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "net.{} takes exactly 1 argument, got {} (HYB-E1002)",
+                            name,
+                            args.len()
+                        ),
+                        &format!("provide exactly 1 argument to net.{}", name),
+                    );
+                }
+            }
+            "pipe" | "interface_addrs" | "interfaces" => {
+                if !args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "net.{} takes 0 arguments, got {} (HYB-E1002)",
+                            name,
+                            args.len()
+                        ),
+                        &format!("write net.{}()", name),
+                    );
+                }
+            }
+            "ipv4" | "ipv4_mask" => {
+                if args.len() != 4 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "net.{} takes exactly 4 arguments (a, b, c, d), got {} (HYB-E1002)",
+                            name,
+                            args.len()
+                        ),
+                        &format!("write net.{}(a, b, c, d)", name),
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
