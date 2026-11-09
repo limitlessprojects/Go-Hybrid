@@ -2493,6 +2493,18 @@ impl<'a> Checker<'a> {
     /// `None` means "not provably a fixed-width integer". This predicate
     /// gates a diagnostic, so an unknown shape must fail open.
     pub(crate) fn fixed_width_int_ty_of(&self, st: &FnState, e: &Expr) -> Option<(String, i128, i128)> {
+        self.fixed_width_int_ty_of_depth(st, e, 0)
+    }
+
+    fn fixed_width_int_ty_of_depth(
+        &self,
+        st: &FnState,
+        e: &Expr,
+        depth: u32,
+    ) -> Option<(String, i128, i128)> {
+        if depth > 16 {
+            return None;
+        }
         let e = unwrap_parens(e);
         if let Some(ty) = self.ty_of_expr(st, e) {
             if let TypeExpr::Named { name, .. } = self.resolve_type_alias(&ty) {
@@ -2502,17 +2514,25 @@ impl<'a> Checker<'a> {
             }
         }
         // A file-level `const` is not a local binding, so `ty_of_expr` has no
-        // entry for it; read the declaration's own type annotation instead.
-        // `const top u8 = 255; top + 1` is the shape this exists for.
+        // entry for it; read the declaration's own type annotation (or its
+        // typed initializer when unannotated and not locally shadowed) instead.
+        // `const top u8 = 255; top + 1` and `const top = u8(255); top + 1` are
+        // the shapes this exists for.
         if let Expr::Ident { name, .. } = e {
-            let decl = self.file.decls.iter().find_map(|d| match d {
-                hy_syntax::Decl::Const(c) if c.name == *name => Some(c),
-                _ => None,
-            });
-            if let Some(ty) = decl.and_then(|c| c.ty.as_ref()) {
-                if let TypeExpr::Named { name: tn, .. } = self.resolve_type_alias(ty) {
-                    if let Some((lo, hi)) = fixed_width_int_range(&tn) {
-                        return Some((tn, lo, hi));
+            if st.env_lookup(name).is_none() {
+                let decl = self.file.decls.iter().find_map(|d| match d {
+                    hy_syntax::Decl::Const(c) if c.name == *name => Some(c),
+                    _ => None,
+                });
+                if let Some(c) = decl {
+                    if let Some(ty) = c.ty.as_ref() {
+                        if let TypeExpr::Named { name: tn, .. } = self.resolve_type_alias(ty) {
+                            if let Some((lo, hi)) = fixed_width_int_range(&tn) {
+                                return Some((tn, lo, hi));
+                            }
+                        }
+                    } else {
+                        return self.fixed_width_int_ty_of_depth(st, &c.value, depth + 1);
                     }
                 }
             }
@@ -2520,21 +2540,35 @@ impl<'a> Checker<'a> {
         // #1915: nested expressions over typed constants. Go folds the whole
         // constant expression and range-checks the result, so the operand's
         // fixed-width type propagates through unary negation, shifts and
-        // binary operations with an untyped constant on the other side.
+        // arithmetic/bitwise binary operations with an untyped constant on the
+        // other side.
         match e {
             Expr::Unary {
                 op: UnOp::Neg,
                 operand,
                 ..
-            } => self.fixed_width_int_ty_of(st, operand),
+            } => self.fixed_width_int_ty_of_depth(st, operand, depth + 1),
             Expr::Binary {
                 op: BinOp::Shl | BinOp::Shr,
                 lhs,
                 ..
-            } => self.fixed_width_int_ty_of(st, lhs),
-            Expr::Binary { lhs, rhs, .. } => {
-                let lt = self.fixed_width_int_ty_of(st, lhs);
-                let rt = self.fixed_width_int_ty_of(st, rhs);
+            } => self.fixed_width_int_ty_of_depth(st, lhs, depth + 1),
+            Expr::Binary {
+                op:
+                    BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Mod
+                    | BinOp::BitAnd
+                    | BinOp::BitOr
+                    | BinOp::BitXor,
+                lhs,
+                rhs,
+                ..
+            } => {
+                let lt = self.fixed_width_int_ty_of_depth(st, lhs, depth + 1);
+                let rt = self.fixed_width_int_ty_of_depth(st, rhs, depth + 1);
                 match (lt, rt) {
                     (Some(a), Some(b)) if a.0 == b.0 => Some(a),
                     (Some(a), None) => Some(a),
