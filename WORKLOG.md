@@ -798,3 +798,17 @@
 **Scouted next**: #4221 (Sora1916 nursery cancellation — 5th tick scouted, NEVER read; must take the full read next tick or drop from scouting), SADIQ2M arity band (#4247/#4254/#4256 — patch-id dup-check vs landed #4202/#4201 first), #4229 (dextermos-dev M5 allowlist expansion `98a862b1` — keystone for the 9-PR dextermos band that keeps re-pushing; spec-level review), #4238 (wminno hex/strconv arity `c57ac80c`), #4123/#4122 (phatloi0010, re-pushed 15:44Z), CrowAleksito band (#3949/#3942/#4228), #4250 (Yumihariii tools/job digests). Pending authors: #4199, #4206, #4097, #4217, #4219.
 
 **State**: main `79b5f68c` == origin (pushed this tick). Suites 492, corpus 139/139, differential FULL. Disk 91% after incremental trim.
+
+## Session 173 — 2026-11-10 01:10 UTC+8 — 1 landed (W-026 M1, the 5-tick scouting debt paid)
+
+**Landed #4221** (Sora1916, nursery cancellation + SPSC channel lifecycle, W-026 M1 of #4200, head `0571ecbf` → merge `fd3fae1c`, pushed + remote-asserted, reply 6746560974):
+- Different weight class: new `channel_liveness.rs` (forward CFG dataflow, HYB-E4004 Closed-before-exit / E4005 Drained-before-exit), linear `hy.send_cap[T]`/`hy.recv_cap[T]` capabilities, affine transfer E3001/E3002, `hy` added to curated import/root/member sets, 20-pattern conformance suite + spike dir. 11 files +1685/−321, branch base 9193371c.
+- **Conflict resolution** (scripts/resolve_4221.py): foreign.rs 2 hunks — hunk 1 UNION (PR's `match base` scrutinee adopted — required for `hy.send_cap[T]` generic stripping — plus landed #4198 `error` arm kept); hunk 2 HEAD-only (PR side was stale pre-#4198 reformatted subset, no new entries). Assertions green; **new lesson: a replacement block that opens `match {` whose close lives in the shared tail is NOT self-contained — skip block-balance asserts, the compile gate is the real check** (assertion false-fail cost one script iteration).
+- Battery: 3245/0 (+20 exact), 493=493 1:1, PR suite 20/20 on union tree, corpus 139/139, differential FULL 47/47+92/92.
+- **Landing-commit lesson**: `fixes #4200` in the merge commit auto-closed the tracker — but the issue schedules M1 ($250) AND M2 ($250 post-mortem). **Reopened #4200 with a note** (M1 delivered via fd3fae1c, M2 stays tracked). Rule: multi-milestone trackers get `part of #N` wording, never `fixes #N`, unless the whole issue ships.
+
+**Ops**: cold rootfs (rust snapshot OK, go reinstall); /tmp wiped. One MCP frame-overflow hang on an over-broad `rg` (S170 git-pull precedent — same signature, narrow the pattern/paths). No parallel instance.
+
+**Scouted next**: Anekenonso band (#4273 arity/non-callable, #4271 variadic spread on non-variadic foreign funcs — patch-id dup-check vs landed #4202/#4201; #743 identifier/primitive-type collision), dextermos-dev band re-pushed again (6 PRs, 17:04-17:05Z), #4238 (wminno), #4123/#4122 (phatloi0010), old-backlog rebase wave (#584-#791 re-pushed 16:54Z — bulk wave, screen cheaply by band). Pending authors: #4199, #4206, #4097, #4217, #4219.
+
+**State**: main `fd3fae1c` == origin (pushed this tick). Suites 493, corpus 139/139, differential FULL. Disk ~91% after incremental trim.
