@@ -8078,6 +8078,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if pkg == "bufio" && self.lookup_kind(pkg).is_none() {
+                        self.check_bufio_call_buildable(name, args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -9485,6 +9489,69 @@ impl<'a> Collector<'a> {
             _ => {}
         }
     }
+
+    fn check_bufio_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "err_advance_too_far"
+            | "err_bad_read_count"
+            | "err_buffer_full"
+            | "err_final_token"
+            | "err_invalid_unread_byte"
+            | "err_invalid_unread_rune"
+            | "err_negative_advance"
+            | "err_negative_count"
+            | "err_too_long" => {
+                self.emit_e1002(
+                    span,
+                    format!("cannot call non-function package variable `bufio.{}` (HYB-E1002)", name),
+                    &format!("write `bufio.{}` (package error variable, not a function)", name),
+                );
+            }
+            "max_scan_token_size" => {
+                self.emit_e1002(
+                    span,
+                    "cannot call non-function package constant `bufio.max_scan_token_size` (HYB-E1002)".to_string(),
+                    "write `bufio.max_scan_token_size` (package constant, not a function)",
+                );
+            }
+            "reader" | "writer" | "read_writer" | "scanner" | "split_func" => {
+                self.emit_e1002(
+                    span,
+                    format!("cannot call non-function package type `bufio.{}` (HYB-E1002)", name),
+                    &format!("use `bufio.{}` as a type or struct field, not a function", name),
+                );
+            }
+            "new_reader" | "new_writer" | "new_scanner" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("`bufio.{}` takes exactly 1 argument, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 1 argument to `bufio.{}`", name),
+                    );
+                }
+            }
+            "new_reader_size" | "new_writer_size" | "new_read_writer" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("`bufio.{}` takes exactly 2 arguments, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 2 arguments to `bufio.{}`", name),
+                    );
+                }
+            }
+            "scan_bytes" | "scan_lines" | "scan_runes" | "scan_words" => {
+                if args.len() != 3 {
+                    self.emit_e1002(
+                        span,
+                        format!("`bufio.{}` takes exactly 3 arguments `(data, at_eof, split)`, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 3 arguments to `bufio.{}`", name),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
 }
 
 fn span_expr_label(lhs: &Expr, op: &str, rhs: &Expr) -> String {
