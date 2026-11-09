@@ -898,6 +898,26 @@ fn cmd_build(args: &[String]) -> ExitCode {
     let out_path = out_path.unwrap_or_else(|| "a.out".to_string());
     let binding_prefix = binding_prefix.unwrap_or_else(|| "hybrid.program".to_string());
 
+    if pkg_name.is_none() {
+        let go_path = format!("{}.go", out_path);
+        match std::fs::read_to_string(&go_path) {
+            Ok(existing) if !existing.starts_with(GENERATED_HEADER_PREFIX) => {
+                eprintln!(
+                    "{} exists and is NOT hyb-generated — refusing to overwrite a hand-written file; \
+                     choose another -o path or move the existing file after verifying it is an old generated artifact",
+                    go_path
+                );
+                return ExitCode::from(2);
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                eprintln!("error reading {}: {}", go_path, e);
+                return ExitCode::from(2);
+            }
+        }
+    }
+
     // --- 1. Toolchain pin enforcement (HYB-E9001) ---
     // The walking skeleton's reproducibility guard (DX study: ~30 lines).
     // HYB_ALLOW_TOOLCHAIN_DRIFT=1 is the documented escape hatch for
