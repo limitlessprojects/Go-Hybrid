@@ -830,3 +830,16 @@
 **Scouted next**: #4271 (Anekenonso variadic spread on non-variadic foreign funcs in url/sort/path/filepath, head `d85c6d26` — patch-id dedup vs landed #4202/#4201 first: if those already reject spread for their packages, this is redundant → written reply; check overlap with #4273's spread arm), #743 (Anekenonso identifier/primitive-type collision, head `46f3ac56`), dextermos-dev band (6 PRs re-pushed), #4238 (wminno), #4123/#4122 (phatloi0010), old-backlog rebase wave #584-#791 (screen by band cheaply). Pending authors: #4199, #4206, #4097, #4217, #4219.
 
 **State**: main `3b025ccd` == origin (pushed this tick). Suites 494, tests 3249, corpus 139/139, differential FULL. Disk ~94% after battery (trim incremental before next heavy phase).
+
+### S175 addendum — second landing this tick
+
+**Landed: #4271** (Anekenonso, reject variadic spread on non-variadic foreign calls in url/sort/path/filepath, fixes #4270) — merge `416eb76c`, reply 6750548703.
+- Head `d85c6d26` (full sha via API; abbreviated sha fetch fails — always resolve full sha first). Merge-base `e33e8dc9`, trial-merge tree `6ec825f1`, +32/−4 buildable.rs + 2 suites × +38 pure additions.
+- Premise probed on pre-merge main: url.query_escape / sort.float64s / filepath.join spread → 0 diagnostics (Row-13 bypass live).
+- **False-rejection audit (the decisive check)**: member-by-member against go doc — no arity-table member in the four packages is variadic in Go; url.JoinPath (the one real variadic) lives on the None-arity path with its own ≥1-arg branch, untouched; filepath/path.Join not in tables (None-arity passthrough unchanged, and that passthrough is CORRECT for join since Go Join is variadic).
+- Gates: 3253/0 (+4 exact), 494=494, corpus 139/139, differential FULL 47/47+92/92. #4270 no milestone → `fixes` safe.
+- Residual noted in reply (pre-existing, not PR scope): None-arity members bypass arity+spread; join's passthrough is correct-by-variadicity, non-[]string spread there needs the type checker (different rule).
+
+**State**: main `416eb76c` == origin. Suites 494, tests 3253, corpus 139/139, differential FULL. Disk trimmed twice this tick (incremental regrew to 531M mid-battery; rootfs hit 100% again with 50M free — trim BEFORE corpus/differential, go builds need /tmp headroom).
+
+**Scouted next**: #743 (Anekenonso identifier/primitive-type collision, head `46f3ac56` — third Anekenonso PR this band), dextermos-dev band (6 PRs), #4238 (wminno), #4123/#4122 (phatloi0010), old-backlog rebase wave #584-#791. Pending authors: #4199, #4206, #4097, #4217, #4219. Triage scan/approve STILL pending rerun (session losses twice).
