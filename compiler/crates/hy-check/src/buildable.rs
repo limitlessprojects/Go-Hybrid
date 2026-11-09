@@ -4297,7 +4297,13 @@ impl<'a> Collector<'a> {
         };
 
         if let Some(expected) = expected_arity {
-            if args.len() != expected {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `filepath.{member}` (HYB-E1002)"),
+                    &format!("`filepath.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
                 let noun = if expected == 1 { "argument" } else { "arguments" };
                 self.emit_e1002(
                     span,
@@ -4325,7 +4331,13 @@ impl<'a> Collector<'a> {
         };
 
         if let Some(expected) = expected_arity {
-            if args.len() != expected {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `path.{member}` (HYB-E1002)"),
+                    &format!("`path.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
                 let noun = if expected == 1 { "argument" } else { "arguments" };
                 self.emit_e1002(
                     span,
@@ -4356,7 +4368,13 @@ impl<'a> Collector<'a> {
         };
 
         if let Some(expected) = expected_arity {
-            if args.len() != expected {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `url.{member}` (HYB-E1002)"),
+                    &format!("`url.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
                 let noun = if expected == 1 { "argument" } else { "arguments" };
                 self.emit_e1002(
                     span,
@@ -4392,12 +4410,66 @@ impl<'a> Collector<'a> {
         };
 
         if let Some(expected) = expected_arity {
-            if args.len() != expected {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `sort.{member}` (HYB-E1002)"),
+                    &format!("`sort.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
                 let noun = if expected == 1 { "argument" } else { "arguments" };
                 self.emit_e1002(
                     span,
                     format!("`sort.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
                     &format!("provide exactly {expected} {noun} to `sort.{member}`"),
+                );
+            }
+        }
+    }
+
+    fn check_sync_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "mutex"
+                | "rw_mutex"
+                | "rwmutex"
+                | "wait_group"
+                | "waitgroup"
+                | "once"
+                | "cond"
+                | "map"
+                | "pool"
+                | "locker"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `sync.{member}`: `sync.{member}` is a type or interface, not a function (HYB-E1002)"),
+                &format!("`sync.{member}` is a package type or interface, not a callable function"),
+            );
+            return;
+        }
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `sync.{member}` (HYB-E1002)"),
+                &format!("`sync.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_cond" | "once_func" | "once_value" | "once_values" => Some(1),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`sync.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `sync.{member}`"),
                 );
             }
         }
@@ -7977,19 +8049,75 @@ impl<'a> Collector<'a> {
                             &format!("write `os.{}` (package variable, not a function)", name),
                         );
                     }
-                    if pkg == "hex"
-                        && self.lookup_kind(pkg).is_none()
-                        && name == "encode"
-                        && args.len() != 1
-                    {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "`hex.encode` takes exactly 1 slice argument `(src)`, got {} (HYB-E1002)",
-                                args.len()
-                            ),
-                            "write `hex.encode(data)` (SPEC M5 hex encoding)",
-                        );
+                    if pkg == "hex" && self.lookup_kind(pkg).is_none() {
+                        // Full encoding/hex call surface — every member the
+                        // member table in foreign.rs blesses, with the arity
+                        // of the Go name it lowers to (`to_go_name`: snake
+                        // case -> CamelCase, e.g. `encode` -> EncodeToString,
+                        // `decode_string` -> DecodeString). Checking only
+                        // `encode` let every other member escape with any
+                        // arity and blow up at `go build` instead of at
+                        // `hyb check` (Row 13 BUILDABLE: reject fail-closed,
+                        // HYB-E1002). Arities are the Go signatures in
+                        // encoding/hex.
+                        let expected: Option<usize> = match name.as_str() {
+                            "encode" // EncodeToString(src) -> string
+                            | "encode_to_string" // EncodeToString(src)
+                            | "decode_string" // DecodeString(s) (2 results)
+                            | "dump" // Dump(b) -> string
+                            | "dumper" // Dumper(w)
+                            | "encoded_len" // EncodedLen(n)
+                            | "decoded_len" // DecodedLen(x)
+                            | "new_encoder" // NewEncoder(w)
+                            | "new_decoder" // NewDecoder(r)
+                            => Some(1),
+                            "decode" => Some(2), // Decode(dst, src)
+                            _ => None,
+                        };
+                        if let Some(n) = expected {
+                            if args.len() != n {
+                                let go_name = {
+                                    // mirror hy-emit's to_go_name without a
+                                    // cross-crate dep (hy-check must not
+                                    // depend on hy-emit).
+                                    let mut out = String::new();
+                                    for part in name.split('_') {
+                                        if part.is_empty() {
+                                            continue;
+                                        }
+                                        let mut cs = part.chars();
+                                        if let Some(c) = cs.next() {
+                                            out.extend(c.to_uppercase());
+                                        }
+                                        out.push_str(cs.as_str());
+                                    }
+                                    out
+                                };
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`hex.{}` takes exactly {} argument{}, got {} (HYB-E1002)",
+                                        name,
+                                        n,
+                                        if n == 1 { "" } else { "s" },
+                                        args.len()
+                                    ),
+                                    &format!(
+                                        "match the arity of the Go function this lowers to (`hex.{}`)",
+                                        go_name
+                                    ),
+                                );
+                            }
+                        } else if matches!(name.as_str(), "err_length" | "invalid_byte_error") {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`hex.{}` is not a function — it is a package-level value/type and cannot be called (HYB-E1002)",
+                                    name
+                                ),
+                                &format!("reference `hex.{}` directly, do not call it", name),
+                            );
+                        }
                     }
 
                     if pkg == "filepath" && self.lookup_kind(pkg).is_none() {
@@ -8003,6 +8131,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sort" && self.lookup_kind(pkg).is_none() {
                         self.check_sort_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "sync" && self.lookup_kind(pkg).is_none() {
+                        self.check_sync_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
