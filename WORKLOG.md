@@ -726,3 +726,18 @@
 **Ops**: cold rootfs again; rustup-init/go both needed FOREGROUND installs this tick (background setsid jobs killed by sandbox ~3 attempts — install.log stuck at "downloading installer" with dead processes; foreground completed both in ~2-4 min). **triage scan+approve dead again (0 bytes, process dead) — 5 failures across 2 ticks; standing rule: queue via direct API + worklog scouting, retry scan only if a chunked/foreground mode appears.**
 
 **Scouted next**: #4198 (jpereyra243-byte, http.response_writer+round_tripper curated method surfaces, fixes #4197, net/http allowlist-✓, head 8b647245, base stale 1e8673b4), #4199 (tmclaos T23/E2002 multi-value try unwraps — non-arity, full read), #4221 (Sora1916 nursery cancellation). Pending author fixes: #4202/#4201 (suite controls), #4206, #4097, #4217, #4219, #4215/#4213/#4211.
+
+## Session 168 — 2026-11-09 19:10 UTC+8 — 1 landed, 1 gate fail (premise overturned)
+
+**Landed #4198** (jpereyra243-byte, fixes #4197, `8b647245` → merge `32ac79aa`, pushed + remote-asserted, reply 6738677538):
+- Curated method surfaces: http.response_writer [header, write, write_header] + http.round_tripper [round_trip] + builtin error [error] + net.addr [network, string] + net.error [error, temporary, timeout], lowercased+capitalized spellings, method_result entries. No dup vs main (member-existence table ≠ handle-type surface — different functions).
+- Battery: auto-merge clean (true merge-base 65c8489d computed first — lesson from S167 held); workspace 3206/0 (+8 = PR test count exactly), 488=488 1:1; corpus 139/139 tripwire not fired; differential FULL AGREEMENT 47/47+92/92. The `error` named-type tightening (permissive→modeled) tripped nothing: no false rejects.
+
+**#4199 (tmclaos, T23 try-unwrap result counting, +25/−5 tuple.rs + 91 tests) → Gate FAIL (premise overturned by probes, pre-battery)** (reply 6738714590):
+- The PR changes static_result_count to account `?`-unwrapped calls as N−1 values and reject binding mismatches. Its suite cites go build "assignment mismatch: 2 variables but f returns 3 values" — **that failure mode never occurs**: probe 3 (`p := pair_err()?`) dies at the emitter's MVP-0 cap ("functions with 3 results (max 2)") loudly before go build, for any 3-result fn regardless of `?`.
+- Probes 1–2 disprove the reject cases as false-rejects of currently-building programs: `n := strconv.parse_int(...)?` emits `n, hyErr0 := strconv.ParseInt(...)` (synthetic error binding) and BUILDS; `a, b := single_err()?` emits `a, b := single_err()` and BUILDS. The landed tuple.rs contract matches the emitter's actual lowering; the PR contradicts it (#4219 hex.encode shape).
+- Landable paths offered: scope the reject to 3-result single-binding only (emit-cap ergonomics), or reconcile SPEC §2.8 + emitter first in a separate spec-change PR. tmclaos now has three open items (#4202, #4201, #4199 — all with concrete fix paths).
+
+**Ops**: cold rootfs; rust+go foreground installs in parallel with review work (S167 strategy held, ~4 min combined); triage scan skipped per standing rule (2-tick, 5-failure history) — queue via API + worklog; trim incremental → disk 89%.
+
+**Scouted next**: #4221 (Sora1916 nursery cancellation — non-arity, needs full read). Check for author re-pushes on #4202/#4201 (suite-only fixes are quick re-verifies). Pending: #4206, #4097, #4217, #4219, #4215/#4213/#4211, #4199.
