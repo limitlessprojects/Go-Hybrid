@@ -8333,6 +8333,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if (pkg == "hex" || pkg == "encoding/hex") && self.lookup_kind(pkg).is_none() {
+                        self.check_hex_call_buildable(name, args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -8521,6 +8525,257 @@ impl<'a> Collector<'a> {
                 ),
                 "supply one type argument per declared type parameter on the function",
             );
+        }
+    }
+
+    fn check_hex_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "err_length" => {
+                self.emit_e1002(
+                    span,
+                    "cannot call non-function package error `hex.err_length` (HYB-E1002)".to_string(),
+                    "`hex.err_length` is a package error variable, not a callable function",
+                );
+            }
+            "encode_to_string" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.encode_to_string` takes exactly 1 argument `(src)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.encode_to_string(src)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "src" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.encode_to_string` has no parameter named `{}` (params: src) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `src`",
+                        );
+                    }
+                }
+            }
+            "decode_string" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.decode_string` takes exactly 1 argument `(s)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.decode_string(s)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "s" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.decode_string` has no parameter named `{}` (params: s) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `s`",
+                        );
+                    }
+                }
+            }
+            "encode" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.encode` takes exactly 2 arguments `(dst, src)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.encode(dst, src)`",
+                    );
+                } else {
+                    for a in args {
+                        if let Some(ref n) = a.name {
+                            if n != "dst" && n != "src" {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`hex.encode` has no parameter named `{}` (params: dst, src) (HYB-E1002)",
+                                        n
+                                    ),
+                                    "pass arguments by position or use valid parameter names `dst` and `src`",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            "decode" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.decode` takes exactly 2 arguments `(dst, src)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.decode(dst, src)`",
+                    );
+                } else {
+                    for a in args {
+                        if let Some(ref n) = a.name {
+                            if n != "dst" && n != "src" {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`hex.decode` has no parameter named `{}` (params: dst, src) (HYB-E1002)",
+                                        n
+                                    ),
+                                    "pass arguments by position or use valid parameter names `dst` and `src`",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            "encoded_len" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.encoded_len` takes exactly 1 argument `(n)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.encoded_len(n)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "n" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.encoded_len` has no parameter named `{}` (params: n) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `n`",
+                        );
+                    }
+                }
+            }
+            "decoded_len" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.decoded_len` takes exactly 1 argument `(x)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.decoded_len(x)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "x" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.decoded_len` has no parameter named `{}` (params: x) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `x`",
+                        );
+                    }
+                }
+            }
+            "dump" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.dump` takes exactly 1 argument `(data)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.dump(data)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "data" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.dump` has no parameter named `{}` (params: data) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `data`",
+                        );
+                    }
+                }
+            }
+            "dumper" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.dumper` takes exactly 1 argument `(w)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.dumper(w)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "w" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.dumper` has no parameter named `{}` (params: w) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `w`",
+                        );
+                    }
+                }
+            }
+            "new_decoder" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.new_decoder` takes exactly 1 argument `(r)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.new_decoder(r)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "r" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.new_decoder` has no parameter named `{}` (params: r) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `r`",
+                        );
+                    }
+                }
+            }
+            "new_encoder" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.new_encoder` takes exactly 1 argument `(w)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.new_encoder(w)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "w" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.new_encoder` has no parameter named `{}` (params: w) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `w`",
+                        );
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
