@@ -588,6 +588,8 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const HTTP_RESPONSE_WRITER: &[&str] = &["header", "write", "write_header"];
     /// `http.RoundTripper` — standard library HTTP transport round tripper interface.
     const HTTP_ROUND_TRIPPER: &[&str] = &["round_trip"];
+    /// `context.Context` — standard library context interface.
+    const CONTEXT_CONTEXT: &[&str] = &["deadline", "done", "err", "value"];
     const URL_URL: &[&str] = &[
         "escaped_fragment",
         "escaped_path",
@@ -717,6 +719,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "http.cookie" | "http.Cookie" => Some(HTTP_COOKIE),
         "http.response_writer" | "http.responsewriter" | "http.ResponseWriter" => Some(HTTP_RESPONSE_WRITER),
         "http.round_tripper" | "http.roundtripper" | "http.RoundTripper" => Some(HTTP_ROUND_TRIPPER),
+        "context.context" | "context.Context" => Some(CONTEXT_CONTEXT),
         "url.url" | "url.URL" => Some(URL_URL),
         "json.decoder" | "json.Decoder" => Some(JSON_DECODER),
         "json.encoder" | "json.Encoder" => Some(JSON_ENCODER),
@@ -896,6 +899,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
         "fmt"
             | "os"
             | "io"
+            | "context"
             | "time"
             | "sort"
             | "strings"
