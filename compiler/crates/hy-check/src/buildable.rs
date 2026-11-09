@@ -1491,6 +1491,23 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
+        if let Expr::Field { base, name, .. } = unwrap_parens(callee) {
+            if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                if self.lookup_kind(pkg).is_none()
+                    && !self.scopes.iter().any(|layer| layer.contains_key(pkg.as_str()))
+                {
+                    let head = Checker::base_named_type_str(name);
+                    let assoc_key = format!("{}.{}", pkg, head);
+                    if let Some(fd) = self.ck.fns.get(assoc_key.as_str()) {
+                        if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                            return None;
+                        }
+                        return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                    }
+                }
+            }
+            return None;
+        }
         let Expr::Ident { name, .. } = unwrap_parens(callee) else {
             return None;
         };
@@ -2520,9 +2537,26 @@ impl<'a> Collector<'a> {
                         self.check_user_fn_arg_types(name, args);
                     }
                     Expr::Field { base, name, .. } => {
-                        let bk = self.kind_of_expr(base);
-                        self.check_method_arity(&bk, name, args, *span);
-                        self.check_method_arg_types(&bk, name, args);
+                        let mut handled_assoc = false;
+                        if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                            if self.lookup_kind(pkg).is_none()
+                                && !self.scopes.iter().any(|s| s.contains_key(pkg.as_str()))
+                            {
+                                let head = Checker::base_named_type_str(name);
+                                let assoc_key = format!("{}.{}", pkg, head);
+                                let raw_assoc = format!("{}.{}", pkg, name);
+                                if self.ck.fns.contains_key(assoc_key.as_str()) {
+                                    self.check_user_fn_arity(&raw_assoc, args, *span);
+                                    self.check_user_fn_arg_types(&raw_assoc, args);
+                                    handled_assoc = true;
+                                }
+                            }
+                        }
+                        if !handled_assoc {
+                            let bk = self.kind_of_expr(base);
+                            self.check_method_arity(&bk, name, args, *span);
+                            self.check_method_arg_types(&bk, name, args);
+                        }
                     }
                     Expr::FnLit { params, .. } => {
                         self.check_fn_lit_call(params, args, callee, *span);
@@ -4032,6 +4066,25 @@ impl<'a> Collector<'a> {
                         Some(params),
                     );
                 }
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none()
+                        && !self.scopes.iter().any(|s| s.contains_key(pkg.as_str()))
+                    {
+                        let head = Checker::base_named_type_str(name);
+                        let assoc_key = format!("{}.{}", pkg, head);
+                        if let Some(f) = self.ck.fns.get(assoc_key.as_str()) {
+                            if f.type_params.is_empty() {
+                                return OpKind::Fn(
+                                    f.results
+                                        .iter()
+                                        .map(|r| self.kind_of_ty(&r.ty, 0))
+                                        .collect(),
+                                    Some(f.params.iter().map(|p| self.param_kind(p, 0)).collect()),
+                                );
+                            }
+                        }
+                    }
+                }
                 OpKind::Unknown
             }
             Expr::StructLit { ty, .. } => ty
@@ -4172,6 +4225,21 @@ impl<'a> Collector<'a> {
                                 .map(|r| self.kind_of_ty(&r.ty, 0))
                                 .collect(),
                         );
+                    }
+                }
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none()
+                        && !self.scopes.iter().any(|s| s.contains_key(pkg.as_str()))
+                    {
+                        let assoc_key = format!("{}.{}", pkg, head);
+                        if let Some(f) = self.ck.fns.get(assoc_key.as_str()) {
+                            return Some(
+                                f.results
+                                    .iter()
+                                    .map(|r| self.kind_of_ty(&r.ty, 0))
+                                    .collect(),
+                            );
+                        }
                     }
                 }
                 if let Some(OpKind::Fn(res, _)) = self.struct_field_kind(&bk, name) {
@@ -8078,10 +8146,18 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
-                    if self.lookup_kind(pkg).is_none() {
+                    if self.lookup_kind(pkg).is_none()
+                        && !self.scopes.iter().any(|s| s.contains_key(pkg.as_str()))
+                    {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
+                        let raw_assoc = format!("{}.{}", pkg, name);
                         self.check_fn_type_arg_arity(&assoc_key, name, span);
+                        if self.ck.fns.contains_key(assoc_key.as_str()) {
+                            self.check_user_fn_arity(&raw_assoc, args, span);
+                            self.check_user_fn_arg_types(&raw_assoc, args);
+                            return;
+                        }
                     }
                 }
                 if let Some(m) = self.method_expr_decl(base, name) {
