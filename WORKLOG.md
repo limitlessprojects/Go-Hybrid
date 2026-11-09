@@ -769,3 +769,19 @@
 **Scouted next** (API queue scan): #4240 (vandurmedries, triage chunked foreground --limit/--since-pr — the chunked mode the standing scan-stop rule awaited; landing it re-enables triage scan), #4229 (dextermos-dev, M5 allowlist expansion for log/compress*/archive* — the spec-change path offered to #4215/#4213/#4211; spec-level review needed), #4247 (SADIQ2M, arity+non-callable class, `8caebe47`), #4245/#4243 (Mekdou23, pointer-receiver/.pop() + StructLit-slice/channel-recv rejects), #4221 (Sora1916 nursery cancellation, head 0571ecbf, never read — 3rd tick scouted), #4109 (jpereyra243-byte, net/http surfaces — dup-check vs landed #4198), #3988 (Yumihariii, time.time value-method surface), #4123/#4122 (phatloi0010 const-init/guard rules). Pending author items: #4199, #4206, #4097, #4217, #4219.
 
 **State**: main `43dc18bf` == origin (pushed this tick). Suites 490, corpus 139/139, differential FULL. Disk 90% after incremental trim (998M free). triage scan skipped per standing rule (no chunked mode on main yet — #4240 would change that).
+
+## Session 171 — 2026-11-09 23:10 UTC+8 — 1 landed, 1 gate fail (surface completeness)
+
+**Landed #4249** (jpereyra243-byte, curated context.Context surface, fixes #4248, head `0bd82080` → merge `5c6eebb8`, pushed + remote-asserted, reply 6743822536):
+- Same proven #4198 family: annotation-driven (`fs`/`ctx` param types resolve via `is_curated_package_root("context")` — probe-verified that hy enforces NO import-to-use on foreign type annotations, killing the #4215-class deadness worry for annotation-driven surfaces), aliases lowercased+CamelCase, suite adds a struct-field-receiver case.
+- **Completeness verified against go1.26.9 `go doc context.Context`: exactly 4 methods (Deadline/Done/Err/Value), surface covers all 4, no keyword collisions** — no #4252-class gap. Battery: 3222/0 (+4 exact), 491=491 1:1, corpus 139/139, differential FULL 47/47+92/92.
+
+**#4252 (jpereyra243-byte, flag.FlagSet surface, fixes #4251) → Gate FAIL (review-level completeness, pre-battery)** (reply 6743721108):
+- Mechanism correct (annotation-driven, `is_curated_package_root("flag")` added, suite 3/3 on trial merge), **but `FLAG_FLAG_SET` omits `bool_func`** — `go doc flag.FlagSet.BoolFunc` exists in go1.26.9 and the name is representable (not a keyword). Probe on the trial-merged tree: `fs.bool_func("v","verbose",nil)` → HYB-E1002 false reject of a valid Go program (mirror Row-13 violation). One-line fix; `func`/`var` omissions unobservable (both reserved keywords, lexer.rs:74); Print*/SetInterspersed correctly absent from go doc (they don't exist). Re-push lands fast (merge conflict-free, rest proven green).
+- **New lesson: `go doc <Type>` on the pinned toolchain is the authoritative completeness oracle for curated surfaces — faster and harder than pkg.go.dev (offline, exact version).**
+
+**Ops**: cold rootfs; rust survived snapshot, go reinstalled from tarball. No parallel instance this tick (main `5a93dff0` at open == S170 close). Triage scan skipped per standing rule.
+
+**Scouted next**: #4247/#4254/#4256 (SADIQ2M arity band — patch-id dup-check against landed #4202/#4201 first), #4229 (dextermos-dev M5 allowlist expansion, re-pushed 15:00Z `5b11a4f2` — keystone for #4215/#4213/#4211; spec-level review), #4221 (Sora1916 nursery cancellation, 4th tick scouted, never read), #4250 (Yumihariii tools/job digest verification), #4123/#4122 (phatloi0010), gorky117-cell band (#4224/#4225/#4141/#4142/#4134/#4133...), #4240 (chunked triage mode). Pending authors: #4252 (one-line bool_func), #4199, #4206, #4097, #4217, #4219.
+
+**State**: main `5c6eebb8` == origin (pushed this tick). Suites 491, corpus 139/139, differential FULL. Disk 91% after incremental trim. jpereyra243-byte band: #4198 ✅ (S168), #4252 pending one-line fix, #4249 ✅ (S171).
