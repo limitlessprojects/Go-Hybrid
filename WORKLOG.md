@@ -642,3 +642,15 @@
 - fmt family coverage on main: printf (#4087) + scan (#4093); append (#4097) still pending author's escaped-quote fix.
 - Next queue: #4095/#4109/#4117 (jpereyra243-byte), #4105 (mischievousdeveloper), #4107/#4111/#4113/#4115 (dextermos-dev arity band — dedupe vs landed fmt arms), flood #4117–#4152 — top-down by created.
 - Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
+## Session 161 — 2026-11-09 09:10 UTC+8 — 1 landed, 1 accident repaired
+
+**Landed #4204** (dextermos-dev, fixes #4203, `b8b1e48b` → merge `a95dddf2`, pushed + remote-asserted):
+- io package call arity + 19 non-callable symbol rejects under the landed fmt pattern (#4087/#4093); lookup_kind guard, fail-open unknowns. New suite io_call_buildable_soundness.rs → suites 486.
+- Battery: workspace 486/486 (1:1), corpus 137/137 tripwire not fired, differential FULL AGREEMENT.
+- **#4162 (Sora1916) = different patch-id, independent io implementation → first-come-first-served honored by battery order; hall-of-fame reply posted (comment 6729945605), PR kept open for supplement-or-subset disposition** (predecessors #4084/#4085).
+
+**ACCIDENT — session-159 trim deleted tracked examples/ (28 files) and the worklog `git add -A` pushed the deletions (`30d4ebf0`)**: caught by the battery gate itself (parse_all.rs examples_01_02_03_parse "No such file or directory"). Restored byte-identical from afc41e90 and pushed as `00bfd96a` (pure repair commit, disclosed in its message). **Discipline corrected: post-battery trims must exclude git-tracked paths — from now on trim only `/home/z/go-hybrid-target/debug/incremental` (non-tracked), never `examples/` or anything under the repo working tree.**
+
+**Also this window**: #4206 (flate2) gate-FAILed last session (unresolved conflict markers at blob lines 8164/8170 + whole-file CRLF rewrite; evidence reply 6729165885 with two-step fix); awaiting author re-push.
+
+**Queue next**: #4202/#4201/#4199 (tmclaos), #4198 (jpereyra243-byte http.response_writer), #4196 (9xj89gzrtw-hue fmt — overlap-watch vs landed fmt arms), #4194/#4189 (SuperPiIot), then the 4140s band.
