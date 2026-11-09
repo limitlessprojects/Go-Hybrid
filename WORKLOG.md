@@ -686,3 +686,11 @@
 **Allowlist pre-screen adopted as standing triage step**: #4219 (encoding/hex ✓ but failed on semantics), #4202 (path/filepath+path ✓), #4201 (url+sort ✓), #4198 (net/http ✓) are all viable; #4217 (regexp ✗), #4206 (flate2 ✗) dead-on-arrival regardless of code quality.
 
 **Scouted for next tick**: #4209 (matrixneoaiagent corpus, sister of #4208, 137→139, head b9b1b258, base 30d4ebf0) — review next cycle. Queue: #4215/#4213/#4211 (dextermos-dev band, packages unknown — screen first), #4202/#4201/#4199 (tmclaos), #4198, #4196, #4221 (Sora1916 nursery cancellation — non-arity, needs full read).
+
+## Session 165 — 2026-11-09 15:10 UTC+8 — 1 landed
+
+**Landed #4209** (matrixneoaiagent, `b9b1b258` → merge `7c575a41`, pushed + remote-asserted):
+- Send-site companions of the #4208 spawn-site pair: struct-chan-scalars-send-accept (ACCEPT, `packets <- move p`) + struct-chan-shared-map-send-reject (REJECT A1b HYB-E3003). Freeze now pinned on the channel-send path, not just spawn. Census 137→139 (45+2+92), 7 count-bump edits audited consistent.
+- Battery: workspace 486/486 (1:1), corpus **139/139** tripwire not fired, differential FULL AGREEMENT. Landing reply comment 6734458403. Second clean corpus PR from this author.
+
+**Scouted for next tick**: #4202 (tmclaos, head a5226551, +73 buildable.rs + 119 tests, LF clean, no markers; title says "regression tests for filepath and path" but +73 impl lines — needs full read; both packages allowlist-✓). Queue: #4215/#4213/#4211 (dextermos-dev, packages unscreened), #4201 (url+sort ✓), #4199, #4198, #4196, #4221. Pending author fixes: #4206 (markers+CRLF+allowlist trap), #4097 (quotes), #4217 (allowlist re-target), #4219 (wallet line + curated-semantics alignment).
