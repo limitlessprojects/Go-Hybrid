@@ -785,3 +785,16 @@
 **Scouted next**: #4247/#4254/#4256 (SADIQ2M arity band — patch-id dup-check against landed #4202/#4201 first), #4229 (dextermos-dev M5 allowlist expansion, re-pushed 15:00Z `5b11a4f2` — keystone for #4215/#4213/#4211; spec-level review), #4221 (Sora1916 nursery cancellation, 4th tick scouted, never read), #4250 (Yumihariii tools/job digest verification), #4123/#4122 (phatloi0010), gorky117-cell band (#4224/#4225/#4141/#4142/#4134/#4133...), #4240 (chunked triage mode). Pending authors: #4252 (one-line bool_func), #4199, #4206, #4097, #4217, #4219.
 
 **State**: main `5c6eebb8` == origin (pushed this tick). Suites 491, corpus 139/139, differential FULL. Disk 91% after incremental trim. jpereyra243-byte band: #4198 ✅ (S168), #4252 pending one-line fix, #4249 ✅ (S171).
+
+## Session 172 — 2026-11-10 00:10 UTC+8 — 1 landed (#4252 round 2 completes the jpereyra surface arc)
+
+**Landed #4252 round 2** (jpereyra243-byte, flag.FlagSet surface, fixes #4251, re-push `1363bf32` → merge `79b5f68c`, pushed + remote-asserted, reply 6745066398):
+- Author applied the prescribed one-liner exactly: `"bool_func"` into FLAG_FLAG_SET + accept-control `_ = fs.bool_func("v","verbose",nil)` + doc comment. Probes on merged tree: bool_func → 0 diagnostics (round-1 false reject resolved), totally_fake_flag_method → E1002 (fail-closed intact, surface note lists all 35).
+- **In-merge union disclosure**: branch point predates #4249, three disjoint foreign.rs hunks conflicted at identical anchors — resolved by scripted union (scripts/union_4252.py, S160 procedure; both sides kept: 2 consts, 2 dispatch arms, 2 root entries; presence+balance assertions; context suite 4 + flag suite 3 pass together). One assertion bug during authoring: `| "context"` also matches is_uncurated_go_stdlib_root (count 2) — scope assertions to the is_curated_package_root region.
+- Battery: 3225/0 (+3 exact), 492=492 1:1, corpus 139/139, differential FULL 47/47+92/92. jpereyra243-byte arc complete: #4198 ✅ (S168), #4249 ✅ (S171), #4252 ✅ (S172).
+
+**Ops**: cold rootfs (rust snapshot OK, go tarball reinstall); /tmp wiped between ticks — probe fixtures must be recreated (probe_4252_boolfunc.hy lost and re-made). No parallel instance (main `56539008` at open == S171 close).
+
+**Scouted next**: #4221 (Sora1916 nursery cancellation — 5th tick scouted, NEVER read; must take the full read next tick or drop from scouting), SADIQ2M arity band (#4247/#4254/#4256 — patch-id dup-check vs landed #4202/#4201 first), #4229 (dextermos-dev M5 allowlist expansion `98a862b1` — keystone for the 9-PR dextermos band that keeps re-pushing; spec-level review), #4238 (wminno hex/strconv arity `c57ac80c`), #4123/#4122 (phatloi0010, re-pushed 15:44Z), CrowAleksito band (#3949/#3942/#4228), #4250 (Yumihariii tools/job digests). Pending authors: #4199, #4206, #4097, #4217, #4219.
+
+**State**: main `79b5f68c` == origin (pushed this tick). Suites 492, corpus 139/139, differential FULL. Disk 91% after incremental trim.
