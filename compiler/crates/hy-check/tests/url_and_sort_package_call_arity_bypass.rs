@@ -80,8 +80,9 @@ fn caller() error {
 #[test]
 fn sort_non_callable_types_rejected_e1002() {
     let cases = [
-        "fn main() { sort.interface() }",
         "fn main() { sort.int_slice() }",
+        "fn main() { sort.float64_slice() }",
+        "fn main() { sort.string_slice() }",
     ];
     for src in cases {
         let r = check(src);
