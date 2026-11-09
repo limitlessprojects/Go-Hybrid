@@ -866,3 +866,19 @@
 **State**: main `af7b6364` == origin (pushed). Suites 495, tests 3259, corpus 139/139, differential FULL. Disk 95% (trim discipline: incremental regrows ~500M per battery).
 
 **Scouted next**: dextermos-dev #4229 (M5 allowlist expansion `98a862b1` — keystone for the band; spec-level review), #4123/#4122 (phatloi0010 const validation `54a9da79`), #4240 (chunked triage mode), triage scan verify. Pending authors: #4199, #4206, #4097, #4217, #4219. Anekenonso band: #743 re-scope awaited; #728 tracker stays open.
+
+## Session 177 — 2026-11-10 06:10
+
+**Landed: #4229** (dextermos-dev / M5 curated allowlist expansion: log, compress/gzip, archive/tar) — merge `3c6e4954`, reply 6753186904.
+- Head `98a862b1` (fork dextermos-dev/Go-Hybrid), base `56539008` (19 behind); single conflict hunk in foreign.rs member table (main's `hy` arm vs PR's log/gzip/tar arms) — union-spliced, both sides kept.
+- Out-of-scope example edits carried by PR head (examples 03/07/08/10 "restore to s158", machine-specific hashes in example-10 expected.txt) — **stripped in merge**, disclosed in reply.
+- go doc oracle: log 27/27 complete, gzip 13/13 complete, tar 11/~40 partial (Type*/Format* families absent, fail-closed via unknown-member HYB-E1001) — residual disclosed.
+- **Emit-side gap found by probe (PR fixed check side only)**: hy-emit has its OWN is_package_root table (lib.rs:478); without log/gzip/tar, members emitted VERBATIM snake into Go (`gzip.best_speed` → undefined). In-merge fixups (credited to PR): ① is_package_root += log/gzip/tar; ② go_initialism += lstdflags→LstdFlags, lutc→LUTC, utc→UTC (also fixes pre-existing time.utc → time.Utc, does not compile); ③ curated_import_path_normalization.rs +4 import-path +3 go-build cases.
+- **LX2 lexing fact learned**: hy parse rejects capitalized identifiers (`log.LstdFlags` → HYB-E0001 identifier-case), so Go-spelled members are unreachable in .hy — snake table forms are the only spellings; dead Go-norm table entries reverted.
+- Gates: battery 3262/0 (+3 exact = PR suite; suite-count method variance noted: 505 result-lines / 500 Running / 498 distinct targets in one log — reconcile method across instances), corpus 139/139 (tripwire 1.4%), differential FULL 47/47+92/92. Hygiene: zero wallet text, no markers.
+
+**Ops**: cold rootfs again (rust+go reinstalled); /tmp wiped (triage outputs lost AGAIN — scan/approve rerun still pending); disk peaked 42% with pre-battery trim — discipline holds.
+
+**State**: main `3c6e4954` == origin (pushed & asserted). Tests 3262, corpus 139/139, differential FULL.
+
+**Scouted next**: #4123/#4122 (phatloi0010 const validation `54a9da79`), #4240 (chunked triage mode), dextermos follow-ups (tar table completion candidate), old-backlog rebase wave #584-#791 (band screening). Pending authors: #4199, #4206, #4097, #4217, #4219, #743 (Anekenonso re-scope awaited).
