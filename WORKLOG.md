@@ -654,3 +654,14 @@
 **Also this window**: #4206 (flate2) gate-FAILed last session (unresolved conflict markers at blob lines 8164/8170 + whole-file CRLF rewrite; evidence reply 6729165885 with two-step fix); awaiting author re-push.
 
 **Queue next**: #4202/#4201/#4199 (tmclaos), #4198 (jpereyra243-byte http.response_writer), #4196 (9xj89gzrtw-hue fmt — overlap-watch vs landed fmt arms), #4194/#4189 (SuperPiIot), then the 4140s band.
+
+## Session 162 — 2026-11-09 11:10 UTC+8 — 1 landed
+
+**Landed #4220** (dextermos-dev, `088bc752` → merge `1610d689`, pushed + remote-asserted):
+- Completes the S161 examples repair: 00bfd96a restored from afc41e90 (Session 1), which predates examples/09-go-imports-hybrid/program.hy and the whole examples/gomod-integration/ module. Author verified byte-identical from 1e8673b4; evidence chain re-audited on landing (afc41e90 lacks all 7 paths, 1e8673b4 has them, PR blob diff vs 1e8673b4 = 0 lines).
+- Battery: workspace 486/486 (1:1) incl. examples parse tests green, **test_run_examples 19/19 OK** (09 FAIL row gone), corpus 137/137 tripwire not fired, differential FULL AGREEMENT. CI Row-13 go.mod step restored.
+- Landing reply comment 6731365866. Repair arc now fully disclosed: S159 trim accident → S161 partial restore (00bfd96a) → S162 completion (1610d689).
+
+**Ops**: trim discipline held (only /home/z/go-hybrid-target/debug/incremental, no repo working tree paths).
+
+**Scouted for next tick**: #4217 (bradwue313, regexp arity, fixes #4216, head a8f09304, +22 buildable.rs / +147 tests, LF clean) — review next cycle. Queue: #4219/#4194 (SuperPiIot), #4215/#4213/#4211 (dextermos-dev arity band), #4209 (matrixneoaiagent corpus), #4202/#4201/#4199 (tmclaos), #4198, #4196 (fmt overlap-watch). #4206 still pending author escape-fix (head unchanged 7fb240fd).
