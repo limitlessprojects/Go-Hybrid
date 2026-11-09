@@ -49,30 +49,31 @@ mod addr_loan;
 mod addressable;
 mod arith;
 mod buildable;
-mod const_overflow;
+mod builtins;
+pub mod channel_liveness;
 mod closures;
+mod const_init;
+mod const_overflow;
 mod elided_literal;
-mod go_keyword_names;
 mod emit_guard;
 mod foreign;
 mod freeze;
+mod go_keyword_names;
 mod loans;
-mod const_init;
 mod model;
+mod range_iter;
+mod recv;
 mod resolve;
 mod sendability;
 mod shape;
+mod try_context;
 mod tuple;
 mod walk;
-mod builtins;
-mod range_iter;
-mod recv;
-mod try_context;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
 use hy_syntax::{Decl, Expr, File, FnDecl, ForKind, SelectArmKind, Stmt, TypeExpr};
-use model::{Binding, Checker, FnState, MANAGED_CATEGORIES, TypeShape};
+use model::{Binding, Checker, FnState, TypeShape, MANAGED_CATEGORIES};
 
 /// The result of checking one file.
 #[derive(Debug, Default)]
@@ -140,6 +141,10 @@ pub fn check_file(file: &File) -> CheckResult {
     // bindings (incl. `_ := 5`), unused imports, and repeated names on the
     // left of one `:=` are rejected fail-closed as HYB-E1002.
     buildable::check_buildable(&mut ck);
+
+    let cl_diags =
+        channel_liveness::ChannelLivenessChecker::new(file.path.clone()).check_file(file);
+    ck.diags.extend(cl_diags);
 
     let mut diags = ck.diags;
     diags.sort_by(|a, b| {
@@ -462,8 +467,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         &hy_syntax::Block,
         std::collections::HashSet<String>,
     )> = Vec::new();
-    let mut reported_backedge: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut reported_backedge: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Pass B: statements in source order.
     for (stmt, idx) in &flat.stmts {
@@ -534,8 +538,16 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // against an undefined Go label (`invalid break label hyLoop`).
         // Reject at check time (HYB-E3010); closure bodies are outside the
         // Tier-0 flat walk and are guarded at emit time instead.
-        if let Stmt::Break { label: Some(_), span, .. }
-        | Stmt::Continue { label: Some(_), span, .. } = stmt
+        if let Stmt::Break {
+            label: Some(_),
+            span,
+            ..
+        }
+        | Stmt::Continue {
+            label: Some(_),
+            span,
+            ..
+        } = stmt
         {
             if !flat.in_infinite_loop(idx) {
                 ck.diags.push(
@@ -775,8 +787,22 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         hi,
                         format!("the range bound `{}`", hi.render()),
                     );
-                    let range_ty = ck.typed_int_bound(&st, lo).or_else(|| ck.typed_int_bound(&st, hi)).map(|name| TypeExpr::Named { name, span: lo.span() });
-                    ck.define_binding(&mut st, var, TypeShape::Primitive, range_ty, false, managed, false);
+                    let range_ty = ck
+                        .typed_int_bound(&st, lo)
+                        .or_else(|| ck.typed_int_bound(&st, hi))
+                        .map(|name| TypeExpr::Named {
+                            name,
+                            span: lo.span(),
+                        });
+                    ck.define_binding(
+                        &mut st,
+                        var,
+                        TypeShape::Primitive,
+                        range_ty,
+                        false,
+                        managed,
+                        false,
+                    );
                 }
                 ForKind::While { cond } => {
                     ck.mark_move_in_value(
@@ -881,19 +907,11 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             }
 
             Stmt::If { cond, .. } => {
-                ck.mark_move_in_value(
-                    &mut st,
-                    cond,
-                    format!("the condition `{}`", cond.render()),
-                );
+                ck.mark_move_in_value(&mut st, cond, format!("the condition `{}`", cond.render()));
             }
 
             Stmt::Expr { expr, .. } => {
-                ck.mark_move_in_value(
-                    &mut st,
-                    expr,
-                    format!("the expression `{}`", expr.render()),
-                );
+                ck.mark_move_in_value(&mut st, expr, format!("the expression `{}`", expr.render()));
             }
 
             Stmt::Defer { call, .. } => {
@@ -1084,7 +1102,6 @@ mod tests {
         assert_eq!(r.verdict, Verdict::Accept);
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
-
 
     #[test]
     fn shadow_scope_does_not_wipe_outer_alias_e3003() {
@@ -1390,7 +1407,12 @@ mod tests {
                task worker(j)\n\
              }",
         );
-        assert_eq!(r_spawn.verdict, Verdict::Reject, "{:?}", r_spawn.diagnostics);
+        assert_eq!(
+            r_spawn.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_spawn.diagnostics
+        );
         assert!(r_spawn.diagnostics.iter().any(|d| d.code == "HYB-E4001"));
 
         // S2: a plain local define — no boundary involved.
@@ -1401,16 +1423,27 @@ mod tests {
                fmt.println(j)\n\
              }",
         );
-        assert_eq!(r_local.verdict, Verdict::Reject, "{:?}", r_local.diagnostics);
+        assert_eq!(
+            r_local.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_local.diagnostics
+        );
         assert!(r_local.diagnostics.iter().any(|d| d.code == "HYB-E4001"));
 
         // S3: map literal value slot + slice element slot.
-        let r_map = check("fn main() {\n  mm := map[string][]int{\"k\": nil}\n  fmt.println(mm)\n}");
+        let r_map =
+            check("fn main() {\n  mm := map[string][]int{\"k\": nil}\n  fmt.println(mm)\n}");
         assert_eq!(r_map.verdict, Verdict::Reject, "{:?}", r_map.diagnostics);
         assert!(r_map.diagnostics.iter().any(|d| d.code == "HYB-E4001"));
 
         let r_slice = check("fn main() {\n  xs := []map[string]int{nil}\n  fmt.println(xs)\n}");
-        assert_eq!(r_slice.verdict, Verdict::Reject, "{:?}", r_slice.diagnostics);
+        assert_eq!(
+            r_slice.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_slice.diagnostics
+        );
         assert!(r_slice.diagnostics.iter().any(|d| d.code == "HYB-E4001"));
 
         // S4: the managed hatch does NOT suppress a type contract.
@@ -1429,10 +1462,7 @@ mod tests {
             "{:?}",
             r_managed.diagnostics
         );
-        assert!(r_managed
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "HYB-E4001"));
+        assert!(r_managed.diagnostics.iter().any(|d| d.code == "HYB-E4001"));
 
         // Nested literals reject too.
         let r_nested = check(
@@ -1443,7 +1473,12 @@ mod tests {
                fmt.println(w)\n\
              }",
         );
-        assert_eq!(r_nested.verdict, Verdict::Reject, "{:?}", r_nested.diagnostics);
+        assert_eq!(
+            r_nested.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_nested.diagnostics
+        );
         assert!(r_nested.diagnostics.iter().any(|d| d.code == "HYB-E4001"));
 
         // Positive control: a real map value stays legal; error-typed nil
@@ -1599,12 +1634,14 @@ mod tests {
         // A1c/E3001 — both rules must be present, A1b now first. The old
         // assertion pinned A1c-first because the capture edge did not exist.
         assert_eq!(first_error_rule(&r_closure).as_deref(), Some("A1b"));
-        assert!(r_closure
-            .diagnostics
-            .iter()
-            .any(|d| d.tier0_rule.as_deref() == Some("A1c")),
+        assert!(
+            r_closure
+                .diagnostics
+                .iter()
+                .any(|d| d.tier0_rule.as_deref() == Some("A1c")),
             "the spawn-boundary A1c diagnostic must still fire: {:?}",
-            r_closure.diagnostics);
+            r_closure.diagnostics
+        );
 
         let r_ptr = check(
             "struct st { n int }\n\
@@ -2624,7 +2661,12 @@ mod tests {
                }\n\
              }",
         );
-        assert_eq!(r_fresh.verdict, Verdict::Accept, "{:?}", r_fresh.diagnostics);
+        assert_eq!(
+            r_fresh.verdict,
+            Verdict::Accept,
+            "{:?}",
+            r_fresh.diagnostics
+        );
 
         let r_break = check(
             "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
@@ -2636,7 +2678,12 @@ mod tests {
                }\n\
              }",
         );
-        assert_eq!(r_break.verdict, Verdict::Accept, "{:?}", r_break.diagnostics);
+        assert_eq!(
+            r_break.verdict,
+            Verdict::Accept,
+            "{:?}",
+            r_break.diagnostics
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3082,7 +3129,12 @@ mod tests {
                <-done\n\
              }",
         );
-        assert_eq!(r_param.verdict, Verdict::Reject, "{:?}", r_param.diagnostics);
+        assert_eq!(
+            r_param.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_param.diagnostics
+        );
         assert_eq!(first_error_rule(&r_param).as_deref(), Some("A1b"));
         assert!(r_param.diagnostics.iter().any(|d| d.code == "HYB-E3004"));
 
@@ -3118,7 +3170,12 @@ mod tests {
                mm[\"a\"][\"k\"] = 2\n\
              }",
         );
-        assert_eq!(r_range.verdict, Verdict::Reject, "{:?}", r_range.diagnostics);
+        assert_eq!(
+            r_range.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_range.diagnostics
+        );
         assert_eq!(first_error_rule(&r_range).as_deref(), Some("A1b"));
         assert!(r_range.diagnostics.iter().any(|d| d.code == "HYB-E3004"));
         assert!(r_range.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
@@ -3465,7 +3522,12 @@ mod tests {
                }\n\
              }",
         );
-        assert_eq!(r_plain.verdict, Verdict::Reject, "{:?}", r_plain.diagnostics);
+        assert_eq!(
+            r_plain.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_plain.diagnostics
+        );
         assert!(r_plain.diagnostics.iter().any(|d| d.code == "HYB-E3002"));
 
         // 4. The freeze now begins at the select-send: the sender's later
@@ -3480,7 +3542,12 @@ mod tests {
                m[\"k\"] = 1\n\
              }",
         );
-        assert_eq!(r_freeze.verdict, Verdict::Reject, "{:?}", r_freeze.diagnostics);
+        assert_eq!(
+            r_freeze.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_freeze.diagnostics
+        );
         assert_eq!(first_error_rule(&r_freeze).as_deref(), Some("A1b"));
         assert!(r_freeze.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
 
@@ -3496,7 +3563,12 @@ mod tests {
                }\n\
              }",
         );
-        assert_eq!(r_field.verdict, Verdict::Reject, "{:?}", r_field.diagnostics);
+        assert_eq!(
+            r_field.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_field.diagnostics
+        );
         assert!(
             r_field.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
             "{:?}",
@@ -3613,7 +3685,12 @@ mod tests {
                return\n\
              }",
         );
-        assert_eq!(r7_chan.verdict, Verdict::Reject, "{:?}", r7_chan.diagnostics);
+        assert_eq!(
+            r7_chan.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r7_chan.diagnostics
+        );
         assert!(r7_chan.diagnostics.iter().any(|d| d.code == "HYB-E3011"));
 
         // 8. Positive controls: unmoved named results with bare `return` stay accepted.
@@ -3982,7 +4059,12 @@ mod tests {
                fmt.println(len(out))\n\
              }",
         );
-        assert_eq!(r_pkg_ok.verdict, Verdict::Accept, "{:?}", r_pkg_ok.diagnostics);
+        assert_eq!(
+            r_pkg_ok.verdict,
+            Verdict::Accept,
+            "{:?}",
+            r_pkg_ok.diagnostics
+        );
     }
 
     #[test]
@@ -4148,7 +4230,12 @@ mod tests {
                }\n\
              }",
         );
-        assert_eq!(r_ok_opt.verdict, Verdict::Accept, "{:?}", r_ok_opt.diagnostics);
+        assert_eq!(
+            r_ok_opt.verdict,
+            Verdict::Accept,
+            "{:?}",
+            r_ok_opt.diagnostics
+        );
 
         let r_ok_enum = check(
             "enum shape {\n\
@@ -4165,7 +4252,12 @@ mod tests {
              }\n\
              fn main() {}",
         );
-        assert_eq!(r_ok_enum.verdict, Verdict::Accept, "{:?}", r_ok_enum.diagnostics);
+        assert_eq!(
+            r_ok_enum.verdict,
+            Verdict::Accept,
+            "{:?}",
+            r_ok_enum.diagnostics
+        );
     }
 
     #[test]
@@ -4212,7 +4304,7 @@ mod tests {
         assert_eq!(r_ok.verdict, Verdict::Accept, "{:?}", r_ok.diagnostics);
     }
 
-#[test]
+    #[test]
     fn closure_ascribed_local_assign_rebind_and_self_shadow_reject() {
         // 1. Type-ascribed local inside a closure (`var alias map[string]int = m`)
         // preserves `non_owned_origin` and rejects `move alias` with HYB-E3004.
@@ -4314,7 +4406,7 @@ mod tests {
             .any(|d| d.code == "HYB-E3004"));
     }
 
-#[test]
+    #[test]
     fn self_rebind_assign_and_param_peer_rebind_preserve_origin_and_shares() {
         // 1. Self-rebind assignment (`s = s[:]`, `m = same(m)`) on a parameter
         // preserves `non_owned_origin` and rejects `move` with HYB-E3004.
@@ -5093,7 +5185,12 @@ mod tests {
                m[\"main\"] = 2\n\
              }",
         );
-        assert_eq!(field_proj.verdict, Verdict::Reject, "{:?}", field_proj.diagnostics);
+        assert_eq!(
+            field_proj.verdict,
+            Verdict::Reject,
+            "{:?}",
+            field_proj.diagnostics
+        );
         assert_eq!(field_proj.diagnostics[0].code, "HYB-E3003");
         assert_eq!(first_error_rule(&field_proj).as_deref(), Some("A1b"));
 
@@ -5107,7 +5204,12 @@ mod tests {
                m[\"main\"] = 2\n\
              }",
         );
-        assert_eq!(index_proj.verdict, Verdict::Reject, "{:?}", index_proj.diagnostics);
+        assert_eq!(
+            index_proj.verdict,
+            Verdict::Reject,
+            "{:?}",
+            index_proj.diagnostics
+        );
         assert_eq!(index_proj.diagnostics[0].code, "HYB-E3003");
         assert_eq!(first_error_rule(&index_proj).as_deref(), Some("A1b"));
 
@@ -5121,7 +5223,12 @@ mod tests {
                s[0] = 9\n\
              }",
         );
-        assert_eq!(slice_proj.verdict, Verdict::Reject, "{:?}", slice_proj.diagnostics);
+        assert_eq!(
+            slice_proj.verdict,
+            Verdict::Reject,
+            "{:?}",
+            slice_proj.diagnostics
+        );
         assert_eq!(slice_proj.diagnostics[0].code, "HYB-E3003");
         assert_eq!(first_error_rule(&slice_proj).as_deref(), Some("A1b"));
 
@@ -5136,7 +5243,12 @@ mod tests {
                m[\"main\"] = 2\n\
              }",
         );
-        assert_eq!(call_wrap.verdict, Verdict::Reject, "{:?}", call_wrap.diagnostics);
+        assert_eq!(
+            call_wrap.verdict,
+            Verdict::Reject,
+            "{:?}",
+            call_wrap.diagnostics
+        );
         assert_eq!(call_wrap.diagnostics[0].code, "HYB-E3003");
         assert_eq!(first_error_rule(&call_wrap).as_deref(), Some("A1b"));
 
@@ -5164,7 +5276,12 @@ mod tests {
                task worker(move t)\n\
              }",
         );
-        assert_eq!(field_proj.verdict, Verdict::Reject, "{:?}", field_proj.diagnostics);
+        assert_eq!(
+            field_proj.verdict,
+            Verdict::Reject,
+            "{:?}",
+            field_proj.diagnostics
+        );
         assert!(
             field_proj.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
             "{:?}",
@@ -5179,7 +5296,12 @@ mod tests {
                task worker(move t)\n\
              }",
         );
-        assert_eq!(index_proj.verdict, Verdict::Reject, "{:?}", index_proj.diagnostics);
+        assert_eq!(
+            index_proj.verdict,
+            Verdict::Reject,
+            "{:?}",
+            index_proj.diagnostics
+        );
         assert!(
             index_proj.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
             "{:?}",
@@ -5194,7 +5316,12 @@ mod tests {
                task worker(move t)\n\
              }",
         );
-        assert_eq!(slice_proj.verdict, Verdict::Reject, "{:?}", slice_proj.diagnostics);
+        assert_eq!(
+            slice_proj.verdict,
+            Verdict::Reject,
+            "{:?}",
+            slice_proj.diagnostics
+        );
         assert!(
             slice_proj.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
             "{:?}",
@@ -5210,7 +5337,12 @@ mod tests {
                task worker(move t)\n\
              }",
         );
-        assert_eq!(call_wrap.verdict, Verdict::Reject, "{:?}", call_wrap.diagnostics);
+        assert_eq!(
+            call_wrap.verdict,
+            Verdict::Reject,
+            "{:?}",
+            call_wrap.diagnostics
+        );
         assert!(
             call_wrap.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
             "{:?}",
@@ -5232,7 +5364,12 @@ mod tests {
                task worker(move m)\n\
              }",
         );
-        assert_eq!(rebind_wrap.verdict, Verdict::Reject, "{:?}", rebind_wrap.diagnostics);
+        assert_eq!(
+            rebind_wrap.verdict,
+            Verdict::Reject,
+            "{:?}",
+            rebind_wrap.diagnostics
+        );
         let e3004_count = rebind_wrap
             .diagnostics
             .iter()
@@ -5264,4 +5401,3 @@ mod tests {
         assert_eq!(e3006_count, 2, "{:?}", r.diagnostics);
     }
 }
-
