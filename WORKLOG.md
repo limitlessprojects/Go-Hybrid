@@ -741,3 +741,17 @@
 **Ops**: cold rootfs; rust+go foreground installs in parallel with review work (S167 strategy held, ~4 min combined); triage scan skipped per standing rule (2-tick, 5-failure history) — queue via API + worklog; trim incremental → disk 89%.
 
 **Scouted next**: #4221 (Sora1916 nursery cancellation — non-arity, needs full read). Check for author re-pushes on #4202/#4201 (suite-only fixes are quick re-verifies). Pending: #4206, #4097, #4217, #4219, #4215/#4213/#4211, #4199.
+
+## Session 169 — 2026-11-09 21:10 UTC+8 — 1 landed, 1 gate fail round 2 (keyword case again)
+
+**Landed #4202 round 2** (tmclaos, `05afddaa` → merge `52bed580`, pushed + remote-asserted, reply 6740985282):
+- Author fixed round-1 review exactly: `_ =` reads on all control bindings + `path.match("a")` → observable `path.base("a","b")`. Battery: 3212/0 (+6 exact), 489=489 1:1, corpus 139/139, differential FULL 47/47+92/92. filepath/path arg-arity + non-callable enforcement is now main (variadic Join fail-open kept).
+
+**#4201 round 2 (re-push 17bc9a0b) → Gate FAIL again — same author flaw class resurfaced** (reply 6741110902):
+- Binding fix confirmed; conflict with the just-landed #4202 resolved by the S160 union-splice (checkout --ours + insert #4201's 2 fns + 2 dispatch arms via scripted splice with block-balance + presence assertions; cargo check green; splice script kept at scripts/splice_4201.py). 5/6 suite tests green on the resolved tree.
+- **`sort.interface()` is unrepresentable**: `interface` is a reserved keyword — parse-level E0002 under the suite's own parser-contract guard, checker E1002 unreachable (identical shape to #4202 round 1's `path.match`). One-line suite fix (drop or replace the case; int_slice/float64_slice/string_slice already cover the class). Impl remains conflict-resolved and ready — re-push lands fast.
+- Infra note: linker Bus error (signal 7) at 93% disk killed one battery run; trim incremental → 83% → retry clean. Env does not persist across tool calls — every cargo/go invocation needs the full export inline.
+
+**Ops**: cold rootfs; rust+go parallel foreground installs (~4 min); triage scan skipped per standing rule. Re-push watch paid off: heads diffed at tick open (#4202/#4201 both re-pushed at ~12:04/12:06Z).
+
+**Scouted next**: #4201 round 3 (one-line fix expected — highest priority on re-push), #4221 (Sora1916 nursery cancellation, head 0571ecbf, never read), #4199 (tmclaos, awaiting author on emitter-contract paths). Pending: #4206, #4097, #4217, #4219, #4215/#4213/#4211.
