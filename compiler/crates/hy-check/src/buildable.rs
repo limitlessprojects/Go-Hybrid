@@ -8078,6 +8078,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if (pkg == "path" || pkg == "filepath") && self.lookup_kind(pkg).is_none() {
+                        self.check_path_call_buildable(pkg, name, args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -9485,6 +9489,71 @@ impl<'a> Collector<'a> {
             _ => {}
         }
     }
+
+    fn check_path_call_buildable(&mut self, pkg: &str, name: &str, args: &[CallArg], span: Span) {
+        if pkg == "path" {
+            match name {
+                "err_bad_pattern" => {
+                    self.emit_e1002(
+                        span,
+                        "`path.err_bad_pattern` is a package variable error, not a function (HYB-E1002)".to_string(),
+                        "compare against `path.err_bad_pattern` without parentheses",
+                    );
+                }
+                "base" | "clean" | "dir" | "ext" | "is_abs" | "split" => {
+                    if args.len() != 1 {
+                        self.emit_e1002(
+                            span,
+                            format!("`path.{}` takes exactly 1 argument `(path)`, got {} (HYB-E1002)", name, args.len()),
+                            &format!("pass 1 argument to `path.{}`", name),
+                        );
+                    }
+                }
+                "match" => {
+                    if args.len() != 2 {
+                        self.emit_e1002(
+                            span,
+                            format!("`path.{}` takes exactly 2 arguments `(pattern, name)`, got {} (HYB-E1002)", name, args.len()),
+                            &format!("pass 2 arguments to `path.{}`", name),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        } else if pkg == "filepath" {
+            match name {
+                "err_bad_pattern" | "skip_dir" | "skip_all" => {
+                    self.emit_e1002(
+                        span,
+                        format!("`filepath.{}` is a package variable error, not a function (HYB-E1002)", name),
+                        &format!("compare against `filepath.{}` without parentheses", name),
+                    );
+                }
+                "abs" | "base" | "clean" | "dir" | "eval_symlinks" | "ext" | "from_slash"
+                | "glob" | "has_prefix" | "is_abs" | "is_local" | "split" | "split_list"
+                | "to_slash" | "volume_name" => {
+                    if args.len() != 1 {
+                        self.emit_e1002(
+                            span,
+                            format!("`filepath.{}` takes exactly 1 argument `(path)`, got {} (HYB-E1002)", name, args.len()),
+                            &format!("pass 1 argument to `filepath.{}`", name),
+                        );
+                    }
+                }
+                "match" | "rel" => {
+                    if args.len() != 2 {
+                        self.emit_e1002(
+                            span,
+                            format!("`filepath.{}` takes exactly 2 arguments, got {} (HYB-E1002)", name, args.len()),
+                            &format!("pass 2 arguments to `filepath.{}`", name),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
 }
 
 fn span_expr_label(lhs: &Expr, op: &str, rhs: &Expr) -> String {
