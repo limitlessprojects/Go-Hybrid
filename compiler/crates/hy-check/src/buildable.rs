@@ -852,9 +852,14 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                     c.expr(&cd.value);
                 }
                 Decl::Struct(s) => {
+                    let outer_tp = std::mem::replace(
+                        &mut c.fn_type_params,
+                        s.type_params.iter().map(|p| p.name.clone()).collect(),
+                    );
                     for f in &s.fields {
                         c.ty(&f.ty);
                     }
+                    c.fn_type_params = outer_tp;
                 }
                 Decl::Enum(e) => {
                     for v in &e.variants {
@@ -1941,6 +1946,23 @@ impl<'a> Collector<'a> {
             f.span,
         );
 
+        let mut tp: HashSet<String> = f.type_params.iter().map(|p| p.name.clone()).collect();
+        if let Some(r) = &f.receiver {
+            let mut rty = &r.ty;
+            while let TypeExpr::Pointer { to, .. } = rty {
+                rty = to;
+            }
+            if let TypeExpr::Named { name, .. } = rty {
+                if let Some(open) = name.find('[') {
+                    if name.ends_with(']') {
+                        for arg in split_top_level_type_args(&name[open + 1..name.len() - 1]) {
+                            tp.insert(arg.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let outer_tp = std::mem::replace(&mut self.fn_type_params, tp);
         if let Some(r) = &f.receiver {
             self.ty(&r.ty);
         }
@@ -1960,7 +1982,10 @@ impl<'a> Collector<'a> {
             f.results.last().map(|r| &r.ty),
             Some(TypeExpr::Named { name, .. }) if name == "error"
         );
-        let Some(body) = &f.body else { return };
+        let Some(body) = &f.body else {
+            self.fn_type_params = outer_tp;
+            return;
+        };
         self.push_scope();
         if let Some(r) = &f.receiver {
             self.exempt(&r.name);
@@ -2008,19 +2033,6 @@ impl<'a> Collector<'a> {
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
-        let mut tp: HashSet<String> = f.type_params.iter().map(|p| p.name.clone()).collect();
-        if let Some(r) = &f.receiver {
-            if let TypeExpr::Named { name, .. } = &r.ty {
-                if let Some(open) = name.find('[') {
-                    if name.ends_with(']') {
-                        for arg in split_top_level_type_args(&name[open + 1..name.len() - 1]) {
-                            tp.insert(arg.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        let outer_tp = std::mem::replace(&mut self.fn_type_params, tp);
         let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
         let outer_select = std::mem::replace(&mut self.select_depth, 0);
         self.block_stmts(body);
@@ -2409,9 +2421,20 @@ impl<'a> Collector<'a> {
                         self.expr(cond);
                         self.check_bool_condition(cond, "for");
                     }
-                    ForKind::Range { var, lo, hi, .. } => {
+                    ForKind::Range {
+                        var,
+                        lo,
+                        hi,
+                        inclusive,
+                    } => {
                         self.expr(lo);
+                        let outer_range_fmt = !*inclusive
+                            && var == "fmt"
+                            && self.fn_type_params.insert("fmt".to_string());
                         self.expr(hi);
+                        if outer_range_fmt {
+                            self.fn_type_params.remove("fmt");
+                        }
                         // The loop head always reads the counter.
                         self.exempt(var);
                         self.bind_kind(var, OpKind::Int);
@@ -8213,7 +8236,9 @@ impl<'a> Collector<'a> {
             || self.ck.pkg_names.contains_key(pkg)
             || self.file_consts.contains_key(pkg)
             || self.file_untyped_consts.contains(pkg)
+            || self.ck.consts.contains_key(pkg)
             || self.ck.structs.contains_key(pkg)
+            || self.ck.struct_type_params.contains_key(pkg)
             || self.ck.fns.contains_key(pkg)
             || self.ck.type_aliases.contains_key(pkg)
             || self.ck.enums.contains_key(pkg)
