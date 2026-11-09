@@ -9358,13 +9358,63 @@ impl<'a> Collector<'a> {
             | "pipe_writer"
             | "section_reader"
             | "limited_reader"
-            | "offset_writer" => {
+            | "offset_writer"
+            | "seek_start"
+            | "seek_current"
+            | "seek_end"
+            | "read_write_closer"
+            | "read_seeker"
+            | "read_seek_closer"
+            | "write_seeker"
+            | "read_write_seeker"
+            | "reader_from"
+            | "writer_to"
+            | "reader_at"
+            | "writer_at"
+            | "byte_reader"
+            | "byte_scanner"
+            | "byte_writer"
+            | "rune_reader"
+            | "rune_scanner"
+            | "string_writer" => {
                 self.emit_e1002(
                     span,
                     format!("cannot call `io.{}`: package symbol is a variable or type, not a function (HYB-E1002)", name),
                     &format!("refer to `io.{}` as a value or type rather than calling it", name),
                 );
+                return;
             }
+            _ => {}
+        }
+
+        if matches!(
+            name,
+            "pipe"
+                | "read_all"
+                | "copy"
+                | "read_full"
+                | "write_string"
+                | "limit_reader"
+                | "tee_reader"
+                | "copy_n"
+                | "copy_buffer"
+                | "read_at_least"
+                | "new_section_reader"
+                | "nop_closer"
+        ) && args.iter().any(|a| a.spread)
+        {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic `io.{}` — Go refuses `cannot use ... in call to non-variadic io.{}` (HYB-E1002)",
+                    name, name
+                ),
+                &format!("write discrete arguments without `...` in call to `io.{}`", name),
+            );
+            return;
+        }
+
+        match name {
             "pipe" => {
                 if !args.is_empty() {
                     self.emit_e1002(
@@ -9380,6 +9430,15 @@ impl<'a> Collector<'a> {
                         span,
                         format!("`io.read_all` takes exactly 1 argument `(r)`, got {} (HYB-E1002)", args.len()),
                         "write `io.read_all(r)`",
+                    );
+                }
+            }
+            "nop_closer" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("`io.nop_closer` takes exactly 1 argument `(r)`, got {} (HYB-E1002)", args.len()),
+                        "write `io.nop_closer(r)`",
                     );
                 }
             }
