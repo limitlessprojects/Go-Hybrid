@@ -269,6 +269,72 @@ fn pointer_and_snake_case_sync_mutex_receivers_enforce_surface() {
     assert_eq!(good.verdict, Verdict::Accept, "got {:?}", good.diagnostics);
 }
 
+// --- sort.StringSlice / sort.IntSlice / sort.Float64Slice (#3990) --------
+//
+// `sort.string_slice` etc. resolve to `ForeignOpaque`, so the fail-open method
+// tables blessed every phantom name. `go build` then rejected the emitted Go:
+//
+//     h.s.totally_fake undefined (type sort.StringSlice has no field or method totally_fake)
+//
+// These pin both directions for all three wrappers: phantom names reject with
+// HYB-E1002, while the five real Go methods still accept.
+
+fn sort_holder(decl: &str, call: &str) -> String {
+    format!(
+        "import \"sort\"\n\
+         struct holder {{\n\
+             s {decl}\n\
+         }}\n\
+         fn main() {{\n\
+             var h holder\n\
+             {call}\n\
+             fmt.println(\"ok\")\n\
+         }}\n"
+    )
+}
+
+#[test]
+fn phantom_sort_slice_methods_are_rejected() {
+    for decl in ["sort.string_slice", "sort.int_slice", "sort.float64_slice"] {
+        let r = check(&sort_holder(decl, "h.s.totally_fake()"));
+        assert_eq!(
+            r.verdict,
+            Verdict::Reject,
+            "phantom method on `{decl}` must reject, got {:?}",
+            r.diagnostics
+        );
+        assert!(
+            codes(&r).iter().any(|c| c == "HYB-E1002"),
+            "expected HYB-E1002 for `{decl}`, got {:?}",
+            codes(&r)
+        );
+        let notes = r.diagnostics[0].notes.join(" | ");
+        assert!(
+            notes.contains("len, less, swap, sort, search"),
+            "notes must list the real surface, got: {notes}"
+        );
+    }
+}
+
+#[test]
+fn real_sort_slice_methods_still_accept() {
+    for decl in ["sort.string_slice", "sort.int_slice", "sort.float64_slice"] {
+        let r = check(&sort_holder(
+            decl,
+            "n := h.s.len()\n\
+             h.s.swap(0, 1)\n\
+             h.s.sort()\n\
+             if h.s.less(0, 1) { fmt.println(\"less\") }\n\
+             fmt.println(\"{n}\")",
+        ));
+        assert_eq!(
+            r.verdict,
+            Verdict::Accept,
+            "real methods on `{decl}` must accept, got {:?}",
+            r.diagnostics
+        );
+    }
+}
 
 // --- Atomics stay fail-open (learned in review) --------------------------
 //
