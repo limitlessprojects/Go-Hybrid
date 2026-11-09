@@ -843,3 +843,26 @@
 **State**: main `416eb76c` == origin. Suites 494, tests 3253, corpus 139/139, differential FULL. Disk trimmed twice this tick (incremental regrew to 531M mid-battery; rootfs hit 100% again with 50M free — trim BEFORE corpus/differential, go builds need /tmp headroom).
 
 **Scouted next**: #743 (Anekenonso identifier/primitive-type collision, head `46f3ac56` — third Anekenonso PR this band), dextermos-dev band (6 PRs), #4238 (wminno), #4123/#4122 (phatloi0010), old-backlog rebase wave #584-#791. Pending authors: #4199, #4206, #4097, #4217, #4219. Triage scan/approve STILL pending rerun (session losses twice).
+
+## Session 176 — 2026-11-10 05:10
+
+**Landed: #4238** (wminno / gamma-5 agent, disclosed — full encoding/hex call arity + non-callable rejection, fixes #4218) — merge `af7b6364`, reply 6751846686.
+- Head `c57ac80c`, merge-base `5a93dff0`, trial-merge tree `36779317`, +82/−13 buildable.rs + 99-line hex-only suite.
+- Premise probed: hex.err_length() 0 diagnostics on main; 9 of 10 callables had no arity check (encode-only legacy).
+- Coverage audit: foreign.rs hex list = 12 members, new table covers 12/12, arities match Go signatures (go doc). No over-rejection (accept-controls legal).
+- **Body-vs-diff discrepancy found at review**: body claims strconv coverage + `fixes #4135`, ships zero strconv code/tests (probes: strconv.atoi() 0-arg and parse_int 2-arg still pass clean). Merge wording narrowed to `fixes #4218`; #4135 left OPEN, path to close documented (same template, premise live).
+- Gates: 3259/0 (+6 exact), 495=495, corpus 139/139, differential FULL 47/47+92/92.
+- Battery flaked again on `test_curated_import_go_build_compilation` (rootfs 100% mid-compile → test's net/http go build died: `no space left`), same environmental failure as S175 — trim + rerun green. Discipline holds: ALWAYS trim incremental before the battery AND before corpus/differential.
+
+**Gate FAIL: #743** (Anekenonso — Go-primitive identifier shadowing, fixes #728, head `46f3ac56`) — NOT landed, written evidence reply 6751722059.
+- Big PR (+631: emit_guard RESERVED_GO_PRIMITIVES + file_main_has_e6 AST walk + declare_pkg_name arms + lib.rs import pre-population + buildable check_reserved_binding at 12 binding sites + 31 tests).
+- Parity verified GOOD: emitter injects fmt/os/filepath iff `main && (!results.empty() || body_has_try)` == PR's file_main_has_e6; import-root pre-population matches use_package roots.
+- **Fatal conflict**: existing pre-registered suite `const_overflow_local_float_and_conv_fold.rs::accepts_in_range_float_consts_and_shadowed_conversion_callees` (line 81) asserts ACCEPT for `fn int8(n int) int { return n }` + `int8(1000)` — the corpus IS the spec; verdict flips need a logged VERDICTS amendment, and the PR proposes none. Union tree rejects it (reproduced with union hyb, the PR's own diagnostic).
+- **Go-legality proof**: `func int8(n int) int` + `fmt.Println(int8(1000))` builds clean on pinned go1.26.9 (functions MAY shadow predeclared type names) → the old accept ruling is correct; PR is a genuine false rejection. Contrast probe: `var int64 = 5` + `int64(x)` → Go `invalid operation: cannot call int64 (variable of type int)` — the REAL #728 hazard is value bindings.
+- Suggested re-scope (in reply): keep hy_pop + E6-package + import-collision arms (correct); restrict primitive rejections to VALUE positions (locals/params/results/loop/select/match bindings — check_reserved_binding is already right); drop the package-level fn/struct/enum/type-alias primitive arm. Battery aborted 900/1, merge aborted clean.
+
+**Ops**: cold rootfs (rust+go reinstall); triage scan/approve backgrounded AGAIN (pids 1464/1465 — session has been stable this tick; check next tick whether TRIAGE.md materialized).
+
+**State**: main `af7b6364` == origin (pushed). Suites 495, tests 3259, corpus 139/139, differential FULL. Disk 95% (trim discipline: incremental regrows ~500M per battery).
+
+**Scouted next**: dextermos-dev #4229 (M5 allowlist expansion `98a862b1` — keystone for the band; spec-level review), #4123/#4122 (phatloi0010 const validation `54a9da79`), #4240 (chunked triage mode), triage scan verify. Pending authors: #4199, #4206, #4097, #4217, #4219. Anekenonso band: #743 re-scope awaited; #728 tracker stays open.

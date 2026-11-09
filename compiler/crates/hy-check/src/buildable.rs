@@ -8049,19 +8049,75 @@ impl<'a> Collector<'a> {
                             &format!("write `os.{}` (package variable, not a function)", name),
                         );
                     }
-                    if pkg == "hex"
-                        && self.lookup_kind(pkg).is_none()
-                        && name == "encode"
-                        && args.len() != 1
-                    {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "`hex.encode` takes exactly 1 slice argument `(src)`, got {} (HYB-E1002)",
-                                args.len()
-                            ),
-                            "write `hex.encode(data)` (SPEC M5 hex encoding)",
-                        );
+                    if pkg == "hex" && self.lookup_kind(pkg).is_none() {
+                        // Full encoding/hex call surface — every member the
+                        // member table in foreign.rs blesses, with the arity
+                        // of the Go name it lowers to (`to_go_name`: snake
+                        // case -> CamelCase, e.g. `encode` -> EncodeToString,
+                        // `decode_string` -> DecodeString). Checking only
+                        // `encode` let every other member escape with any
+                        // arity and blow up at `go build` instead of at
+                        // `hyb check` (Row 13 BUILDABLE: reject fail-closed,
+                        // HYB-E1002). Arities are the Go signatures in
+                        // encoding/hex.
+                        let expected: Option<usize> = match name.as_str() {
+                            "encode" // EncodeToString(src) -> string
+                            | "encode_to_string" // EncodeToString(src)
+                            | "decode_string" // DecodeString(s) (2 results)
+                            | "dump" // Dump(b) -> string
+                            | "dumper" // Dumper(w)
+                            | "encoded_len" // EncodedLen(n)
+                            | "decoded_len" // DecodedLen(x)
+                            | "new_encoder" // NewEncoder(w)
+                            | "new_decoder" // NewDecoder(r)
+                            => Some(1),
+                            "decode" => Some(2), // Decode(dst, src)
+                            _ => None,
+                        };
+                        if let Some(n) = expected {
+                            if args.len() != n {
+                                let go_name = {
+                                    // mirror hy-emit's to_go_name without a
+                                    // cross-crate dep (hy-check must not
+                                    // depend on hy-emit).
+                                    let mut out = String::new();
+                                    for part in name.split('_') {
+                                        if part.is_empty() {
+                                            continue;
+                                        }
+                                        let mut cs = part.chars();
+                                        if let Some(c) = cs.next() {
+                                            out.extend(c.to_uppercase());
+                                        }
+                                        out.push_str(cs.as_str());
+                                    }
+                                    out
+                                };
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`hex.{}` takes exactly {} argument{}, got {} (HYB-E1002)",
+                                        name,
+                                        n,
+                                        if n == 1 { "" } else { "s" },
+                                        args.len()
+                                    ),
+                                    &format!(
+                                        "match the arity of the Go function this lowers to (`hex.{}`)",
+                                        go_name
+                                    ),
+                                );
+                            }
+                        } else if matches!(name.as_str(), "err_length" | "invalid_byte_error") {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`hex.{}` is not a function — it is a package-level value/type and cannot be called (HYB-E1002)",
+                                    name
+                                ),
+                                &format!("reference `hex.{}` directly, do not call it", name),
+                            );
+                        }
                     }
 
                     if pkg == "filepath" && self.lookup_kind(pkg).is_none() {
