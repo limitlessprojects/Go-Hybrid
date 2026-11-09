@@ -755,3 +755,17 @@
 **Ops**: cold rootfs; rust+go parallel foreground installs (~4 min); triage scan skipped per standing rule. Re-push watch paid off: heads diffed at tick open (#4202/#4201 both re-pushed at ~12:04/12:06Z).
 
 **Scouted next**: #4201 round 3 (one-line fix expected — highest priority on re-push), #4221 (Sora1916 nursery cancellation, head 0571ecbf, never read), #4199 (tmclaos, awaiting author on emitter-contract paths). Pending: #4206, #4097, #4217, #4219, #4215/#4213/#4211.
+
+## Session 170 — 2026-11-09 22:10 UTC+8 — 1 landed (#4201 round 3 closes the tmclaos url/sort arc)
+
+**Landed #4201 round 3** (tmclaos, re-push `5be5b956` → merge `43dc18bf`, pushed + remote-asserted, reply 6742569846):
+- Author applied the prescribed fix exactly: keyword-unrepresentable `sort.interface()` (parse-level, same class as #4202 round 1's `path.match`) replaced by observable `sort.float64_slice()`/`sort.string_slice()` cases; round-1 `_ =` binding reads intact. 3-round arc: controls → interface case → landed.
+- True merge-base `1e8673b4`, additive +75/+131, no dup. Conflict with the just-landed #4202 resolved via persisted `scripts/splice_4201.py` (S160 union-splice: HEAD side wholesale + 2 fns + 2 dispatch arms at original anchors; balance+presence assertions green, 4 fns/4 arms exactly once) — disclosed in the credit commit per in-merge doctrine.
+- Battery: 3218/0 (+6 = PR suite count exact), 490=490 1:1, corpus 139/139 tripwire not fired, differential FULL AGREEMENT 47/47+92/92.
+- tmclaos status: #4202 ✅ (S169), #4201 ✅ (S170), #4199 open (emitter-contract paths pending author choice).
+
+**Ops**: cold rootfs; rust toolchain survived snapshot (unchanged, default re-set); go tarball reinstalled — first attempt failed on `tar -C /home/z/tools` with the dir missing (mkdir -p first; cached /tmp/go.tgz reused on retry). Tick-open `git pull` hit an MCP frame-overflow quirk (1MiB SSE limit) — state verified via `git fetch` + `rev-parse` instead; pull-replacement pattern works. Also discovered: **another instance's worklog commit can be HEAD at tick open — always diff worklog tail against own summary assumptions before queueing.** Parallel-instance check: S169's commit found at open, no duplicated work done.
+
+**Scouted next** (API queue scan): #4240 (vandurmedries, triage chunked foreground --limit/--since-pr — the chunked mode the standing scan-stop rule awaited; landing it re-enables triage scan), #4229 (dextermos-dev, M5 allowlist expansion for log/compress*/archive* — the spec-change path offered to #4215/#4213/#4211; spec-level review needed), #4247 (SADIQ2M, arity+non-callable class, `8caebe47`), #4245/#4243 (Mekdou23, pointer-receiver/.pop() + StructLit-slice/channel-recv rejects), #4221 (Sora1916 nursery cancellation, head 0571ecbf, never read — 3rd tick scouted), #4109 (jpereyra243-byte, net/http surfaces — dup-check vs landed #4198), #3988 (Yumihariii, time.time value-method surface), #4123/#4122 (phatloi0010 const-init/guard rules). Pending author items: #4199, #4206, #4097, #4217, #4219.
+
+**State**: main `43dc18bf` == origin (pushed this tick). Suites 490, corpus 139/139, differential FULL. Disk 90% after incremental trim (998M free). triage scan skipped per standing rule (no chunked mode on main yet — #4240 would change that).

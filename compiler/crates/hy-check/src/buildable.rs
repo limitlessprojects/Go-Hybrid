@@ -4335,6 +4335,73 @@ impl<'a> Collector<'a> {
             }
         }
     }
+    fn check_url_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "url" | "values" | "userinfo" | "error" | "escape_error" | "invalid_host_error"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `url.{member}`: type `url.{member}` is not a function (HYB-E1002)"),
+                &format!("`url.{member}` is a type name, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "parse" | "parse_request_uri" | "parse_query" | "query_escape" | "query_unescape"
+            | "path_escape" | "path_unescape" | "user" => Some(1),
+            "user_password" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`url.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `url.{member}`"),
+                );
+            }
+        } else if member == "join_path" && args.is_empty() {
+            self.emit_e1002(
+                span,
+                "`url.join_path` requires at least 1 argument `(base[, ...])`, got 0 (HYB-E1002)".to_string(),
+                "provide at least 1 path argument to `url.join_path`",
+            );
+        }
+    }
+
+    fn check_sort_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(member, "interface" | "int_slice" | "float64_slice" | "string_slice") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `sort.{member}`: `sort.{member}` is a type, not a function (HYB-E1002)"),
+                &format!("`sort.{member}` is an interface or type name, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "ints" | "ints_are_sorted" | "float64s" | "float64s_are_sorted" | "strings"
+            | "strings_are_sorted" | "sort" | "stable" | "is_sorted" | "reverse" => Some(1),
+            "search_ints" | "search_float64s" | "search_strings" | "search" | "slice"
+            | "slice_is_sorted" | "slice_stable" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`sort.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `sort.{member}`"),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -7986,6 +8053,12 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "path" && self.lookup_kind(pkg).is_none() {
                         self.check_path_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "url" && self.lookup_kind(pkg).is_none() {
+                        self.check_url_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "sort" && self.lookup_kind(pkg).is_none() {
+                        self.check_sort_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
