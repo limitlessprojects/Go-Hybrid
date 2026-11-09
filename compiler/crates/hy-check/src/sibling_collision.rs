@@ -42,6 +42,15 @@ impl<'a> Checker<'a> {
             return;
         }
 
+        // Skip test corpora where each file is an independent test fixture (e.g. tests/checker-corpus).
+        if dir.join("VERDICTS.md").exists()
+            || path
+                .components()
+                .any(|c| c.as_os_str() == "checker-corpus" || c.as_os_str() == "testdata")
+        {
+            return;
+        }
+
         // Collect top-level declarations from the current file
         let mut decls: Vec<DeclTarget> = Vec::new();
         for d in &self.file.decls {
