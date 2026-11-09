@@ -1,11 +1,5 @@
-//! Regression tests for Wave 27:
-//! Curated foreign package function calls (`filepath.*`, `path.*`) must enforce call arity
-//! constraints and non-callable member checks during `hyb check` (HYB-E1002, Row 13 BUILDABLE).
-//!
-//! Without arity and non-callable checks on packages `filepath` and `path`, invocations on constants
-//! (`filepath.separator()`, `path.err_bad_pattern()`), or invocations with invalid arity
-//! (`filepath.clean()`, `filepath.dir("a", "b")`, `path.clean()`),
-//! passed `hyb check` with 0 diagnostics and subsequently failed downstream `go build`.
+//! Regression tests for foreign package function calls (`filepath.*`, `path.*`).
+//! Enforces call arity constraints and non-callable member checks during `hyb check` (HYB-E1002, Row 13 BUILDABLE).
 
 use hy_check::{check_file, CheckResult, Verdict};
 use hy_diag::Severity;
@@ -67,10 +61,15 @@ fn filepath_valid_calls_accepted() {
     let src = r#"
 fn test_filepath() {
     c := filepath.clean("/foo/bar/../baz")
+    _ = c
     d := filepath.dir("/foo/bar")
+    _ = d
     b := filepath.base("/foo/bar.txt")
+    _ = b
     e := filepath.ext("/foo/bar.txt")
+    _ = e
     j := filepath.join("a", "b", "c")
+    _ = j
 }
 "#;
     let r = check(src);
@@ -90,7 +89,7 @@ fn path_arity_mismatch_rejected_e1002() {
     let cases = [
         "fn main() { path.clean() }",
         r#"fn main() { path.dir("a", "b") }"#,
-        r#"fn main() { path.match("a") }"#,
+        r#"fn main() { path.base("a", "b") }"#,
     ];
     for src in cases {
         let r = check(src);
@@ -108,9 +107,13 @@ fn path_valid_calls_accepted() {
     let src = r#"
 fn test_path() {
     c := path.clean("a/b/c")
+    _ = c
     d := path.dir("a/b")
+    _ = d
     b := path.base("a/b")
+    _ = b
     j := path.join("a", "b")
+    _ = j
 }
 "#;
     let r = check(src);
