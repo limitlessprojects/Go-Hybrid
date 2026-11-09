@@ -1,6 +1,6 @@
 //! Tests for curated foreign method surface of `flag.FlagSet` (HYB-E1002, Row 13 BUILDABLE).
 //! Guarantees that invoking phantom/unsupported methods on `flag.flag_set` or `*flag.flag_set`
-//! rejects fail-closed with HYB-E1002, while standard Go methods (`parse`, `args`, `n_arg`, `set`)
+//! rejects fail-closed with HYB-E1002, while standard Go methods (`parse`, `args`, `n_arg`, `bool_func`, `set`)
 //! accept cleanly with 0 diagnostics.
 
 use hy_check::{check_file, Verdict};
@@ -61,6 +61,7 @@ fn real_flag_set_methods_accept() {
     let good = check(
         "fn setup(fs *flag.flag_set) {\n\
              _ = fs.parse([]string{})\n\
+             _ = fs.bool_func(\"v\", \"verbose\", nil)\n\
              _ = fs.parsed()\n\
              _ = fs.args()\n\
              _ = fs.n_arg()\n\

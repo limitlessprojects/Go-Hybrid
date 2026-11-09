@@ -590,7 +590,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const HTTP_ROUND_TRIPPER: &[&str] = &["round_trip"];
     /// `flag.FlagSet` — standard library flag set type.
     const FLAG_FLAG_SET: &[&str] = &[
-        "arg", "args", "bool", "bool_var", "duration", "duration_var",
+        "arg", "args", "bool", "bool_func", "bool_var", "duration", "duration_var",
         "error_handling", "float64", "float64_var", "init", "int", "int_var",
         "int64", "int64_var", "lookup", "name", "n_arg", "n_flag", "output",
         "parse", "parsed", "print_defaults", "set", "set_output", "string",
