@@ -590,6 +590,15 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const HTTP_ROUND_TRIPPER: &[&str] = &["round_trip"];
     /// `context.Context` — standard library context interface.
     const CONTEXT_CONTEXT: &[&str] = &["deadline", "done", "err", "value"];
+    /// `flag.FlagSet` — standard library flag set type.
+    const FLAG_FLAG_SET: &[&str] = &[
+        "arg", "args", "bool", "bool_func", "bool_var", "duration", "duration_var",
+        "error_handling", "float64", "float64_var", "init", "int", "int_var",
+        "int64", "int64_var", "lookup", "name", "n_arg", "n_flag", "output",
+        "parse", "parsed", "print_defaults", "set", "set_output", "string",
+        "string_var", "text_var", "uint", "uint_var", "uint64", "uint64_var",
+        "var", "visit", "visit_all",
+    ];
     const URL_URL: &[&str] = &[
         "escaped_fragment",
         "escaped_path",
@@ -720,6 +729,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "http.response_writer" | "http.responsewriter" | "http.ResponseWriter" => Some(HTTP_RESPONSE_WRITER),
         "http.round_tripper" | "http.roundtripper" | "http.RoundTripper" => Some(HTTP_ROUND_TRIPPER),
         "context.context" | "context.Context" => Some(CONTEXT_CONTEXT),
+        "flag.flag_set" | "flag.flagset" | "flag.FlagSet" => Some(FLAG_FLAG_SET),
         "url.url" | "url.URL" => Some(URL_URL),
         "json.decoder" | "json.Decoder" => Some(JSON_DECODER),
         "json.encoder" | "json.Encoder" => Some(JSON_ENCODER),
@@ -900,6 +910,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "os"
             | "io"
             | "context"
+            | "flag"
             | "time"
             | "sort"
             | "strings"
