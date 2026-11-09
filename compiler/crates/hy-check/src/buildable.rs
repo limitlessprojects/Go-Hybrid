@@ -7974,6 +7974,162 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+                    if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
+                        let method = name.as_str();
+                        if method == "scanf" {
+                            if args.is_empty() {
+                                self.emit_e1002(
+                                    span,
+                                    "`fmt.scanf` requires at least 1 format string argument `(format[, ...])`, got 0 (HYB-E1002)".to_string(),
+                                    "write `fmt.scanf(\"%s\", ...)`",
+                                );
+                            } else {
+                                let bare = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.scanf` requires a string format argument, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string literal or expression as format to `fmt.scanf`",
+                                    );
+                                }
+                            }
+                        } else if method == "sscanf" {
+                            if args.len() < 2 {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`fmt.sscanf` requires at least 2 arguments `(str, format[, ...])`, got {} (HYB-E1002)",
+                                        args.len()
+                                    ),
+                                    "write `fmt.sscanf(str, \"%s\", ...)`",
+                                );
+                            } else {
+                                let bare0 = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare0,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.sscanf` requires a string first argument `(str)`, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string expression or literal as the input string to `fmt.sscanf`",
+                                    );
+                                }
+                                let bare1 = unwrap_parens(&args[1].value);
+                                if matches!(
+                                    bare1,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.sscanf` requires a string format second argument `(format)`, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string literal or expression as format to `fmt.sscanf`",
+                                    );
+                                }
+                            }
+                        } else if method == "fscanf" {
+                            if args.len() < 2 {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`fmt.fscanf` requires at least 2 arguments `(r, format[, ...])`, got {} (HYB-E1002)",
+                                        args.len()
+                                    ),
+                                    "write `fmt.fscanf(r, \"%s\", ...)`",
+                                );
+                            } else {
+                                let bare1 = unwrap_parens(&args[1].value);
+                                if matches!(
+                                    bare1,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.fscanf` requires a string format second argument `(format)`, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string literal or expression as format to `fmt.fscanf`",
+                                    );
+                                }
+                            }
+                        } else if matches!(method, "sscan" | "sscanln") {
+                            if args.is_empty() {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`fmt.{}` requires at least 1 string argument `(str[, ...])`, got 0 (HYB-E1002)",
+                                        name
+                                    ),
+                                    &format!("write `fmt.{}(str, ...)`", name),
+                                );
+                            } else {
+                                let bare0 = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare0,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.{}` requires a string first argument `(str)`, found non-string literal (HYB-E1002)",
+                                            name
+                                        ),
+                                        &format!("pass a string expression or literal as the input string to `fmt.{}`", name),
+                                    );
+                                }
+                            }
+                        } else if matches!(method, "fscan" | "fscanln") && args.is_empty() {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`fmt.{}` requires at least 1 source reader argument `(r[, ...])`, got 0 (HYB-E1002)",
+                                    name
+                                ),
+                                &format!("write `fmt.{}(r, ...)`", name),
+                            );
+                        }
+                    }
+
+                    if pkg == "io" && self.lookup_kind(pkg).is_none() {
+                        self.check_io_call_buildable(name, args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -9255,6 +9411,154 @@ impl<'a> Collector<'a> {
                     )]),
                 );
             }
+        }
+    }
+
+    fn check_io_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "eof"
+            | "err_unexpected_eof"
+            | "err_no_progress"
+            | "err_short_buffer"
+            | "err_short_write"
+            | "err_closed_pipe"
+            | "discard"
+            | "reader"
+            | "writer"
+            | "closer"
+            | "seeker"
+            | "read_closer"
+            | "write_closer"
+            | "read_writer"
+            | "pipe_reader"
+            | "pipe_writer"
+            | "section_reader"
+            | "limited_reader"
+            | "offset_writer" => {
+                self.emit_e1002(
+                    span,
+                    format!("cannot call `io.{}`: package symbol is a variable or type, not a function (HYB-E1002)", name),
+                    &format!("refer to `io.{}` as a value or type rather than calling it", name),
+                );
+            }
+            "pipe" => {
+                if !args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        format!("`io.pipe` takes 0 arguments `()`, got {} (HYB-E1002)", args.len()),
+                        "write `io.pipe()`",
+                    );
+                }
+            }
+            "read_all" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("`io.read_all` takes exactly 1 argument `(r)`, got {} (HYB-E1002)", args.len()),
+                        "write `io.read_all(r)`",
+                    );
+                }
+            }
+            "copy" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("`io.copy` takes exactly 2 arguments `(dst, src)`, got {} (HYB-E1002)", args.len()),
+                        "write `io.copy(dst, src)`",
+                    );
+                }
+            }
+            "read_full" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("`io.read_full` takes exactly 2 arguments `(r, buf)`, got {} (HYB-E1002)", args.len()),
+                        "write `io.read_full(r, buf)`",
+                    );
+                }
+            }
+            "write_string" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("`io.write_string` takes exactly 2 arguments `(w, s)`, got {} (HYB-E1002)", args.len()),
+                        "write `io.write_string(w, s)`",
+                    );
+                }
+            }
+            "limit_reader" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("`io.limit_reader` takes exactly 2 arguments `(r, n)`, got {} (HYB-E1002)", args.len()),
+                        "write `io.limit_reader(r, n)`",
+                    );
+                }
+            }
+            "tee_reader" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("`io.tee_reader` takes exactly 2 arguments `(r, w)`, got {} (HYB-E1002)", args.len()),
+                        "write `io.tee_reader(r, w)`",
+                    );
+                }
+            }
+            "copy_n" => {
+                if args.len() != 3 {
+                    self.emit_e1002(
+                        span,
+                        format!("`io.copy_n` takes exactly 3 arguments `(dst, src, n)`, got {} (HYB-E1002)", args.len()),
+                        "write `io.copy_n(dst, src, n)`",
+                    );
+                }
+            }
+            "copy_buffer" => {
+                if args.len() != 3 {
+                    self.emit_e1002(
+                        span,
+                        format!("`io.copy_buffer` takes exactly 3 arguments `(dst, src, buf)`, got {} (HYB-E1002)", args.len()),
+                        "write `io.copy_buffer(dst, src, buf)`",
+                    );
+                }
+            }
+            "read_at_least" => {
+                if args.len() != 3 {
+                    self.emit_e1002(
+                        span,
+                        format!("`io.read_at_least` takes exactly 3 arguments `(r, buf, min)`, got {} (HYB-E1002)", args.len()),
+                        "write `io.read_at_least(r, buf, min)`",
+                    );
+                }
+            }
+            "new_section_reader" => {
+                if args.len() != 3 {
+                    self.emit_e1002(
+                        span,
+                        format!("`io.new_section_reader` takes exactly 3 arguments `(r, off, n)`, got {} (HYB-E1002)", args.len()),
+                        "write `io.new_section_reader(r, off, n)`",
+                    );
+                }
+            }
+            "multi_reader" => {
+                if args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        "`io.multi_reader` requires at least 1 reader argument `(readers...)`, got 0 (HYB-E1002)".to_string(),
+                        "write `io.multi_reader(r1, ...)`",
+                    );
+                }
+            }
+            "multi_writer" => {
+                if args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        "`io.multi_writer` requires at least 1 writer argument `(writers...)`, got 0 (HYB-E1002)".to_string(),
+                        "write `io.multi_writer(w1, ...)`",
+                    );
+                }
+            }
+            _ => {}
         }
     }
 }
