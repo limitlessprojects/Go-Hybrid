@@ -57,7 +57,7 @@ fn main() -> ExitCode {
             eprintln!("  hyb generate [--check] [--binding-prefix <path>] <paths...>  (existing go.mod projects)");
             eprintln!("  hyb vendor-runtime <dir>  (vendored runtime for a go.mod project)");
             eprintln!("  hyb explain <HYB-Exxxx | Exxxx | xxxx | machine-name>");
-            eprintln!("  hyb build <file.hy> -o <bin-path> [--emit-go]");
+            eprintln!("  hyb build <file.hy> -o <bin-path> [--emit-go] [--race]");
             eprintln!("  hyb bench-overhead");
             eprintln!();
             eprintln!(
@@ -795,14 +795,21 @@ fn render_build_error(e: &BuildError) -> String {
 }
 
 fn cmd_build(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--deny-managed] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
+    const USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--emit-proof] [--race] [--deny-managed] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
     // Validate the entire invocation before touching the filesystem or the
     // toolchain, mirroring cmd_check/cmd_generate: a mistyped option or a
     // missing value must not fall back to a default and build something else.
     let mut file: Option<String> = None;
     let mut out_path: Option<String> = None;
     let mut emit_go_only = false;
+    let mut emit_proof = false;
     let mut deny_managed = false;
+    // --race hands `-race` to the underlying `go build`. The race
+    // detector needs cgo, so the flag also forces CGO_ENABLED=1 on the
+    // plain single-file path (the bridge path already sets it). Off by
+    // default: it makes builds markedly slower, and no existing gate
+    // asks for it.
+    let mut race = false;
     // Package mode (example 09): emit an importable Go package + the
     // runtime pieces, instead of building a binary.
     let mut pkg_name: Option<String> = None;
@@ -824,8 +831,18 @@ fn cmd_build(args: &[String]) -> ExitCode {
                     i += 1;
                     continue;
                 }
+                "--emit-proof" => {
+                    emit_proof = true;
+                    i += 1;
+                    continue;
+                }
                 "--deny-managed" => {
                     deny_managed = true;
+                    i += 1;
+                    continue;
+                }
+                "--race" => {
+                    race = true;
                     i += 1;
                     continue;
                 }
@@ -872,6 +889,10 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
     if pkg_name.is_some() != out_dir.is_some() {
         eprintln!("error: --package and --out-dir must be supplied together\n{USAGE}");
+        return ExitCode::from(2);
+    }
+    if emit_proof && pkg_name.is_some() {
+        eprintln!("error: --emit-proof is not supported with --package (single-file builds only)\n{USAGE}");
         return ExitCode::from(2);
     }
     let out_path = out_path.unwrap_or_else(|| "a.out".to_string());
@@ -958,9 +979,23 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
 
     // --- 4. Emit Go ---
+    // --emit-proof (issue #3930): emit Go together with the witness proof
+    // and fail closed unless a fresh parse+emit reproduces every hash.
+    let mut proof_src: Option<String> = None;
     let go_src = if let Some(pn) = &pkg_name {
         match hy_emit::emit_go_package(&ast, pn, &binding_prefix) {
             Ok(g) => g,
+            Err(e) => {
+                eprintln!("error [emit]: {}", e.message);
+                return ExitCode::from(2);
+            }
+        }
+    } else if emit_proof {
+        match hy_emit::emit_go_with_proof(&ast) {
+            Ok((g, proof)) => {
+                proof_src = Some(proof);
+                g
+            }
             Err(e) => {
                 eprintln!("error [emit]: {}", e.message);
                 return ExitCode::from(2);
@@ -1001,14 +1036,71 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
 
     let go_path = format!("{}.go", out_path);
+    // This path is implicit in `-o`, so preserve hand-written Go files just
+    // as `generate` does. Old, unmarked build output cannot be distinguished
+    // from user source and must be moved aside explicitly before rebuilding.
+    match std::fs::read_to_string(&go_path) {
+        Ok(existing) if !existing.starts_with(GENERATED_HEADER_PREFIX) => {
+            eprintln!(
+                "{} exists and is NOT hyb-generated — refusing to overwrite a hand-written file; \
+                 choose another -o path or move the existing file after verifying it is an old generated artifact",
+                go_path
+            );
+            return ExitCode::from(2);
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!("error reading {}: {}", go_path, e);
+            return ExitCode::from(2);
+        }
+    }
+    let source_name = std::path::Path::new(&file)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("?")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n");
+    let marked_go_src = format!(
+        "{}{}. DO NOT EDIT.\n\n{}",
+        GENERATED_HEADER_PREFIX, source_name, go_src
+    );
     if let Some(parent) = std::path::Path::new(&go_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = std::fs::write(&go_path, &go_src) {
+    if let Err(e) = std::fs::write(&go_path, &marked_go_src) {
         eprintln!("error writing {}: {}", go_path, e);
         return ExitCode::from(2);
     }
     println!("emitted {}", go_path);
+    if let Some(proof) = &proof_src {
+        let proof_path = format!("{}.proof.json", out_path);
+        if let Err(e) = std::fs::write(&proof_path, proof) {
+            eprintln!("error writing {}: {}", proof_path, e);
+            return ExitCode::from(2);
+        }
+        println!("emitted {}", proof_path);
+        // Fail-closed verifier (issue #3930): re-read the source from disk,
+        // re-parse, re-emit, recompute every witness hash. Any drift between
+        // what was checked and what was emitted is a hard error.
+        let verify = (|| -> Result<(), String> {
+            let src2 = std::fs::read_to_string(&file)
+                .map_err(|e| format!("re-read failed: {}", e))?;
+            let ast2 = hy_syntax::parse_file(&file, &src2)
+                .map_err(|_| "re-parse failed".to_string())?;
+            let (_, proof2) = hy_emit::emit_go_with_proof(&ast2)
+                .map_err(|e| format!("re-emit failed: {}", e.message))?;
+            if proof2 != *proof {
+                return Err("witness mismatch: emitted Go does not correspond to the checked IR".to_string());
+            }
+            Ok(())
+        })();
+        if let Err(msg) = verify {
+            eprintln!("emit-proof: {}", msg);
+            return ExitCode::FAILURE;
+        }
+        println!("emit-proof: verified (fail-closed)");
+    }
     if emit_go_only {
         return ExitCode::SUCCESS;
     }
@@ -1020,9 +1112,24 @@ fn cmd_build(args: &[String]) -> ExitCode {
     // the single-file build.
     let go_bin = go_bin();
     if bindings.is_empty() {
-        let build = Command::new(go_bin)
-            .args(["build", "-o", &out_path, &go_path])
+        let mut gb = Command::new(go_bin);
+        gb.arg("build");
+        if race {
+            // Must precede -o: `go build [build flags] [packages]`.
+            gb.arg("-race");
+        }
+        let build = gb
+            .args(["-o", &out_path, &go_path])
             .env("GOFLAGS", "-p=2")
+            // The race runtime needs cgo. Without --race we leave
+            // CGO_ENABLED alone rather than pinning it to 0: the plain
+            // path has always inherited the caller's setting, and
+            // changing that is a behaviour change nobody asked for.
+            .envs(if race {
+                vec![("CGO_ENABLED", "1")]
+            } else {
+                Vec::new()
+            })
             .output();
         match build {
             Ok(out) if out.status.success() => {
@@ -1040,7 +1147,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
             }
         }
     } else {
-        match build_with_bridge(go_bin, &out_path, &go_src, &bindings) {
+        match build_with_bridge(go_bin, &out_path, &go_src, &bindings, race) {
             Ok(()) => {
                 println!("built {} (go {}, bridge: hyrt)", out_path, PINNED_GO);
                 ExitCode::SUCCESS
@@ -1203,7 +1310,12 @@ fn ensure_staticlib(rt: &std::path::Path) -> Result<std::path::PathBuf, BuildErr
                 .current_dir(&crate_dir)
                 .env("CARGO_BUILD_JOBS", "2");
             if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
-                cargo.env("CARGO_TARGET_DIR", t);
+                // Probes resolve this path from hyb's caller, while Cargo runs
+                // in crate_dir. Keep both looking in the same target directory.
+                let target = std::path::absolute(t).map_err(|e| {
+                    BuildError::Tool(format!("resolving CARGO_TARGET_DIR: {}", e))
+                })?;
+                cargo.env("CARGO_TARGET_DIR", target);
             }
             let out = cargo
                 .output()
@@ -1534,6 +1646,7 @@ fn build_with_bridge(
     out_path: &str,
     go_src: &str,
     bindings: &[&str],
+    race: bool,
 ) -> Result<(), BuildError> {
     let rt = runtime_dir()?;
     // The workspace build runs with cwd = <ws>; a RELATIVE -o would land
@@ -1595,9 +1708,16 @@ fn build_with_bridge(
 
     // 3. go build inside the module.
     let mut gb = Command::new(go_bin);
-    gb.args(["build", "-o", &out_path, "."])
+    gb.arg("build");
+    if race {
+        // Must precede -o: `go build [build flags] [packages]`.
+        gb.arg("-race");
+    }
+    gb.args(["-o", &out_path, "."])
         .current_dir(&ws)
         .env("GOFLAGS", "-p=2")
+        // Already 1 here for the cgo broker; -race needs it for the
+        // same reason, so the value is unchanged either way.
         .env("CGO_ENABLED", "1");
     let out = gb
         .output()
@@ -1950,11 +2070,14 @@ fn cmd_bench_overhead() -> ExitCode {
         ))
         .to_string_lossy()
         .to_string();
+    // bench-overhead measures call latency; instrumenting it would
+    // invalidate the numbers, so it never builds with -race.
     if let Err(e) = build_with_bridge(
         go_bin,
         &out,
         BENCH_MAIN,
         &["overheadbench", "jsonbinding", "hybench"],
+        false,
     ) {
         match e {
             BuildError::Tool(m) => eprintln!("error: {}", m),
