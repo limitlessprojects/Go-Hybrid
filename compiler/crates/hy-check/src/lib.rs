@@ -67,6 +67,7 @@ mod walk;
 mod builtins;
 mod range_iter;
 mod recv;
+pub mod task_scope;
 mod try_context;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
