@@ -674,3 +674,15 @@
 - Local merge `1e045b7b` reset before push; main untouched this session.
 
 **Queue next**: #4219/#4194 (SuperPiIot), #4215/#4213/#4211 (dextermos-dev arity band — check allowlist membership per package before battery, lesson from #4217), #4209 (matrixneoaiagent corpus), #4202/#4201/#4199 (tmclaos), #4198, #4196 (fmt overlap-watch). Pending author fixes: #4206 (conflict markers + CRLF), #4097 (quote escape).
+
+## Session 164 — 2026-11-09 14:10 UTC+8 — 0 landed, 1 gate fail (wallet spam + curated-semantics contradiction)
+
+**#4219 (SuperPiIot, encoding/hex arity, fixes #4218) → Gate FAIL, not landed**; two independent grounds (evidence reply 6733577698):
+1. **Wallet-address spam** in the test file doc comment (blob line 24, "Settlement Wallet (Base L2 USDC): 0xf084…") — unrelated content, must be removed; merged content is permanent history.
+2. **hex.encode arity contradicts the landed curated surface**: main's existing arm (buildable.rs ~7835) enforces the M5 curated 1-arg `(src)` form ("SPEC M5 hex encoding" fixit); the PR enforces upstream-Go 2-arg `(dst, src)` — a merge would false-reject currently-legal `hex.encode(data)` programs. Masked in the PR's own suite because every encode reject case uses 0 args (both arms reject) and the positive control skips encode entirely. Fix path given: align all arms with foreign.rs curated signatures, drop the wallet line, add a 1-arg encode positive control.
+
+**#4206 addendum posted** (comment 6733580736): even after the marker/CRLF fixes, flate2/rust-flate2 are not on the M5 allowlist — same dead-code trap as #4217; two options offered (re-target allowlisted package, or separate allowlist spec-change PR).
+
+**Allowlist pre-screen adopted as standing triage step**: #4219 (encoding/hex ✓ but failed on semantics), #4202 (path/filepath+path ✓), #4201 (url+sort ✓), #4198 (net/http ✓) are all viable; #4217 (regexp ✗), #4206 (flate2 ✗) dead-on-arrival regardless of code quality.
+
+**Scouted for next tick**: #4209 (matrixneoaiagent corpus, sister of #4208, 137→139, head b9b1b258, base 30d4ebf0) — review next cycle. Queue: #4215/#4213/#4211 (dextermos-dev band, packages unknown — screen first), #4202/#4201/#4199 (tmclaos), #4198, #4196, #4221 (Sora1916 nursery cancellation — non-arity, needs full read).
