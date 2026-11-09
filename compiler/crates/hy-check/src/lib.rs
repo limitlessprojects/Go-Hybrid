@@ -724,6 +724,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         None,
                         targets.as_deref(),
                     );
+                    // #3273: the sent value must have the channel element type.
+                    ck.check_send_operands(&st, chan, value, *span);
                     ck.check_chan_send_const_overflow(&st, chan, value);
                 }
             }
@@ -842,6 +844,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                                     None,
                                     targets.as_deref(),
                                 );
+                                // #3273: same element-type rule in a select send arm.
+                                ck.check_send_operands(&st, chan, value, span);
                                 ck.check_chan_send_const_overflow(&st, chan, value);
                             }
                         }
