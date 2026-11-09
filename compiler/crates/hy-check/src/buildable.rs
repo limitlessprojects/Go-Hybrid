@@ -4402,6 +4402,54 @@ impl<'a> Collector<'a> {
             }
         }
     }
+
+    fn check_sync_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "mutex"
+                | "rw_mutex"
+                | "rwmutex"
+                | "wait_group"
+                | "waitgroup"
+                | "once"
+                | "cond"
+                | "map"
+                | "pool"
+                | "locker"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `sync.{member}`: `sync.{member}` is a type or interface, not a function (HYB-E1002)"),
+                &format!("`sync.{member}` is a package type or interface, not a callable function"),
+            );
+            return;
+        }
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `sync.{member}` (HYB-E1002)"),
+                &format!("`sync.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_cond" | "once_func" | "once_value" | "once_values" => Some(1),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`sync.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `sync.{member}`"),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -8003,6 +8051,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sort" && self.lookup_kind(pkg).is_none() {
                         self.check_sort_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "sync" && self.lookup_kind(pkg).is_none() {
+                        self.check_sync_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
