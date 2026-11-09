@@ -4269,6 +4269,30 @@ impl<'a> Collector<'a> {
         OpKind::Pointer(Box::new(inner))
     }
 
+    fn check_strings_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        let expected_arity = match member {
+            "to_lower" | "to_upper" | "trim_space" | "clone" => Some(1),
+            "contains" | "contains_any" | "contains_rune" | "has_prefix" | "has_suffix"
+            | "count" | "index" | "index_any" | "index_byte" | "last_index" | "last_index_any"
+            | "last_index_byte" | "split" | "split_after" | "join" | "repeat" | "trim"
+            | "trim_left" | "trim_right" | "trim_prefix" | "trim_suffix" | "new_reader" => Some(2),
+            "split_n" | "split_after_n" | "replace_all" => Some(3),
+            "replace" => Some(4),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`strings.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `strings.{member}`"),
+                );
+            }
+        }
+    }
+
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -7843,6 +7867,9 @@ impl<'a> Collector<'a> {
                             ),
                             &format!("write `os.{}` (package variable, not a function)", name),
                         );
+                    }
+                    if pkg == "strings" && self.lookup_kind(pkg).is_none() {
+                        self.check_strings_package_call(name.as_str(), args, span);
                     }
                     if pkg == "hex"
                         && self.lookup_kind(pkg).is_none()
