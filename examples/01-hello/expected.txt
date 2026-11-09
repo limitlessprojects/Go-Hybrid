@@ -1,5 +1,0 @@
-hello, Hybrid!
-count=1 ok=true
-0: Go
-1: Rust
-2: Hybrid
