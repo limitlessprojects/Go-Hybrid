@@ -8129,6 +8129,15 @@ impl<'a> Collector<'a> {
                                         "`fmt.scanf` requires a string format argument, found non-string literal (HYB-E1002)".to_string(),
                                         "pass a string literal or expression as format to `fmt.scanf`",
                                     );
+                                } else if let Some(kind_label) = self.nonstring_format_kind(bare) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.scanf` requires a string format argument, found non-string ({}) (HYB-E1002)",
+                                            kind_label
+                                        ),
+                                        "pass a string literal or expression as format to `fmt.scanf`",
+                                    );
                                 }
                             }
                         } else if method == "sscanf" {
@@ -8159,6 +8168,15 @@ impl<'a> Collector<'a> {
                                         "`fmt.sscanf` requires a string first argument `(str)`, found non-string literal (HYB-E1002)".to_string(),
                                         "pass a string expression or literal as the input string to `fmt.sscanf`",
                                     );
+                                } else if let Some(kind_label) = self.nonstring_format_kind(bare0) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.sscanf` requires a string first argument `(str)`, found non-string ({}) (HYB-E1002)",
+                                            kind_label
+                                        ),
+                                        "pass a string expression or literal as the input string to `fmt.sscanf`",
+                                    );
                                 }
                                 let bare1 = unwrap_parens(&args[1].value);
                                 if matches!(
@@ -8175,6 +8193,15 @@ impl<'a> Collector<'a> {
                                     self.emit_e1002(
                                         span,
                                         "`fmt.sscanf` requires a string format second argument `(format)`, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string literal or expression as format to `fmt.sscanf`",
+                                    );
+                                } else if let Some(kind_label) = self.nonstring_format_kind(bare1) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.sscanf` requires a string format second argument `(format)`, found non-string ({}) (HYB-E1002)",
+                                            kind_label
+                                        ),
                                         "pass a string literal or expression as format to `fmt.sscanf`",
                                     );
                                 }
@@ -8207,6 +8234,15 @@ impl<'a> Collector<'a> {
                                         "`fmt.fscanf` requires a string format second argument `(format)`, found non-string literal (HYB-E1002)".to_string(),
                                         "pass a string literal or expression as format to `fmt.fscanf`",
                                     );
+                                } else if let Some(kind_label) = self.nonstring_format_kind(bare1) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.fscanf` requires a string format second argument `(format)`, found non-string ({}) (HYB-E1002)",
+                                            kind_label
+                                        ),
+                                        "pass a string literal or expression as format to `fmt.fscanf`",
+                                    );
                                 }
                             }
                         } else if matches!(method, "sscan" | "sscanln") {
@@ -8237,6 +8273,15 @@ impl<'a> Collector<'a> {
                                         format!(
                                             "`fmt.{}` requires a string first argument `(str)`, found non-string literal (HYB-E1002)",
                                             name
+                                        ),
+                                        &format!("pass a string expression or literal as the input string to `fmt.{}`", name),
+                                    );
+                                } else if let Some(kind_label) = self.nonstring_format_kind(bare0) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.{}` requires a string first argument `(str)`, found non-string ({}) (HYB-E1002)",
+                                            name, kind_label
                                         ),
                                         &format!("pass a string expression or literal as the input string to `fmt.{}`", name),
                                     );
