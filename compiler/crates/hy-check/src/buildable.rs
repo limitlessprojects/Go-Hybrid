@@ -8257,6 +8257,9 @@ impl<'a> Collector<'a> {
                     if pkg == "io" && self.lookup_kind(pkg).is_none() {
                         self.check_io_call_buildable(name, args, span);
                     }
+                    if (pkg == "zip" || pkg == "archive/zip") && self.lookup_kind(pkg).is_none() {
+                        self.check_zip_call_buildable(name, args, span);
+                    }
 
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
@@ -9518,6 +9521,63 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_zip_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "err_format"
+            | "err_algorithm"
+            | "err_checksum"
+            | "deflate"
+            | "store"
+            | "reader"
+            | "writer"
+            | "read_closer"
+            | "file_header"
+            | "file" => {
+                self.emit_e1002(
+                    span,
+                    format!("cannot call zip.{}: package symbol is a variable, constant, or type, not a function (HYB-E1002)", name),
+                    &format!("refer to zip.{} as a value or type rather than calling it", name),
+                );
+            }
+            "new_reader" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("zip.new_reader takes exactly 2 arguments (r, size), got {} (HYB-E1002)", args.len()),
+                        "write zip.new_reader(r, size)",
+                    );
+                }
+            }
+            "new_writer" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("zip.new_writer takes exactly 1 argument (w), got {} (HYB-E1002)", args.len()),
+                        "write zip.new_writer(w)",
+                    );
+                }
+            }
+            "open_reader" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("zip.open_reader takes exactly 1 argument (name), got {} (HYB-E1002)", args.len()),
+                        "write zip.open_reader(name)",
+                    );
+                }
+            }
+            "file_info_header" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("zip.file_info_header takes exactly 1 argument (fi), got {} (HYB-E1002)", args.len()),
+                        "write zip.file_info_header(fi)",
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
     fn check_io_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
         match name {
             "eof"
