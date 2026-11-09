@@ -824,7 +824,6 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
             | "flag"
             | "testing"
             | "unicode"
-            | "bytes"
             | "context"
             | "regexp"
             | "crypto"
@@ -1387,7 +1386,12 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
         ),
         "bytes" => matches!(
             m,
-            "new_buffer"
+            "buffer"
+                | "reader"
+                | "min_read"
+                | "err_too_large"
+                | "clone"
+                | "new_buffer"
                 | "new_buffer_string"
                 | "new_reader"
                 | "compare"
