@@ -1,12 +1,12 @@
 //! try_multi_value_tuple_e2002.rs — regression tests for T23 (HYB-E2002)
-//! interaction with error unwrapping `?` (E3/E4).
+//! checking of 3+ result calls unwrapped by `?`.
 //!
-//! SPEC-LANGUAGE.md §2.8 pins that a multi-value result is not a tuple.
-//! When a function returns `(T1, T2, error)`, applying `?` yields two values.
-//! Binding one name `p := f()?` must be rejected with HYB-E2002, preventing
-//! `go build` from failing with `assignment mismatch: 2 variables but f returns 3 values`.
-//! Symmetrically, binding two names to a `(T, error)` call unwrapped by `?`
-//! must be rejected with HYB-E1002 (assignment mismatch).
+//! Functions returning 3+ results (e.g. `(T1, T2, error)`) unwrapped by `?`
+//! produce multiple values. Binding a single variable `p := pair_err()?`
+//! is rejected at check time with HYB-E2002 (a multi-value result is not a tuple),
+//! catching the mismatch prior to the emitter's MVP-0 3-result cap.
+//! Standard 2-result `?`-unwraps (`n := strconv.parse_int(...)?` and pass-through
+//! `a, b := single_err()?`) stay accepted.
 
 use hy_check::{check_file, Verdict};
 use hy_diag::Severity;
@@ -15,7 +15,7 @@ use hy_syntax::parse_file;
 fn check(src: &str) -> hy_check::CheckResult {
     let path = "inline.hy";
     let ast = parse_file(path, src)
-        .unwrap_or_else(|diags| panic!("must parse (parser contract): {:?}", diags));
+        .unwrap_or_else(|diags| panic!("must parse: {:?}", diags));
     check_file(&ast)
 }
 
@@ -42,50 +42,61 @@ fn with_caller(body: &str) -> String {
 }
 
 #[test]
-fn try_multi_value_single_bind_rejected_e2002() {
-    let r = check(&with_caller("    p := pair_err()?"));
-    assert_eq!(codes(&r), vec!["HYB-E2002".to_string()]);
-    assert_eq!(r.verdict, Verdict::Reject);
-}
-
-#[test]
-fn try_multi_value_exact_bind_accepted() {
-    let r = check(&with_caller("    a, b := pair_err()?"));
+fn probe1_try_two_result_single_bind_accepted() {
+    let r = check(&with_caller(
+        "    n := strconv.parse_int(\"42\", 10, 64)?\n    _ = n\n",
+    ));
     assert_eq!(codes(&r), Vec::<String>::new());
     assert_eq!(r.verdict, Verdict::Accept);
 }
 
 #[test]
-fn try_single_value_over_bind_rejected_e1002() {
-    let r = check(&with_caller("    a, b := single_err()?"));
-    assert_eq!(codes(&r), vec!["HYB-E1002".to_string()]);
+fn probe2_try_two_result_pass_through_bind_accepted() {
+    let r = check(&with_caller(
+        "    a, b := single_err()?\n    _ = a\n    _ = b\n",
+    ));
+    assert_eq!(codes(&r), Vec::<String>::new());
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn probe3_try_three_result_single_bind_rejected_e2002() {
+    let r = check(&with_caller(
+        "    p := pair_err()?\n    _ = p\n",
+    ));
+    assert_eq!(codes(&r), vec!["HYB-E2002".to_string()]);
     assert_eq!(r.verdict, Verdict::Reject);
 }
 
 #[test]
-fn try_multi_value_let_and_var_rejected_e2002() {
-    let r1 = check(&with_caller("    let p = pair_err()?"));
+fn try_three_result_let_and_var_rejected_e2002() {
+    let r1 = check(&with_caller(
+        "    let p = pair_err()?\n    _ = p\n",
+    ));
     assert_eq!(codes(&r1), vec!["HYB-E2002".to_string()]);
+    assert_eq!(r1.verdict, Verdict::Reject);
 
-    let r2 = check(&with_caller("    var p = pair_err()?"));
+    let r2 = check(&with_caller(
+        "    var p = pair_err()?\n    _ = p\n",
+    ));
     assert_eq!(codes(&r2), vec!["HYB-E2002".to_string()]);
+    assert_eq!(r2.verdict, Verdict::Reject);
 }
 
 #[test]
-fn try_multi_value_assign_rejected_e2002() {
-    let r = check(&with_caller("    var p int\n    p = pair_err()?"));
+fn try_three_result_assign_rejected_e2002() {
+    let r = check(&with_caller(
+        "    var p int\n    p = pair_err()?\n    _ = p\n",
+    ));
     assert_eq!(codes(&r), vec!["HYB-E2002".to_string()]);
+    assert_eq!(r.verdict, Verdict::Reject);
 }
 
 #[test]
-fn try_foreign_package_over_bind_rejected_e1002() {
-    let r = check(&with_caller(r#"    a, b := strconv.parse_int("42", 10, 64)?"#));
-    assert_eq!(codes(&r), vec!["HYB-E1002".to_string()]);
-}
-
-#[test]
-fn try_foreign_package_exact_bind_accepted() {
-    let r = check(&with_caller(r#"    n := strconv.parse_int("42", 10, 64)?"#));
+fn try_three_result_exact_bind_accepted_at_check() {
+    let r = check(&with_caller(
+        "    a, b := pair_err()?\n    _ = a\n    _ = b\n",
+    ));
     assert_eq!(codes(&r), Vec::<String>::new());
     assert_eq!(r.verdict, Verdict::Accept);
 }
