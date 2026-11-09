@@ -1799,6 +1799,18 @@ impl<'a> Collector<'a> {
         self.file_consts.get(name).cloned()
     }
 
+    /// For `fmt` printf-family format operands: the kind label when `e` is
+    /// statically known to have a non-`string` kind, `None` otherwise.
+    /// `Str` (legit), `Unknown` (unresolvable), and `Interface` (`any`,
+    /// which Go accepts as a printf operand) stay permissive — mirroring the
+    /// conservative accept-side shape used everywhere in this file.
+    fn nonstring_format_kind(&self, e: &Expr) -> Option<String> {
+        match self.kind_of_expr(e) {
+            OpKind::Str | OpKind::Unknown | OpKind::Interface => None,
+            k => Some(k.label()),
+        }
+    }
+
     /// A `for`-iterate or `select`-receive binding is elided to `_` at
     /// emission when completely untouched, but if the body assigns to it
     /// (`v = ...`) without ever reading it, the emitter must keep the binding
@@ -4365,6 +4377,139 @@ impl<'a> Collector<'a> {
         OpKind::Pointer(Box::new(inner))
     }
 
+
+    fn check_filepath_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "separator"
+                | "list_separator"
+                | "err_bad_pattern"
+                | "skip_all"
+                | "skip_dir"
+                | "walk_func"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `filepath.{member}`: `filepath.{member}` is a constant or type, not a function (HYB-E1002)"),
+                &format!("`filepath.{member}` is a package constant or type, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "abs" | "base" | "clean" | "dir" | "eval_symlinks" | "ext" | "from_slash"
+            | "is_abs" | "is_local" | "localize" | "split" | "split_list" | "to_slash"
+            | "volume_name" => Some(1),
+            "has_prefix" | "match" | "rel" | "walk" | "walk_dir" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`filepath.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `filepath.{member}`"),
+                );
+            }
+        }
+    }
+
+    fn check_path_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if member == "err_bad_pattern" {
+            self.emit_e1002(
+                span,
+                "cannot call `path.err_bad_pattern`: `path.err_bad_pattern` is an error variable, not a function (HYB-E1002)".to_string(),
+                "`path.err_bad_pattern` is a package variable, not a callable function",
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "base" | "clean" | "dir" | "ext" | "is_abs" | "split" => Some(1),
+            "match" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`path.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `path.{member}`"),
+                );
+            }
+        }
+    }
+    fn check_url_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "url" | "values" | "userinfo" | "error" | "escape_error" | "invalid_host_error"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `url.{member}`: type `url.{member}` is not a function (HYB-E1002)"),
+                &format!("`url.{member}` is a type name, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "parse" | "parse_request_uri" | "parse_query" | "query_escape" | "query_unescape"
+            | "path_escape" | "path_unescape" | "user" => Some(1),
+            "user_password" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`url.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `url.{member}`"),
+                );
+            }
+        } else if member == "join_path" && args.is_empty() {
+            self.emit_e1002(
+                span,
+                "`url.join_path` requires at least 1 argument `(base[, ...])`, got 0 (HYB-E1002)".to_string(),
+                "provide at least 1 path argument to `url.join_path`",
+            );
+        }
+    }
+
+    fn check_sort_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(member, "interface" | "int_slice" | "float64_slice" | "string_slice") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `sort.{member}`: `sort.{member}` is a type, not a function (HYB-E1002)"),
+                &format!("`sort.{member}` is an interface or type name, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "ints" | "ints_are_sorted" | "float64s" | "float64s_are_sorted" | "strings"
+            | "strings_are_sorted" | "sort" | "stable" | "is_sorted" | "reverse" => Some(1),
+            "search_ints" | "search_float64s" | "search_strings" | "search" | "slice"
+            | "slice_is_sorted" | "slice_stable" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`sort.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `sort.{member}`"),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -7980,6 +8125,19 @@ impl<'a> Collector<'a> {
                             "write `hex.encode(data)` (SPEC M5 hex encoding)",
                         );
                     }
+
+                    if pkg == "filepath" && self.lookup_kind(pkg).is_none() {
+                        self.check_filepath_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "path" && self.lookup_kind(pkg).is_none() {
+                        self.check_path_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "url" && self.lookup_kind(pkg).is_none() {
+                        self.check_url_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "sort" && self.lookup_kind(pkg).is_none() {
+                        self.check_sort_package_call(name.as_str(), args, span);
+                    }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
                         if matches!(method, "printf" | "sprintf" | "eprintf" | "errorf") {
@@ -8013,6 +8171,17 @@ impl<'a> Collector<'a> {
                                         ),
                                         &format!("pass a string literal or expression as format to `fmt.{}`", name),
                                     );
+                                } else if let Some(kind_label) =
+                                    self.nonstring_format_kind(bare)
+                                {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.{}` requires a string format argument, found non-string ({}) (HYB-E1002)",
+                                            name, kind_label
+                                        ),
+                                        &format!("pass a string literal or expression as format to `fmt.{}`", name),
+                                    );
                                 }
                             }
                         } else if method == "fprintf" {
@@ -8041,6 +8210,17 @@ impl<'a> Collector<'a> {
                                     self.emit_e1002(
                                         span,
                                         "`fmt.fprintf` requires a string format second argument, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string literal or expression as format to `fmt.fprintf`",
+                                    );
+                                } else if let Some(kind_label) =
+                                    self.nonstring_format_kind(bare)
+                                {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.fprintf` requires a string format second argument, found non-string ({}) (HYB-E1002)",
+                                            kind_label
+                                        ),
                                         "pass a string literal or expression as format to `fmt.fprintf`",
                                     );
                                 }
