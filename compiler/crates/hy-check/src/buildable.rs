@@ -8111,6 +8111,9 @@ impl<'a> Collector<'a> {
                     if pkg == "io" && self.lookup_kind(pkg).is_none() {
                         self.check_io_call_buildable(name, args, span);
                     }
+                    if (pkg == "base64" || pkg == "encoding/base64") && self.lookup_kind(pkg).is_none() {
+                        self.check_base64_call_buildable(name, args, span);
+                    }
 
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
@@ -9372,6 +9375,52 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_base64_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "std_encoding"
+            | "url_encoding"
+            | "raw_std_encoding"
+            | "raw_url_encoding"
+            | "std_padding"
+            | "no_padding"
+            | "encoding"
+            | "corrupt_input_error" => {
+                self.emit_e1002(
+                    span,
+                    format!("cannot call ase64.{}: package symbol is a variable, constant, or type, not a function (HYB-E1002)", name),
+                    &format!("refer to ase64.{} as a value or type rather than calling it", name),
+                );
+            }
+            "new_encoding" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("ase64.new_encoding takes exactly 1 argument (encoder), got {} (HYB-E1002)", args.len()),
+                        "write ase64.new_encoding(encoder)",
+                    );
+                }
+            }
+            "new_decoder" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("ase64.new_decoder takes exactly 2 arguments (enc, r), got {} (HYB-E1002)", args.len()),
+                        "write ase64.new_decoder(enc, r)",
+                    );
+                }
+            }
+            "new_encoder" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("ase64.new_encoder takes exactly 2 arguments (enc, w), got {} (HYB-E1002)", args.len()),
+                        "write ase64.new_encoder(enc, w)",
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
     fn check_io_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
         match name {
             "eof"
