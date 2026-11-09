@@ -161,6 +161,29 @@ fn main() {
 }
 
 #[test]
+fn test_http_request_basic_auth_methods_accept() {
+    // `net/http.Request` ships BasicAuth and SetBasicAuth. Omitting them from
+    // the curated surface made the checker reject valid Go with a diagnostic
+    // claiming Go has no such method — a false rejection, the mirror image of
+    // the phantom-method bug this surface was built to stop.
+    let src = r#"
+import "net/http"
+
+struct state {
+    req http.request
+}
+
+fn main() {
+    var s state
+    s.req.set_basic_auth("user", "pass")
+    u, p, ok := s.req.basic_auth()
+    fmt.println("{u} {p} {ok}")
+}
+"#;
+    accepts(src);
+}
+
+#[test]
 fn test_real_methods_on_http_and_url_handles_accept() {
     let src = r#"
 import "net/http"
