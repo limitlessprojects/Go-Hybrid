@@ -686,3 +686,86 @@
 **Allowlist pre-screen adopted as standing triage step**: #4219 (encoding/hex ✓ but failed on semantics), #4202 (path/filepath+path ✓), #4201 (url+sort ✓), #4198 (net/http ✓) are all viable; #4217 (regexp ✗), #4206 (flate2 ✗) dead-on-arrival regardless of code quality.
 
 **Scouted for next tick**: #4209 (matrixneoaiagent corpus, sister of #4208, 137→139, head b9b1b258, base 30d4ebf0) — review next cycle. Queue: #4215/#4213/#4211 (dextermos-dev band, packages unknown — screen first), #4202/#4201/#4199 (tmclaos), #4198, #4196, #4221 (Sora1916 nursery cancellation — non-arity, needs full read).
+
+## Session 165 — 2026-11-09 15:10 UTC+8 — 1 landed
+
+**Landed #4209** (matrixneoaiagent, `b9b1b258` → merge `7c575a41`, pushed + remote-asserted):
+- Send-site companions of the #4208 spawn-site pair: struct-chan-scalars-send-accept (ACCEPT, `packets <- move p`) + struct-chan-shared-map-send-reject (REJECT A1b HYB-E3003). Freeze now pinned on the channel-send path, not just spawn. Census 137→139 (45+2+92), 7 count-bump edits audited consistent.
+- Battery: workspace 486/486 (1:1), corpus **139/139** tripwire not fired, differential FULL AGREEMENT. Landing reply comment 6734458403. Second clean corpus PR from this author.
+
+**Scouted for next tick**: #4202 (tmclaos, head a5226551, +73 buildable.rs + 119 tests, LF clean, no markers; title says "regression tests for filepath and path" but +73 impl lines — needs full read; both packages allowlist-✓). Queue: #4215/#4213/#4211 (dextermos-dev, packages unscreened), #4201 (url+sort ✓), #4199, #4198, #4196, #4221. Pending author fixes: #4206 (markers+CRLF+allowlist trap), #4097 (quotes), #4217 (allowlist re-target), #4219 (wallet line + curated-semantics alignment).
+
+## Session 166 — 2026-11-09 17:10 UTC+8 — 0 landed, 5 gate-fail replies (1 battery, 1 probe, 3 allowlist)
+
+**Parallel-instance note**: the 15:10 slot executed as S165 in a parallel instance — #4209 landed (`7c575a41`, corpus 139/139, reply 6734458403, worklog `30206b57`). This session continued from its scouting list; main verified `30206b57` == origin at open.
+
+**#4202 (tmclaos, filepath+path arity, +73/+119) → Gate FAIL (battery)**; merge commit builds clean but the PR's own suite fails 3/6 (reply 6736681894):
+1. `path.match("a")` is **unrepresentable in source** — `match` is a keyword, member access dies at parse (HYB-E0002, test's own parse guard panics). The `"match"` arity row is unobservable via source text. Replace with e.g. `path.base("a","b")`.
+2/3. Both positive controls violate the **pre-existing declared-not-used rule** (buildable.rs:9328): unread bindings `c/d/b/e/j` (filepath) and `c/d/b/j` (path) → 5×/4×HYB-E1002, one per binding, arm not involved. **Probe proved the arm sound**: clean+join with `_ =` reads → OK (0 diagnostics). Suite-only fix expected; implementation reviewed correct against upstream Go arities (variadic Join correctly fail-open; dispatch key `filepath` matches the httptest dotted-import precedent).
+
+**#4201 (tmclaos, url+sort arity, +75/+131) → Gate FAIL (probe, pre-battery)** (reply 6736686542): same author template, same control flaw — url accept control binds u/q/up/j unread (4×E1002 expected), sort control binds `b` unread; probes of both shapes confirmed E1002 from the pre-existing rule. Packages allowlist-✓, no dup, patch additive — landable after suite fix. #4202/#4201 authors informed cross-referentially.
+
+**#4215 archive/tar / #4213 compress/gzip / #4211 log (dextermos-dev band) → all dead-on-arrival, allowlist ✗** (replies 6736692386 / 6736692745 / 6736693090): none of the three packages is on the M5 curated allowlist → HYB-E1001 at import → arms unreachable (the #4217/#4206 trap). Three-path fix offered per reply (re-target allowlisted package / re-target rust/* pinned crate / separate allowlist spec-change PR). **Allowlist pre-screen is now paying for itself: three PRs dispositioned without spending battery windows.**
+
+**Screened, not reviewed**: #4199 (tmclaos, T23/E2002 multi-value try unwraps — non-arity, needs full read); #4198 (jpereyra243-byte, http.response_writer+round_tripper curated method surfaces, fixes #4197 — net/http allowlist-✓ but surface-modeling scope); **#4196 (9xj89gzrtw-hue, fmt non-string format operands — HAZARD: two-point diff shows −340 lines incl. deletion of #4093's fmt_scan_family suite (−176); stale-base rewrite of landed fmt arms; needs careful review before any merge trial**; its fprint/fprintln-empty and non-string-literal checks duplicate what #4087/#4093 already landed, but it generalizes literal-kind checking via `nonstring_format_kind`.
+
+**Ops**: cold rebuild this tick (rootfs recycle wiped tools+target). go1.26.9 reinstalled from go.dev (64M tarball, verified `go version`); rust 1.99.0 via rustup-init. Cold workspace test build 1m30s. **Disk 96% mid-tick (456M free)** → trim `/home/z/go-hybrid-target/debug/incremental` + /tmp tarball → 88% (trim discipline held: non-tracked paths only). **triage scan+approve failed 3×** (sandbox kills detached long runs; foreground 170s too short for 1176-repo scan) — stop-per-two-failures honored; queue worked via direct API + worklog scouting; re-run scan next tick with chunked approach if available.
+
+**State**: main `30206b57` untouched this session (trial merge aborted before push). Suites/corpus/differential reflect S165's green run (486 suites, 139/139, FULL AGREEMENT); no full battery on pure main this tick (battery interrupted by cargo fail-fast at the #4202 suite after 131 green suites).
+
+**Scouted next**: #4196 (deletes landed suite — priority, review deletions line-by-line), #4198, #4199, #4221 (Sora1916 nursery cancellation). Pending author fixes: #4202/#4201 (suite-only controls), #4206 (markers+CRLF+allowlist), #4097 (quotes), #4217 (allowlist re-target), #4219 (wallet+curated), #4215/#4213/#4211 (allowlist re-target).
+
+## Session 167 — 2026-11-09 18:10 UTC+8 — 1 landed
+
+**Landed #4196** (9xj89gzrtw-hue, fixes #4195, `e5ea7dce` → merge `a0b15b78`, pushed + remote-asserted, reply 6737609691):
+- Extends the landed #4087 printf/fprintf guard from non-string *literals* to statically-known non-string *expressions* (`nonstring_format_kind`: Str/Unknown/Interface permissive; +34 buildable.rs, +69 suite in the existing fmt_special_member_calls file — 7 new tests, controls properly read bindings, no #4202-family flaw).
+- **Base-staleness lesson recorded**: two-point diff vs PR-reported base 1e8673b4 showed −340 (fmt_scan_family suite −176, WORKLOG −13) — pure artifact; true merge-base is ce6219cd (pre-#4093), real patch purely additive. Rule reinforced: **always compute the true merge-base before judging deletions** (third instance of the pattern: #4206, #4202/#4201 base 1e8673b4, now #4196).
+- Battery: merge gate auto-clean (#4093 suite verified intact in merged tree); workspace 3198/0, 486=486 1:1; corpus 139/139 tripwire not fired; differential FULL AGREEMENT 47/47 + 92/92.
+- **Ops lesson — differential 0/47 false alarm**: ran differential_loop without go in PATH → accept-side 0/47 while reject-side 92/92; full env rerun → FULL AGREEMENT. The loop fails accept-side silently when `go build` is unavailable; always export the full env before the differential gate.
+
+**Ops**: cold rootfs again; rustup-init/go both needed FOREGROUND installs this tick (background setsid jobs killed by sandbox ~3 attempts — install.log stuck at "downloading installer" with dead processes; foreground completed both in ~2-4 min). **triage scan+approve dead again (0 bytes, process dead) — 5 failures across 2 ticks; standing rule: queue via direct API + worklog scouting, retry scan only if a chunked/foreground mode appears.**
+
+**Scouted next**: #4198 (jpereyra243-byte, http.response_writer+round_tripper curated method surfaces, fixes #4197, net/http allowlist-✓, head 8b647245, base stale 1e8673b4), #4199 (tmclaos T23/E2002 multi-value try unwraps — non-arity, full read), #4221 (Sora1916 nursery cancellation). Pending author fixes: #4202/#4201 (suite controls), #4206, #4097, #4217, #4219, #4215/#4213/#4211.
+
+## Session 168 — 2026-11-09 19:10 UTC+8 — 1 landed, 1 gate fail (premise overturned)
+
+**Landed #4198** (jpereyra243-byte, fixes #4197, `8b647245` → merge `32ac79aa`, pushed + remote-asserted, reply 6738677538):
+- Curated method surfaces: http.response_writer [header, write, write_header] + http.round_tripper [round_trip] + builtin error [error] + net.addr [network, string] + net.error [error, temporary, timeout], lowercased+capitalized spellings, method_result entries. No dup vs main (member-existence table ≠ handle-type surface — different functions).
+- Battery: auto-merge clean (true merge-base 65c8489d computed first — lesson from S167 held); workspace 3206/0 (+8 = PR test count exactly), 488=488 1:1; corpus 139/139 tripwire not fired; differential FULL AGREEMENT 47/47+92/92. The `error` named-type tightening (permissive→modeled) tripped nothing: no false rejects.
+
+**#4199 (tmclaos, T23 try-unwrap result counting, +25/−5 tuple.rs + 91 tests) → Gate FAIL (premise overturned by probes, pre-battery)** (reply 6738714590):
+- The PR changes static_result_count to account `?`-unwrapped calls as N−1 values and reject binding mismatches. Its suite cites go build "assignment mismatch: 2 variables but f returns 3 values" — **that failure mode never occurs**: probe 3 (`p := pair_err()?`) dies at the emitter's MVP-0 cap ("functions with 3 results (max 2)") loudly before go build, for any 3-result fn regardless of `?`.
+- Probes 1–2 disprove the reject cases as false-rejects of currently-building programs: `n := strconv.parse_int(...)?` emits `n, hyErr0 := strconv.ParseInt(...)` (synthetic error binding) and BUILDS; `a, b := single_err()?` emits `a, b := single_err()` and BUILDS. The landed tuple.rs contract matches the emitter's actual lowering; the PR contradicts it (#4219 hex.encode shape).
+- Landable paths offered: scope the reject to 3-result single-binding only (emit-cap ergonomics), or reconcile SPEC §2.8 + emitter first in a separate spec-change PR. tmclaos now has three open items (#4202, #4201, #4199 — all with concrete fix paths).
+
+**Ops**: cold rootfs; rust+go foreground installs in parallel with review work (S167 strategy held, ~4 min combined); triage scan skipped per standing rule (2-tick, 5-failure history) — queue via API + worklog; trim incremental → disk 89%.
+
+**Scouted next**: #4221 (Sora1916 nursery cancellation — non-arity, needs full read). Check for author re-pushes on #4202/#4201 (suite-only fixes are quick re-verifies). Pending: #4206, #4097, #4217, #4219, #4215/#4213/#4211, #4199.
+
+## Session 169 — 2026-11-09 21:10 UTC+8 — 1 landed, 1 gate fail round 2 (keyword case again)
+
+**Landed #4202 round 2** (tmclaos, `05afddaa` → merge `52bed580`, pushed + remote-asserted, reply 6740985282):
+- Author fixed round-1 review exactly: `_ =` reads on all control bindings + `path.match("a")` → observable `path.base("a","b")`. Battery: 3212/0 (+6 exact), 489=489 1:1, corpus 139/139, differential FULL 47/47+92/92. filepath/path arg-arity + non-callable enforcement is now main (variadic Join fail-open kept).
+
+**#4201 round 2 (re-push 17bc9a0b) → Gate FAIL again — same author flaw class resurfaced** (reply 6741110902):
+- Binding fix confirmed; conflict with the just-landed #4202 resolved by the S160 union-splice (checkout --ours + insert #4201's 2 fns + 2 dispatch arms via scripted splice with block-balance + presence assertions; cargo check green; splice script kept at scripts/splice_4201.py). 5/6 suite tests green on the resolved tree.
+- **`sort.interface()` is unrepresentable**: `interface` is a reserved keyword — parse-level E0002 under the suite's own parser-contract guard, checker E1002 unreachable (identical shape to #4202 round 1's `path.match`). One-line suite fix (drop or replace the case; int_slice/float64_slice/string_slice already cover the class). Impl remains conflict-resolved and ready — re-push lands fast.
+- Infra note: linker Bus error (signal 7) at 93% disk killed one battery run; trim incremental → 83% → retry clean. Env does not persist across tool calls — every cargo/go invocation needs the full export inline.
+
+**Ops**: cold rootfs; rust+go parallel foreground installs (~4 min); triage scan skipped per standing rule. Re-push watch paid off: heads diffed at tick open (#4202/#4201 both re-pushed at ~12:04/12:06Z).
+
+**Scouted next**: #4201 round 3 (one-line fix expected — highest priority on re-push), #4221 (Sora1916 nursery cancellation, head 0571ecbf, never read), #4199 (tmclaos, awaiting author on emitter-contract paths). Pending: #4206, #4097, #4217, #4219, #4215/#4213/#4211.
+
+## Session 170 — 2026-11-09 22:10 UTC+8 — 1 landed (#4201 round 3 closes the tmclaos url/sort arc)
+
+**Landed #4201 round 3** (tmclaos, re-push `5be5b956` → merge `43dc18bf`, pushed + remote-asserted, reply 6742569846):
+- Author applied the prescribed fix exactly: keyword-unrepresentable `sort.interface()` (parse-level, same class as #4202 round 1's `path.match`) replaced by observable `sort.float64_slice()`/`sort.string_slice()` cases; round-1 `_ =` binding reads intact. 3-round arc: controls → interface case → landed.
+- True merge-base `1e8673b4`, additive +75/+131, no dup. Conflict with the just-landed #4202 resolved via persisted `scripts/splice_4201.py` (S160 union-splice: HEAD side wholesale + 2 fns + 2 dispatch arms at original anchors; balance+presence assertions green, 4 fns/4 arms exactly once) — disclosed in the credit commit per in-merge doctrine.
+- Battery: 3218/0 (+6 = PR suite count exact), 490=490 1:1, corpus 139/139 tripwire not fired, differential FULL AGREEMENT 47/47+92/92.
+- tmclaos status: #4202 ✅ (S169), #4201 ✅ (S170), #4199 open (emitter-contract paths pending author choice).
+
+**Ops**: cold rootfs; rust toolchain survived snapshot (unchanged, default re-set); go tarball reinstalled — first attempt failed on `tar -C /home/z/tools` with the dir missing (mkdir -p first; cached /tmp/go.tgz reused on retry). Tick-open `git pull` hit an MCP frame-overflow quirk (1MiB SSE limit) — state verified via `git fetch` + `rev-parse` instead; pull-replacement pattern works. Also discovered: **another instance's worklog commit can be HEAD at tick open — always diff worklog tail against own summary assumptions before queueing.** Parallel-instance check: S169's commit found at open, no duplicated work done.
+
+**Scouted next** (API queue scan): #4240 (vandurmedries, triage chunked foreground --limit/--since-pr — the chunked mode the standing scan-stop rule awaited; landing it re-enables triage scan), #4229 (dextermos-dev, M5 allowlist expansion for log/compress*/archive* — the spec-change path offered to #4215/#4213/#4211; spec-level review needed), #4247 (SADIQ2M, arity+non-callable class, `8caebe47`), #4245/#4243 (Mekdou23, pointer-receiver/.pop() + StructLit-slice/channel-recv rejects), #4221 (Sora1916 nursery cancellation, head 0571ecbf, never read — 3rd tick scouted), #4109 (jpereyra243-byte, net/http surfaces — dup-check vs landed #4198), #3988 (Yumihariii, time.time value-method surface), #4123/#4122 (phatloi0010 const-init/guard rules). Pending author items: #4199, #4206, #4097, #4217, #4219.
+
+**State**: main `43dc18bf` == origin (pushed this tick). Suites 490, corpus 139/139, differential FULL. Disk 90% after incremental trim (998M free). triage scan skipped per standing rule (no chunked mode on main yet — #4240 would change that).
