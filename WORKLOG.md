@@ -665,3 +665,12 @@
 **Ops**: trim discipline held (only /home/z/go-hybrid-target/debug/incremental, no repo working tree paths).
 
 **Scouted for next tick**: #4217 (bradwue313, regexp arity, fixes #4216, head a8f09304, +22 buildable.rs / +147 tests, LF clean) — review next cycle. Queue: #4219/#4194 (SuperPiIot), #4215/#4213/#4211 (dextermos-dev arity band), #4209 (matrixneoaiagent corpus), #4202/#4201/#4199 (tmclaos), #4198, #4196 (fmt overlap-watch). #4206 still pending author escape-fix (head unchanged 7fb240fd).
+
+## Session 163 — 2026-11-09 13:10 UTC+8 — 0 landed, 1 gate fail (premise overturned)
+
+**#4217 (bradwue313, regexp arity, fixes #4216) → Gate FAIL, not landed**; head force-pushed during triage (a8f09304 → 132f204d), battery run on the pushed head:
+- Positive control failed 5×HYB-E1001 on the merge commit; `hyb check` decisive: `import "regexp"` is outside the M5 curated allowlist (which has `rust/regex`, not Go `regexp`). SPEC M5 fail-closed → every `regexp.*` program rejects at resolve, so the claimed "arity bypass" (#4216 premise) has no observable bypass; the PR's arity arm is unreachable dead code, and its reject-tests passed only because they accept any E-code.
+- Not a regression from the resolve work — pre-existing SPEC behavior. Evidence reply 6732813657 offers three landable paths: re-target allowlisted package (sort/bufio/strconv), re-target `rust/regex`, or propose allowlisting `regexp` as a separate spec-change PR.
+- Local merge `1e045b7b` reset before push; main untouched this session.
+
+**Queue next**: #4219/#4194 (SuperPiIot), #4215/#4213/#4211 (dextermos-dev arity band — check allowlist membership per package before battery, lesson from #4217), #4209 (matrixneoaiagent corpus), #4202/#4201/#4199 (tmclaos), #4198, #4196 (fmt overlap-watch). Pending author fixes: #4206 (conflict markers + CRLF), #4097 (quote escape).
