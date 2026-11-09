@@ -1097,3 +1097,18 @@ alias is rejected when the sender writes through the alias after the move.
 | struct-chan-shared-map-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct freezes that storage, so `m["after"] = 2` is a write through a live alias |
 
 With this registration the corpus is **137 programs — ACCEPT 44 · ACCEPT-MANAGED 2 · REJECT 91**.
+
+-------------------------------------------------------------------------------
+
+### struct-chan-scalars-send-accept / struct-chan-shared-map-send-reject — ACCEPT + REJECT (bounty track: grow the adversarial corpus)
+
+The send-site companions of the spawn-site pair: the same struct shapes crossed
+by a channel send instead of a `task` spawn, pinning that deep sendability and
+the move freeze reach the send path as well.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| struct-chan-scalars-send-accept | ACCEPT | — | — | channel safe-by-type + immutable scalars; owned `move` over `chan packet`; no use after move |
+| struct-chan-shared-map-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct over the channel freezes that storage, so `m["after"] = 2` is a write through a live alias |
+
+With this registration the corpus is **139 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 92**.
