@@ -1112,3 +1112,19 @@ the move freeze reach the send path as well.
 | struct-chan-shared-map-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct over the channel freezes that storage, so `m["after"] = 2` is a write through a live alias |
 
 With this registration the corpus is **139 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 92**.
+
+-------------------------------------------------------------------------------
+
+### struct-chan-slice-send-reject / struct-chan-slice-fresh-send-accept — REJECT + ACCEPT (bounty track: grow the adversarial corpus)
+
+The slice-field companion of the #4209 map-field pair: the same struct shape
+crossed by a channel send instead of a `task` spawn, pinning that the A1b
+alias-freeze reaches a SLICE field and that a fresh slice inside a moved struct
+is still accepted.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| struct-chan-slice-send-reject | REJECT | A1b | `HYB-E3003` | the slice field aliases the sender's `xs`; moving the struct over the channel freezes that storage, so `xs[0] = 7` is a write through a live alias |
+| struct-chan-slice-fresh-send-accept | ACCEPT | — | — | the slice is a fresh literal at the send site; nothing else names its backing array |
+
+With this registration the corpus is **141 programs — ACCEPT 46 · ACCEPT-MANAGED 2 · REJECT 93**.
