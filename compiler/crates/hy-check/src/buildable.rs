@@ -8078,6 +8078,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if pkg == "strconv" && self.lookup_kind(pkg).is_none() {
+                        self.check_strconv_call_buildable(name, args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -9485,6 +9489,77 @@ impl<'a> Collector<'a> {
             _ => {}
         }
     }
+
+    fn check_strconv_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "int_size" => {
+                self.emit_e1002(
+                    span,
+                    "`strconv.int_size` is a package constant, not a function (HYB-E1002)".to_string(),
+                    "use `strconv.int_size` as a value without parentheses",
+                );
+            }
+            "err_range" | "err_syntax" => {
+                self.emit_e1002(
+                    span,
+                    format!("`strconv.{}` is a package variable error, not a function (HYB-E1002)", name),
+                    &format!("compare against `strconv.{}` without parentheses", name),
+                );
+            }
+            "num_error" => {
+                self.emit_e1002(
+                    span,
+                    "`strconv.num_error` is a struct type, not a function (HYB-E1002)".to_string(),
+                    "instantiate `strconv.num_error` as a struct literal or use it in type position",
+                );
+            }
+            "atoi" | "itoa" | "parse_bool" | "format_bool" | "can_backquote" | "is_graphic"
+            | "is_print" | "quote" | "quote_rune" | "quote_rune_to_ascii"
+            | "quote_rune_to_graphic" | "quote_to_ascii" | "quote_to_graphic" | "quoted_prefix"
+            | "unquote" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("`strconv.{}` takes exactly 1 argument, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 1 argument to `strconv.{}`", name),
+                    );
+                }
+            }
+            "parse_complex" | "parse_float" | "format_int" | "format_uint" | "unquote_char"
+            | "append_bool" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("`strconv.{}` takes exactly 2 arguments, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 2 arguments to `strconv.{}`", name),
+                    );
+                }
+            }
+            "parse_int" | "parse_uint" | "append_int" | "append_uint" | "append_quote"
+            | "append_quote_rune" | "append_quote_rune_to_ascii"
+            | "append_quote_rune_to_graphic" | "append_quote_to_ascii"
+            | "append_quote_to_graphic" => {
+                if args.len() != 3 {
+                    self.emit_e1002(
+                        span,
+                        format!("`strconv.{}` takes exactly 3 arguments, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 3 arguments to `strconv.{}`", name),
+                    );
+                }
+            }
+            "format_complex" | "format_float" | "append_float" => {
+                if args.len() != 4 {
+                    self.emit_e1002(
+                        span,
+                        format!("`strconv.{}` takes exactly 4 arguments, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 4 arguments to `strconv.{}`", name),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
 }
 
 fn span_expr_label(lhs: &Expr, op: &str, rhs: &Expr) -> String {
