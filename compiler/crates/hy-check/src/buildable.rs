@@ -8295,7 +8295,8 @@ impl<'a> Collector<'a> {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
                         self.check_fn_type_arg_arity(&assoc_key, name, span);
-                        self.check_user_fn_arity(&assoc_key, args, span);
+                        let full_assoc_key = format!("{}.{}", pkg, name);
+                        self.check_user_fn_arity(&full_assoc_key, args, span);
                         self.check_user_fn_arg_types(&assoc_key, args);
                     }
                 }
