@@ -4297,7 +4297,13 @@ impl<'a> Collector<'a> {
         };
 
         if let Some(expected) = expected_arity {
-            if args.len() != expected {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `filepath.{member}` (HYB-E1002)"),
+                    &format!("`filepath.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
                 let noun = if expected == 1 { "argument" } else { "arguments" };
                 self.emit_e1002(
                     span,
@@ -4325,7 +4331,13 @@ impl<'a> Collector<'a> {
         };
 
         if let Some(expected) = expected_arity {
-            if args.len() != expected {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `path.{member}` (HYB-E1002)"),
+                    &format!("`path.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
                 let noun = if expected == 1 { "argument" } else { "arguments" };
                 self.emit_e1002(
                     span,
@@ -4356,7 +4368,13 @@ impl<'a> Collector<'a> {
         };
 
         if let Some(expected) = expected_arity {
-            if args.len() != expected {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `url.{member}` (HYB-E1002)"),
+                    &format!("`url.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
                 let noun = if expected == 1 { "argument" } else { "arguments" };
                 self.emit_e1002(
                     span,
@@ -4392,7 +4410,13 @@ impl<'a> Collector<'a> {
         };
 
         if let Some(expected) = expected_arity {
-            if args.len() != expected {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `sort.{member}` (HYB-E1002)"),
+                    &format!("`sort.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
                 let noun = if expected == 1 { "argument" } else { "arguments" };
                 self.emit_e1002(
                     span,
