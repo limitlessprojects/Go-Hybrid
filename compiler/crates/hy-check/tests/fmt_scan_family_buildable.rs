@@ -128,6 +128,67 @@ fn test_fmt_sscanln_non_string_literal_rejects() {
 }
 
 // ---------------------------------------------------------------------------
+// Non-string expression operand violations (#4265)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_fmt_scanf_non_string_local_rejects() {
+    rejects_e1002("import \"fmt\"\nfn main() {\n    x := 42\n    fmt.scanf(x)\n}\n");
+    rejects_e1002("import \"fmt\"\nfn main() {\n    b := true\n    fmt.scanf(b)\n}\n");
+    rejects_e1002("import \"fmt\"\nfn main() {\n    fmt.scanf(40 + 2)\n}\n");
+}
+
+#[test]
+fn test_fmt_sscanf_non_string_input_local_rejects() {
+    rejects_e1002("import \"fmt\"\nfn main() {\n    x := 42\n    fmt.sscanf(x, \"%d\")\n}\n");
+    rejects_e1002("import \"fmt\"\nfn main() {\n    fmt.sscanf(10 + 20, \"%d\")\n}\n");
+}
+
+#[test]
+fn test_fmt_sscanf_non_string_format_local_rejects() {
+    rejects_e1002("import \"fmt\"\nfn main() {\n    x := 42\n    fmt.sscanf(\"123\", x)\n}\n");
+    rejects_e1002("import \"fmt\"\nfn main() {\n    fmt.sscanf(\"123\", 10 * 2)\n}\n");
+}
+
+#[test]
+fn test_fmt_fscanf_non_string_format_local_rejects() {
+    rejects_e1002("import \"fmt\"\nimport \"os\"\nfn main() {\n    x := 42\n    fmt.fscanf(os.stdin, x)\n}\n");
+    rejects_e1002("import \"fmt\"\nimport \"os\"\nfn main() {\n    fmt.fscanf(os.stdin, 50 - 8)\n}\n");
+}
+
+#[test]
+fn test_fmt_sscan_non_string_local_rejects() {
+    rejects_e1002("import \"fmt\"\nfn main() {\n    x := 42\n    fmt.sscan(x)\n}\n");
+    rejects_e1002("import \"fmt\"\nfn main() {\n    fmt.sscan(30 + 12)\n}\n");
+}
+
+#[test]
+fn test_fmt_sscanln_non_string_local_rejects() {
+    rejects_e1002("import \"fmt\"\nfn main() {\n    x := 42\n    fmt.sscanln(x)\n}\n");
+    rejects_e1002("import \"fmt\"\nfn main() {\n    fmt.sscanln(30 + 12)\n}\n");
+}
+
+#[test]
+fn test_fmt_scan_with_string_variables_accept() {
+    let src = r#"
+import "fmt"
+import "os"
+
+fn main() {
+    var v int
+    fmt_str := "%d"
+    input_str := "42"
+    _, _ = fmt.scanf(fmt_str, &v)
+    _, _ = fmt.sscanf(input_str, fmt_str, &v)
+    _, _ = fmt.fscanf(os.stdin, fmt_str, &v)
+    _, _ = fmt.sscan(input_str, &v)
+    _, _ = fmt.sscanln(input_str, &v)
+}
+"#;
+    accepts(src);
+}
+
+// ---------------------------------------------------------------------------
 // Positive controls: valid scan calls must keep accepting
 // ---------------------------------------------------------------------------
 
