@@ -269,3 +269,46 @@ fn zero_values_stay_legal() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+#[test]
+fn nested_set_containers_type_param_callee_and_enum_chan_dirs_reject() {
+    let r_closure = check(
+        "fn sink(xs []set[fn() int]) {}\nfn main() {\n    xs := []set[fn() int]{}\n    task sink(move xs)\n}\n",
+    );
+    assert!(codes(&r_closure).contains(&"HYB-E3001".to_string()), "got {:?}", codes(&r_closure));
+
+    let r_leaf = check(
+        "import \"sync\"\nfn sink(xs []set[sync.mutex]) {}\nfn main() {\n    xs := []set[sync.mutex]{}\n    task sink(move xs)\n}\n",
+    );
+    assert!(codes(&r_leaf).contains(&"HYB-E3001".to_string()), "got {:?}", codes(&r_leaf));
+
+    let r_tp_set = check(
+        "fn sink[t](xs []set[t]) {}\nfn forward[t]() {\n    xs := []set[t]{}\n    task sink(move xs)\n}\nfn main() {}\n",
+    );
+    assert!(codes(&r_tp_set).contains(&"HYB-E3005".to_string()), "got {:?}", codes(&r_tp_set));
+
+    let r_tp_callee = check(
+        "fn work() {}\nfn launch[work]() {\n    task work()\n}\nfn main() {}\n",
+    );
+    assert!(codes(&r_tp_callee).contains(&"HYB-E3005".to_string()), "got {:?}", codes(&r_tp_callee));
+
+    let r_enum_dir = check(
+        "enum pkt {\n    rx(<-chan int)\n    tx(chan<- int)\n}\nfn inspect(p pkt) {\n    match p {\n        pkt.rx(ch) => {\n            close(ch)\n        }\n        pkt.tx(ch) => {\n            _ = <-ch\n        }\n    }\n}\nfn main() {}\n",
+    );
+    let dir_codes = codes(&r_enum_dir);
+    assert!(
+        dir_codes.contains(&"HYB-E3009".to_string()) && dir_codes.contains(&"HYB-E3008".to_string()),
+        "got {:?}",
+        dir_codes
+    );
+}
+
+#[test]
+fn sendable_set_containers_and_bi_enum_chan_dirs_stay_accepted() {
+    let r = check(
+        "enum pkt {\n    empty\n    bi(chan int)\n}\nfn sink(xs []set[int], done chan<- bool) {\n    _ = xs\n    done <- true\n}\nfn main() {\n    xs := []set[int]{}\n    done := make(chan bool, 1)\n    task sink(move xs, done)\n    <-done\n    var p pkt\n    match p {\n        pkt.bi(ch) => {\n            close(ch)\n        }\n        _ => {}\n    }\n}\n",
+    );
+    assert!(codes(&r).is_empty(), "expected 0 diagnostics, got {:?}", codes(&r));
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+

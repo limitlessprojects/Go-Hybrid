@@ -72,14 +72,23 @@ impl Emitter {
             while let Expr::Paren { inner, .. } = lit {
                 lit = inner;
             }
+            let resolved = self.n5_resolve_alias(exp);
             match lit {
                 Expr::StructLit {
                     ty: None, fields, ..
                 } => {
-                    if let TypeExpr::Pointer { to, .. } = exp {
+                    if let TypeExpr::Pointer { to, .. } = &resolved {
+                        if fields.is_empty() && matches!(self.n5_resolve_alias(to), TypeExpr::Array { .. }) {
+                            if let Some(init) = self.n5_zero_init_addr(to) {
+                                return Ok(init);
+                            }
+                        }
                         let body = self.struct_lit_body(to, fields)?;
                         let s = format!("&{}{{{}}}", self.type_text(to), body);
                         return Ok(if min_prec > 50 { format!("({})", s) } else { s });
+                    }
+                    if let (true, Some(init)) = (fields.is_empty(), self.n5_zero_init(exp)) {
+                        return Ok(init);
                     }
                     let head = self.type_text(exp);
                     let body = self.struct_lit_body(exp, fields)?;
@@ -87,12 +96,38 @@ impl Emitter {
                 }
                 Expr::SliceLit {
                     elem: None, items, ..
-                } => match exp {
+                } => match &resolved {
                     TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
                         let head = self.type_text(exp);
                         let mut parts = Vec::new();
                         for i in items {
                             parts.push(self.emit_expr_exp(i, 0, Some(elem))?);
+                        }
+                        if let (
+                            TypeExpr::Array {
+                                len: Some(len_expr),
+                                ..
+                            },
+                            Some(init),
+                        ) = (&resolved, self.n5_zero_init(elem))
+                        {
+                            if let Expr::Lit {
+                                kind: LitKind::Int(s),
+                                ..
+                            } = Self::unwrap_parens(len_expr)
+                            {
+                                if let Some(n) = super::constconv::parse_int(s)
+                                    .and_then(|v| usize::try_from(v).ok())
+                                {
+                                    parts.resize(n.max(parts.len()), init);
+                                }
+                            } else {
+                                let skip = parts.len();
+                                return Ok(format!(
+                                    "func() (hyArr {head}) {{ hyArr = {head}{{{}}}; for hyIdx := {skip}; hyIdx < len(hyArr); hyIdx++ {{ hyArr[hyIdx] = {init} }}; return hyArr }}()",
+                                    parts.join(", ")
+                                ));
+                            }
                         }
                         return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                     }
@@ -160,6 +195,29 @@ impl Emitter {
             }
 
             Expr::AddrOf { operand, .. } => {
+                let inner = Self::unwrap_parens(operand);
+                if let Expr::SliceLit { items, .. } = inner {
+                    if items.is_empty() {
+                        if let Some((_, _, arr_ty)) = inner.as_array_lit() {
+                            if let Some(init) = self.n5_zero_init_addr(arr_ty) {
+                                return Ok(init);
+                            }
+                        }
+                    } else if let Some((Some(len_expr), inner_elem, arr_ty)) = inner.as_array_lit() {
+                        if !matches!(Self::unwrap_parens(len_expr), Expr::Lit { kind: LitKind::Int(_), .. })
+                            && self.n5_zero_init(inner_elem).is_some()
+                        {
+                            let (val, head) = (self.emit_expr(inner, 0)?, self.type_text(arr_ty));
+                            return Ok(format!("func() *{head} {{ hyArr := {val}; return &hyArr }}()"));
+                        }
+                    }
+                } else if let Expr::StructLit { ty: Some(t), fields, .. } = inner {
+                    if fields.is_empty() && matches!(self.n5_resolve_alias(t), TypeExpr::Array { .. }) {
+                        if let Some(init) = self.n5_zero_init_addr(t) {
+                            return Ok(init);
+                        }
+                    }
+                }
                 let o = self.emit_expr(operand, ATOM)?;
                 Ok(format!("&{}", o))
             }
@@ -225,10 +283,13 @@ impl Emitter {
 
             Expr::StructLit { ty, fields, .. } => {
                 if let Some(t) = ty {
-                    if matches!(t, TypeExpr::Chan { .. }) {
+                    if matches!(self.resolve_type_alias(t), TypeExpr::Chan { .. }) {
                         return Err(EmitError::unsupported(
                             "channel type is not a value expression — construct a channel with `make(chan T)`",
                         ));
+                    }
+                    if let (true, Some(init)) = (fields.is_empty(), self.n5_zero_init(t)) {
+                        return Ok(init);
                     }
                     let head = self.type_text(t);
                     let body = self.struct_lit_body(t, fields)?;
@@ -252,8 +313,18 @@ impl Emitter {
                     for i in items {
                         parts.push(self.emit_expr_exp(i, 0, Some(inner_elem))?);
                     }
-                    if let (Some(Expr::Lit { kind: LitKind::Int(n), .. }), Some(init)) = (len, self.n5_zero_init(inner_elem)) {
-                        parts.resize(n.replace('_', "").parse().unwrap_or(0).max(parts.len()), init);
+                    if let (Some(len_expr), Some(init)) = (len, self.n5_zero_init(inner_elem)) {
+                        if let Expr::Lit { kind: LitKind::Int(s), .. } = Self::unwrap_parens(len_expr) {
+                            if let Some(n) = super::constconv::parse_int(s).and_then(|v| usize::try_from(v).ok()) {
+                                parts.resize(n.max(parts.len()), init);
+                            }
+                        } else {
+                            let skip = parts.len();
+                            return Ok(format!(
+                                "func() (hyArr {head}) {{ hyArr = {head}{{{}}}; for hyIdx := {skip}; hyIdx < len(hyArr); hyIdx++ {{ hyArr[hyIdx] = {init} }}; return hyArr }}()",
+                                parts.join(", ")
+                            ));
+                        }
                     }
                     return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                 }
@@ -416,7 +487,17 @@ impl Emitter {
                 };
                 let saved_err_returns =
                     std::mem::replace(&mut self.cur_fn_error_returns, closure_err_returns);
-                self.fnlit_depth += 1;
+                let mut closure_opt = None;
+                let mut closure_conv = None;
+                if results.len() == 1 && results[0].name.is_none() {
+                    let rt = self.type_text(&results[0].ty);
+                    if rt.starts_with("option[") {
+                        closure_opt = Some(rt);
+                    }
+                    closure_conv = self.result_conv_key(&results[0].ty);
+                }
+                let saved_opt = std::mem::replace(&mut self.cur_option_result, closure_opt);
+                let saved_conv = std::mem::replace(&mut self.cur_fn_conv_result, closure_conv);
                 // Labels do not cross func boundaries: a labeled break/continue
                 // must find its loop INSIDE the literal — reset the depth so
                 // an outer loop's count cannot bless a closure-nested label.
@@ -445,9 +526,10 @@ impl Emitter {
                 self.loop_labels = saved_loop_labels;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
-                self.fnlit_depth -= 1;
                 self.in_main_closure = saved_main_closure;
                 self.cur_fn_error_returns = saved_err_returns;
+                self.cur_option_result = saved_opt;
+                self.cur_fn_conv_result = saved_conv;
                 self.for_depth = saved_for_depth;
                 self.handler_writer = saved_writer;
                 self.restore_scope(saved_scope);
@@ -531,25 +613,22 @@ impl Emitter {
         ty: &TypeExpr,
         fields: &[FieldInit],
     ) -> Result<String, EmitError> {
-        let body = self.field_inits(fields)?;
-        let extra = self.n5_missing_fields(ty, fields);
-        if extra.is_empty() {
-            return Ok(body);
-        }
-        let mut parts = Vec::new();
-        if !body.is_empty() {
-            parts.push(body);
-        }
-        parts.extend(extra);
-        Ok(parts.join(", "))
-    }
-
-    fn field_inits(&mut self, fields: &[FieldInit]) -> Result<String, EmitError> {
+        let field_decls = match self.n5_resolve_alias(ty) {
+            TypeExpr::Named { name, .. } => self.struct_lit_field_decls(&name),
+            _ => None,
+        };
         let mut parts = Vec::new();
         for f in fields {
-            let v = self.emit_expr(&f.value, 0)?;
+            let exp_ty = field_decls.as_ref().and_then(|ds| {
+                ds.iter()
+                    .find(|d| d.name == f.name)
+                    .map(|d| d.ty.clone())
+            });
+            let v = self.emit_expr_exp(&f.value, 0, exp_ty.as_ref())?;
             parts.push(format!("{}: {}", f.name, v));
         }
+        let extra = self.n5_missing_fields(ty, fields);
+        parts.extend(extra);
         Ok(parts.join(", "))
     }
 
@@ -635,7 +714,10 @@ impl Emitter {
     pub(crate) fn user_struct_name_of(&self, e: &Expr) -> Option<&str> {
         match Self::unwrap_parens(e) {
             Expr::Ident { name, .. } => self.var_struct.get(name).map(String::as_str),
-            Expr::AddrOf { operand, .. } => self.user_struct_name_of(operand),
+            Expr::Try { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Unary { op: UnOp::Addr, operand, .. } => self.user_struct_name_of(operand),
             Expr::Field { base, name, .. } => {
                 let sn = self.user_struct_name_of(base)?;
                 let fty = self
@@ -645,6 +727,40 @@ impl Emitter {
                     .find(|(f, _)| f == name)
                     .map(|(_, t)| t.as_str())?;
                 self.resolve_to_struct_name(fty)
+            }
+            Expr::StructLit { ty: Some(t), .. } => super::base_ty_name(t).and_then(|n| self.resolve_to_struct_name(&n)),
+            Expr::Call { callee, args, .. } => {
+                let callee_head = match Self::unwrap_parens(callee) {
+                    Expr::Index { base, .. } => Self::unwrap_parens(base),
+                    other => other,
+                };
+                match callee_head {
+                    Expr::Ident { name, .. } => {
+                        if name == "new" && self.is_unshadowed_builtin("new") {
+                            return args.first().and_then(|a| Self::assoc_index_type_arg(&a.value)).and_then(|n| self.resolve_to_struct_name(&n));
+                        }
+                        let (fn_head, _) = split_type_args(name);
+                        if !self.local_vars.contains(fn_head) {
+                            return self.fn_ret_struct.get(fn_head).map(String::as_str);
+                        }
+                        None
+                    }
+                    Expr::Field { base, name, .. } => {
+                        let (head, _) = split_type_args(name);
+                        if let Some(recv_sn) = self.user_struct_name_of(base) {
+                            if let Some(sn) = self.fn_ret_struct.get(&format!("{recv_sn}.{head}")) {
+                                return Some(sn.as_str());
+                            }
+                        }
+                        if let Expr::Ident { name: pkg, .. } = Self::unwrap_parens(base) {
+                            if !self.local_vars.contains(pkg) && !self.bindings.contains_key(pkg) {
+                                return self.fn_ret_struct.get(&format!("{pkg}.{head}")).map(String::as_str);
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
             }
             _ => None,
         }
@@ -657,10 +773,10 @@ impl Emitter {
     /// aliased hop dropped the chain exactly like a missing recursion did.
     /// A cycle (`type a = b; type b = a`) is not resolvable by Go either;
     /// bounded walk returns None.
-    fn resolve_to_struct_name(&self, start: &str) -> Option<&str> {
+    pub(crate) fn resolve_to_struct_name(&self, start: &str) -> Option<&str> {
         let mut cur = std::borrow::Cow::Borrowed(start);
         for _ in 0..16 {
-            if let Some((k, _)) = self.struct_fields.get_key_value(cur.as_ref()) {
+            if let Some((k, _)) = self.struct_fields.get_key_value(cur.split('[').next().unwrap_or(cur.as_ref())) {
                 return Some(k.as_str());
             }
             match self.n5_aliases.get::<str>(cur.as_ref()) {
@@ -713,28 +829,41 @@ impl Emitter {
                 // var_struct + struct_fields when the field's declared
                 // type is shape-known (18: sync.mutex).
                 if let Some(sn) = self.user_struct_name_of(base.as_ref()) {
-                    if let Some(fields) = self.struct_fields.get(sn) {
-                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                            if let Some((k, _)) =
-                                super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
-                            {
-                                return Some(k);
-                            }
+                    if let Some((_, fty)) = self.struct_fields.get(sn).and_then(|fs| fs.iter().find(|(f, _)| f == name)) {
+                        let mut cur = fty.clone();
+                        for _ in 0..16 {
+                            if let Some((k, _)) = super::shapes::SHAPES.iter().find(|(k, _)| *k == cur) { return Some(k); }
+                            let Some(next) = self.n5_aliases.get(&cur).and_then(super::base_ty_name) else { break };
+                            cur = next;
                         }
                     }
                 }
                 None
             }
-            Expr::Try { operand, .. } | Expr::Move { operand, .. } => self.type_of_expr(operand),
+            Expr::Try { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => self.type_of_expr(operand),
             // A zero-arg/method call's result type is the member's result;
             // package constructors and user functions returning shape-known
             // foreign types resolve to their descriptor keys.
-            Expr::Call { callee, .. } => {
+            Expr::Call { callee, args, .. } => {
                 if let Some(t) = self.type_of_expr(callee) {
                     return Some(t);
                 }
-                match Self::unwrap_parens(callee) {
-                    Expr::Ident { name, .. } => {
+                let callee_head = match Self::unwrap_parens(callee) {
+                    Expr::Index { base, .. } => Self::unwrap_parens(base),
+                    other => other,
+                };
+                match callee_head {
+                    Expr::Ident { name, span } => {
+                        if name == "new" && self.is_unshadowed_builtin("new") {
+                            if let Some(BindingKind::ForeignTy(t)) = args.first().and_then(|a| Self::assoc_index_type_arg(&a.value)).and_then(|n| self.binding_kind_of_ty(&TypeExpr::Named { name: n, span: *span })) { return Some(t); }
+                        }
                         let (fn_head, _) = split_type_args(name);
                         if !self.local_vars.contains(fn_head) {
                             if let Some((_, _, Some(BindingKind::ForeignTy(t)), _)) =
@@ -746,6 +875,10 @@ impl Emitter {
                         None
                     }
                     Expr::Field { base, name, .. } => {
+                        let (head, _) = split_type_args(name);
+                        if let Some(recv_sn) = self.user_struct_name_of(base) {
+                            if let Some((_, _, Some(BindingKind::ForeignTy(t)), _)) = self.fn_shapes.get(&format!("{recv_sn}.{head}")) { return Some(t); }
+                        }
                         if let Expr::Ident { name: pkg, .. } = Self::unwrap_parens(base) {
                             if self.is_unshadowed_pkg_root(pkg) {
                                 return match (pkg.as_str(), name.as_str()) {
@@ -767,6 +900,8 @@ impl Emitter {
                                     ("url", "parse") => Some("url.url"),
                                     _ => None,
                                 };
+                            } else if !self.local_vars.contains(pkg) && !self.bindings.contains_key(pkg) {
+                                if let Some((_, _, Some(BindingKind::ForeignTy(t)), _)) = self.fn_shapes.get(&format!("{pkg}.{head}")) { return Some(t); }
                             }
                         }
                         None
@@ -794,6 +929,14 @@ impl Emitter {
                 };
             }
         }
+        if let Expr::Ident { name: root, .. } = Self::unwrap_parens_and_addr(base) {
+            if matches!(
+                self.bindings.get(root),
+                Some(BindingKind::Foreign) | Some(BindingKind::ForeignTy(_))
+            ) {
+                return to_go_name(name);
+            }
+        }
         self.member_name(base, name)
     }
 
@@ -804,17 +947,34 @@ impl Emitter {
         e
     }
 
-    fn assoc_index_type_arg(e: &Expr) -> Option<String> {
+    fn unwrap_parens_and_addr(mut e: &Expr) -> &Expr {
+        loop {
+            match e {
+                Expr::Paren { inner, .. } => e = inner,
+                Expr::AddrOf { operand, .. }
+                | Expr::Unary {
+                    op: UnOp::Addr,
+                    operand,
+                    ..
+                } => e = operand,
+                _ => return e,
+            }
+        }
+    }
+
+    pub(crate) fn assoc_index_type_arg(e: &Expr) -> Option<String> {
         match Self::unwrap_parens(e) {
             Expr::Ident { name, .. } => Some(name.clone()),
             Expr::Field { base, name, .. } => {
                 Self::assoc_index_type_arg(base).map(|b| format!("{b}.{name}"))
             }
+            Expr::Index { base, index, .. } => Some(format!("{}[{}]", Self::assoc_index_type_arg(base)?, Self::assoc_index_type_arg(index)?)),
             Expr::SliceLit {
                 elem: Some(t),
                 items,
                 ..
             } if items.is_empty() => Some(format!("[]{}", t.render())),
+            Expr::StructLit { ty: Some(t), fields, .. } if fields.is_empty() => super::base_ty_name(t),
             _ => None,
         }
     }
@@ -840,15 +1000,22 @@ impl Emitter {
         match Self::unwrap_parens(e) {
             Expr::Ident { name, .. } => self.var_struct.contains_key(name),
             Expr::StructLit { .. } => true,
-            Expr::AddrOf { operand, .. } => self.is_user_struct_expr(operand),
+            Expr::Try { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Unary { op: UnOp::Addr, operand, .. } => self.is_user_struct_expr(operand),
             // Recursive since #1553: `o.sub` AND `o.sub.deep` are user
             // structs, not just `o.f`. The old single-hop read made a
             // three-level `o.sub.thing.pop()` look like a builtin pop and
             // rewrite to `hy_pop(&o.sub.thing)` — Go has no such method on
             // a user struct field.
-            Expr::Field { .. } => self.user_struct_name_of(e).is_some(),
+            Expr::Field { .. } | Expr::Call { .. } => self.user_struct_name_of(e).is_some(),
             _ => false,
         }
+    }
+
+    fn is_unshadowed_builtin(&self, name: &str) -> bool {
+        !self.local_vars.contains(name) && !self.fn_shapes.contains_key(name)
     }
 
     pub(crate) fn emit_call(
@@ -858,12 +1025,15 @@ impl Emitter {
     ) -> Result<String, EmitError> {
         let callee = Self::unwrap_parens(raw_callee);
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
-        if matches!(callee, Expr::Ident { name, .. } if name == "make") {
+        if matches!(callee, Expr::Ident { name, .. } if name == "make")
+            && self.is_unshadowed_builtin("make")
+        {
             return self.emit_make(args);
         }
         // --- new(T) whose zero value allocates maps (N5, issue #645) ---
-        let is_new = matches!(callee, Expr::Ident { name, .. } if name == "new");
-        if is_new && !self.local_vars.contains("new") && !self.fn_shapes.contains_key("new") {
+        if matches!(callee, Expr::Ident { name, .. } if name == "new")
+            && self.is_unshadowed_builtin("new")
+        {
             if let Some(alloc) = self.n5_new(args) {
                 return Ok(alloc);
             }
@@ -908,7 +1078,7 @@ impl Emitter {
                     // — a clean failure, never a wrong emission.
                 }
             }
-            if let Expr::Ident { name: root, .. } = base {
+            if let Expr::Ident { name: root, .. } = Self::unwrap_parens_and_addr(base) {
                 if let Some(BindingKind::Foreign) = self.bindings.get(root) {
                     let b = self.emit_expr(base, ATOM)?;
                     let mut parts = Vec::new();
@@ -987,10 +1157,15 @@ impl Emitter {
         while let Expr::Paren { inner, .. } = bare_callee {
             bare_callee = inner;
         }
-        if matches!(bare_callee, Expr::Ident { name, .. } if name == "make") {
+        if matches!(bare_callee, Expr::Ident { name, .. } if name == "make")
+            && self.is_unshadowed_builtin("make")
+        {
             return self.emit_make(args);
         }
-        if matches!(bare_callee, Expr::Ident { name, .. } if name == "new") && args.len() == 1 {
+        if matches!(bare_callee, Expr::Ident { name, .. } if name == "new")
+            && self.is_unshadowed_builtin("new")
+            && args.len() == 1
+        {
             return self.emit_new(&args[0]);
         }
 
@@ -1000,33 +1175,35 @@ impl Emitter {
         //     name used to fall through to the verbatim emission below and
         //     die in Go as `undefined: u8`. Issue #147. ---
         if let Expr::Ident { name, .. } = callee {
-            if let Some(go) = super::shapes::go_primitive_name(name) {
-                if args.len() != 1 {
-                    return Err(EmitError::unsupported(format!(
-                        "`{}` conversion takes exactly one argument",
-                        name
-                    )));
+            if self.is_unshadowed_builtin(name) {
+                if let Some(go) = super::shapes::go_primitive_name(name) {
+                    if args.len() != 1 {
+                        return Err(EmitError::unsupported(format!(
+                            "`{}` conversion takes exactly one argument",
+                            name
+                        )));
+                    }
+                    // A CONSTANT operand that does not fit the target has to
+                    // be folded here: Go rejects `uint8(300)` outright (the
+                    // truncation Go does is only for a variable operand), yet
+                    // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
+                    // executable test-claim. The fold computes that same
+                    // two's-complement truncation at emit time.
+                    if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
+                        return Ok(format!("{}({})", go, folded));
+                    }
+                    let a = self.emit_call_arg(&args[0])?;
+                    return Ok(format!("{}({})", go, a));
                 }
-                // A CONSTANT operand that does not fit the target has to
-                // be folded here: Go rejects `uint8(300)` outright (the
-                // truncation Go does is only for a variable operand), yet
-                // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
-                // executable test-claim. The fold computes that same
-                // two's-complement truncation at emit time.
-                if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
-                    return Ok(format!("{}({})", go, folded));
+                if name == "len" && args.len() == 1 && self.is_set_expr(&args[0].value) {
+                    let a = self.emit_call_arg(&args[0])?;
+                    return Ok(format!("{}.len()", a));
                 }
-                let a = self.emit_call_arg(&args[0])?;
-                return Ok(format!("{}({})", go, a));
-            }
-            if name == "len" && args.len() == 1 && self.is_set_expr(&args[0].value) {
-                let a = self.emit_call_arg(&args[0])?;
-                return Ok(format!("{}.len()", a));
-            }
-            if name == "delete" && args.len() == 2 && self.is_set_expr(&args[0].value) {
-                let s = self.emit_call_arg(&args[0])?;
-                let v = self.emit_call_arg(&args[1])?;
-                return Ok(format!("{}.remove({})", s, v));
+                if name == "delete" && args.len() == 2 && self.is_set_expr(&args[0].value) {
+                    let s = self.emit_call_arg(&args[0])?;
+                    let v = self.emit_call_arg(&args[1])?;
+                    return Ok(format!("{}.remove({})", s, v));
+                }
             }
         }
 
@@ -1144,7 +1321,7 @@ impl Emitter {
         // takes any integer type for the sizes; the helper takes `int`.
         let elem = match first_val {
             Expr::SliceLit { elem: Some(t), items, .. } if items.is_empty() && first_val.as_array_lit().is_none() => Some(t.as_ref().clone()),
-            Expr::Ident { name, span } => match self.n5_resolve_alias(&TypeExpr::Named { name: name.clone(), span: *span }) {
+            Expr::Ident { name, span } if !self.local_vars.contains(name) => match self.n5_resolve_alias(&TypeExpr::Named { name: name.clone(), span: *span }) {
                 TypeExpr::Slice { elem, .. } => Some(*elem),
                 _ => None,
             },
@@ -1190,10 +1367,7 @@ impl Emitter {
                 entries,
                 ..
             } if entries.is_empty() => format!("map[{}]{}", self.type_text(key), self.type_text(value)),
-            Expr::Ident { name, .. } => super::shapes::go_primitive_name(name)
-                .unwrap_or(name.as_str())
-                .to_string(),
-            other => self.emit_expr(other, 0)?,
+            other => if let Some(name) = Self::assoc_index_type_arg(other) { self.go_type_name(&name) } else { self.emit_expr(other, 0)? },
         };
         Ok(format!("new({})", ty_text))
     }
