@@ -1297,10 +1297,26 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::MapLit { value: vty, entries, .. } => {
+            Expr::MapLit { key: kty, value: vty, entries, .. } => {
                 let vshape = self.shape_of_type(vty);
                 let vty_text = vty.render();
+                // #4036: the map KEY slot is a type contract too. The sweep
+                // above checked only `v` against the value shape, so
+                // `map[int]int{nil: 1}` passed `hyb check` with 0 diagnostics
+                // and then failed `go build` ("cannot use nil as int value in
+                // map literal") — an accepted-implies-buildable break. Mirror
+                // the value-slot rule onto the key slot.
+                let kshape = self.shape_of_type(kty);
+                let kty_text = kty.render();
                 for (k, v) in entries {
+                    if Checker::is_nil_literal(k) && !Checker::is_nilable_shape(&kshape) {
+                        self.emit_nil_type_error_text(
+                            &kshape,
+                            kty_text.clone(),
+                            k.span(),
+                            &format!("the map key slot `{}`", kty_text),
+                        );
+                    }
                     if Checker::is_nil_literal(v) && !Checker::is_nilable_shape(&vshape) {
                         self.emit_nil_type_error_text(
                             &vshape,
