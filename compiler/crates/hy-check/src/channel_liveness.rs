@@ -70,6 +70,13 @@ impl ChannelLivenessChecker {
     fn pop_scope(&mut self) {
         if let Some(scope) = self.scope_stack.pop() {
             self.check_terminal_invariants(&scope);
+            // Affine moves must remain visible after the inner scope ends:
+            // merge the inner scope's moved capabilities into the enclosing
+            // scope so use-after-move / double-move are caught and the
+            // enclosing terminal invariants see the moved state.
+            if let Some(parent) = self.scope_stack.last_mut() {
+                parent.moved_caps.extend(scope.moved_caps);
+            }
         }
     }
 
@@ -145,7 +152,36 @@ impl ChannelLivenessChecker {
                     self.check_expr(v);
                 }
             }
-            Stmt::Assign { values, .. } => {
+            Stmt::Assign { targets, op, values, span } => {
+                // Re-assignment through places must register channel
+                // capabilities exactly like `Local` bindings, otherwise
+                // `tx, rx = hy.pipe[T]()` bypasses all capability tracking.
+                if matches!(op, AssignOp::Assign)
+                    && targets.len() == 2
+                    && values.len() == 1
+                    && self.is_pipe_call(&values[0])
+                {
+                    if let (PlaceKind::Ident(tx_name), PlaceKind::Ident(rx_name)) =
+                        (&targets[0].kind, &targets[1].kind)
+                    {
+                        let pipe = PipeInfo {
+                            tx: tx_name.clone(),
+                            rx: rx_name.clone(),
+                            tx_state: ChannelTypestate::Fresh,
+                            rx_state: ChannelTypestate::Fresh,
+                            def_span: *span,
+                        };
+
+                        let p_idx = self.pipes_all.len();
+                        self.pipes_all.push(pipe.clone());
+                        self.cap_to_pipe.insert(tx_name.clone(), p_idx);
+                        self.cap_to_pipe.insert(rx_name.clone(), p_idx);
+
+                        if let Some(cur) = self.scope_stack.last_mut() {
+                            cur.pipes.push(pipe);
+                        }
+                    }
+                }
                 for v in values {
                     self.check_expr(v);
                 }
