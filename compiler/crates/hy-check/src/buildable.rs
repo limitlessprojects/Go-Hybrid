@@ -8049,19 +8049,8 @@ impl<'a> Collector<'a> {
                             &format!("write `os.{}` (package variable, not a function)", name),
                         );
                     }
-                    if pkg == "hex"
-                        && self.lookup_kind(pkg).is_none()
-                        && name == "encode"
-                        && args.len() != 1
-                    {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "`hex.encode` takes exactly 1 slice argument `(src)`, got {} (HYB-E1002)",
-                                args.len()
-                            ),
-                            "write `hex.encode(data)` (SPEC M5 hex encoding)",
-                        );
+                    if (pkg == "hex" || pkg == "encoding/hex") && self.lookup_kind(pkg).is_none() {
+                        self.check_hex_call_buildable(name.as_str(), args, span);
                     }
 
                     if pkg == "filepath" && self.lookup_kind(pkg).is_none() {
@@ -8333,10 +8322,6 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
-                    if (pkg == "hex" || pkg == "encoding/hex") && self.lookup_kind(pkg).is_none() {
-                        self.check_hex_call_buildable(name, args, span);
-                    }
-
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -8537,6 +8522,13 @@ impl<'a> Collector<'a> {
                     "`hex.err_length` is a package error variable, not a callable function",
                 );
             }
+            "invalid_byte_error" => {
+                self.emit_e1002(
+                    span,
+                    "cannot call non-function package type `hex.invalid_byte_error` (HYB-E1002)".to_string(),
+                    "use `hex.invalid_byte_error` as a type, not a function",
+                );
+            }
             "encode_to_string" => {
                 if args.len() != 1 {
                     self.emit_e1002(
@@ -8584,29 +8576,25 @@ impl<'a> Collector<'a> {
                 }
             }
             "encode" => {
-                if args.len() != 2 {
+                if args.len() != 1 {
                     self.emit_e1002(
                         span,
                         format!(
-                            "`hex.encode` takes exactly 2 arguments `(dst, src)`, got {} (HYB-E1002)",
+                            "`hex.encode` takes exactly 1 slice argument `(src)`, got {} (HYB-E1002)",
                             args.len()
                         ),
-                        "write `hex.encode(dst, src)`",
+                        "write `hex.encode(data)` (SPEC M5 hex encoding)",
                     );
-                } else {
-                    for a in args {
-                        if let Some(ref n) = a.name {
-                            if n != "dst" && n != "src" {
-                                self.emit_e1002(
-                                    span,
-                                    format!(
-                                        "`hex.encode` has no parameter named `{}` (params: dst, src) (HYB-E1002)",
-                                        n
-                                    ),
-                                    "pass arguments by position or use valid parameter names `dst` and `src`",
-                                );
-                            }
-                        }
+                } else if let Some(ref n) = args[0].name {
+                    if n != "src" && n != "data" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.encode` has no parameter named `{}` (params: data) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `data`",
+                        );
                     }
                 }
             }

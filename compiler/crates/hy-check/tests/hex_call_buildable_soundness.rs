@@ -2,9 +2,9 @@
 //! under GUARANTEES.md Row 13 (BUILDABLE) (Fixes #4218):
 //!
 //! 1. Call arity violations on `encoding/hex` functions must reject fail-closed with `HYB-E1002`:
+//!    - `hex.encode` (exact 1 slice arg: `src` / `data`, SPEC M5 hex encoding)
 //!    - `hex.encode_to_string` (exact 1 arg: `src`)
 //!    - `hex.decode_string` (exact 1 arg: `s`)
-//!    - `hex.encode` (exact 2 args: `dst`, `src`)
 //!    - `hex.decode` (exact 2 args: `dst`, `src`)
 //!    - `hex.encoded_len` (exact 1 arg: `n`)
 //!    - `hex.decoded_len` (exact 1 arg: `x`)
@@ -13,15 +13,16 @@
 //!    - `hex.new_decoder` (exact 1 arg: `r`)
 //!    - `hex.new_encoder` (exact 1 arg: `w`)
 //!
-//! 2. Package error variable `hex.err_length` (`hex.ErrLength`) must reject fail-closed as a call target (`HYB-E1002`).
+//! 2. Package non-callable symbols must reject fail-closed as call targets (`HYB-E1002`):
+//!    - `hex.err_length` (`hex.ErrLength` package error variable)
+//!    - `hex.invalid_byte_error` (`hex.InvalidByteError` package type)
 //!
 //! 3. Named arguments with unrecognized parameter names must reject with `HYB-E1002`.
 //!
-//! 4. Positive controls: valid calls with correct positional or named arguments accept cleanly.
+//! 4. Positive controls: valid calls with correct positional or named arguments accept cleanly
+//!    (including 1-argument `hex.encode(data)` per SPEC M5).
 //!
 //! 5. Shadowing: local declarations named after packages preserve user semantics.
-//!
-//! Settlement Wallet (Base L2 USDC): 0xf084cF0076F91AA48C2370F427C399dAA8C1f07F
 
 use hy_check::{check_file, CheckResult, Verdict};
 use hy_diag::Severity;
@@ -63,6 +64,40 @@ fn accepts(src: &str) {
         cs
     );
     assert_eq!(r.verdict, Verdict::Accept, "expected Accept for:\n{}", src);
+}
+
+#[test]
+fn test_hex_encode_arity_rejects() {
+    rejects_e1002(
+        r#"
+package main
+import "encoding/hex"
+fn main() {
+    s := hex.encode()
+    _ = s
+}
+"#,
+    );
+    rejects_e1002(
+        r#"
+package main
+import "encoding/hex"
+fn main() {
+    s := hex.encode("a", "b")
+    _ = s
+}
+"#,
+    );
+    rejects_e1002(
+        r#"
+package main
+import "encoding/hex"
+fn main() {
+    s := hex.encode("a", "b", "c")
+    _ = s
+}
+"#,
+    );
 }
 
 #[test]
@@ -116,40 +151,6 @@ fn main() {
 }
 
 #[test]
-fn test_hex_encode_arity_rejects() {
-    rejects_e1002(
-        r#"
-package main
-import "encoding/hex"
-fn main() {
-    n := hex.encode()
-    _ = n
-}
-"#,
-    );
-    rejects_e1002(
-        r#"
-package main
-import "encoding/hex"
-fn main() {
-    n := hex.encode("only_one")
-    _ = n
-}
-"#,
-    );
-    rejects_e1002(
-        r#"
-package main
-import "encoding/hex"
-fn main() {
-    n := hex.encode("a", "b", "c")
-    _ = n
-}
-"#,
-    );
-}
-
-#[test]
 fn test_hex_decode_arity_rejects() {
     rejects_e1002(
         r#"
@@ -168,6 +169,17 @@ package main
 import "encoding/hex"
 fn main() {
     n, err := hex.decode("only_one")
+    _ = n
+    _ = err
+}
+"#,
+    );
+    rejects_e1002(
+        r#"
+package main
+import "encoding/hex"
+fn main() {
+    n, err := hex.decode("a", "b", "c")
     _ = n
     _ = err
 }
@@ -272,13 +284,22 @@ fn main() {
 }
 
 #[test]
-fn test_hex_err_length_non_callable_rejects() {
+fn test_hex_non_callable_symbols_reject() {
     rejects_e1002(
         r#"
 package main
 import "encoding/hex"
 fn main() {
     _ = hex.err_length()
+}
+"#,
+    );
+    rejects_e1002(
+        r#"
+package main
+import "encoding/hex"
+fn main() {
+    _ = hex.invalid_byte_error()
 }
 "#,
     );
@@ -301,7 +322,17 @@ fn main() {
 package main
 import "encoding/hex"
 fn main() {
-    n := hex.encode(target="a", src="b")
+    s := hex.encode(bad_param="hello")
+    _ = s
+}
+"#,
+    );
+    rejects_e1002(
+        r#"
+package main
+import "encoding/hex"
+fn main() {
+    n := hex.decode(target="a", src="b")
     _ = n
 }
 "#,
@@ -337,6 +368,8 @@ fn test_hex_valid_calls_accept() {
 package main
 import "encoding/hex"
 fn main() {
+    e := hex.encode("hello")
+    _ = e
     s := hex.encode_to_string("hello")
     _ = s
     l := hex.encoded_len(16)
@@ -345,6 +378,8 @@ fn main() {
     _ = dl
     s2 := hex.encode_to_string(src="world")
     _ = s2
+    e2 := hex.encode(data="world")
+    _ = e2
 }
 "#,
     );
