@@ -536,3 +536,222 @@
 - Zero silent closes; 2 replies 201; both pushes remote-asserted (979c472a, 93e4625f == ls-remote); post-battery trim kept disk healthy (no ENOSPC this tick).
 - Next queue: #3892/#3894 (Burapa-J loans/sendability), then #4015+ flood. Stalled-watch unchanged: #3942/#3949/#3918.
 - Suites 479 integration files (+1: builtin_complex_soundness_3072; #3890 python-side only).
+
+## Session 147 — 2026-11-08 06:10 UTC+8 tick
+- env cold-recycled (rootfs c-6aef9a1b, 7th consecutive); toolchains restored; approve 4/4 (4994 left); scan skipped (quota doctrine).
+- **1 landed, 1 fully-reviewed-pending-battery**:
+  - **#3892** -> `a3f88231` (Burapa-J, fixes #3891): loans.rs — check_a2_conflict + map-slot conflict now consult effective_loan_last (loop-extended window) instead of raw l.last; alias source unwrap extends to Move wrappers (`q := move p` no longer skips extension); diagnostic reports eff_last. Extended suite 8/8 (3 new fixtures: loop-carried O8 E3102, loop-carried A2 E3101, move-alias window); workspace 488/3126/0; corpus 135; differential FULL. Reply 201.
+  - **#3894** (Burapa-J, sendability) diff reviewed end-to-end this tick, battery deferred (budget): set[T] element recursion in all three shape_holds_* walkers (user-set-struct guard respected), Unproven-tp arm moved from top-level match to fallback tail (more precise classification wins first), spawn-callee + static-arg-inference shadow sets extended (type-param/struct/enum/alias), fn type_params defined in const env, match-arm binders resolve enum variant payload for chan-dir checks (new resolve_enum_arm_dir_ty). 2 new tests in callee_and_nil (nested set/callee/enum-dir rejects E3001/E3005/E3008/E3009 + sendable control). Branch pr-3894 fetched locally; battery next tick is first action.
+- Zero silent closes; reply 201; push remote-asserted (a3f88231 == ls-remote); disk trimmed, no ENOSPC.
+- Next queue: #3894 battery+land (ready), then #4015+ flood. Stalled-watch unchanged: #3942/#3949/#3918.
+- Suites 479 integration files (unchanged; #3892 extends existing suite).
+
+## Session 148 — 2026-11-08 09:10 UTC+8 tick (07:10/08:10 ticks did not fire; no parallel work lost)
+- env cold-recycled (rootfs c-6aefcbe9, 8th consecutive); toolchains restored; approve 6/6 (4994 left); scan skipped (quota doctrine).
+- **1 landed**:
+  - **#3894** -> `6c1a0602` (Burapa-J, fixes #3893): sendability.rs — set[T] element recursion in all three shape_holds_* walkers (user-set guard respected); Unproven-tp arm moved to fallback tail (precise E3001 etc. win first); spawn-callee + static-arg shadow sets extended (tp/struct/enum/alias); fn type_params in const env; match-arm binders resolve enum variant payload via new resolve_enum_arm_dir_ty (E3008/E3009 see inside enum matches). Extended suite 20/20; workspace 488/3128/0; corpus 135; differential FULL. Battery executed this tick per S147 plan (branch ref preserved across cold recycle). Reply 201.
+- Queue refresh (desc order): flood is real — #4081-#4117, 20 open PRs: Yumihariii #4081 (sendability directional foreign chan), Burapa-J #4083/#4091, seenorht #4084/#4087, bradwue313 #4085/#4097/#4099/#4101, wminno #4088, marhabynova #4093, jpereyra243-byte #4095/#4109/#4117, mischievousdeveloper #4105, dextermos-dev #4107/#4111/#4113/#4115 (arity band), spikes/ #4089 excluded per ledger.
+- Next queue: #4081 battery+land (oldest open), then #4083, #4084, #4085... top-down by created. Stalled-watch unchanged: #3942/#3949/#3918.
+- Suites 479 integration files (unchanged; #3894 extends existing suite). Zero silent closes; push remote-asserted (6c1a0602 == ls-remote).
+
+## Session 150 — 2026-11-08 14:10 +08 (cron tick, Job 487193)
+
+- Cold sandbox; main still `a1490f03` (12:10 tick did not run in parallel — S149's failed start consumed it).
+- Triage scan killed by shell recycling twice (400/1140 stall); queue refreshed via API instead. New flood mapped: #4117–#4152 (today). Old S148 queue intact: #4081–#4116 all open.
+- **#4081 (Yumihariii, fixes #4076) LANDED → merge commit `6c7af266`.**
+  - Probe-first body honored: of the issue's four forms, method-receiver cases already reject on main; PR scoped to the two live foreign gaps (`close(time.after(..))` zero-diag Accept; send caught only by generic E3005).
+  - foreign.rs `package_result_chan_ty`: `("time","after"|"After")` → `<-chan time.Time`; sendability.rs consults after local-fn miss, `known_package` guard, fail direction unchanged. Insertion point verified semantically (unbound package root + local-fn miss).
+  - Merge clean (no conflicts). Battery: workspace 489 suites / 3136 passed / 0 failed, 480 on-disk files = 480 Running lines (1:1, +9 inline), new suite 8/8 standalone; corpus 135/135 tripwire clear; differential FULL 45/45 + 90/90.
+  - Pushed `a1490f03..6c7af266`, ls-remote asserted. Landing reply posted (comment 6718390970), bounty rail per BOUNTY.md tiers / discussion #295. Issue #4076 auto-closed.
+  - Notes: first cargo attempt ran from repo root (no Cargo.toml) — workspace lives in `compiler/`; differential_loop.py takes no positional mode arg (FULL is default). Triage scan background jobs need setsid/nohup next tick.
+  - Post-battery trim: target 4.6G removed, disk 90%→42%.
+- Suites on disk: **480** integration files. Corpus 135/135. Differential FULL AGREEMENT.
+- Next queue: #4083 (Burapa-J, const_overflow local float fold), then #4084/#4087 (seenorht), #4085/#4097/#4099/#4101 (bradwue313), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115, then today's #4117–#4152 flood — top-down by created.
+- Track-3 spikes #336–#474 untouched (review window 2026-12-01). Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 152 — 2026-11-08 16:10 +08 (cron tick, Job 487193)
+
+- Cold sandbox. **S151's local commits were lost to persistent-volume rollback** (73bcc32b/f609ec61 absent, reflog reset to S150). Lesson recorded: unpushed local commits do not survive tick boundaries reliably; review state survives only in the PR thread (status comment did its job). Re-fetch + re-merge cost ~1 min — cheap; prefer redo over WIP refs unless diff review itself is at risk.
+- **#4083 (Burapa-J, fixes #4082) LANDED → merge commit `ef78ff1f`.**
+  - Patch identical to S151's reviewed head (`782c02e4`, 203+/46-), merge clean again.
+  - Battery (new chunked strategy, no background jobs): single-call `cargo test --no-run` completed in one 570s window (BUILD_RC=0), then single-call test run — 490 suites / 3140 passed / 0 failed; 481 on-disk files = 481 Running lines (1:1, +9 inline); new suite standalone 4/4. Corpus 135/135 tripwire clear. Differential FULL 45/45 + 90/90.
+  - Pushed `b2131a7a..ef78ff1f`, ls-remote asserted. Landing reply posted (comment 6719151543), supersedes S151 status comment. Issue #4082 auto-closed.
+- Suites on disk: **481** integration files. Corpus 135/135. Differential FULL AGREEMENT.
+- Next queue: #4084/#4087 (seenorht), #4085/#4097/#4099/#4101 (bradwue313), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115, then flood #4117–#4152 — top-down by created.
+- Track-3 spikes #336–#474 untouched (2026-12-01 window). Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 153 — 2026-11-08 17:10 +08 (cron tick, Job 487193)
+
+- Cold sandbox; main pulled clean (`78c33284`).
+- **#4084 (seenorht, also fixes #4076) LANDED → merge commit `84398676` — landed as verified SUPERSET supplement, not dup.**
+  - Dup protocol applied with judgment: #4081 won #4076's primary forms (after); #4084's diff showed real remaining fail-open surfaces (time.tick close, new_timer/new_ticker pointers, timer.c/ticker.c field dirs) → validated as increment, not rework. #4081's package_result_chan_ty table kept behind the new hardcoded arms (merged-tree verified both layers, same direction for shared case).
+  - Battery: workspace 491 suites / 3145 passed / 0 failed; 482 files = 482 Running lines (1:1, +9 inline); both 4076 suites coexist green 8/8 + 5/5 standalone. Corpus 135/135 tripwire clear. Differential FULL 45/45 + 90/90.
+  - Pushed `78c33284..84398676`, ls-remote asserted. Landing reply posted (comment 6719705276) with explicit #4081-relationship paragraph + nit on time.time vs time.Time spelling. PR kept open→merged; issue #4076 stays credited to #4081.
+- Suites on disk: **482**. Corpus 135/135. Differential FULL AGREEMENT.
+- Next queue: #4087 (seenorht), #4085/#4097/#4099/#4101 (bradwue313), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115, flood #4117–#4152 — top-down by created.
+- Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 154 — 2026-11-08 19:10 +08 (cron tick, Job 487193; 18:10 did not fire)
+
+- Cold sandbox; main pulled clean (`586dc06d`).
+- **#4087 (seenorht, fixes #4086) LANDED → merge commit `e83ccf81`.**
+  - fmt printf-family arity + non-string-format-literal validation (HYB-E1002, Row 13). Dup-check clean (no printf/sprintf/errorf handling on main); #3598 os-shadow arm (7721) and #3864 hex arm verified co-present — three complementary fmt arms.
+  - Battery: workspace 492 suites / 3158 passed / 0 failed; 483 files = 483 Running lines (1:1, +9 inline); new suite standalone 13/13 (PR body said 11 — noted in reply). Corpus 135/135 tripwire clear. Differential FULL 45/45 + 90/90.
+  - Pushed `586dc06d..e83ccf81`, ls-remote asserted. Landing reply posted (comment 6720788150). Issue #4086 auto-closed.
+- Suites on disk: **483**. Corpus 135/135. Differential FULL AGREEMENT.
+- Next queue: #4085/#4097/#4099/#4101 (bradwue313 — fmt append + arity family; check overlap vs #4087 before landing), #4088, #4093, #4095/#4109/#4117, #4105, #4107/#4111/#4113/#4115 (dextermos-dev buildable arity band — dedupe carefully against #4087's fmt arm), flood #4117–#4152 — top-down by created.
+- Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 155 — 2026-11-08 20:10 +08 (cron tick, Job 487193)
+
+- Cold sandbox; main pulled clean (`736d2d8f`).
+- **#4085 (bradwue313, also fixes #4076) — VERIFIED DUP, hall-of-fame reply, kept open (comment 6721330559).**
+  - Method: ran author's suite verbatim on bare main — 3/4, the 1 failure was the author's fixture using `Receiver` (mixed case → HYB-E0001 at parse, before type-check). After `Receiver`→`receiver` substitution: 4/4 green. Zero residue; #4081+#4084 cover all surfaces. Third independent implementation of #4076; first-lander keeps the issue.
+  - Tree hygiene note: the temp checkout for this check staged the test file and blocked the next trial merge ("local changes would be overwritten") — `git reset` + rm before merging, not `git checkout --`.
+- **#4097 (bradwue313, fixes #4096, fmt append family) — GATE FAIL, not landed (evidence reply 6721346368).**
+  - Trial merge clean; `cargo check -p hy-check` fails: buildable.rs:7967 `"write \`fmt.appendf(b, "%s", ...)\`"` embeds bare double quotes → Rust 2021 "prefix `s` is unknown" + E0425. Only bare-quote line in the PR; sibling fix-its escape correctly. append/appendln/appendf arms otherwise sound and complementary to #4087 (no overlap; dst rejects Str/RawStr literals, appendf format slot accepts strings). Author asked to push the one-line escape fix for a re-run.
+  - MERGE_RC=2 earlier was the #4085 residue file, not a real conflict — verified clean after reset.
+- **#4088 (wminno, fixes #4068) PRE-REVIEWED for next tick** (head `dc6f7721`, resolve.rs +40/-10, 141-line test file):
+  1. MatchPattern::Path 2+ segments → check_type_name(joined) (E1001 under-fire fix; pkg-qualified and declared-enum qualifiers stay accepted).
+  2. dotted-type roots `option`/`set` added to pass-set (over-fire fix).
+  3. Unparseable type args: deleted plain-ident fallback, fail-open documented (`fn(c chan<- int)` alias-grammar case).
+  4. Type-position bracket args `run_bracketed_type_args(.., false→true)` (`set[undef]{}` under-fire fix).
+  - Mixed tighten+loosen ⇒ corpus/differential tripwire movement possible; full battery mandatory. No dup on main (diff self-evident). Next tick: merge → commit → battery → land/evidence per gates.
+- Suites on disk: **483** (unchanged this tick). Corpus 135/135. Differential FULL AGREEMENT.
+- Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 156 — 2026-11-08 21:10 +08 (cron tick, Job 487193)
+
+- Cold sandbox; main pulled clean (`01651478`). pr-4088 local ref lost to rollback (unpushed refs don't persist) — refetched, head unchanged `dc6f7721`, pre-review from S155 held.
+- **#4088 (wminno, fixes #4068) LANDED → merge commit `14c8e916`.**
+  - Battery: workspace 493 suites / 3169 passed / 0 failed; 484 files = 484 Running lines (1:1, +9 inline); new suite standalone 11/11. Corpus 135/135 with tripwire RATES UNCHANGED (1.5%/2.2%) — paired tighten+loosen nets zero corpus movement. Differential FULL 45/45 + 90/90.
+  - Pushed `01651478..14c8e916`, ls-remote asserted. Landing reply posted (comment 6721951929). Issue #4068 auto-closed.
+- Suites on disk: **484**. Corpus 135/135. Differential FULL AGREEMENT.
+- Next queue: #4093 (marhabynova), #4095/#4109/#4117 (jpereyra243-byte), #4105 (mischievousdeveloper), #4107/#4111/#4113/#4115 (dextermos-dev arity band — check overlap vs landed #4087 fmt arm + #4088 resolve changes), flood #4117–#4152 — top-down by created. Also watch #4097 for author's escaped-quote fix.
+- Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
+
+## Session 158 — 2026-11-09 01:10 +08 (cron tick, Job 487193; 22:10 sandbox-fail, 23:10/00:10 did not fire)
+
+- Cold sandbox; main pulled clean (`ce6219cd`).
+- **#4093 (marhabynova, fixes #4092) LANDED → merge commit `6ae4a862` — with IN-MERGE UNION disclosed.**
+  - fmt scan-family (scanf/sscanf/fscanf/sscan/sscanln/fscan/fscanln) arity + operand validation, HYB-E1002, same guard/fail-direction as #4087. Fix-its correctly escaped (no #4097 repeat).
+  - Trial merge conflicted: both #4087 and #4093 insert at the same hex-branch anchor. Resolved by side-by-side splice of both chains in the shared fmt guard (disjoint method-name sets); 3 duplicated git common-tail lines removed; `cargo check` green pre-battery. Procedure that worked: extract both complete blocks via depth-walk from each parent blob, rebuild from main version + inserted PR block (avoid hand-unstitching git's interleaved conflict hunks; balance assertion caught a stray -1 splice attempt first).
+  - Battery: workspace 494 suites / 3183 passed / 0 failed; 485 files = 485 Running lines (1:1, +9 inline); new suite standalone 14/14. Corpus 135/135 tripwire clear. Differential FULL 45/45 + 90/90.
+  - Pushed `ce6219cd..6ae4a862`, ls-remote asserted. Landing reply posted (comment 6724581497). Issue #4092 auto-closed.
+- Suites on disk: **485**. Corpus 135/135. Differential FULL AGREEMENT.
+- fmt family coverage on main: printf (#4087) + scan (#4093); append (#4097) still pending author's escaped-quote fix.
+- Next queue: #4095/#4109/#4117 (jpereyra243-byte), #4105 (mischievousdeveloper), #4107/#4111/#4113/#4115 (dextermos-dev arity band — dedupe vs landed fmt arms), flood #4117–#4152 — top-down by created.
+- Track-3 spikes #336–#474 untouched. Stale-watch #3942/#3949/#3918 unchanged.
+## Session 161 — 2026-11-09 09:10 UTC+8 — 1 landed, 1 accident repaired
+
+**Landed #4204** (dextermos-dev, fixes #4203, `b8b1e48b` → merge `a95dddf2`, pushed + remote-asserted):
+- io package call arity + 19 non-callable symbol rejects under the landed fmt pattern (#4087/#4093); lookup_kind guard, fail-open unknowns. New suite io_call_buildable_soundness.rs → suites 486.
+- Battery: workspace 486/486 (1:1), corpus 137/137 tripwire not fired, differential FULL AGREEMENT.
+- **#4162 (Sora1916) = different patch-id, independent io implementation → first-come-first-served honored by battery order; hall-of-fame reply posted (comment 6729945605), PR kept open for supplement-or-subset disposition** (predecessors #4084/#4085).
+
+**ACCIDENT — session-159 trim deleted tracked examples/ (28 files) and the worklog `git add -A` pushed the deletions (`30d4ebf0`)**: caught by the battery gate itself (parse_all.rs examples_01_02_03_parse "No such file or directory"). Restored byte-identical from afc41e90 and pushed as `00bfd96a` (pure repair commit, disclosed in its message). **Discipline corrected: post-battery trims must exclude git-tracked paths — from now on trim only `/home/z/go-hybrid-target/debug/incremental` (non-tracked), never `examples/` or anything under the repo working tree.**
+
+**Also this window**: #4206 (flate2) gate-FAILed last session (unresolved conflict markers at blob lines 8164/8170 + whole-file CRLF rewrite; evidence reply 6729165885 with two-step fix); awaiting author re-push.
+
+**Queue next**: #4202/#4201/#4199 (tmclaos), #4198 (jpereyra243-byte http.response_writer), #4196 (9xj89gzrtw-hue fmt — overlap-watch vs landed fmt arms), #4194/#4189 (SuperPiIot), then the 4140s band.
+
+## Session 162 — 2026-11-09 11:10 UTC+8 — 1 landed
+
+**Landed #4220** (dextermos-dev, `088bc752` → merge `1610d689`, pushed + remote-asserted):
+- Completes the S161 examples repair: 00bfd96a restored from afc41e90 (Session 1), which predates examples/09-go-imports-hybrid/program.hy and the whole examples/gomod-integration/ module. Author verified byte-identical from 1e8673b4; evidence chain re-audited on landing (afc41e90 lacks all 7 paths, 1e8673b4 has them, PR blob diff vs 1e8673b4 = 0 lines).
+- Battery: workspace 486/486 (1:1) incl. examples parse tests green, **test_run_examples 19/19 OK** (09 FAIL row gone), corpus 137/137 tripwire not fired, differential FULL AGREEMENT. CI Row-13 go.mod step restored.
+- Landing reply comment 6731365866. Repair arc now fully disclosed: S159 trim accident → S161 partial restore (00bfd96a) → S162 completion (1610d689).
+
+**Ops**: trim discipline held (only /home/z/go-hybrid-target/debug/incremental, no repo working tree paths).
+
+**Scouted for next tick**: #4217 (bradwue313, regexp arity, fixes #4216, head a8f09304, +22 buildable.rs / +147 tests, LF clean) — review next cycle. Queue: #4219/#4194 (SuperPiIot), #4215/#4213/#4211 (dextermos-dev arity band), #4209 (matrixneoaiagent corpus), #4202/#4201/#4199 (tmclaos), #4198, #4196 (fmt overlap-watch). #4206 still pending author escape-fix (head unchanged 7fb240fd).
+
+## Session 163 — 2026-11-09 13:10 UTC+8 — 0 landed, 1 gate fail (premise overturned)
+
+**#4217 (bradwue313, regexp arity, fixes #4216) → Gate FAIL, not landed**; head force-pushed during triage (a8f09304 → 132f204d), battery run on the pushed head:
+- Positive control failed 5×HYB-E1001 on the merge commit; `hyb check` decisive: `import "regexp"` is outside the M5 curated allowlist (which has `rust/regex`, not Go `regexp`). SPEC M5 fail-closed → every `regexp.*` program rejects at resolve, so the claimed "arity bypass" (#4216 premise) has no observable bypass; the PR's arity arm is unreachable dead code, and its reject-tests passed only because they accept any E-code.
+- Not a regression from the resolve work — pre-existing SPEC behavior. Evidence reply 6732813657 offers three landable paths: re-target allowlisted package (sort/bufio/strconv), re-target `rust/regex`, or propose allowlisting `regexp` as a separate spec-change PR.
+- Local merge `1e045b7b` reset before push; main untouched this session.
+
+**Queue next**: #4219/#4194 (SuperPiIot), #4215/#4213/#4211 (dextermos-dev arity band — check allowlist membership per package before battery, lesson from #4217), #4209 (matrixneoaiagent corpus), #4202/#4201/#4199 (tmclaos), #4198, #4196 (fmt overlap-watch). Pending author fixes: #4206 (conflict markers + CRLF), #4097 (quote escape).
+
+## Session 164 — 2026-11-09 14:10 UTC+8 — 0 landed, 1 gate fail (wallet spam + curated-semantics contradiction)
+
+**#4219 (SuperPiIot, encoding/hex arity, fixes #4218) → Gate FAIL, not landed**; two independent grounds (evidence reply 6733577698):
+1. **Wallet-address spam** in the test file doc comment (blob line 24, "Settlement Wallet (Base L2 USDC): 0xf084…") — unrelated content, must be removed; merged content is permanent history.
+2. **hex.encode arity contradicts the landed curated surface**: main's existing arm (buildable.rs ~7835) enforces the M5 curated 1-arg `(src)` form ("SPEC M5 hex encoding" fixit); the PR enforces upstream-Go 2-arg `(dst, src)` — a merge would false-reject currently-legal `hex.encode(data)` programs. Masked in the PR's own suite because every encode reject case uses 0 args (both arms reject) and the positive control skips encode entirely. Fix path given: align all arms with foreign.rs curated signatures, drop the wallet line, add a 1-arg encode positive control.
+
+**#4206 addendum posted** (comment 6733580736): even after the marker/CRLF fixes, flate2/rust-flate2 are not on the M5 allowlist — same dead-code trap as #4217; two options offered (re-target allowlisted package, or separate allowlist spec-change PR).
+
+**Allowlist pre-screen adopted as standing triage step**: #4219 (encoding/hex ✓ but failed on semantics), #4202 (path/filepath+path ✓), #4201 (url+sort ✓), #4198 (net/http ✓) are all viable; #4217 (regexp ✗), #4206 (flate2 ✗) dead-on-arrival regardless of code quality.
+
+**Scouted for next tick**: #4209 (matrixneoaiagent corpus, sister of #4208, 137→139, head b9b1b258, base 30d4ebf0) — review next cycle. Queue: #4215/#4213/#4211 (dextermos-dev band, packages unknown — screen first), #4202/#4201/#4199 (tmclaos), #4198, #4196, #4221 (Sora1916 nursery cancellation — non-arity, needs full read).
+
+## Session 165 — 2026-11-09 15:10 UTC+8 — 1 landed
+
+**Landed #4209** (matrixneoaiagent, `b9b1b258` → merge `7c575a41`, pushed + remote-asserted):
+- Send-site companions of the #4208 spawn-site pair: struct-chan-scalars-send-accept (ACCEPT, `packets <- move p`) + struct-chan-shared-map-send-reject (REJECT A1b HYB-E3003). Freeze now pinned on the channel-send path, not just spawn. Census 137→139 (45+2+92), 7 count-bump edits audited consistent.
+- Battery: workspace 486/486 (1:1), corpus **139/139** tripwire not fired, differential FULL AGREEMENT. Landing reply comment 6734458403. Second clean corpus PR from this author.
+
+**Scouted for next tick**: #4202 (tmclaos, head a5226551, +73 buildable.rs + 119 tests, LF clean, no markers; title says "regression tests for filepath and path" but +73 impl lines — needs full read; both packages allowlist-✓). Queue: #4215/#4213/#4211 (dextermos-dev, packages unscreened), #4201 (url+sort ✓), #4199, #4198, #4196, #4221. Pending author fixes: #4206 (markers+CRLF+allowlist trap), #4097 (quotes), #4217 (allowlist re-target), #4219 (wallet line + curated-semantics alignment).
+
+## Session 166 — 2026-11-09 17:10 UTC+8 — 0 landed, 5 gate-fail replies (1 battery, 1 probe, 3 allowlist)
+
+**Parallel-instance note**: the 15:10 slot executed as S165 in a parallel instance — #4209 landed (`7c575a41`, corpus 139/139, reply 6734458403, worklog `30206b57`). This session continued from its scouting list; main verified `30206b57` == origin at open.
+
+**#4202 (tmclaos, filepath+path arity, +73/+119) → Gate FAIL (battery)**; merge commit builds clean but the PR's own suite fails 3/6 (reply 6736681894):
+1. `path.match("a")` is **unrepresentable in source** — `match` is a keyword, member access dies at parse (HYB-E0002, test's own parse guard panics). The `"match"` arity row is unobservable via source text. Replace with e.g. `path.base("a","b")`.
+2/3. Both positive controls violate the **pre-existing declared-not-used rule** (buildable.rs:9328): unread bindings `c/d/b/e/j` (filepath) and `c/d/b/j` (path) → 5×/4×HYB-E1002, one per binding, arm not involved. **Probe proved the arm sound**: clean+join with `_ =` reads → OK (0 diagnostics). Suite-only fix expected; implementation reviewed correct against upstream Go arities (variadic Join correctly fail-open; dispatch key `filepath` matches the httptest dotted-import precedent).
+
+**#4201 (tmclaos, url+sort arity, +75/+131) → Gate FAIL (probe, pre-battery)** (reply 6736686542): same author template, same control flaw — url accept control binds u/q/up/j unread (4×E1002 expected), sort control binds `b` unread; probes of both shapes confirmed E1002 from the pre-existing rule. Packages allowlist-✓, no dup, patch additive — landable after suite fix. #4202/#4201 authors informed cross-referentially.
+
+**#4215 archive/tar / #4213 compress/gzip / #4211 log (dextermos-dev band) → all dead-on-arrival, allowlist ✗** (replies 6736692386 / 6736692745 / 6736693090): none of the three packages is on the M5 curated allowlist → HYB-E1001 at import → arms unreachable (the #4217/#4206 trap). Three-path fix offered per reply (re-target allowlisted package / re-target rust/* pinned crate / separate allowlist spec-change PR). **Allowlist pre-screen is now paying for itself: three PRs dispositioned without spending battery windows.**
+
+**Screened, not reviewed**: #4199 (tmclaos, T23/E2002 multi-value try unwraps — non-arity, needs full read); #4198 (jpereyra243-byte, http.response_writer+round_tripper curated method surfaces, fixes #4197 — net/http allowlist-✓ but surface-modeling scope); **#4196 (9xj89gzrtw-hue, fmt non-string format operands — HAZARD: two-point diff shows −340 lines incl. deletion of #4093's fmt_scan_family suite (−176); stale-base rewrite of landed fmt arms; needs careful review before any merge trial**; its fprint/fprintln-empty and non-string-literal checks duplicate what #4087/#4093 already landed, but it generalizes literal-kind checking via `nonstring_format_kind`.
+
+**Ops**: cold rebuild this tick (rootfs recycle wiped tools+target). go1.26.9 reinstalled from go.dev (64M tarball, verified `go version`); rust 1.99.0 via rustup-init. Cold workspace test build 1m30s. **Disk 96% mid-tick (456M free)** → trim `/home/z/go-hybrid-target/debug/incremental` + /tmp tarball → 88% (trim discipline held: non-tracked paths only). **triage scan+approve failed 3×** (sandbox kills detached long runs; foreground 170s too short for 1176-repo scan) — stop-per-two-failures honored; queue worked via direct API + worklog scouting; re-run scan next tick with chunked approach if available.
+
+**State**: main `30206b57` untouched this session (trial merge aborted before push). Suites/corpus/differential reflect S165's green run (486 suites, 139/139, FULL AGREEMENT); no full battery on pure main this tick (battery interrupted by cargo fail-fast at the #4202 suite after 131 green suites).
+
+**Scouted next**: #4196 (deletes landed suite — priority, review deletions line-by-line), #4198, #4199, #4221 (Sora1916 nursery cancellation). Pending author fixes: #4202/#4201 (suite-only controls), #4206 (markers+CRLF+allowlist), #4097 (quotes), #4217 (allowlist re-target), #4219 (wallet+curated), #4215/#4213/#4211 (allowlist re-target).
+
+## Session 167 — 2026-11-09 18:10 UTC+8 — 1 landed
+
+**Landed #4196** (9xj89gzrtw-hue, fixes #4195, `e5ea7dce` → merge `a0b15b78`, pushed + remote-asserted, reply 6737609691):
+- Extends the landed #4087 printf/fprintf guard from non-string *literals* to statically-known non-string *expressions* (`nonstring_format_kind`: Str/Unknown/Interface permissive; +34 buildable.rs, +69 suite in the existing fmt_special_member_calls file — 7 new tests, controls properly read bindings, no #4202-family flaw).
+- **Base-staleness lesson recorded**: two-point diff vs PR-reported base 1e8673b4 showed −340 (fmt_scan_family suite −176, WORKLOG −13) — pure artifact; true merge-base is ce6219cd (pre-#4093), real patch purely additive. Rule reinforced: **always compute the true merge-base before judging deletions** (third instance of the pattern: #4206, #4202/#4201 base 1e8673b4, now #4196).
+- Battery: merge gate auto-clean (#4093 suite verified intact in merged tree); workspace 3198/0, 486=486 1:1; corpus 139/139 tripwire not fired; differential FULL AGREEMENT 47/47 + 92/92.
+- **Ops lesson — differential 0/47 false alarm**: ran differential_loop without go in PATH → accept-side 0/47 while reject-side 92/92; full env rerun → FULL AGREEMENT. The loop fails accept-side silently when `go build` is unavailable; always export the full env before the differential gate.
+
+**Ops**: cold rootfs again; rustup-init/go both needed FOREGROUND installs this tick (background setsid jobs killed by sandbox ~3 attempts — install.log stuck at "downloading installer" with dead processes; foreground completed both in ~2-4 min). **triage scan+approve dead again (0 bytes, process dead) — 5 failures across 2 ticks; standing rule: queue via direct API + worklog scouting, retry scan only if a chunked/foreground mode appears.**
+
+**Scouted next**: #4198 (jpereyra243-byte, http.response_writer+round_tripper curated method surfaces, fixes #4197, net/http allowlist-✓, head 8b647245, base stale 1e8673b4), #4199 (tmclaos T23/E2002 multi-value try unwraps — non-arity, full read), #4221 (Sora1916 nursery cancellation). Pending author fixes: #4202/#4201 (suite controls), #4206, #4097, #4217, #4219, #4215/#4213/#4211.
+
+## Session 168 — 2026-11-09 19:10 UTC+8 — 1 landed, 1 gate fail (premise overturned)
+
+**Landed #4198** (jpereyra243-byte, fixes #4197, `8b647245` → merge `32ac79aa`, pushed + remote-asserted, reply 6738677538):
+- Curated method surfaces: http.response_writer [header, write, write_header] + http.round_tripper [round_trip] + builtin error [error] + net.addr [network, string] + net.error [error, temporary, timeout], lowercased+capitalized spellings, method_result entries. No dup vs main (member-existence table ≠ handle-type surface — different functions).
+- Battery: auto-merge clean (true merge-base 65c8489d computed first — lesson from S167 held); workspace 3206/0 (+8 = PR test count exactly), 488=488 1:1; corpus 139/139 tripwire not fired; differential FULL AGREEMENT 47/47+92/92. The `error` named-type tightening (permissive→modeled) tripped nothing: no false rejects.
+
+**#4199 (tmclaos, T23 try-unwrap result counting, +25/−5 tuple.rs + 91 tests) → Gate FAIL (premise overturned by probes, pre-battery)** (reply 6738714590):
+- The PR changes static_result_count to account `?`-unwrapped calls as N−1 values and reject binding mismatches. Its suite cites go build "assignment mismatch: 2 variables but f returns 3 values" — **that failure mode never occurs**: probe 3 (`p := pair_err()?`) dies at the emitter's MVP-0 cap ("functions with 3 results (max 2)") loudly before go build, for any 3-result fn regardless of `?`.
+- Probes 1–2 disprove the reject cases as false-rejects of currently-building programs: `n := strconv.parse_int(...)?` emits `n, hyErr0 := strconv.ParseInt(...)` (synthetic error binding) and BUILDS; `a, b := single_err()?` emits `a, b := single_err()` and BUILDS. The landed tuple.rs contract matches the emitter's actual lowering; the PR contradicts it (#4219 hex.encode shape).
+- Landable paths offered: scope the reject to 3-result single-binding only (emit-cap ergonomics), or reconcile SPEC §2.8 + emitter first in a separate spec-change PR. tmclaos now has three open items (#4202, #4201, #4199 — all with concrete fix paths).
+
+**Ops**: cold rootfs; rust+go foreground installs in parallel with review work (S167 strategy held, ~4 min combined); triage scan skipped per standing rule (2-tick, 5-failure history) — queue via API + worklog; trim incremental → disk 89%.
+
+**Scouted next**: #4221 (Sora1916 nursery cancellation — non-arity, needs full read). Check for author re-pushes on #4202/#4201 (suite-only fixes are quick re-verifies). Pending: #4206, #4097, #4217, #4219, #4215/#4213/#4211, #4199.
+
+## Session 169 — 2026-11-09 21:10 UTC+8 — 1 landed, 1 gate fail round 2 (keyword case again)
+
+**Landed #4202 round 2** (tmclaos, `05afddaa` → merge `52bed580`, pushed + remote-asserted, reply 6740985282):
+- Author fixed round-1 review exactly: `_ =` reads on all control bindings + `path.match("a")` → observable `path.base("a","b")`. Battery: 3212/0 (+6 exact), 489=489 1:1, corpus 139/139, differential FULL 47/47+92/92. filepath/path arg-arity + non-callable enforcement is now main (variadic Join fail-open kept).
+
+**#4201 round 2 (re-push 17bc9a0b) → Gate FAIL again — same author flaw class resurfaced** (reply 6741110902):
+- Binding fix confirmed; conflict with the just-landed #4202 resolved by the S160 union-splice (checkout --ours + insert #4201's 2 fns + 2 dispatch arms via scripted splice with block-balance + presence assertions; cargo check green; splice script kept at scripts/splice_4201.py). 5/6 suite tests green on the resolved tree.
+- **`sort.interface()` is unrepresentable**: `interface` is a reserved keyword — parse-level E0002 under the suite's own parser-contract guard, checker E1002 unreachable (identical shape to #4202 round 1's `path.match`). One-line suite fix (drop or replace the case; int_slice/float64_slice/string_slice already cover the class). Impl remains conflict-resolved and ready — re-push lands fast.
+- Infra note: linker Bus error (signal 7) at 93% disk killed one battery run; trim incremental → 83% → retry clean. Env does not persist across tool calls — every cargo/go invocation needs the full export inline.
+
+**Ops**: cold rootfs; rust+go parallel foreground installs (~4 min); triage scan skipped per standing rule. Re-push watch paid off: heads diffed at tick open (#4202/#4201 both re-pushed at ~12:04/12:06Z).
+
+**Scouted next**: #4201 round 3 (one-line fix expected — highest priority on re-push), #4221 (Sora1916 nursery cancellation, head 0571ecbf, never read), #4199 (tmclaos, awaiting author on emitter-contract paths). Pending: #4206, #4097, #4217, #4219, #4215/#4213/#4211.

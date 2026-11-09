@@ -94,6 +94,7 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
         return Some(TypeShape::Unknown);
     }
     match name {
+        "error" => Some(TypeShape::ForeignOpaque("error".into())),
         "serde_json.value" => Some(TypeShape::OwnHandle("serde_json.value".into())),
         "serde_json.view" => Some(TypeShape::BorrowHandle("serde_json.view".into())),
         "flate2.writer" => Some(TypeShape::OwnHandle("flate2.writer".into())),
@@ -219,6 +220,33 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ) => TypeShape::ForeignOpaque("httptest.response_recorder".into()),
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
+    }
+}
+
+/// TypeExpr result of a curated package-level call whose channel
+/// *direction* must be visible to the sendability walker (#4076).
+/// `time.after(d)` is Go's `time.After`: it returns `<-chan Time`,
+/// receive-only. The `TypeShape::Chan` entry in `package_result` above
+/// carries no direction, and `dir_ty_of_expr` needs a `TypeExpr` — without
+/// this arm, `close(time.after(..))` and `time.after(..) <- v` resolve to
+/// `None` and both HYB-E3009 / HYB-E3008 checks fail open on programs
+/// whose Go emit cannot compile (GUARANTEES.md row 13 BUILDABLE).
+pub(crate) fn package_result_chan_ty(
+    pkg: &str,
+    method: &str,
+    span: hy_diag::Span,
+) -> Option<hy_syntax::TypeExpr> {
+    use hy_syntax::{ChanDir, TypeExpr};
+    match (pkg, method) {
+        ("time", "after" | "After") => Some(TypeExpr::Chan {
+            dir: ChanDir::Recv,
+            elem: Box::new(TypeExpr::Named {
+                name: "time.Time".to_string(),
+                span,
+            }),
+            span,
+        }),
+        _ => None,
     }
 }
 
@@ -566,6 +594,10 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const HTTP_FILE_SYSTEM: &[&str] = &["open"];
     /// `http.File` — standard library HTTP file handle interface.
     const HTTP_FILE: &[&str] = &["close", "read", "readdir", "seek", "stat"];
+    /// `http.ResponseWriter` — standard library HTTP response writer interface.
+    const HTTP_RESPONSE_WRITER: &[&str] = &["header", "write", "write_header"];
+    /// `http.RoundTripper` — standard library HTTP transport round tripper interface.
+    const HTTP_ROUND_TRIPPER: &[&str] = &["round_trip"];
     const URL_URL: &[&str] = &[
         "escaped_fragment",
         "escaped_path",
@@ -661,7 +693,13 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const NET_UDP_ADDR: &[&str] = &["addr_port", "network", "string"];
     const NET_UNIX_ADDR: &[&str] = &["network", "string"];
     const NET_IP_ADDR: &[&str] = &["network", "string"];
+    const BUILTIN_ERROR: &[&str] = &["error"];
+    const NET_ADDR: &[&str] = &["network", "string"];
+    const NET_ERROR: &[&str] = &["error", "temporary", "timeout"];
     match recv_type {
+        "error" | "errors.error" => Some(BUILTIN_ERROR),
+        "net.addr" | "net.Addr" => Some(NET_ADDR),
+        "net.error" | "net.Error" => Some(NET_ERROR),
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
@@ -692,6 +730,8 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "http.pusher" | "http.Pusher" => Some(HTTP_PUSHER),
         "http.file_system" | "http.filesystem" | "http.FileSystem" => Some(HTTP_FILE_SYSTEM),
         "http.file" | "http.File" => Some(HTTP_FILE),
+        "http.response_writer" | "http.responsewriter" | "http.ResponseWriter" => Some(HTTP_RESPONSE_WRITER),
+        "http.round_tripper" | "http.roundtripper" | "http.RoundTripper" => Some(HTTP_ROUND_TRIPPER),
         "url.url" | "url.URL" => Some(URL_URL),
         "json.decoder" | "json.Decoder" => Some(JSON_DECODER),
         "json.encoder" | "json.Encoder" => Some(JSON_ENCODER),
@@ -759,6 +799,16 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         }
         ("http.request" | "http.Request", "cookie") => TypeShape::ForeignOpaque("http.cookie".into()),
         ("http.response" | "http.Response", "location") => TypeShape::ForeignOpaque("url.url".into()),
+        ("http.response_writer" | "http.responsewriter" | "http.ResponseWriter", "header") => {
+            TypeShape::ForeignOpaque("http.header".into())
+        }
+        ("http.round_tripper" | "http.roundtripper" | "http.RoundTripper", "round_trip") => {
+            TypeShape::ForeignOpaque("http.response".into())
+        }
+        ("error" | "errors.error", "error") => TypeShape::Str,
+        ("net.addr" | "net.Addr", "network" | "string") => TypeShape::Str,
+        ("net.error" | "net.Error", "error") => TypeShape::Str,
+        ("net.error" | "net.Error", "temporary" | "timeout") => TypeShape::Primitive,
         ("strings.reader" | "strings.Reader", "len" | "size") => TypeShape::Primitive,
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
