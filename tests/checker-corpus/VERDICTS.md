@@ -1082,3 +1082,18 @@ companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.
 
 ### composite-lit-inner-types (issue #3412, PR #3503) — REJECT + ACCEPT
 Composite literal elements/keys/values whose composite INNER type differs now reject HYB-E1002: `[]chan int32{ bad_chan }` with `bad_chan chan int64`, `[1][3]int{ bad_arr }` with `bad_arr [4]int`, `map[string]chan int32{ "k": bad_chan }` — all previously passed check with 0 diagnostics and failed `go build` (`cannot use ... as ... value in slice/array/map literal`). `deep_composite_conflict` in buildable.rs deep-compares the resolved composite spellings part by part at the array-item, slice-item, map-key and map-value check sites, wherever the coarse kind model collapsed container inners. Channel direction mismatches stay with the E3012 coercion layer (its single-diagnostic contract pins no double report); bare alias/named/type-parameter spellings, family mismatches and non-numeric array lengths fail open. Rows added in-merge (the PR missed the README's own VERDICTS.md contract). With this registration the corpus is **135 programs — ACCEPT 43 · ACCEPT-MANAGED 2 · REJECT 90**.
+
+-------------------------------------------------------------------------------
+
+### struct-chan-scalars-accept / struct-chan-shared-map-reject — ACCEPT + REJECT (bounty track: grow the adversarial corpus)
+
+A struct carrying a channel plus immutable scalar fields is move-sent and
+accepted; the same struct shape carrying a shared map field and a live sender
+alias is rejected when the sender writes through the alias after the move.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| struct-chan-scalars-accept | ACCEPT | — | — | channel safe-by-type + immutable scalars; owned `move`; no use after move |
+| struct-chan-shared-map-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct freezes that storage, so `m["after"] = 2` is a write through a live alias |
+
+With this registration the corpus is **137 programs — ACCEPT 44 · ACCEPT-MANAGED 2 · REJECT 91**.
