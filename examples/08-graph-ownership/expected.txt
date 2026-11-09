@@ -1,0 +1,2 @@
+a reaches d: true
+d reaches a: false
