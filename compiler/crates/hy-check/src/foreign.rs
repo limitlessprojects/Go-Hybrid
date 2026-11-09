@@ -583,6 +583,15 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "shutdown",
     ];
     const HTTP_COOKIE: &[&str] = &["string", "valid"];
+    /// `url.Values` — Go standard library URL query values map methods.
+    const URL_VALUES: &[&str] = &[
+        "add",
+        "del",
+        "encode",
+        "get",
+        "has",
+        "set",
+    ];
     const URL_URL: &[&str] = &[
         "escaped_fragment",
         "escaped_path",
@@ -705,6 +714,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "http.server" | "http.Server" => Some(HTTP_SERVER),
         "http.cookie" | "http.Cookie" => Some(HTTP_COOKIE),
         "url.url" | "url.URL" => Some(URL_URL),
+        "url.values" | "url.Values" => Some(URL_VALUES),
         "json.decoder" | "json.Decoder" => Some(JSON_DECODER),
         "json.encoder" | "json.Encoder" => Some(JSON_ENCODER),
         "json.raw_message" | "json.rawmessage" | "json.RawMessage" => Some(JSON_RAW_MESSAGE),
@@ -766,6 +776,8 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
         ("url.url" | "url.URL", "query") => TypeShape::ForeignOpaque("url.values".into()),
+        ("url.values" | "url.Values", "get" | "encode") => TypeShape::Str,
+        ("url.values" | "url.Values", "has") => TypeShape::Primitive,
         ("http.request" | "http.Request", "cookies") | ("http.response" | "http.Response", "cookies") => {
             TypeShape::Slice(Box::new(TypeShape::ForeignOpaque("http.cookie".into())))
         }
