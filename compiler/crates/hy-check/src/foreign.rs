@@ -763,7 +763,7 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
 }
 
 /// Human-readable M5 curated package allowlist string for HYB-E1001 diagnostics (#658).
-pub(crate) const CURATED_ALLOWLIST_DISPLAY: &str = "fmt, os, io, time, sort, strings, strconv, errors, sync, sync/atomic, bufio, net, net/http, net/http/httptest, net/url, encoding/json, encoding/hex, path, path/filepath, rust/serde_json, rust/sha3, rust/regex";
+pub(crate) const CURATED_ALLOWLIST_DISPLAY: &str = "fmt, os, io, time, sort, strings, strconv, errors, sync, sync/atomic, bufio, net, net/http, net/http/httptest, net/url, encoding/json, encoding/hex, path, path/filepath, log, compress/gzip, archive/tar, rust/serde_json, rust/sha3, rust/regex";
 
 /// Is `path` in SPEC M5's curated Go allowlist or M6's pinned Rust crate set (#658)?
 pub(crate) fn is_curated_import(path: &str) -> bool {
@@ -796,6 +796,11 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "path"
             | "path/filepath"
             | "filepath"
+            | "log"
+            | "compress/gzip"
+            | "gzip"
+            | "archive/tar"
+            | "tar"
             | "rust/serde_json"
             | "serde_json"
             | "rust/sha3"
@@ -816,7 +821,6 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
             | "syscall"
             | "unsafe"
             | "runtime"
-            | "log"
             | "flag"
             | "testing"
             | "unicode"
@@ -836,9 +840,7 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
             | "exec"
             | "signal"
             | "user"
-            | "gzip"
             | "zlib"
-            | "tar"
             | "zip"
     )
 }
@@ -869,6 +871,9 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "hex"
             | "path"
             | "filepath"
+            | "log"
+            | "gzip"
+            | "tar"
             | "serde_json"
             | "sha3"
             | "regex"
@@ -1743,6 +1748,66 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
         "regex" => matches!(m, "is_match" | "is_valid" | "compile" | "match_string"),
         "flate2" => matches!(m, "new_writer" | "write" | "finish" | "writer"),
         "hy" => matches!(m, "pipe" | "new_pipe" | "send_cap" | "recv_cap" | "channel"),
+        "log" => matches!(
+            m,
+            "ldate"
+                | "ltime"
+                | "lmicroseconds"
+                | "llongfile"
+                | "lshortfile"
+                | "lutc"
+                | "lmsgprefix"
+                | "lstdflags"
+                | "logger"
+                | "flags"
+                | "prefix"
+                | "writer"
+                | "set_flags"
+                | "set_prefix"
+                | "set_output"
+                | "output"
+                | "print"
+                | "println"
+                | "fatal"
+                | "fatalln"
+                | "panic"
+                | "panicln"
+                | "printf"
+                | "fatalf"
+                | "panicf"
+                | "new"
+                | "default"
+        ),
+        "gzip" => matches!(
+            m,
+            "no_compression"
+                | "best_speed"
+                | "best_compression"
+                | "default_compression"
+                | "huffman_only"
+                | "err_checksum"
+                | "err_header"
+                | "reader"
+                | "writer"
+                | "header"
+                | "new_reader"
+                | "new_writer"
+                | "new_writer_level"
+        ),
+        "tar" => matches!(
+            m,
+            "err_header"
+                | "err_write_too_long"
+                | "err_field_too_long"
+                | "err_write_after_close"
+                | "err_insecure_path"
+                | "header"
+                | "reader"
+                | "writer"
+                | "new_reader"
+                | "new_writer"
+                | "file_info_header"
+        ),
         _ => true,
     }
 }
