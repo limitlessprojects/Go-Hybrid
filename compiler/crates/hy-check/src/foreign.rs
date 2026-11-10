@@ -128,6 +128,7 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
         ("serde_json", "parse" | "new_object" | "new_array")
         | ("flate2", "new_writer")
         | ("json" | "encoding/json", "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder")
+        | ("tar" | "archive/tar", "new_reader" | "new_writer" | "NewReader" | "NewWriter")
         | (
             "httptest" | "net/http/httptest",
             "new_server"
@@ -202,6 +203,15 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         }
         ("json" | "encoding/json", "new_encoder" | "NewEncoder") => {
             TypeShape::ForeignOpaque("json.encoder".into())
+        }
+        ("tar" | "archive/tar", "new_reader" | "NewReader") => {
+            TypeShape::ForeignOpaque("tar.reader".into())
+        }
+        ("tar" | "archive/tar", "new_writer" | "NewWriter") => {
+            TypeShape::ForeignOpaque("tar.writer".into())
+        }
+        ("tar" | "archive/tar", "file_info_header" | "FileInfoHeader") => {
+            TypeShape::ForeignOpaque("tar.header".into())
         }
         (
             "httptest" | "net/http/httptest",
@@ -1794,7 +1804,7 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "new_writer"
                 | "new_writer_level"
         ),
-        "tar" => matches!(
+        "tar" | "archive/tar" => matches!(
             m,
             "err_header"
                 | "err_write_too_long"
@@ -1807,6 +1817,26 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "new_reader"
                 | "new_writer"
                 | "file_info_header"
+                | "format"
+                | "file_info_names"
+                | "format_unknown"
+                | "format_ustar"
+                | "format_pax"
+                | "format_gnu"
+                | "type_reg"
+                | "type_reg_a"
+                | "type_link"
+                | "type_symlink"
+                | "type_char"
+                | "type_block"
+                | "type_dir"
+                | "type_fifo"
+                | "type_cont"
+                | "type_x_header"
+                | "type_x_global_header"
+                | "type_gnu_long_name"
+                | "type_gnu_long_link"
+                | "type_gnu_sparse"
         ),
         _ => true,
     }
