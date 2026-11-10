@@ -8197,7 +8197,16 @@ impl<'a> Collector<'a> {
                         && self.lookup_kind(pkg).is_none()
                         && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
                     {
-                        if args.len() != 1 {
+                        if args.iter().any(|a| a.spread) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot use `...` in call to non-variadic `time.{}` (HYB-E1002)",
+                                    name
+                                ),
+                                &format!("`time.{}` does not accept variadic spread arguments", name),
+                            );
+                        } else if args.len() != 1 {
                             self.emit_e1002(
                                 span,
                                 format!(
@@ -8272,7 +8281,16 @@ impl<'a> Collector<'a> {
                             _ => None,
                         };
                         if let Some(n) = expected {
-                            if args.len() != n {
+                            if args.iter().any(|a| a.spread) {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "cannot use `...` in call to non-variadic `hex.{}` (HYB-E1002)",
+                                        name
+                                    ),
+                                    &format!("`hex.{}` does not accept variadic spread arguments", name),
+                                );
+                            } else if args.len() != n {
                                 let go_name = {
                                     // mirror hy-emit's to_go_name without a
                                     // cross-crate dep (hy-check must not
@@ -9874,6 +9892,25 @@ impl<'a> Collector<'a> {
                     span,
                     format!("cannot call `io.{}`: package symbol is a variable or type, not a function (HYB-E1002)", name),
                     &format!("refer to `io.{}` as a value or type rather than calling it", name),
+                );
+            }
+            "pipe"
+            | "read_all"
+            | "copy"
+            | "read_full"
+            | "write_string"
+            | "limit_reader"
+            | "tee_reader"
+            | "copy_n"
+            | "copy_buffer"
+            | "read_at_least"
+            | "new_section_reader"
+                if args.iter().any(|a| a.spread) =>
+            {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `io.{}` (HYB-E1002)", name),
+                    &format!("`io.{}` does not accept variadic spread arguments", name),
                 );
             }
             "pipe" => {

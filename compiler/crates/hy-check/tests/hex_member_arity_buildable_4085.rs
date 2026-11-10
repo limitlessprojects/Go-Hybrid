@@ -97,3 +97,51 @@ fn hex_encode_regression_3863_still_holds() {
     rejects_e1002("import \"encoding/hex\"\nfn main() {\n    b := []byte(\"hi\")\n    s := hex.encode(b, b)\n    _ = s\n}\n");
     accepts("import \"encoding/hex\"\nfn main() {\n    b := []byte(\"hi\")\n    s := hex.encode(b)\n    _ = s\n}\n");
 }
+
+#[test]
+fn hex_non_variadic_spread_rejected_e1002() {
+    let cases = [
+        "import \"encoding/hex\"\nfn main() {\n    var xs = [[]byte(\"hi\")]\n    s := hex.encode(xs...)\n    _ = s\n}\n",
+        "import \"encoding/hex\"\nfn main() {\n    var xs = [[]byte(\"hi\")]\n    s := hex.encode_to_string(xs...)\n    _ = s\n}\n",
+        "import \"encoding/hex\"\nfn main() {\n    var xs = [\"6869\"]\n    b, err := hex.decode_string(xs...)\n    _ = b\n    _ = err\n}\n",
+        "import \"encoding/hex\"\nfn main() {\n    var xs = [[]byte(\"hi\")]\n    s := hex.dump(xs...)\n    _ = s\n}\n",
+        "import \"encoding/hex\"\nfn main() {\n    var xs = [5]\n    n := hex.encoded_len(xs...)\n    _ = n\n}\n",
+        "import \"encoding/hex\"\nfn main() {\n    var xs = [2]\n    n := hex.decoded_len(xs...)\n    _ = n\n}\n",
+        "import \"encoding/hex\"\nfn main() {\n    dst := make([]byte, 32)\n    var xs = [[]byte(\"hi\")]\n    n := hex.decode(dst, xs...)\n    _ = n\n}\n",
+    ];
+    for src in cases {
+        rejects_e1002(src);
+    }
+}
+
+#[test]
+fn time_duration_constructors_reject_variadic_spread_e1002() {
+    let cases = [
+        "import \"time\"\nfn main() {\n    var ns = [10]\n    d := time.milliseconds(ns...)\n    _ = d\n}\n",
+        "import \"time\"\nfn main() {\n    var ns = [10]\n    d := time.seconds(ns...)\n    _ = d\n}\n",
+        "import \"time\"\nfn main() {\n    var ns = [10]\n    d := time.minutes(ns...)\n    _ = d\n}\n",
+        "import \"time\"\nfn main() {\n    var ns = [10]\n    d := time.hours(ns...)\n    _ = d\n}\n",
+    ];
+    for src in cases {
+        rejects_e1002(src);
+    }
+    accepts("import \"time\"\nfn main() {\n    d := time.seconds(10)\n    _ = d\n}\n");
+}
+
+#[test]
+fn io_non_variadic_spread_rejected_e1002() {
+    let cases = [
+        "import \"io\"\nfn main() {\n    var rs []io.reader\n    b, err := io.read_all(rs...)\n    _ = b\n    _ = err\n}\n",
+        "import \"io\"\nfn main() {\n    var w io.writer\n    var rs []io.reader\n    n, err := io.copy(w, rs...)\n    _ = n\n    _ = err\n}\n",
+        "import \"io\"\nfn main() {\n    var r io.reader\n    var bufs [][]byte\n    n, err := io.read_full(r, bufs...)\n    _ = n\n    _ = err\n}\n",
+        "import \"io\"\nfn main() {\n    var w io.writer\n    var ss = [\"hi\"]\n    n, err := io.write_string(w, ss...)\n    _ = n\n    _ = err\n}\n",
+        "import \"io\"\nfn main() {\n    var r io.reader\n    var ns = [int64(10)]\n    lr := io.limit_reader(r, ns...)\n    _ = lr\n}\n",
+        "import \"io\"\nfn main() {\n    var r io.reader\n    var ws []io.writer\n    tr := io.tee_reader(r, ws...)\n    _ = tr\n}\n",
+    ];
+    for src in cases {
+        rejects_e1002(src);
+    }
+    accepts("import \"io\"\nfn main() {\n    var rs []io.reader\n    mr := io.multi_reader(rs...)\n    _ = mr\n}\n");
+    accepts("import \"io\"\nfn main() {\n    var ws []io.writer\n    mw := io.multi_writer(ws...)\n    _ = mw\n}\n");
+}
+
