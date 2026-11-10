@@ -809,6 +809,9 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "regex"
             | "rust/flate2"
             | "flate2"
+            | "csv"
+            | "encoding/csv"
+            | "csv"
     )
 }
 
@@ -913,6 +916,7 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
     let norm = normalize_go_ident_to_snake(member);
     let m = norm.as_str();
     match pkg {
+        "csv" => matches!(m, "new_reader" | "new_writer" | "reader" | "writer" | "parse_error" | "err_bare_quote" | "err_quote" | "err_field_count"),
         "fmt" => matches!(
             m,
             "print"

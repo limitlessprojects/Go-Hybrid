@@ -4624,6 +4624,42 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_csv_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(member, "reader" | "writer" | "parse_error") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `csv.{member}`: `csv.{member}` is a type, not a function (HYB-E1002)"),
+                &format!("`csv.{member}` is a struct type, not a callable function"),
+            );
+            return;
+        }
+
+        if matches!(member, "err_bare_quote" | "err_quote" | "err_field_count") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `csv.{member}`: `csv.{member}` is an error variable, not a function (HYB-E1002)"),
+                &format!("`csv.{member}` is a package variable, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_reader" | "new_writer" => Some(1),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`csv.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `csv.{member}`"),
+                );
+            }
+        }
+    }
+
     fn check_sync_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(
             member,
@@ -8331,6 +8367,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "strconv" && self.lookup_kind(pkg).is_none() {
                         self.check_strconv_package_call(name.as_str(), args, span);
+                    }
+                    if (pkg == "csv" || pkg == "encoding/csv") && self.lookup_kind(pkg).is_none() {
+                        self.check_csv_package_call(name.as_str(), args, span);
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
