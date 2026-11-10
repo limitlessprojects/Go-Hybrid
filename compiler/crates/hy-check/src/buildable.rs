@@ -4588,6 +4588,91 @@ impl<'a> Collector<'a> {
         }
     }
 
+    // Full `encoding/json` call surface — every member blessed in foreign.rs,
+    // arity-checked at hyb check time against the Go std signature it lowers to
+    // (pinned toolchain go1.26.9). Non-callable package types and errors
+    // (`decoder`, `encoder`, `raw_message`, `delim`, `number`, `marshaler`,
+    // `unmarshaler`, `syntax_error`, `unmarshal_type_error`,
+    // `unsupported_type_error`, `unsupported_value_error`, `marshaler_error`)
+    // reject fail-closed with HYB-E1002 (Row 13 BUILDABLE). Spread calls (`...`)
+    // on non-variadic members are strictly guarded.
+    fn check_json_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        // Package-level types and errors are not callable functions.
+        if matches!(
+            member,
+            "decoder"
+                | "encoder"
+                | "raw_message"
+                | "delim"
+                | "number"
+                | "marshaler"
+                | "unmarshaler"
+                | "syntax_error"
+                | "unmarshal_type_error"
+                | "unsupported_type_error"
+                | "unsupported_value_error"
+                | "marshaler_error"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("`json.{member}` is not a function — it is a package-level type/error and cannot be called (HYB-E1002)"),
+                &format!("reference `json.{member}` as a type or value directly, do not call it"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            // 1 arg: Marshal(v), Valid(data), NewDecoder(r), NewEncoder(w)
+            "marshal" | "valid" | "new_decoder" | "new_encoder" => Some(1),
+            // 2 args: Unmarshal(data, v), Compact(dst, src), HTMLEscape(dst, src)
+            "unmarshal" | "compact" | "html_escape" => Some(2),
+            // 3 args: MarshalIndent(v, prefix, indent)
+            "marshal_indent" => Some(3),
+            // 4 args: Indent(dst, src, prefix, indent)
+            "indent" => Some(4),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `json.{member}` (HYB-E1002)"),
+                    &format!("`json.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let go_name = match member {
+                    "html_escape" => "HTMLEscape".to_string(),
+                    _ => {
+                        let mut out = String::new();
+                        for part in member.split('_') {
+                            if part.is_empty() {
+                                continue;
+                            }
+                            let mut cs = part.chars();
+                            if let Some(c) = cs.next() {
+                                out.extend(c.to_uppercase());
+                            }
+                            out.push_str(cs.as_str());
+                        }
+                        out
+                    }
+                };
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`json.{member}` takes exactly {expected} argument{}, got {} (HYB-E1002)",
+                        if expected == 1 { "" } else { "s" },
+                        args.len()
+                    ),
+                    &format!(
+                        "match the arity of the Go function this lowers to (`json.{go_name}`)"
+                    ),
+                );
+            }
+        }
+    }
+
     fn check_sort_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(member, "interface" | "int_slice" | "float64_slice" | "string_slice") {
             self.emit_e1002(
@@ -8334,6 +8419,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if (pkg == "json" || pkg == "encoding/json") && self.lookup_kind(pkg).is_none() {
+                        self.check_json_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
