@@ -137,6 +137,72 @@ class InstallerChecksumTests(unittest.TestCase):
     def test_archive_download_failure_aborts(self):
         self.assert_rejected_without_installing(self.run_installer(HYB_TEST_FAIL_ARCHIVE="1"))
 
+    def snapshot_installation(self):
+        return {
+            str(path.relative_to(self.root)): (path.read_bytes(), path.stat().st_mode)
+            for directory in (self.install, self.bin_dir)
+            for path in directory.rglob("*") if path.is_file()
+        }
+
+    def assert_previous_installation_works(self, before):
+        self.assertEqual(self.snapshot_installation(), before)
+        probe = subprocess.run(
+            [SHELL, "-c", 'exec "$HYB_TEST_LAUNCHER" explain E0002'],
+            env={**self.env, "HYB_TEST_LAUNCHER": shell_path(self.bin_dir / "hyb")},
+            capture_output=True, text=True, encoding="utf-8", timeout=10,
+        )
+        self.assertEqual(probe.returncode, 0, probe.stdout + probe.stderr)
+        self.assertFalse(list(self.install.glob(".hybrid-install.*")))
+
+    def test_payload_copy_failure_preserves_previous_installation(self):
+        shim = self.root / "offline tools" / "cp"
+        shim.write_text(
+            '#!/bin/sh\n'
+            'command -p cp "$@" || exit $?\n'
+            'case "${HYB_TEST_FAIL_COPY:-}:$1" in\n'
+            '  runtime:-R | cli:*/hyb)\n'
+            '    echo "simulated payload copy failure" >&2; exit 28;;\n'
+            'esac\n',
+            encoding="utf-8", newline="\n",
+        )
+        shim.chmod(0o755)
+        for component in ("runtime", "cli"):
+            with self.subTest(component=component):
+                installed = self.run_installer()
+                self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+                # These files distinguish the old payload from a partial replacement.
+                (self.install / "runtime/previous.txt").write_text("previous runtime")
+                (self.install / "bin/previous.txt").write_text("previous binary")
+                before = self.snapshot_installation()
+                failed = self.run_installer(HYB_TEST_FAIL_COPY=component)
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertIn("simulated payload copy failure", failed.stderr)
+                self.assert_previous_installation_works(before)
+
+    def test_payload_promotion_failure_restores_previous_installation(self):
+        shim = self.root / "offline tools" / "mv"
+        shim.write_text(
+            '#!/bin/sh\n'
+            'case "$1" in\n'
+            '  "$HYB_INSTALL_DIR"/.hybrid-install.*/"${HYB_TEST_FAIL_PROMOTION:-never}")\n'
+            '    echo "simulated payload promotion failure" >&2; exit 28;;\n'
+            'esac\n'
+            'command -p mv "$@"\n',
+            encoding="utf-8", newline="\n",
+        )
+        shim.chmod(0o755)
+        for component in ("runtime", "bin"):
+            with self.subTest(component=component):
+                installed = self.run_installer()
+                self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+                (self.install / "runtime/previous.txt").write_text("previous runtime")
+                (self.install / "bin/previous.txt").write_text("previous binary")
+                before = self.snapshot_installation()
+                failed = self.run_installer(HYB_TEST_FAIL_PROMOTION=component)
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertIn("simulated payload promotion failure", failed.stderr)
+                self.assert_previous_installation_works(before)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

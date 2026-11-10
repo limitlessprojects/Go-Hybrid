@@ -124,3 +124,52 @@ fn valid_integer_ranges_stay_legal() {
         "fn main() {\n    var n int = 5\n    for i in 0..n { _ = i }\n}\n",
     );
 }
+
+/// #1165 — the two bounds are compared as Go *types*, not as spellings.
+/// `byte`/`rune` are Go aliases of `uint8`/`int32`, and `u8`/`i8`/`u16`/… are
+/// the SPEC spellings `go_primitive_name` emits as `uint8`/`int8`/`uint16`/…,
+/// so a range whose bounds use two equivalent spellings is a legal loop. Every
+/// pair below was rejected with a false HYB-E2009 before the fix.
+#[test]
+fn equivalent_integer_spellings_stay_legal() {
+    assert_ok("fn main() {\n    var a u8 = 0\n    var b uint8 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a byte = 0\n    var b uint8 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a i8 = 0\n    var b int8 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a u16 = 0\n    var b uint16 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a i16 = 0\n    var b int16 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a u32 = 0\n    var b uint32 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a i32 = 0\n    var b int32 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a rune = 0\n    var b int32 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a u64 = 0\n    var b uint64 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a i64 = 0\n    var b int64 = 10\n    for i in a..b { _ = i }\n}\n");
+    // the inclusive form goes through the same comparison
+    assert_ok("fn main() {\n    var a u8 = 0\n    var b uint8 = 10\n    for i in a..=b { _ = i }\n}\n");
+}
+
+/// …and the pairs Go keeps distinct still reject — including the ones whose
+/// *ranges* coincide (`int`/`i64`, `uint`/`u64`), which is exactly why the fix
+/// canonicalises names instead of comparing `fixed_width_int_range` values.
+#[test]
+fn distinct_integer_types_still_reject() {
+    assert_code(
+        "fn main() {\n    var a u8 = 0\n    var b uint16 = 10\n    for i in a..b { _ = i }\n}\n",
+        "HYB-E2009",
+    );
+    assert_code(
+        "fn main() {\n    var a i32 = 0\n    var b int64 = 10\n    for i in a..b { _ = i }\n}\n",
+        "HYB-E2009",
+    );
+    assert_code(
+        "fn main() {\n    var a int = 0\n    var b i64 = 10\n    for i in a..b { _ = i }\n}\n",
+        "HYB-E2009",
+    );
+    assert_code(
+        "fn main() {\n    var a uint = 0\n    var b u64 = 10\n    for i in a..b { _ = i }\n}\n",
+        "HYB-E2009",
+    );
+    // inclusive form + genuinely different types (same rule, one diagnostic)
+    assert_code(
+        "fn main() {\n    var a u8 = 0\n    var b uint16 = 10\n    for i in a..=b { _ = i }\n}\n",
+        "HYB-E2009",
+    );
+}

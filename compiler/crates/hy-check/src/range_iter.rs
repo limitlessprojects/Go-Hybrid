@@ -23,9 +23,9 @@
 //! and the closure walk (closures.rs — FnLit bodies sit outside the flat
 //! walk, the A5 perimeter).
 
-use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
+use crate::model::{unwrap_parens_and_move, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{Expr, ForKind, LitKind, Stmt, TypeExpr};
+use hy_syntax::{Block, Expr, ForKind, InterpPart, LitKind, MatchPattern, Place, PlaceKind, SelectArmKind, Stmt, TypeExpr};
 
 impl<'a> Checker<'a> {
     /// Statement entry: classify the iterable of every `for x in e` and the
@@ -44,10 +44,13 @@ impl<'a> Checker<'a> {
                 if self.diags.len() == before {
                     let shape = self.shape_of_expr(st, expr);
                     let is_chan = matches!(shape, TypeShape::Chan(_));
-                    let is_set = matches!(
-                        shape,
-                        TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set"
-                    );
+                    let is_set = !self.structs.contains_key("set")
+                        && !self.enums.contains_key("set")
+                        && !st.type_params.contains("set")
+                        && matches!(
+                            shape,
+                            TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set"
+                        );
                     if vars.len() > 1 && (is_chan || is_set || shape.is_handle()) {
                         let kind_str = if is_chan { "channel" } else { "set" };
                         let why_note = if is_chan {
@@ -136,7 +139,23 @@ impl<'a> Checker<'a> {
     }
 
     fn non_integer_bound_kind(&self, st: &FnState, expr: &Expr) -> Option<String> {
-        match unwrap_parens(expr) {
+        self.non_integer_bound_kind_at(st, expr, 0)
+    }
+
+    /// Issue #1554: file `const` initializers can be compound expressions
+    /// (`const hi = 1.5 + 0.5`, `const flag = !false`). Resolve them through
+    /// the same classifier instead of only classifying bare literals; the
+    /// depth cap keeps a `const a = b; const b = a` cycle finite.
+    fn non_integer_bound_kind_at(
+        &self,
+        st: &FnState,
+        expr: &Expr,
+        depth: usize,
+    ) -> Option<String> {
+        if depth > 32 {
+            return None;
+        }
+        match unwrap_parens_and_move(expr) {
             Expr::Lit {
                 kind: LitKind::Float(_),
                 ..
@@ -164,7 +183,7 @@ impl<'a> Checker<'a> {
                 if matches!(op, hy_syntax::UnOp::Not) {
                     return Some("bool".to_string());
                 }
-                if let Some(k) = self.non_integer_bound_kind(st, operand) {
+                if let Some(k) = self.non_integer_bound_kind_at(st, operand, depth + 1) {
                     return Some(k);
                 }
             }
@@ -185,8 +204,8 @@ impl<'a> Checker<'a> {
                     return Some("bool".to_string());
                 }
                 if let Some(k) = self
-                    .non_integer_bound_kind(st, lhs)
-                    .or_else(|| self.non_integer_bound_kind(st, rhs))
+                    .non_integer_bound_kind_at(st, lhs, depth + 1)
+                    .or_else(|| self.non_integer_bound_kind_at(st, rhs, depth + 1))
                 {
                     return Some(k);
                 }
@@ -195,11 +214,71 @@ impl<'a> Checker<'a> {
                 // Issue #827: `&x` is a pointer — never an integer bound.
                 return Some("pointer".to_string());
             }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens_and_move(callee) {
+                    if st.env_lookup(name).is_none()
+                        && !self.fns.contains_key(name.as_str())
+                        && !self.structs.contains_key(name.as_str())
+                        && !self.enums.contains_key(name.as_str())
+                        && !self.type_aliases.contains_key(name.as_str())
+                    {
+                        if name == "complex"
+                            && args.len() == 2
+                            && !args[0].spread
+                            && !args[1].spread
+                        {
+                            return Some("complex".to_string());
+                        }
+                        if (name == "real" || name == "imag")
+                            && args.len() == 1
+                            && !args[0].spread
+                        {
+                            return Some("float".to_string());
+                        }
+                    }
+                }
+            }
             _ => {}
         }
         if let Some(ty) = self.ty_of_expr(st, expr) {
-            let resolved = self.resolve_type_alias(&ty);
-            if let TypeExpr::Named { name, .. } = &resolved {
+            if let Some(desc) = self.non_integer_type_desc(&ty) {
+                return Some(desc);
+            }
+        }
+        // Issue #827: an untyped const identifier carries no type
+        // ascription, so `ty_of_expr`/`shape_of_expr` see nothing. Resolve
+        // the initializer through the file const map (#998 pattern) and
+        // classify the literal. Block-scoped consts stay fail-open (no
+        // const-value map in FnState — the #998 precedent).
+        if let Expr::Ident { name, .. } = unwrap_parens_and_move(expr) {
+            if st.env_lookup(name).is_none() {
+                if let Some(b) = self.consts.get(name.as_str()) {
+                    if let Some(ty) = &b.ty {
+                        if let Some(desc) = self.non_integer_type_desc(ty) {
+                            return Some(desc);
+                        }
+                    }
+                }
+                if let Some(init) = self.const_values.get(name.as_str()) {
+                    let file_st = FnState::default();
+                    if let Some(k) = self.non_integer_bound_kind_at(&file_st, init, depth + 1) {
+                        return Some(k);
+                    }
+                }
+            }
+        }
+        let shape = self.shape_of_expr(st, expr);
+        match shape {
+            TypeShape::Primitive | TypeShape::Unknown => None,
+            other => Some(other.render()),
+        }
+    }
+
+    fn non_integer_type_desc(&self, ty: &TypeExpr) -> Option<String> {
+        let resolved = self.resolve_type_alias(ty);
+        match &resolved {
+            TypeExpr::Option { .. } => Some(resolved.render()),
+            TypeExpr::Named { name, .. }
                 if matches!(
                     name.as_str(),
                     "bool"
@@ -211,45 +290,13 @@ impl<'a> Checker<'a> {
                         | "complex128"
                         | "string"
                         | "error"
-                ) {
-                    return Some(resolved.render());
-                }
+                        | "any"
+                        | "interface{}"
+                ) =>
+            {
+                Some(resolved.render())
             }
-        }
-        // Issue #827: an untyped const identifier carries no type
-        // ascription, so `ty_of_expr`/`shape_of_expr` see nothing. Resolve
-        // the initializer through the file const map (#998 pattern) and
-        // classify the literal. Block-scoped consts stay fail-open (no
-        // const-value map in FnState — the #998 precedent).
-        if let Expr::Ident { name, .. } = unwrap_parens(expr) {
-            if st.env_lookup(name).is_none() {
-                if let Some(init) = self.const_values.get(name.as_str()) {
-                    match unwrap_parens(init) {
-                        Expr::Lit {
-                            kind: LitKind::Float(_),
-                            ..
-                        } => return Some("float".to_string()),
-                        Expr::Lit {
-                            kind: LitKind::Bool(_),
-                            ..
-                        } => return Some("bool".to_string()),
-                        Expr::Lit {
-                            kind: LitKind::Str(_) | LitKind::RawStr(_),
-                            ..
-                        } => return Some("string".to_string()),
-                        Expr::Lit {
-                            kind: LitKind::Nil,
-                            ..
-                        } => return Some("nil".to_string()),
-                        _ => {}
-                    }
-                }
-            }
-        }
-        let shape = self.shape_of_expr(st, expr);
-        match shape {
-            TypeShape::Primitive | TypeShape::Unknown => None,
-            other => Some(other.render()),
+            _ => None,
         }
     }
 
@@ -270,10 +317,44 @@ impl<'a> Checker<'a> {
     ) {
         let tl = self.typed_int_bound(st, lo);
         let th = self.typed_int_bound(st, hi);
-        let mismatch = match (&tl, &th) {
+        // Issue #1165: compare the two bounds as *Go types*, not as spellings.
+        // `byte` and `rune` are Go aliases of `uint8`/`int32`, and `u8`/`i32`
+        // are the SPEC spellings the emitter maps onto those same Go types, so
+        // `var a u8 = 0; var b uint8 = 10; for i in a..b` is a legal loop that
+        // was rejected with a false HYB-E2009. Canonicalise before comparing;
+        // the diagnostic still prints the spellings the author wrote.
+        let tl_c = tl.as_deref().map(crate::const_overflow::canonical_int_type_name);
+        let th_c = th.as_deref().map(crate::const_overflow::canonical_int_type_name);
+        // Issue #3795: `hy-emit` (`stmt.rs:2188-2195`) also hoists `hi` into a
+        // standalone `hyHi := <hi>` temporary for exclusive ranges whenever
+        // `hi` contains a call/receive/try or mentions an in-scope variable
+        // shadowed by `var`. That `:=` binding defaults an untyped `hi` (such
+        // as `10 + len("")` or `len([2]int{k, 0})`) to Go `int`, so `v < hyHi`
+        // fails `go build` with `mismatched types` whenever `lo` fixes `v` to a
+        // non-`int` integer width.
+        let var_in_scope = var != "_" && st.env_lookup(var).is_some();
+        let is_bare_const_len = match unwrap_parens_and_move(hi) {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens_and_move(callee) {
+                    name == "len" && args.len() == 1 && match unwrap_parens_and_move(&args[0].value) {
+                        Expr::Ident { name: arg_name, .. } => {
+                            self.consts.contains_key(arg_name.as_str())
+                        }
+                        _ => false,
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        let hi_hoisted = inclusive
+            || (!is_bare_const_len && Self::range_bound_has_call_or_recv(hi))
+            || (var_in_scope && Self::range_bound_mentions_ident(hi, var));
+        let mismatch = match (&tl_c, &th_c) {
             (Some(a), Some(b)) => a != b,
-            (None, Some(b)) => b != "int",
-            (Some(a), None) => inclusive && a != "int",
+            (None, Some(b)) => *b != "int",
+            (Some(a), None) => hi_hoisted && *a != "int",
             (None, None) => false,
         };
         if mismatch {
@@ -299,12 +380,7 @@ impl<'a> Checker<'a> {
             return;
         };
         for (bound, role) in [(lo, "lo"), (hi, "hi")] {
-            let overflows = match crate::const_overflow::const_int_fold_with(
-                bound,
-                &self.const_values,
-                0,
-                Some(st),
-            ) {
+            let overflows = match self.const_int_fold_expr(bound, Some(st)) {
                 crate::const_overflow::ConstFold::Val(v) => v < clo || v > chi,
                 crate::const_overflow::ConstFold::TooBig => true,
                 crate::const_overflow::ConstFold::NotConst => false,
@@ -329,18 +405,31 @@ impl<'a> Checker<'a> {
     /// The bound's INTEGER type when a typed expression fixes it — `None`
     /// for untyped literals and untyped consts, which adapt to the
     /// counter's type in the lowering (and in Go's constant arithmetic).
-    fn typed_int_bound(&self, st: &FnState, e: &Expr) -> Option<String> {
-        match unwrap_parens(e) {
+    pub(crate) fn typed_int_bound(&self, st: &FnState, e: &Expr) -> Option<String> {
+        self.typed_int_bound_at(st, e, 0)
+    }
+
+    fn typed_int_bound_at(&self, st: &FnState, e: &Expr, depth: usize) -> Option<String> {
+        if depth > 32 {
+            return None;
+        }
+        match unwrap_parens_and_move(e) {
             Expr::Lit { .. } => None,
             Expr::Ident { name, .. } => {
                 if st.env_lookup(name).is_none() {
                     if let Some(b) = self.consts.get(name.as_str()) {
                         // a file-level const: a TYPED const fixes the
                         // bound's type; an untyped const adapts.
-                        let ty = b.ty.as_ref()?;
-                        let resolved = self.resolve_type_alias(ty);
-                        if let TypeExpr::Named { name: rn, .. } = resolved {
-                            if crate::const_overflow::fixed_width_int_range(&rn).is_some() {
+                        if let Some(ty) = b.ty.as_ref() {
+                            let resolved = self.resolve_type_alias(ty);
+                            if let TypeExpr::Named { name: rn, .. } = resolved {
+                                if crate::const_overflow::fixed_width_int_range(&rn).is_some() {
+                                    return Some(rn);
+                                }
+                            }
+                        } else if let Some(init) = self.const_values.get(name.as_str()) {
+                            let file_st = FnState::default();
+                            if let Some(rn) = self.typed_int_bound_at(&file_st, init, depth + 1) {
                                 return Some(rn);
                             }
                         }
@@ -350,12 +439,91 @@ impl<'a> Checker<'a> {
                 let ty = self.ty_of_expr(st, e)?;
                 self.named_int_of(&ty)
             }
-            Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
+            Expr::Unary {
+                op: hy_syntax::UnOp::Neg,
+                operand,
+                ..
+            } => self.typed_int_bound_at(st, operand, depth + 1),
+            Expr::Binary { op, lhs, rhs, .. } => match op {
+                hy_syntax::BinOp::Add
+                | hy_syntax::BinOp::Sub
+                | hy_syntax::BinOp::Mul
+                | hy_syntax::BinOp::Div
+                | hy_syntax::BinOp::Mod
+                | hy_syntax::BinOp::BitAnd
+                | hy_syntax::BinOp::BitOr
+                | hy_syntax::BinOp::BitXor => self
+                    .typed_int_bound_at(st, lhs, depth + 1)
+                    .or_else(|| self.typed_int_bound_at(st, rhs, depth + 1)),
+                hy_syntax::BinOp::Shl | hy_syntax::BinOp::Shr => self.typed_int_bound_at(st, lhs, depth + 1),
+                _ => None,
+            },
+            Expr::Call { callee, args, .. } => {
                 // a fixed-width conversion names its own type: `u32(0)`
                 // is a u32 bound regardless of what ty_of_expr infers.
-                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
-                    if crate::const_overflow::fixed_width_int_range(name).is_some() {
-                        return Some(name.clone());
+                if let Expr::Ident { name, .. } = unwrap_parens_and_move(callee) {
+                    if st.env_lookup(name).is_none()
+                        && !self.fns.contains_key(name.as_str())
+                        && !self.structs.contains_key(name.as_str())
+                        && !self.enums.contains_key(name.as_str())
+                    {
+                        if args.len() == 1
+                            && !args[0].spread
+                        {
+                            if !self.type_aliases.contains_key(name.as_str())
+                                && crate::const_overflow::fixed_width_int_range(name).is_some()
+                            {
+                                return Some(name.clone());
+                            }
+                            let resolved = self.resolve_type_alias(&TypeExpr::Named {
+                                name: name.clone(),
+                                span: callee.span(),
+                            });
+                            if let TypeExpr::Named { name: rn, .. } = resolved {
+                                if crate::const_overflow::fixed_width_int_range(&rn).is_some() {
+                                    return Some(rn);
+                                }
+                            }
+                        }
+                        if name == "copy"
+                            && args.len() == 2
+                            && !args[0].spread
+                            && !args[1].spread
+                            && !self.type_aliases.contains_key("copy")
+                        {
+                            return Some("int".to_string());
+                        }
+                        if (name == "len" || name == "cap")
+                            && args.len() == 1
+                            && !args[0].spread
+                            && !self.type_aliases.contains_key(name.as_str())
+                            && match self.shape_of_expr(st, &args[0].value) {
+                                TypeShape::Slice(_) | TypeShape::Map(_, _) | TypeShape::Chan(_) => true,
+                                TypeShape::Str => name == "len" && match unwrap_parens_and_move(&args[0].value) {
+                                    Expr::Ident { name: s, .. } => st.env_lookup(s).is_some_and(|b| !b.immutable),
+                                    Expr::Index { .. } | Expr::Field { .. } | Expr::Call { .. } | Expr::Receive { .. } => true,
+                                    _ => false,
+                                },
+                                TypeShape::Struct(Some(ref n)) => {
+                                    name == "len"
+                                        && !self.structs.contains_key("set")
+                                        && (n.starts_with("set[") || n == "set")
+                                }
+                                _ => false,
+                            }
+                        {
+                            return Some("int".to_string());
+                        }
+                        if matches!(name.as_str(), "min" | "max")
+                            && !self.type_aliases.contains_key(name.as_str())
+                        {
+                            if let Some(w) = args.iter().find_map(|a| self.typed_int_bound(st, &a.value)) {
+                                return Some(w);
+                            }
+                            if !args.is_empty() && args.iter().all(|a| self.non_integer_bound_kind(st, &a.value).is_none()) {
+                                return Some("int".to_string());
+                            }
+                        }
                     }
                 }
                 let ty = self.ty_of_expr(st, e)?;
@@ -392,10 +560,24 @@ impl<'a> Checker<'a> {
         // only pointer-to-ARRAY is rangeable (`*struct` / `*slice` /
         // `*string` are not), so normalize exactly one Pointer level for
         // arrays and leave every other shape as classified.
-        let shape = if matches!(self.ty_of_expr(st, expr).map(|t| self.resolve_type_alias(&t)), Some(TypeExpr::Option { .. })) { TypeShape::Struct(None) } else { match self.shape_of_expr(st, expr) {
-            TypeShape::Pointer(inner) if matches!(*inner, TypeShape::Array(_)) => *inner,
-            other => other,
-        } };
+        let shape = if matches!(self.ty_of_expr(st, expr).map(|t| self.resolve_type_alias(&t)), Some(TypeExpr::Option { .. })) { TypeShape::Struct(None) } else {
+            if let Some(TypeExpr::Named { name, .. }) = self.ty_of_expr(st, expr) {
+                let base = Self::base_named_type_str(&name);
+                if st.type_params.contains(base) {
+                    TypeShape::Unknown
+                } else {
+                    match self.shape_of_expr(st, expr) {
+                        TypeShape::Pointer(inner) if matches!(*inner, TypeShape::Array(_)) => *inner,
+                        other => other,
+                    }
+                }
+            } else {
+                match self.shape_of_expr(st, expr) {
+                    TypeShape::Pointer(inner) if matches!(*inner, TypeShape::Array(_)) => *inner,
+                    other => other,
+                }
+            }
+        };
         match shape {
             TypeShape::Slice(_)
             | TypeShape::Array(_)
@@ -405,16 +587,33 @@ impl<'a> Checker<'a> {
             // view the emitter iterates; corpus 05/07/11/12). Corpus-driven,
             // NOT a Go range shape — Go cannot range the view struct itself.
             | TypeShape::BorrowHandle(_) => {}
-            TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set" => {}
+            TypeShape::Struct(Some(ref n))
+                if !self.structs.contains_key("set")
+                    && !self.enums.contains_key("set")
+                    && !st.type_params.contains("set")
+                    && (n.starts_with("set[") || n == "set") => {}
             TypeShape::Chan(_) => {
-                let chan_ty = self.ty_of_expr(st, expr).or_else(|| {
-                    if let Expr::Ident { name, .. } = unwrap_parens(expr) {
-                        let root = crate::freeze::resolve_alias(st, name);
-                        self.lookup_binding(st, &root).and_then(|b| b.ty.clone())
-                    } else {
-                        None
-                    }
-                });
+                let chan_ty = self
+                    .ty_of_expr(st, expr)
+                    .or_else(|| {
+                        if let Expr::Ident { name, .. } = unwrap_parens_and_move(expr) {
+                            let root = crate::freeze::resolve_alias(st, name);
+                            self.lookup_binding(st, &root).and_then(|b| b.ty.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| self.composite_type_expr(st, expr))
+                    .or_else(|| match unwrap_parens_and_move(expr) {
+                        Expr::Call { callee, .. } => match unwrap_parens_and_move(callee) {
+                            Expr::Field { base, name, .. } => {
+                                let rb = Self::base_named_type(&self.peel_pointer_and_alias(&self.composite_type_expr(st, base)?))?;
+                                self.method_decls.get(&(rb, Self::base_named_type_str(name).to_string()))?.results.first().map(|r| r.ty.clone())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    });
                 if let Some(ty) = chan_ty {
                     let resolved = self.resolve_type_alias(&ty);
                     if matches!(
@@ -472,6 +671,255 @@ impl<'a> Checker<'a> {
                     Diagnostic::error("HYB-E2009", self.path.clone(), span, msg).with_notes(notes),
                 );
             }
+        }
+    }
+
+    fn range_bound_has_call_or_recv(e: &Expr) -> bool {
+        match e {
+            Expr::Call { .. } | Expr::Receive { .. } | Expr::Try { .. } => true,
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::range_bound_has_call_or_recv(lhs) || Self::range_bound_has_call_or_recv(rhs)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Paren { inner: operand, .. }
+            | Expr::Field { base: operand, .. } => Self::range_bound_has_call_or_recv(operand),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Expr(x) => Self::range_bound_has_call_or_recv(x),
+                InterpPart::Lit(_) => false,
+            }),
+            Expr::Index { base, index, .. } => {
+                Self::range_bound_has_call_or_recv(base)
+                    || Self::range_bound_has_call_or_recv(index)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::range_bound_has_call_or_recv(base)
+                    || lo
+                        .as_deref()
+                        .map(Self::range_bound_has_call_or_recv)
+                        .unwrap_or(false)
+                    || hi
+                        .as_deref()
+                        .map(Self::range_bound_has_call_or_recv)
+                        .unwrap_or(false)
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| Self::range_bound_has_call_or_recv(&f.value)),
+            Expr::SliceLit { items, .. } => items.iter().any(Self::range_bound_has_call_or_recv),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                Self::range_bound_has_call_or_recv(k) || Self::range_bound_has_call_or_recv(v)
+            }),
+            Expr::FnLit { .. } | Expr::Lit { .. } | Expr::Ident { .. } => false,
+        }
+    }
+
+    fn range_bound_mentions_ident(e: &Expr, target: &str) -> bool {
+        match e {
+            Expr::Ident { name, .. } => name == target,
+            Expr::Lit { .. } => false,
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::range_bound_mentions_ident(lhs, target)
+                    || Self::range_bound_mentions_ident(rhs, target)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Receive { chan: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Paren { inner: operand, .. } => {
+                Self::range_bound_mentions_ident(operand, target)
+            }
+            Expr::Call { callee, args, .. } => {
+                Self::range_bound_mentions_ident(callee, target)
+                    || args
+                        .iter()
+                        .any(|a| Self::range_bound_mentions_ident(&a.value, target))
+            }
+            Expr::Index { base, index, .. } => {
+                Self::range_bound_mentions_ident(base, target)
+                    || Self::range_bound_mentions_ident(index, target)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::range_bound_mentions_ident(base, target)
+                    || lo
+                        .as_ref()
+                        .is_some_and(|x| Self::range_bound_mentions_ident(x, target))
+                    || hi
+                        .as_ref()
+                        .is_some_and(|x| Self::range_bound_mentions_ident(x, target))
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| Self::range_bound_mentions_ident(&f.value, target)),
+            Expr::SliceLit { items, .. } => {
+                e.as_array_lit()
+                    .and_then(|(len, _, _)| len)
+                    .is_some_and(|l| Self::range_bound_mentions_ident(l, target))
+                    || items
+                        .iter()
+                        .any(|x| Self::range_bound_mentions_ident(x, target))
+            }
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                Self::range_bound_mentions_ident(k, target)
+                    || Self::range_bound_mentions_ident(v, target)
+            }),
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                let binds = params.iter().any(|p| p.name == target)
+                    || results
+                        .iter()
+                        .any(|r| r.name.as_deref() == Some(target));
+                !binds && Self::range_bound_block_mentions_ident(body, target)
+            }
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Lit(_) => false,
+                InterpPart::Expr(x) => Self::range_bound_mentions_ident(x, target),
+            }),
+        }
+    }
+
+    fn range_bound_block_mentions_ident(b: &Block, target: &str) -> bool {
+        for st in &b.stmts {
+            if Self::range_bound_stmt_mentions_ident(st, target) {
+                return true;
+            }
+            if matches!(st, Stmt::Local(l) if l.names.iter().any(|n| n == target)) {
+                return false;
+            }
+        }
+        false
+    }
+
+    fn range_bound_place_mentions_ident(p: &Place, target: &str) -> bool {
+        match &p.kind {
+            PlaceKind::Ident(n) => n == target,
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                Self::range_bound_place_mentions_ident(base, target)
+            }
+            PlaceKind::Index { base, index } => {
+                Self::range_bound_place_mentions_ident(base, target)
+                    || Self::range_bound_mentions_ident(index, target)
+            }
+        }
+    }
+
+    fn range_bound_stmt_mentions_ident(st: &Stmt, target: &str) -> bool {
+        match st {
+            Stmt::Local(l) => l
+                .values
+                .iter()
+                .any(|v| Self::range_bound_mentions_ident(v, target)),
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                targets
+                    .iter()
+                    .any(|t| Self::range_bound_place_mentions_ident(t, target))
+                    || values
+                        .iter()
+                        .any(|v| Self::range_bound_mentions_ident(v, target))
+            }
+            Stmt::Expr { expr, .. } => Self::range_bound_mentions_ident(expr, target),
+            Stmt::Send { chan, value, .. } => {
+                Self::range_bound_mentions_ident(chan, target)
+                    || Self::range_bound_mentions_ident(value, target)
+            }
+            Stmt::Return { values, .. } => values
+                .iter()
+                .any(|v| Self::range_bound_mentions_ident(v, target)),
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                let init_mentions = init
+                    .as_ref()
+                    .is_some_and(|i| Self::range_bound_stmt_mentions_ident(i, target));
+                let shadows = init.as_ref().is_some_and(
+                    |i| matches!(i.as_ref(), Stmt::Local(l) if l.names.iter().any(|n| n == target)),
+                );
+                init_mentions
+                    || (!shadows
+                        && (Self::range_bound_mentions_ident(cond, target)
+                            || Self::range_bound_block_mentions_ident(then, target)
+                            || otherwise
+                                .as_ref()
+                                .is_some_and(|o| Self::range_bound_stmt_mentions_ident(o, target))))
+            }
+            Stmt::For { kind, body, .. } => {
+                let kind_mentions = match kind {
+                    ForKind::Infinite => false,
+                    ForKind::While { cond } => Self::range_bound_mentions_ident(cond, target),
+                    ForKind::Range { lo, hi, .. } => {
+                        Self::range_bound_mentions_ident(lo, target)
+                            || Self::range_bound_mentions_ident(hi, target)
+                    }
+                    ForKind::Iterate { expr, .. } => Self::range_bound_mentions_ident(expr, target),
+                };
+                let binder_shadows = match kind {
+                    ForKind::Range { var, .. } => var == target,
+                    ForKind::Iterate { vars, .. } => vars.iter().any(|v| v == target),
+                    ForKind::Infinite | ForKind::While { .. } => false,
+                };
+                kind_mentions
+                    || (!binder_shadows && Self::range_bound_block_mentions_ident(body, target))
+            }
+            Stmt::Match { subject, arms, .. } => {
+                Self::range_bound_mentions_ident(subject, target)
+                    || arms.iter().any(|a| {
+                        let shadowed = matches!(
+                            &a.pattern,
+                            MatchPattern::Path {
+                                binding: Some(b),
+                                ..
+                            } if b == target
+                        );
+                        !shadowed
+                            && (a
+                                .guard
+                                .as_ref()
+                                .is_some_and(|g| Self::range_bound_mentions_ident(g, target))
+                                || Self::range_bound_block_mentions_ident(&a.body, target))
+                    })
+            }
+            Stmt::Select { arms, .. } => arms.iter().any(|a| {
+                let head_mentions = match &a.kind {
+                    SelectArmKind::Recv { chan, .. } => {
+                        Self::range_bound_mentions_ident(chan, target)
+                    }
+                    SelectArmKind::Send { chan, value, .. } => {
+                        Self::range_bound_mentions_ident(chan, target)
+                            || Self::range_bound_mentions_ident(value, target)
+                    }
+                    SelectArmKind::Default => false,
+                };
+                let arm_binds = match &a.kind {
+                    SelectArmKind::Recv { names, .. } => names.iter().any(|n| n == target),
+                    SelectArmKind::Send { .. } | SelectArmKind::Default => false,
+                };
+                head_mentions
+                    || (!arm_binds && Self::range_bound_block_mentions_ident(&a.body, target))
+            }),
+            Stmt::Defer { call, .. } => Self::range_bound_mentions_ident(call, target),
+            Stmt::Task { callee, args, .. } => {
+                Self::range_bound_mentions_ident(callee, target)
+                    || args
+                        .iter()
+                        .any(|a| Self::range_bound_mentions_ident(&a.value, target))
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                Self::range_bound_block_mentions_ident(body, target)
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => false,
         }
     }
 }

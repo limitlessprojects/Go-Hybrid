@@ -84,11 +84,28 @@ class PatternExtractionTests(unittest.TestCase):
             "tests/test_live.py", "  run: python3 tests/test_live.py\n"))
 
     def test_later_shell_command_does_not_supply_discovery_patterns(self):
-        for separator in (" && ", "&&", ";", " || ", " | "):
+        for separator in (" && ", "&&", ";"):
             with self.subTest(separator=separator):
                 self.assertEqual(guard.registered_patterns(
                     "python3 -m unittest discover -s tools -p test_live.py"
                     + separator + "echo -p test_disabled.py\n"), ["test_live.py"])
+
+    def test_exit_masking_operators_do_not_register_tests(self):
+        for separator in (" || ", "||", " | ", "|", " & ", "&"):
+            with self.subTest(separator=separator):
+                self.assertEqual(guard.registered_patterns(
+                    "python3 -m unittest discover -s tools -p test_failing.py"
+                    + separator + "true\n"), [])
+                self.assertFalse(guard.is_registered_direct(
+                    "tests/test_direct.py",
+                    "python3 tests/test_direct.py" + separator + "true\n"))
+        # Chained `&& ... || true` also swallows a failure of the first command.
+        self.assertEqual(guard.registered_patterns(
+            "python3 -m unittest discover -s tools -p test_failing.py && echo ok || true\n"),
+            [])
+        self.assertFalse(guard.is_registered_direct(
+            "tests/test_direct.py",
+            "python3 tests/test_direct.py && echo ok || true\n"))
 
     def test_interpreter_flags_preserve_real_invocations(self):
         self.assertEqual(guard.registered_patterns(
@@ -311,6 +328,182 @@ class RegistrationTests(unittest.TestCase):
             self.assertEqual(shell.returncode, 0, shell.stderr)
         self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
                          ["tools/test_disabled.py", "tests/test_disabled.py"])
+
+    def test_or_list_and_pipeline_masked_failures_are_rejected(self):
+        fixtures = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
+        or_workflow = (fixtures / "workflow_or_list_reject.yml").read_text(encoding="utf-8")
+        and_workflow = (fixtures / "workflow_and_list_accept.yml").read_text(encoding="utf-8")
+        root, _ = self.build(
+            or_workflow, ["tools/test_failing.py", "tests/test_direct.py"])
+        self.assertEqual(
+            [rel for rel, _ in guard.unregistered(root, or_workflow)],
+            ["tools/test_failing.py", "tests/test_direct.py"])
+        self.assertEqual(guard.unregistered(root, and_workflow), [])
+
+
+
+class WorkingDirectoryTests(unittest.TestCase):
+    """Cwd metadata must describe the invocation that really runs a file."""
+
+    def build(self):
+        temporary = tempfile.TemporaryDirectory(prefix="hybrid-registration-cwd-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        for directory in ("tools", "tests"):
+            for parent, fails in ((root, True), (root / "nested", False)):
+                path = parent / directory / "test_target.py"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    "import unittest\nclass Target(unittest.TestCase):\n"
+                    "    def test_target(self): "
+                    + ("self.fail('ROOT TEST MUST RUN')" if fails else "pass")
+                    + "\nif __name__ == '__main__': unittest.main()\n",
+                    encoding="utf-8")
+        return root
+
+    def workflow(self, mode, scope="step", *, indentless=False,
+                 defaults_after=False, misleading_echo=False):
+        command = ("python3 -m unittest discover -s tools -p test_target.py"
+                   if mode == "discover" else "python3 tests/test_target.py")
+        text = "name: cwd boundary\non: push\n"
+        if scope == "workflow":
+            text += "defaults:\n  run:\n    working-directory: nested\n"
+        text += "jobs:\n  check:\n    runs-on: ubuntu-latest\n"
+        defaults = "    defaults:\n      run:\n        working-directory: nested\n"
+        if scope == "job" and not defaults_after:
+            text += defaults
+        text += "    steps:\n"
+        indent = "    " if indentless else "      "
+        text += indent + "- name: execute the suite\n"
+        if scope == "step":
+            text += indent + "  working-directory: nested\n"
+        if misleading_echo:
+            text += indent + "  run: |\n" + indent + "    echo working-directory: .\n"
+            text += indent + "    " + command + "\n"
+        else:
+            text += indent + "  run: " + command + "\n"
+        if scope == "job" and defaults_after:
+            text += defaults
+        return text
+
+    def assert_unregistered(self, root, text, mode):
+        target = ("tools" if mode == "discover" else "tests") + "/test_target.py"
+        self.assertIn(target, [rel for rel, _ in guard.unregistered(root, text)])
+
+    def test_step_cwd_does_not_register_root_files(self):
+        root = self.build()
+        for mode in ("discover", "direct"):
+            with self.subTest(mode=mode):
+                self.assert_unregistered(root, self.workflow(mode), mode)
+
+    def test_job_default_cwd_does_not_register_root_files(self):
+        root = self.build()
+        for mode in ("discover", "direct"):
+            with self.subTest(mode=mode):
+                self.assert_unregistered(root, self.workflow(mode, "job"), mode)
+
+    def test_workflow_default_cwd_does_not_register_root_files(self):
+        root = self.build()
+        for mode in ("discover", "direct"):
+            with self.subTest(mode=mode):
+                self.assert_unregistered(root, self.workflow(mode, "workflow"), mode)
+
+    def test_indentless_step_sequence_keeps_its_cwd(self):
+        root = self.build()
+        for mode in ("discover", "direct"):
+            with self.subTest(mode=mode):
+                self.assert_unregistered(root, self.workflow(mode, indentless=True), mode)
+
+    def test_job_default_applies_even_when_written_after_steps(self):
+        root = self.build()
+        for mode in ("discover", "direct"):
+            with self.subTest(mode=mode):
+                self.assert_unregistered(
+                    root, self.workflow(mode, "job", defaults_after=True), mode)
+
+    def test_cwd_words_in_shell_text_do_not_override_step_metadata(self):
+        root = self.build()
+        for mode in ("discover", "direct"):
+            with self.subTest(mode=mode):
+                self.assert_unregistered(root, self.workflow(mode, misleading_echo=True), mode)
+
+    def test_root_step_overrides_nested_job_and_workflow_defaults(self):
+        for cwd in (".", "./", "'./' # repository root", '"."',
+                    "${{ github.workspace }}"):
+            with self.subTest(cwd=cwd):
+                text = self.workflow("discover", "workflow").replace(
+                    "    steps:\n", "    defaults:\n      run:\n"
+                    "        working-directory: nested\n    steps:\n")
+                text = text.replace("        run:", "        working-directory: "
+                                    + cwd + "\n        run:")
+                self.assertEqual(guard.registered_patterns(text), ["test_target.py"])
+
+    def test_root_job_overrides_nested_workflow_default_in_any_key_order(self):
+        text = self.workflow("discover", "workflow")
+        text += "    defaults:\n      run:\n        working-directory: .\n"
+        self.assertEqual(guard.registered_patterns(text), ["test_target.py"])
+
+    def test_step_cwd_does_not_leak_into_next_step(self):
+        text = self.workflow("discover")
+        text += "      - run: python3 -m unittest discover -s tools -p test_control.py\n"
+        self.assertEqual(guard.registered_patterns(text), ["test_control.py"])
+
+    def test_job_cwd_does_not_leak_into_next_job(self):
+        text = self.workflow("discover", "job")
+        text += ("  control:\n    runs-on: ubuntu-latest\n    steps:\n"
+                 "      - run: python3 -m unittest discover -s tools -p test_control.py\n")
+        self.assertEqual(guard.registered_patterns(text), ["test_control.py"])
+
+    def test_step_cwd_after_literal_run_block_still_applies(self):
+        text = self.workflow("discover").replace("        working-directory: nested\n", "")
+        text = text.replace("        run: python3", "        run: |\n          python3")
+        text += "        working-directory: nested\n"
+        self.assertEqual(guard.registered_patterns(text), [])
+
+    def test_dynamic_cwd_is_not_assumed_to_be_root(self):
+        text = self.workflow("discover").replace("nested", "${{ matrix.directory }}")
+        self.assertEqual(guard.registered_patterns(text), [])
+
+    def test_quoted_metadata_keys_keep_their_scope(self):
+        text = self.workflow("discover", "job")
+        for key in ("jobs", "defaults", "run", "working-directory", "steps"):
+            text = text.replace(key + ":", "'" + key + "':")
+        self.assertEqual(guard.registered_patterns(text), [])
+
+    def test_unknown_mapping_forms_do_not_establish_root_execution(self):
+        for defaults in ("{run: {working-directory: nested}}", "*unknown_defaults"):
+            text = self.workflow("discover", "workflow")
+            text = text.replace("defaults:\n  run:\n    working-directory: nested\n",
+                                "defaults: " + defaults + "\n")
+            with self.subTest(defaults=defaults):
+                self.assertEqual(guard.registered_patterns(text), [])
+
+    def test_folded_run_block_does_not_credit_independent_shell_lines(self):
+        text = self.workflow("discover").replace("        working-directory: nested\n", "")
+        text = text.replace("        run: python3", "        run: >\n          python3")
+        self.assertEqual(guard.registered_patterns(text), [])
+
+    def test_shell_text_outside_run_is_not_a_test_invocation(self):
+        text = self.workflow("discover").replace("        working-directory: nested\n", "")
+        text = text.replace("        run: python3", "        env:\n          SCRIPT: |\n            python3")
+        self.assertEqual(guard.registered_patterns(text), [])
+
+    def test_real_nested_execution_passes_while_root_control_fails(self):
+        root = self.build()
+        for mode in ("discover", "direct"):
+            args = (["-m", "unittest", "discover", "-s", "tools", "-p", "test_target.py"]
+                    if mode == "discover" else ["tests/test_target.py"])
+            nested = subprocess.run([sys.executable] + args, cwd=root / "nested",
+                                    capture_output=True, text=True, timeout=15)
+            control = subprocess.run([sys.executable] + args, cwd=root,
+                                     capture_output=True, text=True, timeout=15)
+            self.assertEqual(nested.returncode, 0, nested.stderr)
+            self.assertIn("Ran 1 test", nested.stderr)
+            self.assertEqual(control.returncode, 1, control.stderr)
+            self.assertIn("ROOT TEST MUST RUN", control.stderr)
+            for scope in ("step", "job", "workflow"):
+                with self.subTest(mode=mode, scope=scope):
+                    self.assert_unregistered(root, self.workflow(mode, scope), mode)
 
 
 class GuardMisuseTests(unittest.TestCase):
