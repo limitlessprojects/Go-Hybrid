@@ -1,7 +1,7 @@
 //! The Hybrid AST — the cross-component contract between `hy-syntax`
 //! (produces), `hy-check` (consumes), and the MVP-0 emitter (consumes).
 //!
-//! Scope: the surface exercised by tests/checker-corpus/*.hy (130 programs),
+//! Scope: the surface exercised by tests/checker-corpus/*.hy (139 programs),
 //! examples/ (ten target programs), and spikes/spike6-ownership/work/*.hy
 //! (ten programs). Anything outside that surface is allowed to be
 //! unimplemented by the parser — it must produce a clean `unsupported`
@@ -786,7 +786,7 @@ impl Expr {
     /// Distinguished from a slice-of-arrays literal `[][N]T{…}` by the
     /// array `TypeExpr` sharing the literal's opening `[` source position.
     pub fn as_array_lit(&self) -> Option<(Option<&Expr>, &TypeExpr, &TypeExpr)> {
-        if let Expr::Paren { inner, .. } = self {
+        if let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = self {
             return inner.as_array_lit();
         }
         if let Expr::SliceLit {
@@ -874,6 +874,19 @@ impl BinOp {
             BinOp::BitAnd => "&",
             BinOp::Shl => "<<",
             BinOp::Shr => ">>",
+        }
+    }
+}
+
+impl Decl {
+    pub fn span(&self) -> Span {
+        match self {
+            Decl::Import { span, .. } => *span,
+            Decl::Const(c) => c.span,
+            Decl::Struct(s) => s.span,
+            Decl::Enum(e) => e.span,
+            Decl::TypeAlias(t) => t.span,
+            Decl::Fn(f) => f.span,
         }
     }
 }

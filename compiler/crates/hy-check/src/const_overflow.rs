@@ -30,6 +30,12 @@ impl<'a> Checker<'a> {
         st: Option<&FnState>,
     ) {
         let resolved = self.resolve_type_alias(ty);
+        if let TypeExpr::Option { elem, .. } = &resolved {
+            if let Some(inner) = self.unwrap_some_call_arg(value, st) {
+                self.check_const_overflow_init(name, elem, inner, st);
+            }
+            return;
+        }
         let TypeExpr::Named {
             name: ty_name,
             span: ty_span,
@@ -37,6 +43,11 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
+        if ty_name == "any" || ty_name == "interface{}" {
+            self.check_default_int_overflow(name, value, st);
+            self.check_default_float_overflow(name, value, st);
+            return;
+        }
         if let Some(is_f32) = is_float_type(ty_name) {
             if let Some(f) = self.const_float_fold(value, st) {
                 let overflows = if is_f32 {
@@ -76,7 +87,7 @@ impl<'a> Checker<'a> {
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.const_int_fold_expr(value, st) {
             ConstFold::NotConst => {}
             ConstFold::TooBig => {
                 let span = value.span();
@@ -139,7 +150,12 @@ impl<'a> Checker<'a> {
         // Issue #201-B: a float constant is never assignable to an integer
         // type in Go — `var x int = 2.5` fails with `(truncated)` (and a
         // magnitude that cannot fit fails with `(overflows)`).
-        if let Some(f) = const_float_value(value) {
+        if let Some(f) = const_float_value(value).or_else(|| {
+            (!self.expr_has_local_or_binder(value) && self.is_float_const_expr_at(value, st, 0))
+                .then(|| self.const_float_fold(value, st))
+                .flatten()
+                .filter(|f| !(f.is_finite() && f.fract() == 0.0 && *f >= lo as f64 && *f <= hi as f64))
+        }) {
             let span = value.span();
             let msg = format!(
                 "float constant `{}` assigned to integer type `{}` of `{}` (HYB-E6002)",
@@ -183,6 +199,12 @@ impl<'a> Checker<'a> {
         st: Option<&FnState>,
     ) {
         let resolved = self.resolve_type_alias(ty);
+        if let TypeExpr::Option { elem, .. } = &resolved {
+            if let Some(inner) = self.unwrap_some_call_arg(value, st) {
+                self.check_const_overflow_assign(target, elem, inner, st);
+            }
+            return;
+        }
         let TypeExpr::Named {
             name: ty_name,
             span: ty_span,
@@ -190,6 +212,11 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
+        if ty_name == "any" || ty_name == "interface{}" {
+            self.check_default_int_overflow(target, value, st);
+            self.check_default_float_overflow(target, value, st);
+            return;
+        }
         if let Some(is_f32) = is_float_type(ty_name) {
             if let Some(f) = self.const_float_fold(value, st) {
                 let overflows = if is_f32 {
@@ -229,7 +256,7 @@ impl<'a> Checker<'a> {
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.const_int_fold_expr(value, st) {
             ConstFold::NotConst => {}
             ConstFold::TooBig => {
                 let span = value.span();
@@ -289,7 +316,13 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        if const_float_value(value).is_some() {
+        if const_float_value(value).is_some()
+            || (!self.expr_has_local_or_binder(value)
+                && self.is_float_const_expr_at(value, st, 0)
+                && self
+                    .const_float_fold(value, st)
+                    .is_some_and(|f| !(f.is_finite() && f.fract() == 0.0 && f >= lo as f64 && f <= hi as f64)))
+        {
             let span = value.span();
             let msg = format!(
                 "float constant `{}` assigned to integer type `{}` of `{}` (HYB-E6002)",
@@ -325,14 +358,21 @@ impl<'a> Checker<'a> {
         value: &Expr,
         st: Option<&FnState>,
     ) {
+        let value = self.unwrap_some_call_arg(value, st).unwrap_or(value);
+        if self.has_explicit_fixed_int_ty(st, value) {
+            return;
+        }
         let (lo, hi) = target_int_range();
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.const_int_fold_expr(value, st) {
             ConstFold::NotConst => return,
             ConstFold::Val(v) if v >= lo && v <= hi => return,
             ConstFold::Val(_) | ConstFold::TooBig => {}
         }
 
         let span = value.span();
+        if self.diags.iter().any(|d| d.code == "HYB-E6002" && d.span == span) {
+            return;
+        }
         let msg = format!(
             "constant expression `{}` overflows default type `int` of `{}` (HYB-E6002)",
             value.render(),
@@ -359,12 +399,16 @@ impl<'a> Checker<'a> {
         value: &Expr,
         st: Option<&FnState>,
     ) {
-        if !is_float_const_expr(value, &self.const_values, 0, st) {
+        let value = self.unwrap_some_call_arg(value, st).unwrap_or(value);
+        if self.expr_has_local_or_binder(value) || !self.is_float_const_expr_at(value, st, 0) {
             return;
         }
         if let Some(f) = self.const_float_fold(value, st) {
             if f.is_infinite() {
                 let span = value.span();
+                if self.diags.iter().any(|d| d.code == "HYB-E6002" && d.span == span) {
+                    return;
+                }
                 let msg = format!(
                     "constant expression `{}` overflows default type `float64` of `{}` (HYB-E6002)",
                     value.render(),
@@ -384,9 +428,200 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Default `int` (or fixed-width) type that Go assigns to a non-`const`
+    /// local variable declaration (`x := 1`, `var x = 1`, `let x = 1`) when no
+    /// explicit type annotation is written (#3678).
+    pub(crate) fn default_untyped_local_ty(
+        &self,
+        st: &FnState,
+        value: &Expr,
+    ) -> Option<TypeExpr> {
+        if let Some((name, _, _)) = self.fixed_width_int_ty_of(st, value) {
+            return Some(TypeExpr::Named {
+                name,
+                span: value.span(),
+            });
+        }
+        match self.const_int_fold_expr(value, Some(st)) {
+            ConstFold::Val(_) | ConstFold::TooBig => {
+                let name = if is_char_const_expr(value, &self.const_values, 0, Some(st)) {
+                    "rune"
+                } else {
+                    "int"
+                };
+                Some(TypeExpr::Named {
+                    name: name.to_string(),
+                    span: value.span(),
+                })
+            }
+            ConstFold::NotConst => None,
+        }
+    }
+
+    /// Fold a constant integer expression, resolving both function-local `const`
+    /// declarations and file-level `const` declarations.
+    pub(crate) fn const_int_fold_expr(&self, e: &Expr, st: Option<&FnState>) -> ConstFold {
+        self.const_int_fold_at(e, st, 0)
+    }
+
+    pub(crate) fn const_int_fold_at(
+        &self,
+        e: &Expr,
+        st: Option<&FnState>,
+        depth: u32,
+    ) -> ConstFold {
+        if depth >= 16 {
+            return ConstFold::NotConst;
+        }
+        match unwrap_parens(e) {
+            Expr::Ident {
+                name,
+                span: id_span,
+            } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                    let Some(init_expr) = sight.constant_initializer() else {
+                        return ConstFold::NotConst;
+                    };
+                    if sight.ty.as_ref().is_some_and(|ty| self.is_non_int_type(ty)) {
+                        return ConstFold::NotConst;
+                    }
+                    if (sight.pos.line, sight.pos.col) == (id_span.start.line, id_span.start.col) {
+                        return ConstFold::NotConst;
+                    }
+                    return self.const_int_fold_at(init_expr, st, depth + 1);
+                }
+                if st.is_some_and(|s| s.env_lookup(name).is_some())
+                    || self.is_lexical_binder_at(name, id_span.start)
+                {
+                    return ConstFold::NotConst;
+                }
+                if let Some(v) = self.const_values.get(name) {
+                    return self.const_int_fold_at(v, None, depth + 1);
+                }
+                ConstFold::NotConst
+            }
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => match self.const_int_fold_at(operand, st, depth + 1) {
+                ConstFold::Val(v) => v
+                    .checked_neg()
+                    .map(ConstFold::Val)
+                    .unwrap_or(ConstFold::TooBig),
+                ConstFold::NotConst => ConstFold::NotConst,
+                ConstFold::TooBig => ConstFold::TooBig,
+            },
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let l = self.const_int_fold_at(lhs, st, depth + 1);
+                let r = self.const_int_fold_at(rhs, st, depth + 1);
+                fold_bin(*op, l, r)
+            }
+            Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
+                let Expr::Ident { name, span } = unwrap_parens(callee) else {
+                    return ConstFold::NotConst;
+                };
+                if self.is_shadowed_ident_at(name, span.start) {
+                    return ConstFold::NotConst;
+                }
+                let Some((lo, hi)) = fixed_width_int_range(name) else {
+                    return ConstFold::NotConst;
+                };
+                match self.const_int_fold_at(&args[0].value, st, depth + 1) {
+                    ConstFold::Val(v) => ConstFold::Val(wrap_into(v, lo, hi)),
+                    ConstFold::TooBig => ConstFold::TooBig,
+                    ConstFold::NotConst => ConstFold::NotConst,
+                }
+            }
+            other => const_int_fold_with(other, &self.const_values, depth, st),
+        }
+    }
+
     /// Fold a constant float expression (literals, identifiers, unary, binary).
     pub(crate) fn const_float_fold(&self, e: &Expr, st: Option<&FnState>) -> Option<f64> {
-        const_float_fold_with(e, &self.const_values, 0, st)
+        self.const_float_fold_at(e, st, 0)
+    }
+
+    fn const_float_fold_at(&self, e: &Expr, st: Option<&FnState>, depth: u32) -> Option<f64> {
+        if depth >= 16 {
+            return None;
+        }
+        match unwrap_parens(e) {
+            Expr::Ident { name, span } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, span.start) {
+                    let init = sight.constant_initializer()?;
+                    if (sight.pos.line, sight.pos.col) == (span.start.line, span.start.col) {
+                        return None;
+                    }
+                    return self.const_float_fold_at(init, st, depth + 1);
+                }
+                if st.is_some_and(|s| s.env_lookup(name).is_some())
+                    || self.is_lexical_binder_at(name, span.start)
+                {
+                    return None;
+                }
+                self.const_values
+                    .get(name)
+                    .and_then(|v| self.const_float_fold_at(v, None, depth + 1))
+            }
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.const_float_fold_at(operand, st, depth + 1).map(|v| -v),
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let l = self.const_float_fold_at(lhs, st, depth + 1)?;
+                let r = self.const_float_fold_at(rhs, st, depth + 1)?;
+                match op {
+                    BinOp::Add => Some(l + r),
+                    BinOp::Sub => Some(l - r),
+                    BinOp::Mul => Some(l * r),
+                    BinOp::Div => (r != 0.0).then_some(l / r),
+                    _ => None,
+                }
+            }
+            other => const_float_fold_with(other, &self.const_values, depth, st),
+        }
+    }
+
+    fn is_float_const_expr_at(&self, e: &Expr, st: Option<&FnState>, depth: u32) -> bool {
+        if depth >= 16 {
+            return false;
+        }
+        match unwrap_parens(e) {
+            Expr::Lit {
+                kind: LitKind::Float(_),
+                ..
+            } => true,
+            Expr::Ident { name, span } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, span.start) {
+                    let Some(init) = sight.constant_initializer() else {
+                        return false;
+                    };
+                    if sight.ty.as_ref().is_some_and(|ty| {
+                        !matches!(self.resolve_type_alias(ty), TypeExpr::Named { name: ref tn, .. } if is_float_type(tn).is_some())
+                    }) {
+                        return false;
+                    }
+                    return (sight.pos.line, sight.pos.col) != (span.start.line, span.start.col)
+                        && self.is_float_const_expr_at(init, st, depth + 1);
+                }
+                if st.is_some_and(|s| s.env_lookup(name).is_some())
+                    || self.is_lexical_binder_at(name, span.start)
+                {
+                    return false;
+                }
+                self.const_values
+                    .get(name)
+                    .is_some_and(|v| self.is_float_const_expr_at(v, None, depth + 1))
+            }
+            Expr::Unary { operand, .. } => self.is_float_const_expr_at(operand, st, depth + 1),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_float_const_expr_at(lhs, st, depth + 1)
+                    || self.is_float_const_expr_at(rhs, st, depth + 1)
+            }
+            _ => false,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -568,16 +803,13 @@ impl<'a> Checker<'a> {
                     self.check_expr_type_conversions(hi);
                 }
             }
-            Expr::Call {
-                callee,
-                args,
-                span,
-            } => {
+            Expr::Call { callee, args, span } => {
                 self.check_expr_type_conversions(callee);
                 for a in args {
                     self.check_expr_type_conversions(&a.value);
                 }
                 self.check_conversion_call(callee, args, *span);
+                self.check_any_call_arg_overflow(callee, args);
             }
             Expr::StructLit { fields, .. } => {
                 for f in fields {
@@ -620,6 +852,7 @@ impl<'a> Checker<'a> {
             // not a conversion shape.
             return;
         }
+        let callee = unwrap_parens(callee);
         let arg = unwrap_parens(&args[0].value);
         // `[]byte("abc")` — a slice type-as-value called with one argument
         // (the standing type-as-value encoding; see hy-emit's conversion
@@ -632,7 +865,7 @@ impl<'a> Checker<'a> {
         {
             if items.is_empty() {
                 if let Some((_, _, arr_ty)) = callee.as_array_lit() {
-                    if let Some(c) = conv_const(arg) {
+                    if let Some(c) = self.conv_const_expr(arg) {
                         self.emit_conv_kind_error(&arr_ty.render(), &c, arg, span);
                     }
                 } else {
@@ -641,23 +874,202 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        let Expr::Ident { name, .. } = callee else {
+        let Expr::Ident { name, span: id_span } = callee else {
             return;
         };
-        if !is_conversion_target(name) {
+        if self.is_shadowed_ident_at(name, id_span.start) {
             return;
         }
-        let Some(c) = conv_const(arg) else {
+        let resolved_ty = self.resolve_type_alias(&TypeExpr::Named {
+            name: name.clone(),
+            span: *id_span,
+        });
+        match &resolved_ty {
+            TypeExpr::Slice { elem, .. } => {
+                self.check_slice_conversion(elem, arg, span);
+                return;
+            }
+            TypeExpr::Array { .. } => {
+                if let Some(c) = self.conv_const_expr(arg) {
+                    self.emit_conv_kind_error(name, &c, arg, span);
+                }
+                return;
+            }
+            TypeExpr::Named { name: rn, .. } if matches!(rn.as_str(), "any" | "interface{}") => {
+                let desc = format!("conversion to `{}`", name);
+                self.check_default_int_overflow(&desc, arg, None);
+                self.check_default_float_overflow(&desc, arg, None);
+                return;
+            }
+            _ => {}
+        }
+        let target_name = match &resolved_ty {
+            TypeExpr::Named { name: rn, .. } => rn.as_str(),
+            _ => name.as_str(),
+        };
+        if !is_conversion_target(target_name) {
+            return;
+        }
+        let Some(c) = self.conv_const_expr(arg) else {
             return; // non-constant operand: run-time conversion (SPEC X4)
         };
-        self.check_conv_against_target(name, &c, arg, span);
+        self.check_conv_against_target_alias(name, target_name, &c, arg, span);
+    }
+
+    fn unwrap_some_call_arg<'b>(&self, expr: &'b Expr, st: Option<&FnState>) -> Option<&'b Expr> {
+        let Expr::Call { callee, args, .. } = unwrap_parens(expr) else { return None };
+        if args.len() != 1 || args[0].spread { return None; }
+        let is_some = match unwrap_parens(callee) {
+            Expr::Ident { name, span } if name == "some" => st.map_or(true, |s| s.env_lookup("some").is_none()) && !self.is_shadowed_ident_at("some", span.start),
+            Expr::Field { base, name, .. } if name == "some" => matches!(unwrap_parens(base), Expr::Ident { name: pkg, span } if pkg == "option" && st.map_or(true, |s| s.env_lookup("option").is_none()) && !self.is_shadowed_ident_at("option", span.start)),
+            _ => false,
+        };
+        is_some.then_some(&args[0].value)
+    }
+
+    fn has_explicit_fixed_int_ty(&self, st: Option<&FnState>, e: &Expr) -> bool {
+        self.has_explicit_fixed_int_ty_at(st, e, 0)
+    }
+
+    fn has_explicit_fixed_int_ty_at(&self, st: Option<&FnState>, e: &Expr, depth: u32) -> bool {
+        if depth >= 16 { return false; }
+        if st.is_some_and(|st| self.fixed_width_int_ty_of(st, e).is_some()) { return true; }
+        let is_fixed = |ty: &TypeExpr| matches!(self.resolve_type_alias(ty), TypeExpr::Named { name: ref tn, .. } if fixed_width_int_range(tn).is_some());
+        match unwrap_parens(e) {
+            Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
+                let Expr::Ident { name, span } = unwrap_parens(callee) else { return false };
+                !self.is_shadowed_ident_at(name, span.start) && is_fixed(&TypeExpr::Named { name: name.clone(), span: *span })
+            }
+            Expr::Ident { name, span } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, span.start) {
+                    if let Some(ty) = &sight.ty { return is_fixed(ty); }
+                    return sight.constant_initializer().is_some_and(|init| (sight.pos.line, sight.pos.col) != (span.start.line, span.start.col) && self.has_explicit_fixed_int_ty_at(st, init, depth + 1));
+                }
+                if st.is_some_and(|s| s.env_lookup(name).is_some()) || self.is_lexical_binder_at(name, span.start) { return false; }
+                self.file.decls.iter().any(|d| matches!(d, hy_syntax::Decl::Const(c) if c.name == *name && c.ty.as_ref().map_or_else(|| self.has_explicit_fixed_int_ty_at(st, &c.value, depth + 1), is_fixed)))
+            }
+            Expr::Unary { op: UnOp::Neg, operand, .. } => self.has_explicit_fixed_int_ty_at(st, operand, depth + 1),
+            Expr::Binary { op: BinOp::Shl | BinOp::Shr, lhs, .. } => self.has_explicit_fixed_int_ty_at(st, lhs, depth + 1),
+            Expr::Binary { lhs, rhs, .. } => self.has_explicit_fixed_int_ty_at(st, lhs, depth + 1) || self.has_explicit_fixed_int_ty_at(st, rhs, depth + 1),
+            _ => false,
+        }
+    }
+
+    fn is_lexical_binder_at(&self, name: &str, use_pos: hy_diag::Pos) -> bool {
+        fn has(s: Span, p: hy_diag::Pos) -> bool { (p.line, p.col) >= (s.start.line, s.start.col) && (p.line, p.col) <= (s.end.line, s.end.col) }
+        fn expr_binds(e: &Expr, name: &str, p: hy_diag::Pos) -> bool {
+            has(e.span(), p) && match e {
+                Expr::FnLit { params, results, body, .. } => params.iter().any(|x| x.name == name) || results.iter().any(|r| r.name.as_deref() == Some(name)) || block_binds(body, name, p),
+                Expr::Binary { lhs, rhs, .. } | Expr::Index { base: lhs, index: rhs, .. } => expr_binds(lhs, name, p) || expr_binds(rhs, name, p),
+                Expr::Unary { operand: x, .. } | Expr::AddrOf { operand: x, .. } | Expr::Move { operand: x, .. } | Expr::Try { operand: x, .. } | Expr::Paren { inner: x, .. } | Expr::Field { base: x, .. } | Expr::Receive { chan: x, .. } => expr_binds(x, name, p),
+                Expr::Slice { base, lo, hi, .. } => expr_binds(base, name, p) || lo.as_deref().is_some_and(|x| expr_binds(x, name, p)) || hi.as_deref().is_some_and(|x| expr_binds(x, name, p)),
+                Expr::Call { callee, args, .. } => expr_binds(callee, name, p) || args.iter().any(|a| expr_binds(&a.value, name, p)),
+                Expr::StructLit { fields, .. } => fields.iter().any(|f| expr_binds(&f.value, name, p)),
+                Expr::SliceLit { items, .. } => items.iter().any(|i| expr_binds(i, name, p)),
+                Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| expr_binds(k, name, p) || expr_binds(v, name, p)),
+                Expr::Interp { parts, .. } => parts.iter().any(|pt| matches!(pt, InterpPart::Expr(x) if expr_binds(x, name, p))),
+                Expr::Ident { .. } | Expr::Lit { .. } => false,
+            }
+        }
+        fn block_binds(b: &hy_syntax::Block, name: &str, p: hy_diag::Pos) -> bool { b.stmts.iter().any(|s| stmt_binds(s, name, p)) }
+        fn stmt_binds(s: &Stmt, name: &str, p: hy_diag::Pos) -> bool {
+            match s {
+                Stmt::Local(l) => l.values.iter().any(|v| expr_binds(v, name, p)),
+                Stmt::Assign { values, .. } | Stmt::Return { values, .. } => values.iter().any(|v| expr_binds(v, name, p)),
+                Stmt::Expr { expr: x, .. } | Stmt::Defer { call: x, .. } => expr_binds(x, name, p),
+                Stmt::Send { chan, value, .. } => expr_binds(chan, name, p) || expr_binds(value, name, p),
+                Stmt::Task { callee, args, .. } => expr_binds(callee, name, p) || args.iter().any(|a| expr_binds(&a.value, name, p)),
+                Stmt::If { init, cond, then, otherwise, span } if has(*span, p) => {
+                    init.as_deref().is_some_and(|i| matches!(i, Stmt::Local(l) if l.names.iter().any(|n| n == name)) || stmt_binds(i, name, p)) || expr_binds(cond, name, p) || (has(then.span, p) && block_binds(then, name, p)) || otherwise.as_deref().is_some_and(|o| stmt_binds(o, name, p))
+                }
+                Stmt::For { kind, body, span, .. } if has(*span, p) => {
+                    let bound = match kind {
+                        ForKind::Range { var, lo, hi, .. } => expr_binds(lo, name, p) || expr_binds(hi, name, p) || (has(body.span, p) && var == name),
+                        ForKind::Iterate { vars, expr } => expr_binds(expr, name, p) || (has(body.span, p) && vars.iter().any(|v| v == name)),
+                        ForKind::While { cond } => expr_binds(cond, name, p),
+                        ForKind::Infinite => false,
+                    };
+                    bound || (has(body.span, p) && block_binds(body, name, p))
+                }
+                Stmt::Match { subject, arms, span } if has(*span, p) => expr_binds(subject, name, p) || arms.iter().any(|a| (has(a.body.span, p) || a.guard.as_ref().is_some_and(|g| has(g.span(), p))) && (matches!(&a.pattern, hy_syntax::MatchPattern::Path { binding: Some(b), .. } if b == name) || a.guard.as_ref().is_some_and(|g| expr_binds(g, name, p)) || block_binds(&a.body, name, p))),
+                Stmt::Select { arms, span } if has(*span, p) => arms.iter().any(|a| has(a.body.span, p) && (matches!(&a.kind, SelectArmKind::Recv { names, .. } if names.iter().any(|n| n == name)) || block_binds(&a.body, name, p))),
+                Stmt::Managed { body, span, .. } | Stmt::Block { block: body, span, .. } if has(*span, p) => block_binds(body, name, p),
+                _ => false,
+            }
+        }
+        self.file.decls.iter().any(|d| matches!(d, hy_syntax::Decl::Fn(f) if has(f.span, use_pos) && (f.receiver.as_ref().is_some_and(|r| r.name == name) || f.params.iter().any(|p| p.name == name) || f.results.iter().any(|r| r.name.as_deref() == Some(name)) || f.body.as_ref().is_some_and(|b| block_binds(b, name, use_pos)))))
+    }
+
+    fn expr_has_local_or_binder(&self, e: &Expr) -> bool {
+        self.expr_has_local_or_binder_at(e, 0)
+    }
+
+    fn expr_has_local_or_binder_at(&self, e: &Expr, depth: u32) -> bool {
+        if depth >= 16 {
+            return true;
+        }
+        match unwrap_parens(e) {
+            Expr::Ident { name, span } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, span.start) {
+                    return sight.constant_initializer().map_or(true, |init| {
+                        (sight.pos.line, sight.pos.col) == (span.start.line, span.start.col)
+                            || self.expr_has_local_or_binder_at(init, depth + 1)
+                    });
+                }
+                self.is_lexical_binder_at(name, span.start)
+            }
+            Expr::Unary { operand, .. } => self.expr_has_local_or_binder_at(operand, depth + 1),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr_has_local_or_binder_at(lhs, depth + 1)
+                    || self.expr_has_local_or_binder_at(rhs, depth + 1)
+            }
+            _ => false,
+        }
+    }
+
+    fn is_shadowed_ident_at(&self, name: &str, use_pos: hy_diag::Pos) -> bool {
+        self.resolve_local_binding_at(name, use_pos).is_some() || self.is_lexical_binder_at(name, use_pos) || self.fns.contains_key(name) || self.const_values.contains_key(name)
+    }
+
+    fn check_any_call_arg_overflow(&mut self, callee: &Expr, args: &[CallArg]) {
+        match unwrap_parens(callee) {
+            Expr::Ident { name, span } if matches!(name.as_str(), "print" | "println" | "panic") && !self.is_shadowed_ident_at(name, span.start) => {
+                let desc = format!("argument to `{}`", name);
+                for a in args.iter().filter(|a| !a.spread) {
+                    self.check_default_int_overflow(&desc, &a.value, None);
+                    self.check_default_float_overflow(&desc, &a.value, None);
+                }
+            }
+            Expr::Field { base, name: member, .. } => {
+                let Expr::Ident { name: pkg, span: pkg_span } = unwrap_parens(base) else { return };
+                if self.is_shadowed_ident_at(pkg, pkg_span.start) { return; }
+                let m = member.to_ascii_lowercase();
+                let skip = match (pkg.as_str(), m.as_str()) {
+                    ("fmt", "print" | "println" | "sprint" | "sprintln" | "eprint" | "eprintln") => Some(0),
+                    ("fmt", "printf" | "sprintf" | "eprintf" | "errorf" | "fprint" | "fprintln" | "append" | "appendln") => Some(1),
+                    ("fmt", "fprintf" | "appendf") => Some(2),
+                    ("log", "print" | "println" | "fatal" | "fatalln" | "panic" | "panicln") => Some(0),
+                    ("log", "printf" | "fatalf" | "panicf") => Some(1),
+                    _ => None,
+                };
+                if let Some(skip) = skip {
+                    let desc = format!("argument to `{}.{}`", pkg, member);
+                    for a in args.iter().skip(skip).filter(|a| !a.spread) {
+                        self.check_default_int_overflow(&desc, &a.value, None);
+                        self.check_default_float_overflow(&desc, &a.value, None);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn check_slice_conversion(&mut self, elem: &TypeExpr, arg: &Expr, span: Span) {
-        let TypeExpr::Named { name: slice_elem, .. } = elem else {
+        let resolved_elem = self.resolve_type_alias(elem);
+        let TypeExpr::Named { name: slice_elem, .. } = &resolved_elem else {
             return; // []T with a non-named element + a run-time operand
         };
-        match conv_const(arg) {
+        match self.conv_const_expr(arg) {
             Some(ConvConst::Str) => {
                 // Go allows string -> []byte / []rune (and their aliases)
                 // only; every other element type is a compile error.
@@ -701,6 +1113,55 @@ impl<'a> Checker<'a> {
             }
             None => {} // run-time operand: element-type errors are Go's
         }
+    }
+
+    fn conv_const_expr(&self, e: &Expr) -> Option<ConvConst> {
+        if let Some(c) = conv_const(e) {
+            return Some(c);
+        }
+        if self.expr_has_local_or_binder(e) {
+            return None;
+        }
+        if self.is_float_const_expr_at(e, None, 0) {
+            return self.const_float_fold(e, None).map(ConvConst::Float);
+        }
+        match self.const_int_fold_expr(e, None) {
+            ConstFold::Val(v) => Some(ConvConst::Int(v)),
+            ConstFold::TooBig => {
+                let f = self.const_float_fold(e, None).unwrap_or(f64::INFINITY);
+                Some(ConvConst::Huge { f, lt_512: false })
+            }
+            ConstFold::NotConst => None,
+        }
+    }
+
+    fn check_conv_against_target_alias(
+        &mut self,
+        spelled_target: &str,
+        resolved_target: &str,
+        c: &ConvConst,
+        arg: &Expr,
+        span: Span,
+    ) {
+        if let (Some((lo, hi)), ConvConst::Int(v)) = (fixed_width_int_range(resolved_target), c) {
+            if *v < lo || *v > hi {
+                let emitted_folds = fixed_width_int_range(spelled_target).is_some()
+                    && !is_64bit_int_target(spelled_target)
+                    && conv_const(arg).is_some();
+                if is_64bit_int_target(resolved_target) || !emitted_folds {
+                    self.emit_const_conversion_error(
+                        span,
+                        format!("constant `{}` overflows `{}` in a conversion (HYB-E6006)", arg.render(), spelled_target),
+                        vec![
+                            format!("why: Go rejects `{}({})` at compile time (`constant ... overflows {}`), so an accepted Hybrid program would emit unbuildable Go (issue #228)", spelled_target, arg.render(), spelled_target),
+                            format!("fix: use a constant in [{}, {}], or widen the target type", lo, hi),
+                        ],
+                    );
+                    return;
+                }
+            }
+        }
+        self.check_conv_against_target(resolved_target, c, arg, span);
     }
 
     fn check_conv_against_target(&mut self, target: &str, c: &ConvConst, arg: &Expr, span: Span) {
@@ -995,7 +1456,13 @@ fn conv_const(e: &Expr) -> Option<ConvConst> {
             ConvConst::Huge { f, lt_512 } => Some(ConvConst::Huge { f: -f, lt_512 }),
             other => Some(other),
         },
-        _ => None,
+        _ => {
+            if let Some(v) = crate::arith::const_eval_int(e) {
+                Some(ConvConst::Int(v))
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -1487,8 +1954,8 @@ pub(crate) fn const_float_fold_with(
     }
 }
 
-/// Returns true if `e` is an untyped float constant expression (contains at least one float literal or float const).
-fn is_float_const_expr(
+
+fn is_char_const_expr(
     e: &Expr,
     consts: &HashMap<String, &Expr>,
     depth: u32,
@@ -1496,7 +1963,7 @@ fn is_float_const_expr(
 ) -> bool {
     match unwrap_parens(e) {
         Expr::Lit {
-            kind: LitKind::Float(_),
+            kind: LitKind::Char(_),
             ..
         } => true,
         Expr::Lit { .. } => false,
@@ -1508,15 +1975,20 @@ fn is_float_const_expr(
             }
             if depth < 16 {
                 if let Some(v) = consts.get(name) {
-                    return is_float_const_expr(v, consts, depth + 1, None);
+                    return is_char_const_expr(v, consts, depth + 1, None);
                 }
             }
             false
         }
-        Expr::Unary { operand, .. } => is_float_const_expr(operand, consts, depth + 1, st),
+        Expr::Unary { operand, .. } => is_char_const_expr(operand, consts, depth + 1, st),
+        Expr::Binary {
+            op: BinOp::Shl | BinOp::Shr,
+            lhs,
+            ..
+        } => is_char_const_expr(lhs, consts, depth + 1, st),
         Expr::Binary { lhs, rhs, .. } => {
-            is_float_const_expr(lhs, consts, depth + 1, st)
-                || is_float_const_expr(rhs, consts, depth + 1, st)
+            is_char_const_expr(lhs, consts, depth + 1, st)
+                || is_char_const_expr(rhs, consts, depth + 1, st)
         }
         _ => false,
     }
@@ -1635,6 +2107,70 @@ mod map_lit_duplicate_tests {
         for src in cases {
             let r = check(src);
             assert_eq!(r.verdict, Verdict::Accept, "expected accept for:\n{src}");
+        }
+    }
+
+    #[test]
+    fn map_lit_duplicate_wrapped_int_word_and_float_conversion_keys_rejected() {
+        let cases = [
+            "import \"fmt\"\nfn main() {\n    m := map[u8]int{u8(300): 1, 44: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[i8]int{i8(200): 1, -56: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[u8]int{u8(-1): 1, 255: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[usize]int{usize(1): 1, 1: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[isize]int{isize(1): 1, 1: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[f64]int{f64(1.5): 1, 1.5: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[f64]int{f64(1): 1, 1.0: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[f32]int{f32(1.5): 1, float32(1.5): 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[f64]int{0.0: 1, -0.0: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\nfn main() {\n    m := map[int]int{len(\"ab\"): 1, 2: 2}\n    fmt.println(m)\n}\n",
+            "import \"fmt\"\ntype key_t = int\nfn main() {\n    m := map[key_t]int{key_t(1): 1, 1: 2}\n    fmt.println(m)\n}\n",
+        ];
+        for src in cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                r.diagnostics
+                    .iter()
+                    .any(|d| d.code == "HYB-E1002" && d.message.contains("duplicate key")),
+                "expected HYB-E1002 duplicate key diagnostic, got {:?} for:\n{src}",
+                r.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn inferred_int_local_rejects_overflowing_constant_operands_3678() {
+        let reject_cases = [
+            "import \"fmt\"\nfn main() {\n    x := 1\n    x += 9223372036854775808\n    fmt.println(x)\n}\n",
+            "import \"fmt\"\nfn main() {\n    var x = 1\n    x ^= 1 << 70\n    fmt.println(x)\n}\n",
+            "import \"fmt\"\nfn main() {\n    x := 1\n    x = 18446744073709551616 % x\n    fmt.println(x)\n}\n",
+            "import \"fmt\"\nfn main() {\n    let x = 1\n    fmt.println(x == 9223372036854775808)\n}\n",
+            "import \"fmt\"\nfn main() {\n    x := 1\n    fmt.println(x + 9223372036854775808)\n}\n",
+            "import \"fmt\"\nfn main() {\n    f := fn() {\n        x := 1\n        x += 9223372036854775808\n        fmt.println(x)\n    }\n    f()\n}\n",
+        ];
+        for src in reject_cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                r.diagnostics.iter().any(|d| d.code == "HYB-E6002"),
+                "expected HYB-E6002 diagnostic, got {:?} for:\n{src}",
+                r.diagnostics
+            );
+        }
+
+        let accept_cases = [
+            "import \"fmt\"\nfn main() {\n    x := 1\n    x += 9223372036854775807\n    fmt.println(x == 42)\n}\n",
+            "import \"fmt\"\nfn main() {\n    const c = 1\n    var u u64 = c + 9223372036854775808\n    fmt.println(u)\n}\n",
+            "import \"fmt\"\nfn main() {\n    x := 1 << ('b' - 'a')\n    x += 1 << 40\n    fmt.println(x)\n}\n",
+        ];
+        for src in accept_cases {
+            let r = check(src);
+            assert_eq!(
+                r.verdict,
+                Verdict::Accept,
+                "expected accept for:\n{src}\ndiagnostics: {:?}",
+                r.diagnostics
+            );
         }
     }
 }
