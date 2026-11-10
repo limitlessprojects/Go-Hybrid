@@ -145,7 +145,7 @@ fn repro_07_map_store_direction_mismatch_rejects_e3012() {
     let r = check(
         "fn main() {\n\
            var m = map[string]<-chan int{}\n\
-           var ch = make(chan<- int, 1)\n\
+           var ch chan<- int = make(chan int, 1)\n\
            m[\"a\"] = ch\n\
            var v = <-m[\"a\"]\n\
            _ = v\n\

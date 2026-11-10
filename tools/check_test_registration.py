@@ -18,7 +18,11 @@ reference it, and fails closed on any file no reference reaches:
   tests/**/test_*.py  run directly, e.g. `python3 tests/test_install_runtime.py`
                       -> the path must be the invoked Python entry point
 
-Only explicit single-line Python invocations count. Comments, echoed text,
+Only explicit single-line Python invocations count. Workflow invocations
+must run from the repository root, using step > job > workflow cwd defaults.
+Block mappings and literal run blocks are supported; unknown cwd expressions
+and unsupported mapping forms cannot establish root execution. Raw command
+snippets retain their repository-root convention. Comments, echoed text,
 step names, interpreter flags, chained later commands, and paths passed as
 arguments to other scripts register nothing. This is not a general
 shell/YAML interpreter.
@@ -58,9 +62,120 @@ def shell_words(line):
     return list(lexer)
 
 
+def yaml_fields(lines, indent=None):
+    """Read direct block-mapping fields, keeping scalar bodies opaque.
+
+    This is deliberately a bounded reader, not a YAML loader. In particular,
+    a run block's shell text is never searched for working-directory keys.
+    """
+    entries = []
+    for index, line in enumerate(lines):
+        match = re.match(r'''(?:"([^"]+)"|'([^']+)'|([\w-]+|<<))\s*:\s*(.*)$''',
+                         line.strip())
+        if match:
+            key = next(value for value in match.groups()[:3] if value is not None)
+            entries.append((len(line) - len(line.lstrip()), index, key, match[4]))
+    if indent is None:
+        indent = min((entry[0] for entry in entries), default=0)
+    entries = [entry for entry in entries if entry[0] == indent]
+    fields = {}
+    for position, (_, index, key, value) in enumerate(entries):
+        end = entries[position + 1][1] if position + 1 < len(entries) else len(lines)
+        fields[key] = (value, lines[index + 1:end])
+    return fields
+
+
+def block_fields(node):
+    """An inline/aliased/flow mapping is outside this reader's contract."""
+    value, body = node
+    return yaml_fields(body) if not value.split("#", 1)[0].strip() else None
+
+
+def root_working_directory(value):
+    quoted = re.fullmatch(r'''(['"])(.*?)\1(?:\s+#.*)?''', value.strip())
+    scalar = (quoted[2] if quoted else re.split(r"\s+#", value.strip(), 1)[0])
+    return scalar in (".", "./", "${{ github.workspace }}")
+
+
+def default_root_cwd(fields, inherited):
+    """Resolve defaults.run independently of mapping key order."""
+    if "<<" in fields:
+        return False  # A merge may provide unknown cwd metadata.
+    defaults = fields.get("defaults")
+    if defaults is None:
+        return inherited
+    defaults = block_fields(defaults)
+    if defaults is None or "<<" in defaults:
+        return False
+    run = defaults.get("run")
+    if run is None:
+        return inherited
+    run = block_fields(run)
+    if run is None or "<<" in run:
+        return False
+    cwd = run.get("working-directory")
+    return inherited if cwd is None else root_working_directory(cwd[0])
+
+
+def workflow_run_lines(workflow_text):
+    """Yield shell lines only from steps whose effective cwd is root.
+
+    Literal block syntax avoids treating folded shell commands as independent
+    lines. Flow mappings, aliases and unknown directories fail closed. Existing
+    callers also pass raw command snippets rather than workflows; keep those
+    as root snippets so the command parser remains independently usable.
+    """
+    lines = workflow_text.splitlines()
+    workflow = yaml_fields(lines, indent=0)
+    if "jobs" not in workflow:
+        yield from lines
+        return
+    jobs = block_fields(workflow["jobs"])
+    if jobs is None:
+        return
+    workflow_root = default_root_cwd(workflow, True)
+    for job in jobs.values():
+        fields = block_fields(job)
+        if fields is None:
+            continue
+        job_root = default_root_cwd(fields, workflow_root)
+        steps = fields.get("steps")
+        if steps is None or steps[0].split("#", 1)[0].strip():
+            continue
+        body = steps[1]
+        starts = [(len(line) - len(line.lstrip()), index)
+                  for index, line in enumerate(body)
+                  if re.match(r"-(?:\s|$)", line.lstrip())]
+        if not starts:
+            continue
+        sequence_indent = min(indent for indent, _ in starts)
+        starts = [index for indent, index in starts if indent == sequence_indent]
+        for position, start in enumerate(starts):
+            end = starts[position + 1] if position + 1 < len(starts) else len(body)
+            step_lines = body[start:end].copy()
+            # A sequence item is also the first key of its mapping. Normalize
+            # that key's indentation, including indentless YAML sequences.
+            step_lines[0] = " " * (sequence_indent + 2) + step_lines[0].lstrip()[1:].lstrip()
+            step = yaml_fields(step_lines)
+            cwd = step.get("working-directory")
+            is_root = job_root if cwd is None else root_working_directory(cwd[0])
+            run = step.get("run")
+            if not is_root or run is None or "<<" in step:
+                continue
+            value, commands = run
+            scalar = re.split(r"\s+#", value.strip(), 1)[0]
+            if re.fullmatch(r"\|(?:[1-9][+-]?|[+-][1-9]?)?", scalar):
+                yield from commands
+            elif scalar.startswith(">"):
+                continue
+            elif not any(line.strip() and not line.lstrip().startswith("#")
+                         for line in commands):
+                yield "run: " + value
+
+
 def python_commands(workflow_text):
     """Yield arguments of explicit, single-line Python invocations."""
-    for line in workflow_text.splitlines():
+    for line in workflow_run_lines(workflow_text):
         line = line.strip()
         inline_run = re.match(r"(?:-\s+)?run:\s*(.*)", line)
         if inline_run:
@@ -77,6 +192,15 @@ def python_commands(workflow_text):
             # -p flag must never become another unittest discovery pattern.
             end = next((i for i, token in enumerate(tokens)
                         if token and all(c in ";&|<>()" for c in token)), len(tokens))
+            # Issue #2880: an OR-list (`||`), pipeline (`|`), or background
+            # operator (`&`) masks a non-zero exit status under `set -e`
+            # (without `pipefail`), so a failing test suite would not fail CI.
+            if any(
+                token and all(c in ";&|<>()" for c in token)
+                and ("|" in token or "&" in token.replace("&&", ""))
+                for token in tokens[end:]
+            ):
+                continue
             arguments = tokens[1:end]
             is_script_operand = False
             while arguments:
