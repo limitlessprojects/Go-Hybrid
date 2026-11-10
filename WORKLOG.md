@@ -897,3 +897,17 @@
 **State**: main `235d6fb5` == origin (pushed & asserted). Tests 3267, suites 506 (result-line method), corpus 139/139, differential FULL.
 
 **Scouted next**: #4122 (phatloi0010 sibling), #4240 (chunked triage mode), dextermos follow-up (tar table completion), old-backlog rebase wave #584-#791 (band screening). Pending authors: #4199, #4206, #4097, #4217, #4219, #743 (Anekenonso re-scope awaited). Triage scan/approve STILL pending rerun (third loss).
+
+## Session 179 — 2026-11-10 11:10 (makes up the 09:10 tick, aborted by sandbox-start failure)
+
+**Landed: #4122** (phatloi0010 / hy-syntax: guard return, break/continue, postfix [/{ against cross-newline fusion, fixes #3159) — merge `495aa1b8`, reply 6757975618.
+- Base == HEAD (`de0d36e0`), single commit; re-queue of #3160 (author-closed, supersession clean). Head re-pushed by author since S178 scout (0292dd32 → 08771fce).
+- Pattern completion, not invention: same_line_as_prev pre-exists with 8 call sites; PR adds the 4 remaining sites (return values stop at newline; break/continue `loop` label needs same-line + next != `{`; postfix `{`/`[` attachment needs same-line).
+- Verdict-flip sweep passed: hy-syntax lib 116/0, hy-check lib 184/0 (with additions); corpus 139/139 zero flips — no corpus program relies on next-line fusion. De-fused shapes stay fail-closed; multi-line bracket continuations unaffected.
+- Gates: battery 3271/0 (+4 tests EXACT: 3 parser inline + 1 loans inline, 0 new suites; baseline 506/3267), corpus 139/139 (1.4%), differential FULL 47/47+92/92. Hygiene clean. #3159 no milestone/labels → fixes-safe.
+
+**Ops**: sandbox-start failure killed the 09:10 tick entirely (second tool-wall incident; no state left). This tick reinstalled rust+go from cold; disk peaked 93% post-differential, trimmed after landing; worktree /tmp/wt4122 removed post-merge.
+
+**State**: main `495aa1b8` == origin (pushed & asserted). Tests 3271, suites 506 (result-line method), corpus 139/139, differential FULL.
+
+**Scouted next**: #4240 (chunked triage mode), tar-table completion follow-up (dextermos), old-backlog rebase wave #584-#791 (band screening). Pending authors: #4199, #4206, #4097, #4217, #4219, #743 (Anekenonso re-scope). phatloi0010 band: #4123 + #4122 both landed — queue drained for this author.
