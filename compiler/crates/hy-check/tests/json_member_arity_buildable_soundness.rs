@@ -59,7 +59,7 @@ fn accepts(src: &str) {
 fn json_one_arg_members_accept_exact_arity() {
     accepts("import \"encoding/json\"\nfn main() {\n    b, err := json.marshal(\"hello\")\n    _ = b\n    _ = err\n}\n");
     accepts("import \"json\"\nfn main() {\n    b, err := json.marshal(42)\n    _ = b\n    _ = err\n}\n");
-    accepts("import \"encoding/json\"\nfn main() {\n    ok := json.valid([]byte(\"{}\"))\n    _ = ok\n}\n");
+    accepts("import \"encoding/json\"\nfn main() {\n    ok := json.valid([]byte(\"[1, 2]\"))\n    _ = ok\n}\n");
     accepts("import \"encoding/json\"\nfn main() {\n    d := json.new_decoder(nil)\n    _ = d\n}\n");
     accepts("import \"encoding/json\"\nfn main() {\n    e := json.new_encoder(nil)\n    _ = e\n}\n");
 }
@@ -67,14 +67,14 @@ fn json_one_arg_members_accept_exact_arity() {
 #[test]
 fn json_two_arg_members_accept_exact_arity() {
     accepts("import \"encoding/json\"\nfn main() {\n    var x string\n    err := json.unmarshal([]byte(\"\\\"hi\\\"\"), &x)\n    _ = err\n}\n");
-    accepts("import \"encoding/json\"\nfn main() {\n    err := json.compact(nil, []byte(\"  {}  \"))\n    _ = err\n}\n");
+    accepts("import \"encoding/json\"\nfn main() {\n    err := json.compact(nil, []byte(\"  [1, 2]  \"))\n    _ = err\n}\n");
     accepts("import \"encoding/json\"\nfn main() {\n    json.html_escape(nil, []byte(\"<tag>\"))\n}\n");
 }
 
 #[test]
 fn json_three_and_four_arg_members_accept_exact_arity() {
     accepts("import \"encoding/json\"\nfn main() {\n    b, err := json.marshal_indent(42, \"\", \"  \")\n    _ = b\n    _ = err\n}\n");
-    accepts("import \"encoding/json\"\nfn main() {\n    err := json.indent(nil, []byte(\"{}\"), \"\", \"  \")\n    _ = err\n}\n");
+    accepts("import \"encoding/json\"\nfn main() {\n    err := json.indent(nil, []byte(\"[1, 2]\"), \"\", \"  \")\n    _ = err\n}\n");
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn json_one_arg_members_reject_wrong_arity() {
     rejects_e1002("import \"encoding/json\"\nfn main() {\n    _ = json.marshal()\n}\n");
     rejects_e1002("import \"encoding/json\"\nfn main() {\n    _ = json.marshal(1, 2)\n}\n");
     rejects_e1002("import \"encoding/json\"\nfn main() {\n    _ = json.valid()\n}\n");
-    rejects_e1002("import \"encoding/json\"\nfn main() {\n    _ = json.valid([]byte(\"{}\"), 1)\n}\n");
+    rejects_e1002("import \"encoding/json\"\nfn main() {\n    _ = json.valid([]byte(\"[1, 2]\"), 1)\n}\n");
     rejects_e1002("import \"encoding/json\"\nfn main() {\n    _ = json.new_decoder()\n}\n");
     rejects_e1002("import \"encoding/json\"\nfn main() {\n    _ = json.new_encoder()\n}\n");
 }
@@ -94,7 +94,7 @@ fn json_multi_arg_members_reject_wrong_arity() {
     rejects_e1002("import \"encoding/json\"\nfn main() {\n    _ = json.compact(nil)\n}\n");
     rejects_e1002("import \"encoding/json\"\nfn main() {\n    _ = json.html_escape(nil)\n}\n");
     rejects_e1002("import \"encoding/json\"\nfn main() {\n    _ = json.marshal_indent(42, \"\")\n}\n");
-    rejects_e1002("import \"encoding/json\"\nfn main() {\n    _ = json.indent(nil, []byte(\"{}\"))\n}\n");
+    rejects_e1002("import \"encoding/json\"\nfn main() {\n    _ = json.indent(nil, []byte(\"[1, 2]\"))\n}\n");
 }
 
 #[test]
