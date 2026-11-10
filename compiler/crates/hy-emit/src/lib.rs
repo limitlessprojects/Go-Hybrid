@@ -379,6 +379,15 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "ipv6" => "IPv6",
         "json" => "JSON",
         "lhs" => "LHS",
+        // log flag constants are single snake tokens in M4 spelling but Go
+        // spells them with internal caps (`log.lstdflags` → `LstdFlags`,
+        // `log.lutc` → `LUTC`); naive camel-casing yields Lstdflags/Lutc,
+        // which do not exist in Go (#4229 review fixups).
+        "lstdflags" => "LstdFlags",
+        "lutc" => "LUTC",
+        // General Go initialism the naive mapping misses (`time.utc` →
+        // `time.UTC`, `log.l_utc` → `LUTC`); Go rejects `Utc` spellings.
+        "utc" => "UTC",
         "ok" => "OK",
         "qps" => "QPS",
         "ram" => "RAM",
@@ -500,6 +509,9 @@ pub(crate) fn is_package_root(name: &str) -> bool {
             | "filepath"
             | "path"
             | "hex"
+            | "log"
+            | "gzip"
+            | "tar"
             | "sha3"
             | "serde_json"
             | "regex"
