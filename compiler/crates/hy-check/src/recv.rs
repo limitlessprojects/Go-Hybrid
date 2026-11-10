@@ -39,7 +39,9 @@ impl<'a> Checker<'a> {
                     self.check_expr_recv_operands(st, v);
                 }
             }
-            Stmt::Assign { targets, values, .. } => {
+            Stmt::Assign {
+                targets, values, ..
+            } => {
                 for t in targets {
                     self.check_place_recv_operands(st, t);
                 }
@@ -248,7 +250,12 @@ impl<'a> Checker<'a> {
                     self.check_expr_recv_operands(st, it);
                 }
             }
-            Expr::MapLit { key, value, entries, .. } => {
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } => {
                 self.check_type_recv_operands(st, key);
                 self.check_type_recv_operands(st, value);
                 for (k, v) in entries {
@@ -263,7 +270,9 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::FnLit { params, results, .. } => {
+            Expr::FnLit {
+                params, results, ..
+            } => {
                 for p in params {
                     self.check_type_recv_operands(st, &p.ty);
                 }
@@ -285,7 +294,11 @@ impl<'a> Checker<'a> {
     /// E3008 direction walk does not run), and the send-only misuse passed
     /// with 0 diagnostics — the "known remaining sibling" NOTE in
     /// `tests/checker-corpus` / `recv_composite_channel_operands.rs`.
-    pub(crate) fn composite_type_expr(&self, st: &FnState, expr: &Expr) -> Option<hy_syntax::TypeExpr> {
+    pub(crate) fn composite_type_expr(
+        &self,
+        st: &FnState,
+        expr: &Expr,
+    ) -> Option<hy_syntax::TypeExpr> {
         self.recv_chan_type_expr(st, expr)
     }
 
@@ -295,13 +308,20 @@ impl<'a> Checker<'a> {
                 let immutable = l.kind == hy_syntax::LocalKind::Const;
                 let is_let = l.kind == hy_syntax::LocalKind::Let;
                 if l.values.is_empty() {
-                    let shape = l
-                        .ty
-                        .as_ref()
-                        .map(|t| self.shape_of_type(t))
-                        .unwrap_or(TypeShape::Unknown);
+                    let shape =
+                        l.ty.as_ref()
+                            .map(|t| self.shape_of_type(t))
+                            .unwrap_or(TypeShape::Unknown);
                     for name in &l.names {
-                        self.define_binding(tmp, name, shape.clone(), l.ty.clone(), immutable, false, is_let);
+                        self.define_binding(
+                            tmp,
+                            name,
+                            shape.clone(),
+                            l.ty.clone(),
+                            immutable,
+                            false,
+                            is_let,
+                        );
                     }
                 } else if l.names.len() == l.values.len() {
                     // Parallel multi-name init (PR-665): every RHS is evaluated
@@ -311,11 +331,10 @@ impl<'a> Checker<'a> {
                         .iter()
                         .zip(l.values.iter())
                         .map(|(name, val)| {
-                            let ty = l
-                                .ty
-                                .clone()
-                                .or_else(|| self.ty_of_expr(st, val))
-                                .or_else(|| self.composite_type_expr(st, val));
+                            let ty =
+                                l.ty.clone()
+                                    .or_else(|| self.ty_of_expr(st, val))
+                                    .or_else(|| self.composite_type_expr(st, val));
                             let inferred = self.shape_of_expr(st, val);
                             let shape = match (&ty, inferred) {
                                 (Some(t), TypeShape::Unknown) => self.shape_of_type(t),
@@ -527,6 +546,7 @@ impl<'a> Checker<'a> {
             other => other,
         };
         match shape {
+            TypeShape::OwnHandle(ref h) if h == "hy.recv_cap" => true,
             TypeShape::Chan(_) => {
                 if let Some(ty) = proj_ty {
                     let resolved = self.resolve_type_alias(&ty);
