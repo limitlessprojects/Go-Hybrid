@@ -187,11 +187,21 @@ def python_commands(workflow_text):
             # Issue #2880: an OR-list (`||`), pipeline (`|`), or background
             # operator (`&`) masks a non-zero exit status under `set -e`
             # (without `pipefail`), so a failing test suite would not fail CI.
-            if any(
-                token and all(c in ";&|<>()" for c in token)
-                and ("|" in token or "&" in token.replace("&&", ""))
-                for token in tokens[end:]
-            ):
+            masks_failure = False
+            for index in range(end, len(tokens)):
+                token = tokens[index]
+                # shlex splits `2>&1` into `2`, `>&`, `1`. Duplicating
+                # (or closing) an output descriptor does not mask the
+                # Python exit status. Keep scanning: `2>&1 || true`
+                # and `2>&1 | cat` still must not register the suite.
+                if (token == ">&" and index + 1 < len(tokens)
+                        and re.fullmatch(r"[0-9]+|-", tokens[index + 1])):
+                    continue
+                if (token and all(c in ";&|<>()" for c in token)
+                        and ("|" in token or "&" in token.replace("&&", ""))):
+                    masks_failure = True
+                    break
+            if masks_failure:
                 continue
             arguments = tokens[1:end]
             while arguments:
