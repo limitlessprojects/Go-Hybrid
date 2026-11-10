@@ -7231,10 +7231,14 @@ impl<'a> Collector<'a> {
     /// expression, or an element/field of such a value. Variables, slice
     /// elements and anything reached through a pointer are addressable.
     fn array_operand_unaddressable(&self, e: &Expr) -> bool {
-        match unwrap_parens(e) {
-            Expr::SliceLit { .. } | Expr::Call { .. } => true,
+        match crate::model::unwrap_parens_and_move(e) {
+            Expr::SliceLit { .. }
+            | Expr::StructLit { .. }
+            | Expr::Call { .. }
+            | Expr::Receive { .. } => true,
             Expr::Index { base, .. } => match self.kind_of_expr(base) {
                 OpKind::Map(_, _) => true,
+                OpKind::Pointer(inner) if matches!(*inner, OpKind::Map(_, _)) => true,
                 OpKind::Array(_) => self.array_operand_unaddressable(base),
                 _ => false,
             },
