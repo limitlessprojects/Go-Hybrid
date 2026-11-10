@@ -4624,6 +4624,79 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// `fmt` print/scan/append-family members are variadic over `...any`.
+    /// Go accepts a `...` spread on them only as the final argument, only
+    /// when the leading fixed parameters are supplied individually and
+    /// nothing else follows them, and only when the spread operand is
+    /// assignable to `[]any` (a `[]string` or `[]int` is not). Any other
+    /// shape passed `hyb check` and failed `go build` (Row 13 BUILDABLE,
+    /// HYB-E1002).
+    fn check_fmt_variadic_spread(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if !args.iter().any(|a| a.spread) {
+            return;
+        }
+        // Number of fixed parameters before the `...any` tail, keyed by the
+        // Hybrid member name (eprint* lower to `Fprint*(os.Stderr, ...)`, so
+        // the user supplies the same fixed arguments as print*).
+        let fixed: usize = match member {
+            "print" | "println" | "sprint" | "sprintln" | "eprint" | "eprintln" | "scan"
+            | "scanln" => 0,
+            "printf" | "sprintf" | "eprintf" | "errorf" | "fprint" | "fprintln" | "scanf"
+            | "sscan" | "sscanln" | "fscan" | "fscanln" | "append" | "appendln" => 1,
+            "fprintf" | "sscanf" | "fscanf" | "appendf" => 2,
+            _ => return,
+        };
+        let last = args.len() - 1;
+        if args[..last].iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`...` (variadic spread) may only be used on the final argument of `fmt.{member}` (HYB-E1002)"
+                ),
+                &format!("move the spread slice to the last argument of `fmt.{member}`"),
+            );
+            return;
+        }
+        if last != fixed {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`fmt.{member}` with a `...` spread takes exactly {fixed} leading argument{} before the spread slice, got {last} (HYB-E1002)",
+                    if fixed == 1 { "" } else { "s" }
+                ),
+                &format!(
+                    "individual values cannot be mixed with a spread slice; append them to the `[]any` slice before calling `fmt.{member}`"
+                ),
+            );
+            return;
+        }
+        let spread = &args[last].value;
+        let elem_ty = self.slice_element_type_name(spread);
+        let bad_label = match self.kind_of_expr(spread) {
+            OpKind::Unknown => None,
+            OpKind::Slice(elem) => match elem_ty.as_deref() {
+                Some("any") | Some("interface{}") => None,
+                Some(t) => Some(format!("[]{t}")),
+                None => match *elem {
+                    OpKind::Unknown | OpKind::Interface => None,
+                    k => Some(format!("[]{}", k.label())),
+                },
+            },
+            k => Some(k.label().to_string()),
+        };
+        if let Some(label) = bad_label {
+            self.emit_e1002(
+                spread.span(),
+                format!(
+                    "cannot use `{}` (type `{}`) as `[]any` value in spread argument to `fmt.{member}` (HYB-E1002)",
+                    spread.render(),
+                    label
+                ),
+                &format!("a spread argument to `fmt.{member}` must be a `[]any` slice; copy the elements into a `[]any` first"),
+            );
+        }
+    }
+
     fn check_sync_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(
             member,
@@ -8334,6 +8407,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
+                        self.check_fmt_variadic_spread(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
