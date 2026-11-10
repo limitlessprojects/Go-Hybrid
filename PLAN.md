@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor research — #1755 contract falsifiers (2026-11-10)
+
+- Independent, preregistered native ARM64/Go 1.26.9 audit: external assembly rejects `<ABIInternal>`; a verified ABI0 control retains a wrapper; three nested 112-byte NOSPLIT frames exceed a 192-byte path bound despite each being below 128 bytes. Literal equal right-shift permission children also fail full-mask reunion. Raw observations and limits are in [the spike report](spikes/w1755-contract-falsifiers/RESULTS.md); no Rust-kernel performance, replacement-checker parity, or milestone acceptance is claimed. Hosted CI and maintainer review remain pending.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.
