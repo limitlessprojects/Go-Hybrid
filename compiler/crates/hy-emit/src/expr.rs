@@ -1189,7 +1189,11 @@ impl Emitter {
                     // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
                     // executable test-claim. The fold computes that same
                     // two's-complement truncation at emit time.
-                    if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
+                    if let Some(folded) = super::constconv::fold_constant_with(
+                        &args[0].value,
+                        name,
+                        &|n| self.is_unshadowed_builtin(n),
+                    ) {
                         return Ok(format!("{}({})", go, folded));
                     }
                     let a = self.emit_call_arg(&args[0])?;
