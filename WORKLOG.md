@@ -882,3 +882,18 @@
 **State**: main `3c6e4954` == origin (pushed & asserted). Tests 3262, corpus 139/139, differential FULL.
 
 **Scouted next**: #4123/#4122 (phatloi0010 const validation `54a9da79`), #4240 (chunked triage mode), dextermos follow-ups (tar table completion candidate), old-backlog rebase wave #584-#791 (band screening). Pending authors: #4199, #4206, #4097, #4217, #4219, #743 (Anekenonso re-scope awaited).
+
+## Session 178 — 2026-11-10 08:10
+
+**Landed: #4123** (phatloi0010 / typed top-level const validation + const conversions in consts/array lengths, fixes #3188) — merge `235d6fb5`, reply 6755120584.
+- Base == HEAD (`b2393795`), single commit, zero behind; re-queue of #3189 (already closed by author 2026-11-08, supersession clean).
+- Scope: buildable.rs check_const_decl (kinds_conflict / int_float_conflict / scalar_mismatch / sized_array_names_differ → E1002, bracketed array-literal shorthand preserved); lib.rs + emit_guard.rs route const initializers and array-length exprs through check_expr_type_conversions (→ E6006); narrow `[int8(x)]int` bypass (single ident arg, known const value) with range check still applying.
+- Premise live by inspection: main's Decl::Const arm ran only ty_opt+expr — `const a int = "hello"` accepted pre-PR.
+- **SPEC X4 archaeology (decisive, #743-lesson applied correctly this time)**: controls `byte(300)` const/array-len looked Go-invalid (go1.26.9 oracle: `constant 300 overflows byte` in all three positions) — but const_conversion.rs's pre-registered sub64_integer_overflow_folds_and_stays_accepted documents hy folding semantics (SPEC X4 / line 1991: `u8(300) == 44`). Corpus is the spec: standing verdict, no amendment needed, no flips (const_conversion 13/13 unchanged). Wide-type overflow (int64 1e20, float32 1e40) still rejects — suite internally consistent.
+- Gates: battery 3267/0 (+1 suite, +5 tests EXACT vs 505/3262 — counting method held), corpus 139/139 (1.4%), differential FULL 47/47+92/92. Hygiene clean. #3188 no milestone/labels → fixes-safe.
+
+**Ops**: cold rootfs (rust+go reinstalled); disk peaked 93% after differential — trimmed post-landing; worktree /tmp/wt4123 used for gates, removed after merge.
+
+**State**: main `235d6fb5` == origin (pushed & asserted). Tests 3267, suites 506 (result-line method), corpus 139/139, differential FULL.
+
+**Scouted next**: #4122 (phatloi0010 sibling), #4240 (chunked triage mode), dextermos follow-up (tar table completion), old-backlog rebase wave #584-#791 (band screening). Pending authors: #4199, #4206, #4097, #4217, #4219, #743 (Anekenonso re-scope awaited). Triage scan/approve STILL pending rerun (third loss).
