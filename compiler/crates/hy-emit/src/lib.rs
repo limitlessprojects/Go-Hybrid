@@ -515,6 +515,7 @@ pub(crate) fn is_package_root(name: &str) -> bool {
             | "sha3"
             | "serde_json"
             | "regex"
+            | "adler32"
     )
 }
 
