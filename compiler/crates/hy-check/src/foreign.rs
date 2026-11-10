@@ -488,6 +488,30 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const IO_LIMITED_READER: &[&str] = &["read"];
     /// `io.OffsetWriter`.
     const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
+    /// `io` standard library interfaces (`Reader`, `Writer`, `Closer`, `Seeker`,
+    /// composite read/write/seek/close interfaces, and byte/rune/string/offset I/O interfaces).
+    const IO_READER: &[&str] = &["read"];
+    const IO_WRITER: &[&str] = &["write"];
+    const IO_CLOSER: &[&str] = &["close"];
+    const IO_SEEKER: &[&str] = &["seek"];
+    const IO_READ_WRITER: &[&str] = &["read", "write"];
+    const IO_READ_CLOSER: &[&str] = &["close", "read"];
+    const IO_WRITE_CLOSER: &[&str] = &["close", "write"];
+    const IO_READ_WRITE_CLOSER: &[&str] = &["close", "read", "write"];
+    const IO_READ_SEEKER: &[&str] = &["read", "seek"];
+    const IO_READ_SEEK_CLOSER: &[&str] = &["close", "read", "seek"];
+    const IO_WRITE_SEEKER: &[&str] = &["seek", "write"];
+    const IO_READ_WRITE_SEEKER: &[&str] = &["read", "seek", "write"];
+    const IO_READER_FROM: &[&str] = &["read_from"];
+    const IO_WRITER_TO: &[&str] = &["write_to"];
+    const IO_READER_AT: &[&str] = &["read_at"];
+    const IO_WRITER_AT: &[&str] = &["write_at"];
+    const IO_BYTE_READER: &[&str] = &["read_byte"];
+    const IO_BYTE_SCANNER: &[&str] = &["read_byte", "unread_byte"];
+    const IO_BYTE_WRITER: &[&str] = &["write_byte"];
+    const IO_RUNE_READER: &[&str] = &["read_rune"];
+    const IO_RUNE_SCANNER: &[&str] = &["read_rune", "unread_rune"];
+    const IO_STRING_WRITER: &[&str] = &["write_string"];
     const HTTP_CLIENT: &[&str] = &[
         "close_idle_connections",
         "do",
@@ -661,6 +685,34 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
         "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
         "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
+        "io.reader" | "io.Reader" => Some(IO_READER),
+        "io.writer" | "io.Writer" => Some(IO_WRITER),
+        "io.closer" | "io.Closer" => Some(IO_CLOSER),
+        "io.seeker" | "io.Seeker" => Some(IO_SEEKER),
+        "io.read_writer" | "io.readwriter" | "io.ReadWriter" => Some(IO_READ_WRITER),
+        "io.read_closer" | "io.readcloser" | "io.ReadCloser" => Some(IO_READ_CLOSER),
+        "io.write_closer" | "io.writecloser" | "io.WriteCloser" => Some(IO_WRITE_CLOSER),
+        "io.read_write_closer" | "io.readwritecloser" | "io.ReadWriteCloser" => {
+            Some(IO_READ_WRITE_CLOSER)
+        }
+        "io.read_seeker" | "io.readseeker" | "io.ReadSeeker" => Some(IO_READ_SEEKER),
+        "io.read_seek_closer" | "io.readseekcloser" | "io.ReadSeekCloser" => {
+            Some(IO_READ_SEEK_CLOSER)
+        }
+        "io.write_seeker" | "io.writeseeker" | "io.WriteSeeker" => Some(IO_WRITE_SEEKER),
+        "io.read_write_seeker" | "io.readwriteseeker" | "io.ReadWriteSeeker" => {
+            Some(IO_READ_WRITE_SEEKER)
+        }
+        "io.reader_from" | "io.readerfrom" | "io.ReaderFrom" => Some(IO_READER_FROM),
+        "io.writer_to" | "io.writerto" | "io.WriterTo" => Some(IO_WRITER_TO),
+        "io.reader_at" | "io.readerat" | "io.ReaderAt" => Some(IO_READER_AT),
+        "io.writer_at" | "io.writerat" | "io.WriterAt" => Some(IO_WRITER_AT),
+        "io.byte_reader" | "io.bytereader" | "io.ByteReader" => Some(IO_BYTE_READER),
+        "io.byte_scanner" | "io.bytescanner" | "io.ByteScanner" => Some(IO_BYTE_SCANNER),
+        "io.byte_writer" | "io.bytewriter" | "io.ByteWriter" => Some(IO_BYTE_WRITER),
+        "io.rune_reader" | "io.runereader" | "io.RuneReader" => Some(IO_RUNE_READER),
+        "io.rune_scanner" | "io.runescanner" | "io.RuneScanner" => Some(IO_RUNE_SCANNER),
+        "io.string_writer" | "io.stringwriter" | "io.StringWriter" => Some(IO_STRING_WRITER),
         "http.client" | "http.Client" => Some(HTTP_CLIENT),
         "http.request" | "http.Request" => Some(HTTP_REQUEST),
         "http.response" | "http.Response" => Some(HTTP_RESPONSE),
