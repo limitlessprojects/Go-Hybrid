@@ -4624,6 +4624,34 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_sha256_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(member, "size" | "size224" | "block_size") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `sha256.{member}`: `sha256.{member}` is a package constant, not a function (HYB-E1002)"),
+                &format!("`sha256.{member}` is a constant value, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new" | "new224" => Some(0),
+            "sum256" | "sum224" => Some(1),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`sha256.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `sha256.{member}`"),
+                );
+            }
+        }
+    }
+
     fn check_sync_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(
             member,
@@ -8331,6 +8359,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "strconv" && self.lookup_kind(pkg).is_none() {
                         self.check_strconv_package_call(name.as_str(), args, span);
+                    }
+                    if (pkg == "sha256" || pkg == "crypto/sha256") && self.lookup_kind(pkg).is_none() {
+                        self.check_sha256_package_call(name.as_str(), args, span);
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);

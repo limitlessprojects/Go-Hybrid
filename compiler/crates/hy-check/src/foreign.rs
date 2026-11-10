@@ -809,6 +809,9 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "regex"
             | "rust/flate2"
             | "flate2"
+            | "sha256"
+            | "crypto/sha256"
+            | "sha256"
     )
 }
 
@@ -913,6 +916,7 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
     let norm = normalize_go_ident_to_snake(member);
     let m = norm.as_str();
     match pkg {
+        "sha256" => matches!(m, "new" | "new224" | "sum256" | "sum224" | "size" | "size224" | "block_size" | "New" | "New224" | "Sum256" | "Sum224" | "Size" | "Size224" | "BlockSize"),
         "fmt" => matches!(
             m,
             "print"
