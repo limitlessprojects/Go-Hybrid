@@ -4624,6 +4624,34 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_sha1_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(member, "size" | "block_size") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `sha1.{member}`: `sha1.{member}` is a package constant, not a function (HYB-E1002)"),
+                &format!("`sha1.{member}` is a constant value, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new" => Some(0),
+            "sum" => Some(1),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`sha1.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `sha1.{member}`"),
+                );
+            }
+        }
+    }
+
     fn check_sync_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(
             member,
@@ -8331,6 +8359,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "strconv" && self.lookup_kind(pkg).is_none() {
                         self.check_strconv_package_call(name.as_str(), args, span);
+                    }
+                    if (pkg == "sha1" || pkg == "crypto/sha1") && self.lookup_kind(pkg).is_none() {
+                        self.check_sha1_package_call(name.as_str(), args, span);
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
