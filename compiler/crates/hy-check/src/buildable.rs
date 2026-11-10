@@ -4624,6 +4624,44 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_xml_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(member, "decoder" | "encoder" | "name" | "attr" | "start_element" | "end_element" | "char_data" | "comment" | "proc_inst" | "directive" | "syntax_error" | "tag_path_error" | "unsupported_type_error") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `xml.{member}`: `xml.{member}` is a type, not a function (HYB-E1002)"),
+                &format!("`xml.{member}` is a struct or type name, not a callable function"),
+            );
+            return;
+        }
+
+        if matches!(member, "header" | "html_auto_close" | "html_entity") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `xml.{member}`: `xml.{member}` is a package constant or variable, not a function (HYB-E1002)"),
+                &format!("`xml.{member}` is a constant or variable, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "marshal" | "new_decoder" | "new_encoder" | "new_token_decoder" | "copy_token" => Some(1),
+            "unmarshal" | "escape_text" => Some(2),
+            "marshal_indent" => Some(3),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`xml.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `xml.{member}`"),
+                );
+            }
+        }
+    }
+
     fn check_sync_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(
             member,
@@ -8331,6 +8369,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "strconv" && self.lookup_kind(pkg).is_none() {
                         self.check_strconv_package_call(name.as_str(), args, span);
+                    }
+                    if (pkg == "xml" || pkg == "encoding/xml") && self.lookup_kind(pkg).is_none() {
+                        self.check_xml_package_call(name.as_str(), args, span);
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);

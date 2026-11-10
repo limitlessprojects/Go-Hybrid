@@ -809,6 +809,9 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "regex"
             | "rust/flate2"
             | "flate2"
+            | "xml"
+            | "encoding/xml"
+            | "xml"
     )
 }
 
@@ -913,6 +916,7 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
     let norm = normalize_go_ident_to_snake(member);
     let m = norm.as_str();
     match pkg {
+        "xml" => matches!(m, "marshal" | "unmarshal" | "marshal_indent" | "new_decoder" | "new_encoder" | "new_token_decoder" | "copy_token" | "escape_text" | "header" | "decoder" | "encoder"),
         "fmt" => matches!(
             m,
             "print"
