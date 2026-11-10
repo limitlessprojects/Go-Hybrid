@@ -4588,6 +4588,38 @@ impl<'a> Collector<'a> {
         }
     }
 
+    // Full `rust/sha3` call surface — every member blessed in foreign.rs,
+    // arity-checked at hyb check time against the pinned Rust crate descriptors.
+    // Under Row 13 BUILDABLE, `digest256` requires exactly 1 argument (`data`)
+    // and `stream_checksum` requires exactly 2 arguments (`iters`, `seed`).
+    // Spread calls (`...`) on non-variadic members are strictly guarded.
+    fn check_sha3_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        let expected_arity = match member {
+            // 1 arg: digest256(data)
+            "digest256" => Some(1),
+            // 2 args: stream_checksum(iters, seed)
+            "stream_checksum" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `sha3.{member}` (HYB-E1002)"),
+                    &format!("`sha3.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`sha3.{member}` takes exactly {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `sha3.{member}`"),
+                );
+            }
+        }
+    }
+
     fn check_sort_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(member, "interface" | "int_slice" | "float64_slice" | "string_slice") {
             self.emit_e1002(
@@ -8334,6 +8366,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if (pkg == "sha3" || pkg == "rust/sha3") && self.lookup_kind(pkg).is_none() {
+                        self.check_sha3_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
