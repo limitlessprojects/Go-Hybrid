@@ -9,7 +9,7 @@
 
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelTypestate {
@@ -33,14 +33,13 @@ pub struct PipeInfo {
 pub struct ScopeState {
     pub pipes: Vec<PipeInfo>,
     pub moved_caps: HashSet<String>,
+    pub shadowed_vars: HashSet<String>,
 }
 
 pub struct ChannelLivenessChecker {
     file_path: String,
     diags: Vec<Diagnostic>,
     scope_stack: Vec<ScopeState>,
-    cap_to_pipe: HashMap<String, usize>,
-    pipes_all: Vec<PipeInfo>,
 }
 
 impl ChannelLivenessChecker {
@@ -49,8 +48,6 @@ impl ChannelLivenessChecker {
             file_path,
             diags: Vec::new(),
             scope_stack: vec![ScopeState::default()],
-            cap_to_pipe: HashMap::new(),
-            pipes_all: Vec::new(),
         }
     }
 
@@ -106,6 +103,11 @@ impl ChannelLivenessChecker {
 
     fn check_fn(&mut self, f: &FnDecl) {
         self.push_scope();
+        if let Some(scope) = self.scope_stack.last_mut() {
+            for p in &f.params {
+                scope.shadowed_vars.insert(p.name.clone());
+            }
+        }
         if let Some(body) = &f.body {
             for stmt in &body.stmts {
                 self.check_stmt(stmt);
@@ -117,32 +119,32 @@ impl ChannelLivenessChecker {
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Local(decl) => {
-                if decl.names.len() == 2 && decl.values.len() == 1 {
-                    if self.is_pipe_call(&decl.values[0]) {
-                        let tx_name = decl.names[0].clone();
-                        let rx_name = decl.names[1].clone();
-
-                        let pipe = PipeInfo {
-                            tx: tx_name.clone(),
-                            rx: rx_name.clone(),
-                            tx_state: ChannelTypestate::Fresh,
-                            rx_state: ChannelTypestate::Fresh,
-                            def_span: decl.span,
-                        };
-
-                        let p_idx = self.pipes_all.len();
-                        self.pipes_all.push(pipe.clone());
-                        self.cap_to_pipe.insert(tx_name, p_idx);
-                        self.cap_to_pipe.insert(rx_name, p_idx);
-
-                        if let Some(cur) = self.scope_stack.last_mut() {
-                            cur.pipes.push(pipe);
-                        }
-                        return;
-                    }
-                }
                 for v in &decl.values {
                     self.check_expr(v);
+                }
+                if decl.names.len() == 2 && decl.values.len() == 1 && self.is_pipe_call(&decl.values[0]) {
+                    let tx_name = decl.names[0].clone();
+                    let rx_name = decl.names[1].clone();
+
+                    let pipe = PipeInfo {
+                        tx: tx_name.clone(),
+                        rx: rx_name.clone(),
+                        tx_state: ChannelTypestate::Fresh,
+                        rx_state: ChannelTypestate::Fresh,
+                        def_span: decl.span,
+                    };
+
+                    if let Some(cur) = self.scope_stack.last_mut() {
+                        cur.shadowed_vars.remove(&tx_name);
+                        cur.shadowed_vars.remove(&rx_name);
+                        cur.pipes.push(pipe);
+                    }
+                } else {
+                    if let Some(cur) = self.scope_stack.last_mut() {
+                        for name in &decl.names {
+                            cur.shadowed_vars.insert(name.clone());
+                        }
+                    }
                 }
             }
             Stmt::Assign { values, .. } => {
@@ -177,6 +179,19 @@ impl ChannelLivenessChecker {
                     ForKind::Infinite => {}
                 }
                 self.push_scope();
+                if let Some(scope) = self.scope_stack.last_mut() {
+                    match kind {
+                        ForKind::Range { var, .. } => {
+                            scope.shadowed_vars.insert(var.clone());
+                        }
+                        ForKind::Iterate { vars, .. } => {
+                            for v in vars {
+                                scope.shadowed_vars.insert(v.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 for s in &body.stmts {
                     self.check_stmt(s);
                 }
@@ -400,6 +415,59 @@ impl ChannelLivenessChecker {
                 self.check_expr(base);
                 self.check_expr(index);
             }
+            Expr::FnLit { params, body, .. } => {
+                self.push_scope();
+                if let Some(scope) = self.scope_stack.last_mut() {
+                    for p in params {
+                        scope.shadowed_vars.insert(p.name.clone());
+                    }
+                }
+                for s in &body.stmts {
+                    self.check_stmt(s);
+                }
+                self.pop_scope();
+            }
+            Expr::AddrOf { operand, .. } => {
+                self.check_expr(operand);
+            }
+            Expr::Move { operand, .. } => {
+                self.check_expr(operand);
+            }
+            Expr::Try { operand, .. } => {
+                self.check_expr(operand);
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.check_expr(base);
+                if let Some(lo) = lo {
+                    self.check_expr(lo);
+                }
+                if let Some(hi) = hi {
+                    self.check_expr(hi);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.check_expr(&f.value);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for it in items {
+                    self.check_expr(it);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.check_expr(k);
+                    self.check_expr(v);
+                }
+            }
+            Expr::Interp { parts, .. } => {
+                for part in parts {
+                    if let InterpPart::Expr(e) = part {
+                        self.check_expr(e);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -449,13 +517,31 @@ impl ChannelLivenessChecker {
     }
 
     fn is_cap(&self, name: &str) -> bool {
-        self.cap_to_pipe.contains_key(name)
+        for scope in self.scope_stack.iter().rev() {
+            if scope.shadowed_vars.contains(name) {
+                return false;
+            }
+            for p in &scope.pipes {
+                if p.tx == name || p.rx == name {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn is_moved(&self, name: &str) -> bool {
         for scope in self.scope_stack.iter().rev() {
+            if scope.shadowed_vars.contains(name) {
+                return false;
+            }
             if scope.moved_caps.contains(name) {
                 return true;
+            }
+            for p in &scope.pipes {
+                if p.tx == name || p.rx == name {
+                    return false;
+                }
             }
         }
         false
@@ -465,10 +551,21 @@ impl ChannelLivenessChecker {
         if let Some(scope) = self.scope_stack.last_mut() {
             scope.moved_caps.insert(name.to_string());
         }
+        for scope in self.scope_stack.iter_mut().rev() {
+            for p in &scope.pipes {
+                if p.tx == name || p.rx == name {
+                    scope.moved_caps.insert(name.to_string());
+                    return;
+                }
+            }
+        }
     }
 
     fn mark_tx_closed(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
+            if scope.shadowed_vars.contains(name) {
+                return;
+            }
             for p in &mut scope.pipes {
                 if p.tx == name {
                     p.tx_state = ChannelTypestate::Closed;
@@ -480,6 +577,9 @@ impl ChannelLivenessChecker {
 
     fn mark_tx_active(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
+            if scope.shadowed_vars.contains(name) {
+                return;
+            }
             for p in &mut scope.pipes {
                 if p.tx == name && p.tx_state == ChannelTypestate::Fresh {
                     p.tx_state = ChannelTypestate::Active;
@@ -491,6 +591,9 @@ impl ChannelLivenessChecker {
 
     fn mark_rx_drained(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
+            if scope.shadowed_vars.contains(name) {
+                return;
+            }
             for p in &mut scope.pipes {
                 if p.rx == name {
                     p.rx_state = ChannelTypestate::Drained;
@@ -502,6 +605,9 @@ impl ChannelLivenessChecker {
 
     fn mark_rx_active(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
+            if scope.shadowed_vars.contains(name) {
+                return;
+            }
             for p in &mut scope.pipes {
                 if p.rx == name && p.rx_state == ChannelTypestate::Fresh {
                     p.rx_state = ChannelTypestate::Active;

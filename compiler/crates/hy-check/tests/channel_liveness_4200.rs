@@ -512,3 +512,136 @@ fn main() {
         res.diagnostics
     );
 }
+
+#[test]
+fn test_p21_shadowed_local_after_move_accept() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(1)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task worker(move tx)
+    {
+        tx := 42
+        _ = tx
+    }
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(
+        res.verdict,
+        Verdict::Accept,
+        "Shadowed local variable after move should accept: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_p22_inter_function_variable_name_isolation_accept() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(1)
+    tx.close()
+}
+
+fn f1() {
+    tx, rx := hy.pipe[int]()
+    task worker(move tx)
+    rx.drain()
+}
+
+fn f2() {
+    tx := 99
+    _ = tx
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(
+        res.verdict,
+        Verdict::Accept,
+        "Inter-function variable name collision should accept: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_p23_closure_param_shadow_accept() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(1)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task worker(move tx)
+    f := fn(tx int) {
+        _ = tx
+    }
+    f(10)
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(
+        res.verdict,
+        Verdict::Accept,
+        "Closure parameter shadowing should accept: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_p24_for_loop_var_shadow_accept() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(1)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task worker(move tx)
+    for tx in 0..5 {
+        _ = tx
+    }
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(
+        res.verdict,
+        Verdict::Accept,
+        "For loop variable shadowing should accept: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_p25_nested_block_shadow_preserves_outer_unclosed_rejection() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    {
+        tx := 42
+        _ = tx
+    }
+    // tx is NOT closed here -> must reject with HYB-E4004
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E4004"),
+        "Outer unclosed capability must still be rejected despite inner shadow: {:?}",
+        res.diagnostics
+    );
+}
+
+
+
