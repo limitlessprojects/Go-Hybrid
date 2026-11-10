@@ -19,7 +19,10 @@
 //!     hatch is explicit and auditable: `managed` (HYB-E8001, counted by
 //!     --report-managed).
 
-use crate::model::{as_addr_of, unwrap_parens, unwrap_parens_and_move, Binding, Checker, FnState, MoveKind, TypeShape};
+use crate::model::{
+    as_addr_of, unwrap_parens, unwrap_parens_and_move, Binding, Checker, FnState, MoveKind,
+    TypeShape,
+};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{Expr, LitKind, TypeExpr};
 
@@ -251,8 +254,10 @@ impl<'a> Checker<'a> {
                 if !self.structs.contains_key("set") {
                     if let Some(("set", args)) = Self::parse_generic_type_args(sname) {
                         if args.len() == 1 {
-                            return self
-                                .shape_holds_unproven_type_param(&self.shape_of_type(&args[0]), seen);
+                            return self.shape_holds_unproven_type_param(
+                                &self.shape_of_type(&args[0]),
+                                seen,
+                            );
                         }
                     }
                 }
@@ -321,8 +326,7 @@ impl<'a> Checker<'a> {
                 self.shape_holds_unmovable_leaf(e, seen)
             }
             TypeShape::Map(k, v) => {
-                self.shape_holds_unmovable_leaf(k, seen)
-                    || self.shape_holds_unmovable_leaf(v, seen)
+                self.shape_holds_unmovable_leaf(k, seen) || self.shape_holds_unmovable_leaf(v, seen)
             }
             TypeShape::Struct(Some(sname)) => {
                 if seen.iter().any(|s| s == sname) {
@@ -474,7 +478,10 @@ impl<'a> Checker<'a> {
                     return self.classify_move_ident(st, root);
                 }
             }
-            if matches!(op, Expr::StructLit { .. } | Expr::SliceLit { .. } | Expr::MapLit { .. }) {
+            if matches!(
+                op,
+                Expr::StructLit { .. } | Expr::SliceLit { .. } | Expr::MapLit { .. }
+            ) {
                 return self.classify_value(st, op);
             }
             return Outcome::Ok;
@@ -638,7 +645,8 @@ impl<'a> Checker<'a> {
                 return self.outcome_for_shape(&TypeShape::Unknown, &expr.render());
             }
             let ptr_shape = TypeShape::Pointer(Box::new(shape));
-            if matches!(&ptr_shape, TypeShape::Pointer(inner) if matches!(**inner, TypeShape::Chan(_))) {
+            if matches!(&ptr_shape, TypeShape::Pointer(inner) if matches!(**inner, TypeShape::Chan(_)))
+            {
                 return Outcome::Ok;
             }
             return self.outcome_for_shape(&ptr_shape, &expr.render());
@@ -664,9 +672,8 @@ impl<'a> Checker<'a> {
             // FAIL-CLOSED (O4.9): a borrow of an unproven value.
             return Outcome::Unproven(UnprovenInfo {
                 value: expr.render(),
-                reason: unproven_atomic_reason(b).unwrap_or_else(|| {
-                    format!("the pointee `{root}` has an unresolvable type")
-                }),
+                reason: unproven_atomic_reason(b)
+                    .unwrap_or_else(|| format!("the pointee `{root}` has an unresolvable type")),
             });
         }
         match &b.shape {
@@ -1004,9 +1011,8 @@ impl<'a> Checker<'a> {
             "fix: send/receive a value of the declared element type, or change the channel's element type to match".to_string(),
             "note: channel DIRECTION is checked separately (HYB-E3007); this is the ELEMENT TYPE".to_string(),
         ];
-        self.diags.push(
-            Diagnostic::error("HYB-E3011", self.path.clone(), span, msg).with_notes(notes),
-        );
+        self.diags
+            .push(Diagnostic::error("HYB-E3011", self.path.clone(), span, msg).with_notes(notes));
     }
 
     /// Receive site: when RHS is `<-ch` (or a paren-wrapped receive) and the
@@ -1190,8 +1196,13 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn check_send_target(&mut self, st: &FnState, chan: &Expr, span: Span) -> bool {
         match self.send_target_shape(st, chan) {
+            TypeShape::OwnHandle(ref h) if h == "hy.send_cap" => true,
             TypeShape::Chan(_) => {
-                if self.diags.iter().any(|d| d.code == "HYB-E3008" && d.span == span) {
+                if self
+                    .diags
+                    .iter()
+                    .any(|d| d.code == "HYB-E3008" && d.span == span)
+                {
                     return false;
                 }
                 if let Some(ty) = self.ty_of_expr(st, chan) {
@@ -1297,7 +1308,10 @@ impl<'a> Checker<'a> {
             TypeShape::Pointer(_) | TypeShape::Closure => "fix: restructure so the value is always valid, or carry absence with `option[T]`".to_string(),
             _ => "fix: use the type's zero value (N3)".to_string(),
         });
-        notes.push("if absence is the meaning, use `option[T]` — its zero value is `none` (N3)".to_string());
+        notes.push(
+            "if absence is the meaning, use `option[T]` — its zero value is `none` (N3)"
+                .to_string(),
+        );
         self.diags
             .push(Diagnostic::error("HYB-E4001", self.path.clone(), span, msg).with_notes(notes));
     }
@@ -1392,7 +1406,11 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::MapLit { value: vty, entries, .. } => {
+            Expr::MapLit {
+                value: vty,
+                entries,
+                ..
+            } => {
                 let vshape = self.shape_of_type(vty);
                 let vty_text = vty.render();
                 for (k, v) in entries {
@@ -1655,7 +1673,10 @@ impl<'a> Checker<'a> {
             };
 
             let is_auto_addressed = code == "HYB-E3001"
-                && matches!(target_shapes.and_then(|ts| ts.get(vi)), Some(TypeShape::Pointer(_)))
+                && matches!(
+                    target_shapes.and_then(|ts| ts.get(vi)),
+                    Some(TypeShape::Pointer(_))
+                )
                 && !matches!(self.shape_of_expr(st, v), TypeShape::Pointer(_))
                 && matches!(
                     crate::model::unwrap_parens(v),
@@ -1691,11 +1712,21 @@ impl<'a> Checker<'a> {
             for (name, _) in &moves {
                 match self.classify_move_ident(st, name) {
                     Outcome::Ok => {}
-                    Outcome::Managed { desc, risky } if risky && !managed_descs.contains(&desc) => managed_descs.push(desc),
+                    Outcome::Managed { desc, risky } if risky && !managed_descs.contains(&desc) => {
+                        managed_descs.push(desc)
+                    }
                     Outcome::Managed { .. } => {}
-                    Outcome::Rejected(info) if !rejects.iter().any(|r| r.value == info.value) => rejects.push(info),
+                    Outcome::Rejected(info) if !rejects.iter().any(|r| r.value == info.value) => {
+                        rejects.push(info)
+                    }
                     Outcome::Rejected(_) => {}
-                    Outcome::Unproven(info) if !unprovens.iter().any(|u| u.value == info.value || u.reason.contains(&info.reason)) => unprovens.push(info),
+                    Outcome::Unproven(info)
+                        if !unprovens
+                            .iter()
+                            .any(|u| u.value == info.value || u.reason.contains(&info.reason)) =>
+                    {
+                        unprovens.push(info)
+                    }
                     Outcome::Unproven(_) => {}
                 }
             }
@@ -2214,9 +2245,7 @@ impl<'a> Checker<'a> {
         match expr {
             Expr::Call { callee, args, .. } => {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
-                    if name == "close"
-                        && !env.is_bound("close")
-                        && !self.fns.contains_key("close")
+                    if name == "close" && !env.is_bound("close") && !self.fns.contains_key("close")
                     {
                         if let Some(first) = args.first() {
                             if matches!(
@@ -2467,10 +2496,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Call { callee, args, .. } => {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
-                    if name == "some"
-                        && !env.is_bound("some")
-                        && !self.fns.contains_key("some")
-                    {
+                    if name == "some" && !env.is_bound("some") && !self.fns.contains_key("some") {
                         if let Some(first) = args.first() {
                             if self.dir_ty_of_expr(&first.value, env).is_none() {
                                 if let hy_syntax::TypeExpr::Option { elem, .. } =
@@ -2539,14 +2565,10 @@ impl<'a> Checker<'a> {
             }
             (
                 TypeExpr::Map {
-                    key: ka,
-                    value: va,
-                    ..
+                    key: ka, value: va, ..
                 },
                 TypeExpr::Map {
-                    key: kb,
-                    value: vb,
-                    ..
+                    key: kb, value: vb, ..
                 },
             ) => {
                 self.chan_dir_coercion_violation(ka, kb, false)
@@ -2565,10 +2587,13 @@ impl<'a> Checker<'a> {
                 },
             ) => {
                 (pa.len() == pb.len()
-                    && pa
-                        .iter()
-                        .zip(pb.iter())
-                        .any(|(a, b)| self.chan_dir_coercion_violation(&Self::fn_param_ty(a), &Self::fn_param_ty(b), false)))
+                    && pa.iter().zip(pb.iter()).any(|(a, b)| {
+                        self.chan_dir_coercion_violation(
+                            &Self::fn_param_ty(a),
+                            &Self::fn_param_ty(b),
+                            false,
+                        )
+                    }))
                     || (ra.len() == rb.len()
                         && ra
                             .iter()
@@ -2710,7 +2735,14 @@ impl<'a> Checker<'a> {
         }
     }
     fn fn_param_ty(p: &hy_syntax::Param) -> hy_syntax::TypeExpr {
-        if matches!(&p.ty, hy_syntax::TypeExpr::Named { name, .. } if name.is_empty()) { hy_syntax::TypeExpr::Named { name: p.name.clone(), span: p.span } } else { p.ty.clone() }
+        if matches!(&p.ty, hy_syntax::TypeExpr::Named { name, .. } if name.is_empty()) {
+            hy_syntax::TypeExpr::Named {
+                name: p.name.clone(),
+                span: p.span,
+            }
+        } else {
+            p.ty.clone()
+        }
     }
 
     pub(crate) fn peel_pointer_and_alias(&self, ty: &hy_syntax::TypeExpr) -> hy_syntax::TypeExpr {
@@ -2855,7 +2887,12 @@ impl<'a> Checker<'a> {
             ) => {
                 if pp.len() == ap.len() {
                     for (p, a) in pp.iter().zip(ap.iter()) {
-                        self.infer_type_param_bindings(&Self::fn_param_ty(p), &Self::fn_param_ty(a), tp_names, out);
+                        self.infer_type_param_bindings(
+                            &Self::fn_param_ty(p),
+                            &Self::fn_param_ty(a),
+                            tp_names,
+                            out,
+                        );
                     }
                 }
                 if pr.len() == ar.len() {
@@ -2953,9 +2990,8 @@ impl<'a> Checker<'a> {
             ),
             "fix: declare the source channel as bidirectional (`chan T`), or change the destination's declared channel direction to match the source".to_string(),
         ];
-        self.diags.push(
-            Diagnostic::error("HYB-E3012", self.path.clone(), span, msg).with_notes(notes),
-        );
+        self.diags
+            .push(Diagnostic::error("HYB-E3012", self.path.clone(), span, msg).with_notes(notes));
     }
 
     fn resolve_array_or_ptr_array_elem(
@@ -2985,11 +3021,7 @@ impl<'a> Checker<'a> {
         };
         if let Some(elem) = self.resolve_array_or_ptr_array_elem(&ty) {
             let e = Some(elem);
-            return if n_vars >= 2 {
-                vec![None, e]
-            } else {
-                vec![e]
-            };
+            return if n_vars >= 2 { vec![None, e] } else { vec![e] };
         }
         match self.resolve_type_alias(&ty) {
             TypeExpr::Chan { elem, .. } | TypeExpr::Slice { elem, .. } => {
@@ -3350,12 +3382,12 @@ impl<'a> Checker<'a> {
                     _ => None,
                 }
             }
-            PlaceKind::AddrOf { base } => self.dir_ty_of_place(base, env).map(|t| {
-                TypeExpr::Pointer {
+            PlaceKind::AddrOf { base } => {
+                self.dir_ty_of_place(base, env).map(|t| TypeExpr::Pointer {
                     to: Box::new(t),
                     span: place.span,
-                }
-            }),
+                })
+            }
         }
     }
 
@@ -3385,7 +3417,10 @@ impl<'a> Checker<'a> {
             Expr::Field { base, name, .. } => {
                 let base_ty = self.dir_ty_of_expr(base, env)?;
                 if let Some(bname) = Self::base_named_type(&base_ty) {
-                    if (bname == "time.timer" || bname == "time.Timer" || bname == "time.ticker" || bname == "time.Ticker")
+                    if (bname == "time.timer"
+                        || bname == "time.Timer"
+                        || bname == "time.ticker"
+                        || bname == "time.Ticker")
                         && (name == "c" || name == "C")
                     {
                         return Some(TypeExpr::Chan {
@@ -3478,12 +3513,12 @@ impl<'a> Checker<'a> {
                 op: hy_syntax::UnOp::Addr,
                 operand,
                 span,
-            } => self.dir_ty_of_expr(operand, env).map(|t| {
-                TypeExpr::Pointer {
+            } => self
+                .dir_ty_of_expr(operand, env)
+                .map(|t| TypeExpr::Pointer {
                     to: Box::new(t),
                     span: *span,
-                }
-            }),
+                }),
             Expr::Call { callee, args, span } => match unwrap_parens(callee) {
                 Expr::FnLit { results, .. } => results.first().map(|r| r.ty.clone()),
                 Expr::Ident { name, .. } => {
@@ -3547,7 +3582,10 @@ impl<'a> Checker<'a> {
                         });
                     }
                     if name == "new" && !self.fns.contains_key("new") && args.len() == 1 {
-                        return Some(TypeExpr::Pointer { to: Box::new(Self::type_arg_as_type_expr(&args[0].value)?), span: *span });
+                        return Some(TypeExpr::Pointer {
+                            to: Box::new(Self::type_arg_as_type_expr(&args[0].value)?),
+                            span: *span,
+                        });
                     }
                     let head = Self::base_named_type_str(name);
                     if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
@@ -3569,7 +3607,9 @@ impl<'a> Checker<'a> {
                     let head = Self::base_named_type_str(name);
                     if let Expr::Ident { name: root, .. } = unwrap_parens(base) {
                         if !env.is_bound(root) {
-                            if (root == "time" || root == "time.time") && matches!(head, "after" | "tick") {
+                            if (root == "time" || root == "time.time")
+                                && matches!(head, "after" | "tick")
+                            {
                                 return Some(TypeExpr::Chan {
                                     dir: hy_syntax::ChanDir::Recv,
                                     elem: Box::new(TypeExpr::Named {
@@ -3680,19 +3720,48 @@ impl<'a> Checker<'a> {
         use hy_syntax::TypeExpr;
         let unwrapped = unwrap_parens(expr);
         match unwrapped {
-            Expr::StructLit { ty: Some(t), fields, .. } if fields.is_empty() => Some(t.clone()),
-            Expr::SliceLit { elem: Some(t), items, span } if items.is_empty() => Some(
-                unwrapped.as_array_lit().map(|(_, _, a)| a.clone()).unwrap_or_else(|| TypeExpr::Slice { elem: t.clone(), span: *span }),
+            Expr::StructLit {
+                ty: Some(t),
+                fields,
+                ..
+            } if fields.is_empty() => Some(t.clone()),
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                span,
+            } if items.is_empty() => Some(
+                unwrapped
+                    .as_array_lit()
+                    .map(|(_, _, a)| a.clone())
+                    .unwrap_or_else(|| TypeExpr::Slice {
+                        elem: t.clone(),
+                        span: *span,
+                    }),
             ),
-            Expr::MapLit { key, value, entries, span } if entries.is_empty() => {
-                Some(TypeExpr::Map { key: key.clone(), value: value.clone(), span: *span })
-            }
-            Expr::Ident { name, span } => Some(TypeExpr::Named { name: name.clone(), span: *span }),
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                span,
+            } if entries.is_empty() => Some(TypeExpr::Map {
+                key: key.clone(),
+                value: value.clone(),
+                span: *span,
+            }),
+            Expr::Ident { name, span } => Some(TypeExpr::Named {
+                name: name.clone(),
+                span: *span,
+            }),
             Expr::Field { base, name, span } => match unwrap_parens(base) {
-                Expr::Ident { name: pkg, .. } => Some(TypeExpr::Named { name: format!("{pkg}.{name}"), span: *span }),
+                Expr::Ident { name: pkg, .. } => Some(TypeExpr::Named {
+                    name: format!("{pkg}.{name}"),
+                    span: *span,
+                }),
                 _ => None,
             },
-            Expr::Index { base, index, span, .. } => match unwrap_parens(base) {
+            Expr::Index {
+                base, index, span, ..
+            } => match unwrap_parens(base) {
                 Expr::Ident { name: bname, .. } => Some(TypeExpr::Named {
                     name: format!("{bname}[{}]", Self::type_arg_as_type_expr(index)?.render()),
                     span: *span,
@@ -3727,9 +3796,8 @@ impl<'a> Checker<'a> {
             "why: a `<-chan T` binding only permits receives; sending to it is invalid Go and the emitted program will not build (issue #89)".to_string(),
             "fix: declare the channel as `chan T` (bidirectional) or `chan<- T` (send-only) where the send happens".to_string(),
         ];
-        self.diags.push(
-            Diagnostic::error("HYB-E3008", self.path.clone(), span, msg).with_notes(notes),
-        );
+        self.diags
+            .push(Diagnostic::error("HYB-E3008", self.path.clone(), span, msg).with_notes(notes));
     }
 
     fn emit_recv_send_only(&mut self, chan: &Expr, span: Span) {
@@ -3748,9 +3816,8 @@ impl<'a> Checker<'a> {
             "why: a `chan<- T` binding only permits sends; receiving from it is invalid Go and the emitted program will not build (issue #89)".to_string(),
             "fix: declare the channel as `chan T` (bidirectional) or `<-chan T` (receive-only) where the receive happens".to_string(),
         ];
-        self.diags.push(
-            Diagnostic::error("HYB-E3008", self.path.clone(), span, msg).with_notes(notes),
-        );
+        self.diags
+            .push(Diagnostic::error("HYB-E3008", self.path.clone(), span, msg).with_notes(notes));
     }
 
     fn emit_close_recv_only(&mut self, chan: &Expr) {
@@ -3770,9 +3837,8 @@ impl<'a> Checker<'a> {
             "why: the Go spec requires close to operate on a bidirectional or send-only channel — a `<-chan T` has no send capability, so closing it is invalid Go and the emitted program will not build (issue #94)".to_string(),
             "fix: declare this channel as `chan T` (bidirectional) where the close happens, or pass a `chan<- T` / `chan T` binding to close — receive-only channels are closed by their send-side owner".to_string(),
         ];
-        self.diags.push(
-            Diagnostic::error("HYB-E3009", self.path.clone(), span, msg).with_notes(notes),
-        );
+        self.diags
+            .push(Diagnostic::error("HYB-E3009", self.path.clone(), span, msg).with_notes(notes));
     }
 
     fn emit_range_send_only(&mut self, chan: &Expr) {
@@ -3792,9 +3858,8 @@ impl<'a> Checker<'a> {
             "why: the Go spec requires the range operand to have receive capability — a `chan<- T` can only be sent to, so ranging over it is invalid Go and the emitted program will not build (issue #94)".to_string(),
             "fix: declare this channel as `chan T` (bidirectional) or `<-chan T` (receive-only) where the range happens — send-only channels are consumed via receives on the other side".to_string(),
         ];
-        self.diags.push(
-            Diagnostic::error("HYB-E3009", self.path.clone(), span, msg).with_notes(notes),
-        );
+        self.diags
+            .push(Diagnostic::error("HYB-E3009", self.path.clone(), span, msg).with_notes(notes));
     }
 }
 
@@ -3869,5 +3934,3 @@ fn unproven_atomic_reason(b: &Binding) -> Option<String> {
         None
     }
 }
-
-
