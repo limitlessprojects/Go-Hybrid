@@ -859,6 +859,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                 Decl::Const(cd) => {
                     c.ty_opt(&cd.ty);
                     c.expr(&cd.value);
+                    c.check_const_decl(cd);
                 }
                 Decl::Struct(s) => {
                     for f in &s.fields {
@@ -1702,6 +1703,18 @@ impl<'a> Collector<'a> {
         self.file_consts.get(name).cloned()
     }
 
+    /// For `fmt` printf-family format operands: the kind label when `e` is
+    /// statically known to have a non-`string` kind, `None` otherwise.
+    /// `Str` (legit), `Unknown` (unresolvable), and `Interface` (`any`,
+    /// which Go accepts as a printf operand) stay permissive — mirroring the
+    /// conservative accept-side shape used everywhere in this file.
+    fn nonstring_format_kind(&self, e: &Expr) -> Option<String> {
+        match self.kind_of_expr(e) {
+            OpKind::Str | OpKind::Unknown | OpKind::Interface => None,
+            k => Some(k.label()),
+        }
+    }
+
     /// A `for`-iterate or `select`-receive binding is elided to `_` at
     /// emission when completely untouched, but if the body assigns to it
     /// (`v = ...`) without ever reading it, the emitter must keep the binding
@@ -2284,6 +2297,109 @@ impl<'a> Collector<'a> {
                 is_untyped: matches!(l.kind, LocalKind::Const) && l.ty.is_none(),
             });
             top.insert(name.clone(), Some(id));
+        }
+    }
+
+    fn check_const_decl(&mut self, cd: &hy_syntax::ConstDecl) {
+        let Some(t) = &cd.ty else {
+            return;
+        };
+        let want = self.kind_of_ty(t, 0);
+        let vk = self.kind_of_expr(&cd.value);
+        // `const arr [2]int = [10, 20]` uses bracketed array-literal shorthand
+        // (`Expr::SliceLit { elem: None, .. }`) where `check_local_array_lit_len_match`
+        // validates the element count.
+        let unheaded_array_shorthand = matches!(
+            (&want, &vk),
+            (OpKind::Array(a), OpKind::Slice(b))
+                if !kinds_conflict(a, b)
+                    && matches!(unwrap_parens(&cd.value), Expr::SliceLit { elem: None, .. })
+        );
+        let untyped_integral_float_to_int = want == OpKind::Int
+            && vk == OpKind::Float
+            && self.const_expr_scalar(&cd.value).is_none()
+            && self
+                .ck
+                .const_float_fold(&cd.value, None)
+                .is_some_and(|v| v.is_finite() && v.fract() == 0.0);
+        if unheaded_array_shorthand || untyped_integral_float_to_int {
+            return;
+        }
+        let int_float_conflict = want == OpKind::Float
+            && vk == OpKind::Int
+            && !self.is_untyped_int_const(&cd.value);
+        let scalar_mismatch = matches!(
+            (self.scalar_of_ty(t), self.const_expr_scalar(&cd.value)),
+            (Some(w), Some(v)) if w != v
+        );
+        if kinds_conflict(&want, &vk)
+            || int_float_conflict
+            || scalar_mismatch
+            || self.sized_array_names_differ(
+                Some(t.render().as_str()),
+                self.const_expr_type_name(&cd.value).as_deref(),
+            )
+        {
+            self.emit_e1002(
+                cd.span,
+                format!(
+                    "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in constant declaration` (HYB-E1002)",
+                    cd.name,
+                    want.label(),
+                    vk.label(),
+                    want.label()
+                ),
+                "the declared type is fixed; write an explicit conversion when a conversion is intended",
+            );
+        }
+    }
+
+    fn const_expr_scalar(&self, e: &Expr) -> Option<&'static str> {
+        if let Some(s) = self.typed_value_scalar(e) {
+            return Some(s);
+        }
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.ck.file.decls.iter().find_map(|d| match d {
+                Decl::Const(other) if other.name == *name => {
+                    other.ty.as_ref().and_then(|t| self.scalar_of_ty(t))
+                }
+                _ => None,
+            }),
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.const_expr_scalar(operand),
+            Expr::Binary { op, lhs, rhs, .. } => match op {
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::BitAnd => self
+                    .const_expr_scalar(lhs)
+                    .or_else(|| self.const_expr_scalar(rhs)),
+                BinOp::Shl | BinOp::Shr => self.const_expr_scalar(lhs),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn const_expr_type_name(&self, e: &Expr) -> Option<String> {
+        if let Some(n) = self.typed_value_type_name(e) {
+            return Some(n);
+        }
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.ck.file.decls.iter().find_map(|d| match d {
+                Decl::Const(other) if other.name == *name => {
+                    other.ty.as_ref().map(|t| t.render())
+                }
+                _ => None,
+            }),
+            _ => None,
         }
     }
 
@@ -4267,6 +4383,304 @@ impl<'a> Collector<'a> {
         OpKind::Pointer(Box::new(inner))
     }
 
+
+    fn check_filepath_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "separator"
+                | "list_separator"
+                | "err_bad_pattern"
+                | "skip_all"
+                | "skip_dir"
+                | "walk_func"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `filepath.{member}`: `filepath.{member}` is a constant or type, not a function (HYB-E1002)"),
+                &format!("`filepath.{member}` is a package constant or type, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "abs" | "base" | "clean" | "dir" | "eval_symlinks" | "ext" | "from_slash"
+            | "is_abs" | "is_local" | "localize" | "split" | "split_list" | "to_slash"
+            | "volume_name" => Some(1),
+            "has_prefix" | "match" | "rel" | "walk" | "walk_dir" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `filepath.{member}` (HYB-E1002)"),
+                    &format!("`filepath.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`filepath.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `filepath.{member}`"),
+                );
+            }
+        }
+    }
+
+    fn check_path_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if member == "err_bad_pattern" {
+            self.emit_e1002(
+                span,
+                "cannot call `path.err_bad_pattern`: `path.err_bad_pattern` is an error variable, not a function (HYB-E1002)".to_string(),
+                "`path.err_bad_pattern` is a package variable, not a callable function",
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "base" | "clean" | "dir" | "ext" | "is_abs" | "split" => Some(1),
+            "match" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `path.{member}` (HYB-E1002)"),
+                    &format!("`path.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`path.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `path.{member}`"),
+                );
+            }
+        }
+    }
+    fn check_url_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "url" | "values" | "userinfo" | "error" | "escape_error" | "invalid_host_error"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `url.{member}`: type `url.{member}` is not a function (HYB-E1002)"),
+                &format!("`url.{member}` is a type name, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "parse" | "parse_request_uri" | "parse_query" | "query_escape" | "query_unescape"
+            | "path_escape" | "path_unescape" | "user" => Some(1),
+            "user_password" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `url.{member}` (HYB-E1002)"),
+                    &format!("`url.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`url.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `url.{member}`"),
+                );
+            }
+        } else if member == "join_path" && args.is_empty() {
+            self.emit_e1002(
+                span,
+                "`url.join_path` requires at least 1 argument `(base[, ...])`, got 0 (HYB-E1002)".to_string(),
+                "provide at least 1 path argument to `url.join_path`",
+            );
+        }
+    }
+
+    // Full `strconv` call surface — every member the member table in
+    // foreign.rs blesses, with the arity of the Go name it lowers to
+    // (`to_go_name`: snake case -> CamelCase, e.g. `parse_int` -> ParseInt,
+    // `quote_rune_to_ascii` -> QuoteRuneToASCII). Arities are the Go
+    // std signatures on the pinned toolchain (go1.26.9). Before this, any
+    // strconv call passed `hyb check` with any arity and non-callable
+    // members (constants `int_size`, package error vars `err_range` /
+    // `err_syntax`, struct type `num_error`) could be called as functions —
+    // both blow up at `go build` instead (Row 13 BUILDABLE: reject
+    // fail-closed, HYB-E1002). Never over-reject: only members the table
+    // blesses are listed, and every accepted call matches its Go signature.
+    fn check_strconv_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        // Package-level values and types are not callable.
+        if matches!(member, "int_size" | "err_range" | "err_syntax" | "num_error") {
+            self.emit_e1002(
+                span,
+                format!("`strconv.{member}` is not a function — it is a package-level value/type and cannot be called (HYB-E1002)"),
+                &format!("reference `strconv.{member}` directly, do not call it"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            // 1 arg: Atoi(s), Itoa(i), ParseBool(str), FormatBool(b),
+            // CanBackquote(s), IsGraphic(r), IsPrint(r), Quote(s),
+            // QuoteRune(r), QuoteRuneToASCII(r), QuoteRuneToGraphic(r),
+            // QuoteToASCII(s), QuoteToGraphic(s), QuotedPrefix(s),
+            // Unquote(s)
+            "atoi" | "itoa" | "parse_bool" | "format_bool" | "can_backquote"
+            | "is_graphic" | "is_print" | "quote" | "quote_rune"
+            | "quote_rune_to_ascii" | "quote_rune_to_graphic" | "quote_to_ascii"
+            | "quote_to_graphic" | "quoted_prefix" | "unquote" => Some(1),
+            // 2 args: ParseComplex(s, bitSize), ParseFloat(s, bitSize),
+            // FormatInt(i, base), FormatUint(u, base), AppendBool(dst, b),
+            // AppendQuote(dst, s), AppendQuoteRune(dst, r),
+            // AppendQuoteRuneToASCII(dst, r), AppendQuoteRuneToGraphic(dst, r),
+            // AppendQuoteToASCII(dst, s), AppendQuoteToGraphic(dst, s),
+            // UnquoteChar(s, quote)
+            "parse_complex" | "parse_float" | "format_int" | "format_uint"
+            | "append_bool" | "append_quote" | "append_quote_rune"
+            | "append_quote_rune_to_ascii" | "append_quote_rune_to_graphic"
+            | "append_quote_to_ascii" | "append_quote_to_graphic"
+            | "unquote_char" => Some(2),
+            // 3 args: ParseInt(s, base, bitSize), ParseUint(s, base, bitSize),
+            // AppendInt(dst, i, base), AppendUint(dst, u, base)
+            "parse_int" | "parse_uint" | "append_int" | "append_uint" => Some(3),
+            // 4 args: FormatComplex(c, fmt, prec, bitSize),
+            // FormatFloat(f, fmt, prec, bitSize)
+            "format_complex" | "format_float" => Some(4),
+            // 5 args: AppendFloat(dst, f, fmt, prec, bitSize)
+            "append_float" => Some(5),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `strconv.{member}` (HYB-E1002)"),
+                    &format!("`strconv.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let go_name = {
+                    // mirror hy-emit's to_go_name without a cross-crate dep
+                    // (hy-check must not depend on hy-emit).
+                    let mut out = String::new();
+                    for part in member.split('_') {
+                        if part.is_empty() {
+                            continue;
+                        }
+                        let mut cs = part.chars();
+                        if let Some(c) = cs.next() {
+                            out.extend(c.to_uppercase());
+                        }
+                        out.push_str(cs.as_str());
+                    }
+                    out
+                };
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`strconv.{member}` takes exactly {expected} argument{}, got {} (HYB-E1002)",
+                        if expected == 1 { "" } else { "s" },
+                        args.len()
+                    ),
+                    &format!(
+                        "match the arity of the Go function this lowers to (`strconv.{go_name}`)"
+                    ),
+                );
+            }
+        }
+    }
+
+    fn check_sort_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(member, "interface" | "int_slice" | "float64_slice" | "string_slice") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `sort.{member}`: `sort.{member}` is a type, not a function (HYB-E1002)"),
+                &format!("`sort.{member}` is an interface or type name, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "ints" | "ints_are_sorted" | "float64s" | "float64s_are_sorted" | "strings"
+            | "strings_are_sorted" | "sort" | "stable" | "is_sorted" | "reverse" => Some(1),
+            "search_ints" | "search_float64s" | "search_strings" | "search" | "slice"
+            | "slice_is_sorted" | "slice_stable" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `sort.{member}` (HYB-E1002)"),
+                    &format!("`sort.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`sort.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `sort.{member}`"),
+                );
+            }
+        }
+    }
+
+    fn check_sync_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "mutex"
+                | "rw_mutex"
+                | "rwmutex"
+                | "wait_group"
+                | "waitgroup"
+                | "once"
+                | "cond"
+                | "map"
+                | "pool"
+                | "locker"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `sync.{member}`: `sync.{member}` is a type or interface, not a function (HYB-E1002)"),
+                &format!("`sync.{member}` is a package type or interface, not a callable function"),
+            );
+            return;
+        }
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `sync.{member}` (HYB-E1002)"),
+                &format!("`sync.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_cond" | "once_func" | "once_value" | "once_values" => Some(1),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`sync.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `sync.{member}`"),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -7856,19 +8270,94 @@ impl<'a> Collector<'a> {
                             &format!("write `os.{}` (package variable, not a function)", name),
                         );
                     }
-                    if pkg == "hex"
-                        && self.lookup_kind(pkg).is_none()
-                        && name == "encode"
-                        && args.len() != 1
-                    {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "`hex.encode` takes exactly 1 slice argument `(src)`, got {} (HYB-E1002)",
-                                args.len()
-                            ),
-                            "write `hex.encode(data)` (SPEC M5 hex encoding)",
-                        );
+                    if pkg == "hex" && self.lookup_kind(pkg).is_none() {
+                        // Full encoding/hex call surface — every member the
+                        // member table in foreign.rs blesses, with the arity
+                        // of the Go name it lowers to (`to_go_name`: snake
+                        // case -> CamelCase, e.g. `encode` -> EncodeToString,
+                        // `decode_string` -> DecodeString). Checking only
+                        // `encode` let every other member escape with any
+                        // arity and blow up at `go build` instead of at
+                        // `hyb check` (Row 13 BUILDABLE: reject fail-closed,
+                        // HYB-E1002). Arities are the Go signatures in
+                        // encoding/hex.
+                        let expected: Option<usize> = match name.as_str() {
+                            "encode" // EncodeToString(src) -> string
+                            | "encode_to_string" // EncodeToString(src)
+                            | "decode_string" // DecodeString(s) (2 results)
+                            | "dump" // Dump(b) -> string
+                            | "dumper" // Dumper(w)
+                            | "encoded_len" // EncodedLen(n)
+                            | "decoded_len" // DecodedLen(x)
+                            | "new_encoder" // NewEncoder(w)
+                            | "new_decoder" // NewDecoder(r)
+                            => Some(1),
+                            "decode" => Some(2), // Decode(dst, src)
+                            _ => None,
+                        };
+                        if let Some(n) = expected {
+                            if args.len() != n {
+                                let go_name = {
+                                    // mirror hy-emit's to_go_name without a
+                                    // cross-crate dep (hy-check must not
+                                    // depend on hy-emit).
+                                    let mut out = String::new();
+                                    for part in name.split('_') {
+                                        if part.is_empty() {
+                                            continue;
+                                        }
+                                        let mut cs = part.chars();
+                                        if let Some(c) = cs.next() {
+                                            out.extend(c.to_uppercase());
+                                        }
+                                        out.push_str(cs.as_str());
+                                    }
+                                    out
+                                };
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`hex.{}` takes exactly {} argument{}, got {} (HYB-E1002)",
+                                        name,
+                                        n,
+                                        if n == 1 { "" } else { "s" },
+                                        args.len()
+                                    ),
+                                    &format!(
+                                        "match the arity of the Go function this lowers to (`hex.{}`)",
+                                        go_name
+                                    ),
+                                );
+                            }
+                        } else if matches!(name.as_str(), "err_length" | "invalid_byte_error") {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`hex.{}` is not a function — it is a package-level value/type and cannot be called (HYB-E1002)",
+                                    name
+                                ),
+                                &format!("reference `hex.{}` directly, do not call it", name),
+                            );
+                        }
+                    }
+
+                    if pkg == "filepath" && self.lookup_kind(pkg).is_none() {
+                        self.check_filepath_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "path" && self.lookup_kind(pkg).is_none() {
+                        self.check_path_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "url" && self.lookup_kind(pkg).is_none() {
+                        self.check_url_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "sort" && self.lookup_kind(pkg).is_none() {
+                        self.check_sort_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "strconv" && self.lookup_kind(pkg).is_none() {
+                        self.check_strconv_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "sync" && self.lookup_kind(pkg).is_none() {
+                        self.check_sync_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
@@ -7903,6 +8392,17 @@ impl<'a> Collector<'a> {
                                         ),
                                         &format!("pass a string literal or expression as format to `fmt.{}`", name),
                                     );
+                                } else if let Some(kind_label) =
+                                    self.nonstring_format_kind(bare)
+                                {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.{}` requires a string format argument, found non-string ({}) (HYB-E1002)",
+                                            name, kind_label
+                                        ),
+                                        &format!("pass a string literal or expression as format to `fmt.{}`", name),
+                                    );
                                 }
                             }
                         } else if method == "fprintf" {
@@ -7931,6 +8431,17 @@ impl<'a> Collector<'a> {
                                     self.emit_e1002(
                                         span,
                                         "`fmt.fprintf` requires a string format second argument, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string literal or expression as format to `fmt.fprintf`",
+                                    );
+                                } else if let Some(kind_label) =
+                                    self.nonstring_format_kind(bare)
+                                {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.fprintf` requires a string format second argument, found non-string ({}) (HYB-E1002)",
+                                            kind_label
+                                        ),
                                         "pass a string literal or expression as format to `fmt.fprintf`",
                                     );
                                 }
