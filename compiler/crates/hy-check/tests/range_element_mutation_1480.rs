@@ -107,6 +107,27 @@ fn pointer_receiver_call_on_range_element_rejects() {
 }
 
 #[test]
+fn pointer_receiver_call_on_nested_field_and_array_of_range_copy_rejects() {
+    let src_field = format!(
+        "{}struct outer {{\n    deep cell\n}}\n\nfn main() {{\n    os := []outer{{outer{{deep: cell{{n: 1}}}}}}\n    for o in os {{\n        o.deep.bump()\n    }}\n    fmt.println(\"{{os[0].deep.n}}\")\n}}",
+        CELL_PTR_BUMP
+    );
+    rejects_with_e1002(&src_field);
+
+    let src_arr = format!(
+        "{}fn main() {{\n    rows := [][2]cell{{[2]cell{{cell{{n: 1}}, cell{{n: 2}}}}}}\n    for row in rows {{\n        row[0].bump()\n    }}\n    fmt.println(\"{{rows[0][0].n}}\")\n}}",
+        CELL_PTR_BUMP
+    );
+    rejects_with_e1002(&src_arr);
+}
+
+#[test]
+fn slice_pop_on_range_copy_field_rejects() {
+    let src = "struct wrap {\n    items []int\n}\n\nfn main() {\n    ws := []wrap{wrap{items: []int{1, 2}}}\n    for w in ws {\n        v := w.items.pop()\n        fmt.println(v)\n    }\n}";
+    rejects_with_e1002(src);
+}
+
+#[test]
 fn nested_field_chain_through_copy_rejects() {
     let src = "struct inner {\n    k int\n}\n\nstruct outer {\n    deep inner\n}\n\nfn main() {\n    os := []outer{outer{deep: inner{k: 1}}}\n    for o in os {\n        o.deep.k = 9\n    }\n    fmt.println(\"{os[0].deep.k}\")\n}";
     rejects_with_e1002(src);
