@@ -4624,6 +4624,34 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_md5_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(member, "size" | "block_size") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `md5.{member}`: `md5.{member}` is a package constant, not a function (HYB-E1002)"),
+                &format!("`md5.{member}` is a constant value, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new" => Some(0),
+            "sum" => Some(1),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`md5.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `md5.{member}`"),
+                );
+            }
+        }
+    }
+
     fn check_sync_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(
             member,
@@ -8331,6 +8359,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "strconv" && self.lookup_kind(pkg).is_none() {
                         self.check_strconv_package_call(name.as_str(), args, span);
+                    }
+                    if (pkg == "md5" || pkg == "crypto/md5") && self.lookup_kind(pkg).is_none() {
+                        self.check_md5_package_call(name.as_str(), args, span);
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
