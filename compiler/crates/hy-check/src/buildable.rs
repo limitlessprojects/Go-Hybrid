@@ -8493,6 +8493,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if (pkg == "zip" || pkg == "archive/zip") && self.lookup_kind(pkg).is_none() {
+                        self.check_zip_package_call(name.as_str(), args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -9894,6 +9898,114 @@ impl<'a> Collector<'a> {
                         span,
                         "`io.multi_writer` requires at least 1 writer argument `(writers...)`, got 0 (HYB-E1002)".to_string(),
                         "write `io.multi_writer(w1, ...)`",
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn check_zip_package_call(&mut self, name: &str, args: &[CallArg], span: Span) {
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `zip.{}` with variadic spread `...`: package function does not take variadic parameters (HYB-E1002)", name),
+                "pass arguments individually without `...`",
+            );
+            return;
+        }
+        match name {
+            "err_format"
+            | "err_algorithm"
+            | "err_checksum"
+            | "err_insecure_path"
+            | "deflate"
+            | "store"
+            | "compressor"
+            | "decompressor"
+            | "reader"
+            | "writer"
+            | "read_closer"
+            | "file_header"
+            | "file" => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot call `zip.{}`: package symbol is a variable, constant, or type, not a function (HYB-E1002)",
+                        name
+                    ),
+                    &format!("refer to `zip.{}` as a value or type rather than calling it", name),
+                );
+            }
+            "new_reader" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`zip.new_reader` takes exactly 2 arguments `(r, size)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `zip.new_reader(r, size)`",
+                    );
+                }
+            }
+            "new_writer" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`zip.new_writer` takes exactly 1 argument `(w)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `zip.new_writer(w)`",
+                    );
+                }
+            }
+            "open_reader" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`zip.open_reader` takes exactly 1 argument `(name)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `zip.open_reader(name)`",
+                    );
+                }
+            }
+            "file_info_header" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`zip.file_info_header` takes exactly 1 argument `(fi)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `zip.file_info_header(fi)`",
+                    );
+                }
+            }
+            "register_compressor" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`zip.register_compressor` takes exactly 2 arguments `(method, comp)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `zip.register_compressor(method, comp)`",
+                    );
+                }
+            }
+            "register_decompressor" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`zip.register_decompressor` takes exactly 2 arguments `(method, dcomp)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `zip.register_decompressor(method, dcomp)`",
                     );
                 }
             }
