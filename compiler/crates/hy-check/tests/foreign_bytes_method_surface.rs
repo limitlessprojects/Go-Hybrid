@@ -1,14 +1,12 @@
-//! DRAFT (FOM2/Fo, 2026-11-10 05:05 IST — NOT SUBMITTED; needs QC green on a
-//! C-toolchain env or fork CI before any PR). Modeled on
-//! tests/foreign_io_method_surfaces.rs: guarantees that calling phantom /
-//! unsupported methods on the curated `bytes.buffer` foreign surface rejects
-//! fail-closed with HYB-E1002 (Row 13 BUILDABLE).
+//! Tests for the curated foreign method surface of `bytes.buffer`.
+//! Guarantees that calling phantom / unsupported methods on the curated
+//! `bytes.buffer` foreign surface rejects fail-closed with HYB-E1002, and
+//! every declared method name is accepted outright (Row 13 BUILDABLE).
 //!
-//! Surface under test (declared in hy-check/src/foreign.rs, BYTES_BUFFER,
-//! foreign.rs:371): write, write_byte, write_rune, write_string, write_to,
-//! read, read_byte, read_bytes, read_from, read_rune, read_string, next,
-//! grow, reset, string, bytes, len, cap, truncate, unread_byte, unread_rune.
-//! No dedicated surface-test file existed before this draft.
+//! Surface under test (declared in hy-check/src/foreign.rs, BYTES_BUFFER):
+//! write, write_byte, write_rune, write_string, write_to, read, read_byte,
+//! read_bytes, read_from, read_rune, read_string, next, grow, reset, string,
+//! bytes, len, cap, truncate, unread_byte, unread_rune.
 
 use hy_check::{check_file, Verdict};
 
@@ -37,7 +35,7 @@ fn phantom_buffer_methods_are_rejected() {
 
 #[test]
 fn every_declared_buffer_method_is_accepted() {
-    // Positive control: each declared method name must NOT produce HYB-E1002.
+    // Positive control: each declared method name must be accepted outright.
     for m in [
         "write", "write_byte", "write_rune", "write_string", "write_to",
         "read", "read_byte", "read_bytes", "read_from", "read_rune",
@@ -47,9 +45,10 @@ fn every_declared_buffer_method_is_accepted() {
         let ok = check(&format!(
             "import \"bytes\"\nfn inspect(b *bytes.buffer) {{\n    b.{m}()\n}}\n"
         ));
-        assert!(
-            !codes(&ok).iter().any(|c| c == "HYB-E1002"),
-            "declared method {m} must not be flagged HYB-E1002; got {:?}",
+        assert_eq!(
+            ok.verdict,
+            Verdict::Accept,
+            "declared method {m} must be accepted; got {:?}",
             codes(&ok)
         );
     }

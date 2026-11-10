@@ -1,13 +1,10 @@
-//! DRAFT (FOM2/Fo, 2026-11-10 05:05 IST — NOT SUBMITTED; needs QC green on a
-//! C-toolchain env or fork CI before any PR). Modeled on
-//! tests/foreign_io_method_surfaces.rs: guarantees that calling phantom /
-//! unsupported methods on the curated `strings.builder` foreign surface
-//! rejects fail-closed with HYB-E1002 (Row 13 BUILDABLE).
+//! Tests for the curated foreign method surface of `strings.builder`.
+//! Guarantees that calling phantom / unsupported methods on the curated
+//! `strings.builder` foreign surface rejects fail-closed with HYB-E1002, and
+//! every declared method name is accepted outright (Row 13 BUILDABLE).
 //!
-//! Surface under test (declared in hy-check/src/foreign.rs, STRINGS_BUILDER,
-//! foreign.rs:394): write, write_byte, write_rune, write_string, grow,
-//! reset, string, len, cap. No dedicated surface-test file existed before
-//! this draft.
+//! Surface under test (declared in hy-check/src/foreign.rs, STRINGS_BUILDER):
+//! write, write_byte, write_rune, write_string, grow, reset, string, len, cap.
 
 use hy_check::{check_file, Verdict};
 
@@ -36,6 +33,7 @@ fn phantom_builder_methods_are_rejected() {
 
 #[test]
 fn every_declared_builder_method_is_accepted() {
+    // Positive control: each declared method name must be accepted outright.
     for m in [
         "write", "write_byte", "write_rune", "write_string", "grow",
         "reset", "string", "len", "cap",
@@ -43,9 +41,10 @@ fn every_declared_builder_method_is_accepted() {
         let ok = check(&format!(
             "import \"strings\"\nfn inspect(b *strings.builder) {{\n    b.{m}()\n}}\n"
         ));
-        assert!(
-            !codes(&ok).iter().any(|c| c == "HYB-E1002"),
-            "declared method {m} must not be flagged HYB-E1002; got {:?}",
+        assert_eq!(
+            ok.verdict,
+            Verdict::Accept,
+            "declared method {m} must be accepted; got {:?}",
             codes(&ok)
         );
     }
