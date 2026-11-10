@@ -8588,6 +8588,9 @@ impl<'a> Collector<'a> {
                     if pkg == "io" && self.lookup_kind(pkg).is_none() {
                         self.check_io_call_buildable(name, args, span);
                     }
+                    if pkg == "strings" && self.lookup_kind(pkg).is_none() {
+                        self.check_strings_package_call(name.as_str(), args, span);
+                    }
 
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
@@ -9846,6 +9849,94 @@ impl<'a> Collector<'a> {
                     )]),
                 );
             }
+        }
+    }
+
+    fn check_strings_package_call(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "reader" | "replacer" => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot call strings.{}: package symbol is a variable, constant, or type, not a function (HYB-E1002)",
+                        name
+                    ),
+                    &format!("refer to strings.{} as a value or type rather than calling it", name),
+                );
+            }
+            "builder" => {
+                if !args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "strings.{} takes 0 arguments, got {} (HYB-E1002)",
+                            name,
+                            args.len()
+                        ),
+                        &format!("call strings.{} without arguments", name),
+                    );
+                }
+            }
+            "clone" | "fields" | "title" | "to_lower" | "to_title" | "to_upper" | "trim_space"
+            | "new_reader" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "strings.{} takes exactly 1 argument, got {} (HYB-E1002)",
+                            name,
+                            args.len()
+                        ),
+                        &format!("provide exactly 1 argument to strings.{}", name),
+                    );
+                }
+            }
+            "compare" | "contains" | "contains_any" | "contains_func" | "contains_rune"
+            | "count" | "cut" | "cut_prefix" | "cut_suffix" | "equal_fold" | "fields_func"
+            | "has_prefix" | "has_suffix" | "index" | "index_any" | "index_byte" | "index_func"
+            | "index_rune" | "join" | "last_index" | "last_index_any" | "last_index_byte"
+            | "last_index_func" | "map" | "repeat" | "split" | "split_after"
+            | "to_lower_special" | "to_title_special" | "to_upper_special" | "to_valid_utf8"
+            | "trim" | "trim_func" | "trim_left" | "trim_left_func" | "trim_prefix"
+            | "trim_right" | "trim_right_func" | "trim_suffix" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "strings.{} takes exactly 2 arguments, got {} (HYB-E1002)",
+                            name,
+                            args.len()
+                        ),
+                        &format!("provide exactly 2 arguments to strings.{}", name),
+                    );
+                }
+            }
+            "split_n" | "split_after_n" | "replace_all" => {
+                if args.len() != 3 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "strings.{} takes exactly 3 arguments, got {} (HYB-E1002)",
+                            name,
+                            args.len()
+                        ),
+                        &format!("provide exactly 3 arguments to strings.{}", name),
+                    );
+                }
+            }
+            "replace" => {
+                if args.len() != 4 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "strings.replace takes exactly 4 arguments (s, old, new, n), got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write strings.replace(s, old, new, n)",
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
