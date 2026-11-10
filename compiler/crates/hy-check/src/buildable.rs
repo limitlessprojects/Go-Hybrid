@@ -4495,6 +4495,99 @@ impl<'a> Collector<'a> {
         }
     }
 
+    // Full `strconv` call surface — every member the member table in
+    // foreign.rs blesses, with the arity of the Go name it lowers to
+    // (`to_go_name`: snake case -> CamelCase, e.g. `parse_int` -> ParseInt,
+    // `quote_rune_to_ascii` -> QuoteRuneToASCII). Arities are the Go
+    // std signatures on the pinned toolchain (go1.26.9). Before this, any
+    // strconv call passed `hyb check` with any arity and non-callable
+    // members (constants `int_size`, package error vars `err_range` /
+    // `err_syntax`, struct type `num_error`) could be called as functions —
+    // both blow up at `go build` instead (Row 13 BUILDABLE: reject
+    // fail-closed, HYB-E1002). Never over-reject: only members the table
+    // blesses are listed, and every accepted call matches its Go signature.
+    fn check_strconv_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        // Package-level values and types are not callable.
+        if matches!(member, "int_size" | "err_range" | "err_syntax" | "num_error") {
+            self.emit_e1002(
+                span,
+                format!("`strconv.{member}` is not a function — it is a package-level value/type and cannot be called (HYB-E1002)"),
+                &format!("reference `strconv.{member}` directly, do not call it"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            // 1 arg: Atoi(s), Itoa(i), ParseBool(str), FormatBool(b),
+            // CanBackquote(s), IsGraphic(r), IsPrint(r), Quote(s),
+            // QuoteRune(r), QuoteRuneToASCII(r), QuoteRuneToGraphic(r),
+            // QuoteToASCII(s), QuoteToGraphic(s), QuotedPrefix(s),
+            // Unquote(s)
+            "atoi" | "itoa" | "parse_bool" | "format_bool" | "can_backquote"
+            | "is_graphic" | "is_print" | "quote" | "quote_rune"
+            | "quote_rune_to_ascii" | "quote_rune_to_graphic" | "quote_to_ascii"
+            | "quote_to_graphic" | "quoted_prefix" | "unquote" => Some(1),
+            // 2 args: ParseComplex(s, bitSize), ParseFloat(s, bitSize),
+            // FormatInt(i, base), FormatUint(u, base), AppendBool(dst, b),
+            // AppendQuote(dst, s), AppendQuoteRune(dst, r),
+            // AppendQuoteRuneToASCII(dst, r), AppendQuoteRuneToGraphic(dst, r),
+            // AppendQuoteToASCII(dst, s), AppendQuoteToGraphic(dst, s),
+            // UnquoteChar(s, quote)
+            "parse_complex" | "parse_float" | "format_int" | "format_uint"
+            | "append_bool" | "append_quote" | "append_quote_rune"
+            | "append_quote_rune_to_ascii" | "append_quote_rune_to_graphic"
+            | "append_quote_to_ascii" | "append_quote_to_graphic"
+            | "unquote_char" => Some(2),
+            // 3 args: ParseInt(s, base, bitSize), ParseUint(s, base, bitSize),
+            // AppendInt(dst, i, base), AppendUint(dst, u, base)
+            "parse_int" | "parse_uint" | "append_int" | "append_uint" => Some(3),
+            // 4 args: FormatComplex(c, fmt, prec, bitSize),
+            // FormatFloat(f, fmt, prec, bitSize)
+            "format_complex" | "format_float" => Some(4),
+            // 5 args: AppendFloat(dst, f, fmt, prec, bitSize)
+            "append_float" => Some(5),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `strconv.{member}` (HYB-E1002)"),
+                    &format!("`strconv.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let go_name = {
+                    // mirror hy-emit's to_go_name without a cross-crate dep
+                    // (hy-check must not depend on hy-emit).
+                    let mut out = String::new();
+                    for part in member.split('_') {
+                        if part.is_empty() {
+                            continue;
+                        }
+                        let mut cs = part.chars();
+                        if let Some(c) = cs.next() {
+                            out.extend(c.to_uppercase());
+                        }
+                        out.push_str(cs.as_str());
+                    }
+                    out
+                };
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`strconv.{member}` takes exactly {expected} argument{}, got {} (HYB-E1002)",
+                        if expected == 1 { "" } else { "s" },
+                        args.len()
+                    ),
+                    &format!(
+                        "match the arity of the Go function this lowers to (`strconv.{go_name}`)"
+                    ),
+                );
+            }
+        }
+    }
+
     fn check_sort_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(member, "interface" | "int_slice" | "float64_slice" | "string_slice") {
             self.emit_e1002(
@@ -8235,6 +8328,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sort" && self.lookup_kind(pkg).is_none() {
                         self.check_sort_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "strconv" && self.lookup_kind(pkg).is_none() {
+                        self.check_strconv_package_call(name.as_str(), args, span);
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
