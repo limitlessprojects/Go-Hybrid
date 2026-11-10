@@ -8493,6 +8493,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if (pkg == "zlib" || pkg == "compress/zlib") && self.lookup_kind(pkg).is_none() {
+                        self.check_zlib_package_call(name.as_str(), args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -9894,6 +9898,100 @@ impl<'a> Collector<'a> {
                         span,
                         "`io.multi_writer` requires at least 1 writer argument `(writers...)`, got 0 (HYB-E1002)".to_string(),
                         "write `io.multi_writer(w1, ...)`",
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn check_zlib_package_call(&mut self, name: &str, args: &[CallArg], span: Span) {
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `zlib.{}` with variadic spread `...`: package function does not take variadic parameters (HYB-E1002)", name),
+                "pass arguments individually without `...`",
+            );
+            return;
+        }
+        match name {
+            "err_checksum"
+            | "err_dictionary"
+            | "err_header"
+            | "no_compression"
+            | "best_speed"
+            | "best_compression"
+            | "default_compression"
+            | "huffman_only"
+            | "writer"
+            | "reader"
+            | "resetter" => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot call `zlib.{}`: package symbol is a variable, constant, or type, not a function (HYB-E1002)",
+                        name
+                    ),
+                    &format!("refer to `zlib.{}` as a value or type rather than calling it", name),
+                );
+            }
+            "new_reader" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`zlib.new_reader` takes exactly 1 argument `(r)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `zlib.new_reader(r)`",
+                    );
+                }
+            }
+            "new_writer" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`zlib.new_writer` takes exactly 1 argument `(w)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `zlib.new_writer(w)`",
+                    );
+                }
+            }
+            "new_reader_dict" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`zlib.new_reader_dict` takes exactly 2 arguments `(r, dict)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `zlib.new_reader_dict(r, dict)`",
+                    );
+                }
+            }
+            "new_writer_level" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`zlib.new_writer_level` takes exactly 2 arguments `(w, level)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `zlib.new_writer_level(w, level)`",
+                    );
+                }
+            }
+            "new_writer_level_dict" => {
+                if args.len() != 3 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`zlib.new_writer_level_dict` takes exactly 3 arguments `(w, level, dict)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `zlib.new_writer_level_dict(w, level, dict)`",
                     );
                 }
             }
