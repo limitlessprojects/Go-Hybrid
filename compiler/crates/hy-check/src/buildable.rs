@@ -4578,6 +4578,51 @@ impl<'a> Collector<'a> {
             }
         }
     }
+    fn check_bufio_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "err_advance_too_far"
+            | "err_bad_read_count"
+            | "err_buffer_full"
+            | "err_final_token"
+            | "err_invalid_unread_byte"
+            | "err_invalid_unread_rune"
+            | "err_negative_advance"
+            | "err_negative_count"
+            | "err_too_long"
+            | "max_scan_token_size"
+            | "reader"
+            | "writer"
+            | "read_writer"
+            | "scanner"
+            | "split_func" => {
+                self.emit_e1002(
+                    span,
+                    format!("cannot call `bufio.{}`: package symbol is a variable, constant, or type, not a function (HYB-E1002)", name),
+                    &format!("refer to `bufio.{}` as a value or type rather than calling it", name),
+                );
+            }
+            "new_reader" | "new_writer" | "new_scanner" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("`bufio.{}` takes exactly 1 argument, got {} (HYB-E1002)", name, args.len()),
+                        &format!("call `bufio.{}` with 1 argument", name),
+                    );
+                }
+            }
+            "new_reader_size" | "new_writer_size" | "new_read_writer" | "scan_bytes" | "scan_lines" | "scan_runes" | "scan_words" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("`bufio.{}` takes exactly 2 arguments, got {} (HYB-E1002)", name, args.len()),
+                        &format!("call `bufio.{}` with 2 arguments", name),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -8491,6 +8536,9 @@ impl<'a> Collector<'a> {
 
                     if pkg == "io" && self.lookup_kind(pkg).is_none() {
                         self.check_io_call_buildable(name, args, span);
+                    }
+                    if pkg == "bufio" && self.lookup_kind(pkg).is_none() {
+                        self.check_bufio_call_buildable(name, args, span);
                     }
 
                     if self.lookup_kind(pkg).is_none() {
