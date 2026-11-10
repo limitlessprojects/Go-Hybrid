@@ -4394,7 +4394,7 @@ impl<'a> Collector<'a> {
 
         let expected_arity = match member {
             "abs" | "base" | "clean" | "dir" | "eval_symlinks" | "ext" | "from_slash"
-            | "is_abs" | "is_local" | "localize" | "split" | "split_list" | "to_slash"
+            | "glob" | "is_abs" | "is_local" | "localize" | "split" | "split_list" | "to_slash"
             | "volume_name" => Some(1),
             "has_prefix" | "match" | "rel" | "walk" | "walk_dir" => Some(2),
             _ => None,
@@ -4602,7 +4602,7 @@ impl<'a> Collector<'a> {
             "ints" | "ints_are_sorted" | "float64s" | "float64s_are_sorted" | "strings"
             | "strings_are_sorted" | "sort" | "stable" | "is_sorted" | "reverse" => Some(1),
             "search_ints" | "search_float64s" | "search_strings" | "search" | "slice"
-            | "slice_is_sorted" | "slice_stable" => Some(2),
+            | "slice_is_sorted" | "slice_stable" | "find" => Some(2),
             _ => None,
         };
 
@@ -9964,12 +9964,12 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
-            "read_all" => {
+            "read_all" | "nop_closer" => {
                 if args.len() != 1 {
                     self.emit_e1002(
                         span,
-                        format!("`io.read_all` takes exactly 1 argument `(r)`, got {} (HYB-E1002)", args.len()),
-                        "write `io.read_all(r)`",
+                        format!("`io.{}` takes exactly 1 argument `(r)`, got {} (HYB-E1002)", name, args.len()),
+                        &format!("write `io.{}(r)`", name),
                     );
                 }
             }
