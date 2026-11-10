@@ -70,6 +70,9 @@ impl ChannelLivenessChecker {
     fn pop_scope(&mut self) {
         if let Some(scope) = self.scope_stack.pop() {
             self.check_terminal_invariants(&scope);
+            if let Some(parent) = self.scope_stack.last_mut() {
+                parent.moved_caps.extend(scope.moved_caps);
+            }
         }
     }
 
@@ -183,11 +186,15 @@ impl ChannelLivenessChecker {
                 self.pop_scope();
             }
             Stmt::If {
+                init,
                 cond,
                 then,
                 otherwise,
                 ..
             } => {
+                if let Some(i) = init {
+                    self.check_stmt(i);
+                }
                 self.check_expr(cond);
                 self.push_scope();
                 for s in &then.stmts {
@@ -201,6 +208,34 @@ impl ChannelLivenessChecker {
             Stmt::Block { block, .. } => {
                 self.push_scope();
                 for s in &block.stmts {
+                    self.check_stmt(s);
+                }
+                self.pop_scope();
+            }
+            Stmt::Match { subject, arms, .. } => {
+                self.check_expr(subject);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.check_expr(guard);
+                    }
+                    self.push_scope();
+                    for s in &arm.body.stmts {
+                        self.check_stmt(s);
+                    }
+                    self.pop_scope();
+                }
+            }
+            Stmt::Defer { call, .. } => {
+                self.check_expr(call);
+            }
+            Stmt::Return { values, .. } => {
+                for v in values {
+                    self.check_expr(v);
+                }
+            }
+            Stmt::Managed { body, .. } => {
+                self.push_scope();
+                for s in &body.stmts {
                     self.check_stmt(s);
                 }
                 self.pop_scope();
@@ -326,6 +361,30 @@ impl ChannelLivenessChecker {
 
     fn check_expr(&mut self, expr: &Expr) {
         match expr {
+            Expr::Move { operand, span } => {
+                if let Some(cap) = self.get_cap_name(operand) {
+                    if self.is_moved(&cap) {
+                        self.diags.push(Diagnostic::error(
+                            "HYB-E3001",
+                            &self.file_path,
+                            *span,
+                            format!("affine capability '{}' moved more than once", cap),
+                        ));
+                    } else {
+                        self.mark_moved(&cap);
+                    }
+                }
+            }
+            Expr::Try { operand, .. } => {
+                self.check_expr(operand);
+            }
+            Expr::FnLit { body, .. } => {
+                self.push_scope();
+                for s in &body.stmts {
+                    self.check_stmt(s);
+                }
+                self.pop_scope();
+            }
             Expr::Call { callee, args, span } => {
                 if let Expr::Field { base, name, .. } = callee.as_ref() {
                     if let Some(cap) = self.get_cap_name(base) {

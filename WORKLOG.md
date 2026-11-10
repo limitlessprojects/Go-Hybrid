@@ -882,3 +882,79 @@
 **State**: main `3c6e4954` == origin (pushed & asserted). Tests 3262, corpus 139/139, differential FULL.
 
 **Scouted next**: #4123/#4122 (phatloi0010 const validation `54a9da79`), #4240 (chunked triage mode), dextermos follow-ups (tar table completion candidate), old-backlog rebase wave #584-#791 (band screening). Pending authors: #4199, #4206, #4097, #4217, #4219, #743 (Anekenonso re-scope awaited).
+
+## Session 178 — 2026-11-10 08:10
+
+**Landed: #4123** (phatloi0010 / typed top-level const validation + const conversions in consts/array lengths, fixes #3188) — merge `235d6fb5`, reply 6755120584.
+- Base == HEAD (`b2393795`), single commit, zero behind; re-queue of #3189 (already closed by author 2026-11-08, supersession clean).
+- Scope: buildable.rs check_const_decl (kinds_conflict / int_float_conflict / scalar_mismatch / sized_array_names_differ → E1002, bracketed array-literal shorthand preserved); lib.rs + emit_guard.rs route const initializers and array-length exprs through check_expr_type_conversions (→ E6006); narrow `[int8(x)]int` bypass (single ident arg, known const value) with range check still applying.
+- Premise live by inspection: main's Decl::Const arm ran only ty_opt+expr — `const a int = "hello"` accepted pre-PR.
+- **SPEC X4 archaeology (decisive, #743-lesson applied correctly this time)**: controls `byte(300)` const/array-len looked Go-invalid (go1.26.9 oracle: `constant 300 overflows byte` in all three positions) — but const_conversion.rs's pre-registered sub64_integer_overflow_folds_and_stays_accepted documents hy folding semantics (SPEC X4 / line 1991: `u8(300) == 44`). Corpus is the spec: standing verdict, no amendment needed, no flips (const_conversion 13/13 unchanged). Wide-type overflow (int64 1e20, float32 1e40) still rejects — suite internally consistent.
+- Gates: battery 3267/0 (+1 suite, +5 tests EXACT vs 505/3262 — counting method held), corpus 139/139 (1.4%), differential FULL 47/47+92/92. Hygiene clean. #3188 no milestone/labels → fixes-safe.
+
+**Ops**: cold rootfs (rust+go reinstalled); disk peaked 93% after differential — trimmed post-landing; worktree /tmp/wt4123 used for gates, removed after merge.
+
+**State**: main `235d6fb5` == origin (pushed & asserted). Tests 3267, suites 506 (result-line method), corpus 139/139, differential FULL.
+
+**Scouted next**: #4122 (phatloi0010 sibling), #4240 (chunked triage mode), dextermos follow-up (tar table completion), old-backlog rebase wave #584-#791 (band screening). Pending authors: #4199, #4206, #4097, #4217, #4219, #743 (Anekenonso re-scope awaited). Triage scan/approve STILL pending rerun (third loss).
+
+## Session 179 — 2026-11-10 11:10 (makes up the 09:10 tick, aborted by sandbox-start failure)
+
+**Landed: #4122** (phatloi0010 / hy-syntax: guard return, break/continue, postfix [/{ against cross-newline fusion, fixes #3159) — merge `495aa1b8`, reply 6757975618.
+- Base == HEAD (`de0d36e0`), single commit; re-queue of #3160 (author-closed, supersession clean). Head re-pushed by author since S178 scout (0292dd32 → 08771fce).
+- Pattern completion, not invention: same_line_as_prev pre-exists with 8 call sites; PR adds the 4 remaining sites (return values stop at newline; break/continue `loop` label needs same-line + next != `{`; postfix `{`/`[` attachment needs same-line).
+- Verdict-flip sweep passed: hy-syntax lib 116/0, hy-check lib 184/0 (with additions); corpus 139/139 zero flips — no corpus program relies on next-line fusion. De-fused shapes stay fail-closed; multi-line bracket continuations unaffected.
+- Gates: battery 3271/0 (+4 tests EXACT: 3 parser inline + 1 loans inline, 0 new suites; baseline 506/3267), corpus 139/139 (1.4%), differential FULL 47/47+92/92. Hygiene clean. #3159 no milestone/labels → fixes-safe.
+
+**Ops**: sandbox-start failure killed the 09:10 tick entirely (second tool-wall incident; no state left). This tick reinstalled rust+go from cold; disk peaked 93% post-differential, trimmed after landing; worktree /tmp/wt4122 removed post-merge.
+
+**State**: main `495aa1b8` == origin (pushed & asserted). Tests 3271, suites 506 (result-line method), corpus 139/139, differential FULL.
+
+**Scouted next**: #4240 (chunked triage mode), tar-table completion follow-up (dextermos), old-backlog rebase wave #584-#791 (band screening). Pending authors: #4199, #4206, #4097, #4217, #4219, #743 (Anekenonso re-scope). phatloi0010 band: #4123 + #4122 both landed — queue drained for this author.
+
+## Session 180 — 2026-11-10 12:10
+
+**No landing. Gate FAIL: #4318** (SADIQ2M — hash/adler32 call arity + constant-call rejection, fixes #4317, head `7aa85b6c`, base == main) — NOT landed, written evidence reply 6758915999.
+- Intent correct, arity table matches the go1.26.9 oracle (`adler32.New() hash.Hash32` 0-arg, `Checksum(data []byte) uint32` 1-arg — go doc oracle killed my own 2-arg expectation; old seed form gone), `const Size = 4`; emit `shapes.rs` import_path_of mapping present; fixes #4317 clean (no milestone/labels).
+- **Corruption 1 (live A/B regression)**: is_curated_import's existing arm `| "rust/regex"` rewritten into the literal `"rust/regex, hash/adler32"` (comma inside one string → matches nothing). Probe: `import "rust/regex"` + `regex.is_match` (example 09's shape) — main `9429299a` exit 0 Go emitted; PR head rejects HYB-E1001 **and the diagnostic prints the corrupted merged string** (self-incriminating).
+- **Corruption 2**: is_curated_package_member spliced as `"adler32" | "json"` onto json's member list — probe: `adler32.new` / `adler32.checksum` → "not a resolved member of curated package adler32"; the PR's own claimed surface is dead (no new/checksum/size arm).
+- **Corruption 3**: package_mode/package_result — adler32 injected into json's new_decoder/new_encoder arms (duplicated twice per arm) → `adler32.new_decoder` would type as json.decoder.
+- **Corruption 4**: tests/soundness_adler32_arity.rs is a 3-line stub, zero assertions — body claims regression coverage that doesn't exist; four gates would have passed while shipping corruption 1 (no existing test covers is_curated_import("rust/regex") — the review gate + probe caught what the suite cannot).
+- Also: hy-emit lib.rs is_package_root untouched (S177 dual-table gap again). Re-scope checklist in reply (append arms, dedicated member arm, real parse_file tests + go build probe, fix both emit tables).
+
+**Ops**: cold rootfs (rust 1.99.0 + go1.26.9 reinstalled; go tarball re-downloaded — not persisted); triage scan/approve 4th silent loss (log 0 bytes, no process — API-driven flow again). **Build-hygiene lesson**: after a worktree build into the shared CARGO_TARGET_DIR, a same-dir main rebuild can silently relink stale upstream crates (0.84s "Finished" with PR strings still in the binary) — forced real rebuild via `touch foreign.rs` + verified `Compiling hy-check` line + `strings` on the binary before trusting the A/B contrast. Worktree /tmp/wt4318 removed; incremental trimmed.
+
+**State**: main `9429299a` == origin (unchanged this tick, last asserted on fetch). Tests 3271, suites 506, corpus 139/139, differential FULL (S179 baseline carried). Disk 51%.
+
+**Scouted next**: band screening on the new wave — SADIQ2M arity band (#4296/#4288/#4285/#4283/#4276/#4318-rework; check each for the same corrupted-literal splice pattern), dextermos arity band (#4303/#4302/#4301/#4300/#4294/#4264, all base `62299520` — behind, verify what that base is), seenorht channel-liveness band (#4299/#4290/#4281), aswadi curated-surface pair (#4305/#4307 — log.Logger + gzip/tar method modeling; S177 dual-table lesson applies), Khanhtnq #4316 (const scalar widths — SPEC X4 archaeology mandatory), #4312 (strconv arity), #4311 (examples restore — CAUTION: same out-of-scope example-10 machine-hash content #4229 stripped; review what "pre-accident" state means before landing), #4292 (package-scope redeclarations). Pending authors: #4199, #4206, #4097, #4217, #4219, #743 (re-scope awaited). #4240 still open (head moved to 12efe2ac).
+
+## Session 181 — 2026-11-10 14:10
+
+**Landed: #4312** (wminno / hy-check: strconv call-arity + non-callable rejection, fixes #4135) — merge `5c458ddd`, reply 6760690695140 (id 6760695140).
+- Head `59e8ca3d` = merge of main `4bbda000` + fix branch (merge-base == main HEAD, zero conflicts); author discloses agent provenance (gamma-5 fleet via wminno, #4238 precedent).
+- Scope: check_strconv_package_call — arity table 38 = 34 callable (15×1+12×2+4×3+2×4+1×5) + 4 non-callable (int_size/err_range/err_syntax/num_error), spread-guard on non-variadic, dispatch guard matches sort/sync pattern. No foreign.rs changes (strconv already allowlisted) — no #4318-style corruption surface.
+- Premise live-proven on main binary: parse_int(s,10) 2-arg + err_range() call ACCEPTED pre-PR; PR head rejects both with new E1002 diagnostics.
+- Arity oracle: go doc strconv.<Go> on go1.26.9 — all 34 param counts match. Completeness: table == foreign.rs member arm exactly.
+- Gates: battery **3281/0** (+1 suite +10 tests EXACT vs 506/3271), corpus **139/139** (tripwire 1.4%), differential **FULL 47/47+92/92**. #4135 was already auto-closed by af7b6364 (#4238 message mis-claim) — landing delivers the strconv half, no new close.
+- Emit initialism table already has ascii→ASCII (no #4229-style follow-up needed).
+
+**Ops**: rootfs cold again (rust 1.99.0 + go1.26.9 foreground installs — nohup backgrounding UNRELIABLE in this environment: background jobs died silently within the same tick; triage scan 5th loss, API-driven flow is now the standing method). **Disk fights**: battery ENOSPC'd twice (test binaries with debug info ~25MB × ~100 targets) — fix: `CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0` + `cargo clean` first; battery then fits (95% peak). **Stale-link hazard recurrence (S180 lesson)**: worktree build printed "Finished 0.01s" and linked MAIN's hy-check; "takes exactly" strings are NOT a PR marker (18 hits on main) — the reliable markers are behavior probes + format-split literals like "is not a function — it is a package-level"; always touch+recompile+probe before trusting an A/B.
+
+**State**: main `5c458ddd` == origin (pushed & asserted). Tests 3281, suites 507 (result-line method), corpus 139/139, differential FULL. Disk ~93% post-landing (worktree removed).
+
+**Scouted next**: seenorht band #4299/#4290/#4281 (channel liveness traversal — #4299 has 102-line test file), gorky117-cel tools pair #4320/#4321 (managed_gate + corpus_harness fail-closed, both base==main, tools-side), tmclaos #4314 (liveness shadowing, base==main), Khanhtnq #4316 (const widths — SPEC X4 archaeology mandatory), SADIQ2M band re-check (#4296/#4288/#4285/#4283/#4276 for #4318-style corruption patterns before any review), dextermos band re-based to main (#4319/#4303/#4302/#4301/#4300/#4294 — screen for corruption too), #4311 (examples restore — CAUTION, #4229-stripped content type). Pending authors: #4199, #4206, #4097, #4217, #4219, #743.
+
+## Session 183 — 2026-11-10 16:10 (S182 15:10 aborted: sandbox-start failure, no state impact)
+
+**Landed: #4299** (seenorht / channel_liveness: traverse Match/Defer/Return/Managed + Move/Try/FnLit recursion, fixes #4298) — merge `cb6beeec`, reply 6762551305.
+- Head `f01df0a7`, base == main `0292e9a2`, single commit; re-pushed since S180 scout (7b2c0ef4 → f01df0a7).
+- Premise confirmed by construction: main's check_stmt had NO arms for the four stmt kinds (wildcard `_ => {}` — rg verified) — match-arm double-moves, defer-timed close races, returns of moved caps, managed-block moves were never scanned. PR adds 4 stmt arms + Move/Try/FnLit expr recursion + If-init.
+- pop_scope propagates child moved_caps upward — sticky/conservative (fail-closed); corpus zero flips confirm no existing program relied on the misses. Path-sensitive meet = #4323 territory (stronger analysis, later).
+- Gates: battery **3285/0** (+4 tests EXACT vs 507/3281, PR's 4 tests; +0 suites), corpus **139/139** (tripwire 1.4%), differential **FULL 47/47+92/92**. #4298 open, no milestone/labels → fixes-safe. Hygiene clean.
+- Band note: overlap with #4281 (pop_scope propagation) — this merge carries a compatible version; #4281 needs supersession/rebase review. #4290 (loop backedges) and #4314 (shadowing) rebase territory too.
+
+**Ops**: sandbox-start failure killed S182 (third tool-wall incident; no state left, self-healed this tick). Cold rootfs reinstalled (rust+go foreground). **DISK DOCTRINE UPGRADED**: battery ENOSPC'd twice even with TEST_DEBUG=0+INCREMENTAL=0 (deps 4.8G: ~110 test binaries ×12MB + dev rlibs); the fitting recipe is `CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 RUSTFLAGS="-C link-arg=-Wl,--no-keep-memory -C strip=symbols"` — battery then peaks 75%. One environmental go-run failure mid-ENOSPC (hy-emit array_composite_literals go run — S179-class, vanished on rerun). cargo clean post-landing (44%→83%→cleaned).
+
+**State**: main `cb6beeec` == origin (pushed & asserted). Tests 3285, suites 507 (result-line), corpus 139/139, differential FULL. Disk ~44% post-clean.
+
+**Scouted next**: #4323 (path-sensitive branch/select meet — builds ON this landing's sticky propagation; review after rebase), gorky117-cel tools pair #4320/#4321 (base 4bbda000, 1 behind, small), dextermos arity band re-based to main (#4319/#4303/#4302/#4301/#4300/#4294 — screen for #4318-style corruption before any review), SADIQ2M band (#4296/#4288/#4285/#4283/#4276, same screening), Khanhtnq #4316 (const widths — SPEC X4 archaeology mandatory), #4311 (examples restore — CAUTION). Pending authors: #4199, #4206, #4097, #4217, #4219, #743; seenorht band follow-ups (#4290/#4281) now rebase territory.
