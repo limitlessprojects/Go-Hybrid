@@ -128,6 +128,7 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
         ("serde_json", "parse" | "new_object" | "new_array")
         | ("flate2", "new_writer")
         | ("json" | "encoding/json", "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder")
+        | ("md5" | "crypto/md5", "new" | "New")
         | (
             "httptest" | "net/http/httptest",
             "new_server"
@@ -202,6 +203,12 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         }
         ("json" | "encoding/json", "new_encoder" | "NewEncoder") => {
             TypeShape::ForeignOpaque("json.encoder".into())
+        }
+        ("md5" | "crypto/md5", "new" | "New") => {
+            TypeShape::ForeignOpaque("md5.hash".into())
+        }
+        ("md5" | "crypto/md5", "sum" | "Sum") => {
+            TypeShape::Slice(Box::new(TypeShape::Primitive))
         }
         (
             "httptest" | "net/http/httptest",
@@ -791,6 +798,8 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "url"
             | "encoding/json"
             | "json"
+            | "crypto/md5"
+            | "md5"
             | "encoding/hex"
             | "hex"
             | "path"
@@ -868,6 +877,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "httptest"
             | "url"
             | "json"
+            | "md5"
             | "hex"
             | "path"
             | "filepath"
@@ -1745,6 +1755,10 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "view"
         ),
         "sha3" => matches!(m, "digest256" | "stream_checksum"),
+        "md5" | "crypto/md5" => matches!(
+            m,
+            "new" | "sum" | "size" | "block_size"
+        ),
         "regex" => matches!(m, "is_match" | "is_valid" | "compile" | "match_string"),
         "flate2" => matches!(m, "new_writer" | "write" | "finish" | "writer"),
         "hy" => matches!(m, "pipe" | "new_pipe" | "send_cap" | "recv_cap" | "channel"),
