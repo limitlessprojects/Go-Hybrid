@@ -4671,6 +4671,98 @@ impl<'a> Collector<'a> {
             }
         }
     }
+
+    // Full `archive/tar` (`tar`) call surface — every member blessed in
+    // `foreign.rs` (#4214), checked against Go 1.26 `archive/tar` signatures:
+    //   - Non-callable constants/variables/types (28): `type_reg`..`type_gnu_long_link`,
+    //     `err_header`..`err_insecure_path`, `format`, `format_unknown`..`format_gnu`,
+    //     `header`, `reader`, `writer`, `file_info_names`.
+    //   - 1-arg functions: `new_reader(r)`, `new_writer(w)`.
+    //   - 2-arg function: `file_info_header(fi, link)`.
+    fn check_tar_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "type_reg"
+                | "type_reg_a"
+                | "type_link"
+                | "type_symlink"
+                | "type_char"
+                | "type_block"
+                | "type_dir"
+                | "type_fifo"
+                | "type_cont"
+                | "type_x_header"
+                | "type_x_global_header"
+                | "type_gnu_sparse"
+                | "type_gnu_long_name"
+                | "type_gnu_long_link"
+                | "err_header"
+                | "err_write_too_long"
+                | "err_field_too_long"
+                | "err_write_after_close"
+                | "err_insecure_path"
+                | "format"
+                | "format_unknown"
+                | "format_ustar"
+                | "format_pax"
+                | "format_gnu"
+                | "header"
+                | "reader"
+                | "writer"
+                | "file_info_names"
+        ) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`tar.{member}` is not a function — it is a package-level constant/variable/type and cannot be called (HYB-E1002)"
+                ),
+                &format!("reference `tar.{member}` directly, do not call it"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_reader" | "new_writer" => Some(1),
+            "file_info_header" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `tar.{member}` (HYB-E1002)"),
+                    &format!("`tar.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let go_name = {
+                    let mut out = String::new();
+                    for part in member.split('_') {
+                        if part.is_empty() {
+                            continue;
+                        }
+                        let mut cs = part.chars();
+                        if let Some(c) = cs.next() {
+                            out.extend(c.to_uppercase());
+                        }
+                        out.push_str(cs.as_str());
+                    }
+                    out
+                };
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`tar.{member}` takes exactly {expected} {noun}, got {} (HYB-E1002)",
+                        args.len()
+                    ),
+                    &format!(
+                        "match the arity of the Go function this lowers to (`tar.{go_name}`)"
+                    ),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -8334,6 +8426,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "tar" && self.lookup_kind(pkg).is_none() {
+                        self.check_tar_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
