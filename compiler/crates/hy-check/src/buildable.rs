@@ -4624,6 +4624,45 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_crc32_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(member, "table") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `crc32.{member}`: `crc32.{member}` is a struct type, not a function (HYB-E1002)"),
+                &format!("`crc32.{member}` is a struct type, not a callable function"),
+            );
+            return;
+        }
+
+        if matches!(member, "size" | "ieee" | "castagnoli" | "koopman" | "ieee_table") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `crc32.{member}`: `crc32.{member}` is a package constant or variable, not a function (HYB-E1002)"),
+                &format!("`crc32.{member}` is a package constant or variable, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_ieee" => Some(0),
+            "checksum_ieee" | "new" | "make_table" => Some(1),
+            "checksum" => Some(2),
+            "update" => Some(3),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`crc32.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `crc32.{member}`"),
+                );
+            }
+        }
+    }
+
     fn check_sync_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(
             member,
@@ -8331,6 +8370,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "strconv" && self.lookup_kind(pkg).is_none() {
                         self.check_strconv_package_call(name.as_str(), args, span);
+                    }
+                    if (pkg == "crc32" || pkg == "hash/crc32") && self.lookup_kind(pkg).is_none() {
+                        self.check_crc32_package_call(name.as_str(), args, span);
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
