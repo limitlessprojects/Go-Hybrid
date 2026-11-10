@@ -2908,6 +2908,28 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn copy_expr_root(&self, e: &Expr) -> Option<String> {
+        match crate::model::unwrap_parens_and_move(e) {
+            Expr::Ident { name, .. } => {
+                if self.is_copy_semantic_range_var(name) {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            }
+            Expr::Field { base, .. } => match self.kind_of_expr(base) {
+                OpKind::Unknown | OpKind::Pointer(_) => None,
+                _ => self.copy_expr_root(base),
+            },
+            Expr::Index { base, .. } => match self.kind_of_expr(base) {
+                OpKind::Unknown | OpKind::Pointer(_) | OpKind::Slice(_) | OpKind::Map(..) => None,
+                OpKind::Str => None,
+                _ => self.copy_expr_root(base),
+            },
+            _ => None,
+        }
+    }
+
     /// #1480: `x.f = v`, `x.f += v`, `x[i] = v` … where `x` is a
     /// struct/array element of a `for x in xs` loop are silently dropped at
     /// runtime (the binding is a per-iteration copy). The pass must not
@@ -8828,19 +8850,17 @@ impl<'a> Collector<'a> {
                     // emits `(&x).Bump()` on the per-iteration local), so the
                     // non-addressable rule above cannot catch it — the call
                     // builds and the mutation is silently dropped instead.
-                    if let Expr::Ident { name: var, .. } = unwrap_parens(base) {
-                        if self.is_copy_semantic_range_var(var) {
-                            self.emit_e1002(
-                                span,
-                                format!(
-                                    "cannot call pointer-receiver method `{}` on range element `{}` — `{}` is a per-iteration copy, so the mutation is silently dropped (HYB-E1002)",
-                                    name,
-                                    base.render(),
-                                    base.render()
-                                ),
-                                "call it through the collection index instead: `for i in 0..len(xs) { xs[i].method() }`, or iterate a slice of pointers and call through the pointer",
-                            );
-                        }
+                    if let Some(root) = self.copy_expr_root(base) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot call pointer-receiver method `{}` on range element `{}` — `{}` is a per-iteration copy, so the mutation is silently dropped (HYB-E1002)",
+                                name,
+                                base.render(),
+                                root
+                            ),
+                            "call it through the collection index instead: `for i in 0..len(xs) { xs[i].method() }`, or iterate a slice of pointers and call through the pointer",
+                        );
                     }
                 }
             }
@@ -8985,6 +9005,16 @@ impl<'a> Collector<'a> {
                             base.render()
                         ),
                         "bind the slice to a local variable first (`s := ...; x := s.pop()`)",
+                    );
+                } else if let Some(root) = self.copy_expr_root(base) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "cannot call `.pop()` on range element `{}` — `{}` is a per-iteration copy, so the slice header mutation is silently dropped (HYB-E1002)",
+                            base.render(),
+                            root
+                        ),
+                        "call `.pop()` through the collection index instead: `for i in 0..len(xs) { v := xs[i].items.pop() }`",
                     );
                 }
             }
