@@ -8668,6 +8668,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if (pkg == "crc32" || pkg == "hash/crc32") && self.lookup_kind(pkg).is_none() {
+                        self.check_crc32_package_call(name.as_str(), args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -10073,6 +10077,53 @@ impl<'a> Collector<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn check_crc32_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "size"
+                | "ieee"
+                | "castagnoli"
+                | "koopman"
+                | "ieee_table"
+                | "table"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `crc32.{member}`: package symbol is a variable, constant, or type, not a function (HYB-E1002)"),
+                &format!("refer to `crc32.{member}` as a value or type rather than calling it"),
+            );
+            return;
+        }
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `crc32.{member}` (HYB-E1002)"),
+                &format!("`crc32.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_ieee" => Some(0),
+            "checksum_ieee" | "new" | "make_table" => Some(1),
+            "checksum" => Some(2),
+            "update" => Some(3),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`crc32.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `crc32.{member}`"),
+                );
+            }
         }
     }
 }

@@ -128,6 +128,7 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
         ("serde_json", "parse" | "new_object" | "new_array")
         | ("flate2", "new_writer")
         | ("json" | "encoding/json", "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder")
+        | ("crc32" | "hash/crc32", "new" | "new_ieee" | "New" | "NewIEEE")
         | (
             "httptest" | "net/http/httptest",
             "new_server"
@@ -203,6 +204,16 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("json" | "encoding/json", "new_encoder" | "NewEncoder") => {
             TypeShape::ForeignOpaque("json.encoder".into())
         }
+        ("crc32" | "hash/crc32", "new" | "new_ieee" | "New" | "NewIEEE") => {
+            TypeShape::ForeignOpaque("crc32.hash32".into())
+        }
+        ("crc32" | "hash/crc32", "make_table" | "MakeTable") => {
+            TypeShape::ForeignOpaque("crc32.table".into())
+        }
+        (
+            "crc32" | "hash/crc32",
+            "checksum" | "checksum_ieee" | "update" | "Checksum" | "ChecksumIEEE" | "Update",
+        ) => TypeShape::Primitive,
         (
             "httptest" | "net/http/httptest",
             "new_server"
@@ -791,6 +802,8 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "url"
             | "encoding/json"
             | "json"
+            | "hash/crc32"
+            | "crc32"
             | "encoding/hex"
             | "hex"
             | "path"
@@ -868,6 +881,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "httptest"
             | "url"
             | "json"
+            | "crc32"
             | "hex"
             | "path"
             | "filepath"
@@ -1745,6 +1759,21 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "view"
         ),
         "sha3" => matches!(m, "digest256" | "stream_checksum"),
+        "crc32" | "hash/crc32" => matches!(
+            m,
+            "checksum"
+                | "checksum_ieee"
+                | "new"
+                | "new_ieee"
+                | "make_table"
+                | "update"
+                | "size"
+                | "ieee"
+                | "castagnoli"
+                | "koopman"
+                | "ieee_table"
+                | "table"
+        ),
         "regex" => matches!(m, "is_match" | "is_valid" | "compile" | "match_string"),
         "flate2" => matches!(m, "new_writer" | "write" | "finish" | "writer"),
         "hy" => matches!(m, "pipe" | "new_pipe" | "send_cap" | "recv_cap" | "channel"),
