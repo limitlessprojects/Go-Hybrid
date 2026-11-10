@@ -6,6 +6,8 @@ import "fmt"
 func identity(value uint64) uint64
 
 func frameRoot()
+func frameMiddle()
+func frameLeaf()
 
 // Keep the indirect call so the linker retains the ABIInternal wrapper.
 //
