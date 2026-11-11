@@ -4588,6 +4588,110 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// `fmt` print/scan/append-family members are variadic over `...any`.
+    /// Go accepts a `...` spread on them only when it is the final argument,
+    /// only after exactly the fixed leading parameters, and only when the
+    /// operand is assignable to `[]any` — slice types are invariant, so a
+    /// `[]string`/`[]int`/`[]error` is not. Every other shape passed
+    /// `hyb check` with 0 diagnostics and then failed `go build`
+    /// (Row 13 BUILDABLE, HYB-E1002).
+    ///
+    /// The operand test is kind-based (`Slice(any)`), not spelling-based, so
+    /// a `[]any` reached through a type alias (`type any_alias = any`)
+    /// stays accepted, as do sub-slices, `[]any` aliases and calls returning
+    /// `[]any`. An unresolved kind stays fail-open.
+    fn check_fmt_variadic_spread(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if !args.iter().any(|a| a.spread) {
+            return;
+        }
+        // Fixed parameters before the `...any` tail, in Hybrid argument
+        // terms: `eprint*` lower to `Fprint*(os.Stderr, ...)`, so the writer
+        // is inserted by the emitter and is not a user-supplied argument.
+        let fixed = match member {
+            "print" | "println" | "sprint" | "sprintln" | "eprint" | "eprintln" | "scan"
+            | "scanln" => 0,
+            "printf" | "sprintf" | "eprintf" | "errorf" | "fprint" | "fprintln" | "scanf"
+            | "sscan" | "sscanln" | "fscan" | "fscanln" | "append" | "appendln" => 1,
+            "fprintf" | "sscanf" | "fscanf" | "appendf" => 2,
+            _ => return,
+        };
+        let last = args.len() - 1;
+        if args[..last].iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`...` (variadic spread) may only be used on the final argument of `fmt.{member}`, and only once (HYB-E1002)"
+                ),
+                &format!("move the spread slice to the last argument of `fmt.{member}`"),
+            );
+            return;
+        }
+        if last != fixed {
+            let detail = if last < fixed {
+                format!(
+                    "requires the {fixed} fixed argument{} before the spread slice, got {last}",
+                    if fixed == 1 { "" } else { "s" }
+                )
+            } else {
+                format!(
+                    "cannot mix individual values with a spread slice; its fixed parameters are exactly {fixed}, got {last} leading argument{}",
+                    if last == 1 { "" } else { "s" }
+                )
+            };
+            self.emit_e1002(
+                span,
+                format!("`fmt.{member}` with a `...` spread {detail} (HYB-E1002)"),
+                &format!(
+                    "a spread slice replaces the whole variadic tail of `fmt.{member}`; pass it as the argument after the fixed parameter{}",
+                    if fixed == 1 { "" } else { "s" }
+                ),
+            );
+            return;
+        }
+        let spread = &args[last].value;
+        let label = match self.kind_of_expr(spread) {
+            // Unresolved: fail open. `nil` lands here and Go accepts
+            // `fmt.Println(nil...)` (nil is assignable to `[]any`).
+            OpKind::Unknown => return,
+            OpKind::Slice(elem) => match *elem {
+                OpKind::Interface => return,
+                OpKind::Unknown => {
+                    // An unresolved element is normally fail-open, but a
+                    // type parameter is provably not `[]any`: Go refuses
+                    // `[]T` even when `T` is constrained to any.
+                    let Some(elem_name) = self.slice_element_type_name(spread) else {
+                        return;
+                    };
+                    if self.fn_type_params.contains(elem_name.trim()) {
+                        format!("[]{}", elem_name.trim())
+                    } else {
+                        return;
+                    }
+                }
+                other => {
+                    // Prefer the source spelling (`[]byte`, `[]string`, ...)
+                    // when it is available; the kind model folds `byte` into
+                    // `int`, which would make the diagnostic misleading.
+                    match self.slice_element_type_name(spread) {
+                        Some(t) if !t.trim().is_empty() => format!("[]{}", t.trim()),
+                        _ => format!("[]{}", other.label()),
+                    }
+                }
+            },
+            other => other.label(),
+        };
+        self.emit_e1002(
+            spread.span(),
+            format!(
+                "cannot use `{}` (type `{label}`) as `[]any` value in spread argument to `fmt.{member}` (HYB-E1002)",
+                spread.render()
+            ),
+            &format!(
+                "a spread argument to `fmt.{member}` must be a `[]any` slice; copy the elements into a `[]any` first"
+            ),
+        );
+    }
+
     fn check_sort_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(member, "interface" | "int_slice" | "float64_slice" | "string_slice") {
             self.emit_e1002(
@@ -8413,6 +8517,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
+                        self.check_fmt_variadic_spread(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
