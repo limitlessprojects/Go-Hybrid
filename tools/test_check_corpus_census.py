@@ -288,6 +288,28 @@ class BreakdownBoundaryTests(_ProblemsMixin, unittest.TestCase):
                 self.assertEqual(len(hits), 1)
                 self.assertIn("no verdict breakdown", hits[0])
 
+    def test_reject_arithmetic_suffixes_fail_closed(self):
+        # A count followed by an operator is not a complete integer claim.
+        for tail in ("2/3", "2+1", "2#1", "2-1"):
+            with self.subTest(tail=tail):
+                hits = self._problems_with(
+                    "tests/checker-corpus/README.md",
+                    "**Current registered corpus: 3 programs — ACCEPT 1 · "
+                    "ACCEPT-MANAGED 0 · REJECT " + tail + "\n",
+                )
+                self.assertEqual(len(hits), 1)
+                self.assertIn("no verdict breakdown", hits[0])
+
+    def test_reject_markdown_and_crlf_suffixes_remain_valid(self):
+        for tail in ("2**", "2\x60", "2\r\n"):
+            with self.subTest(tail=tail):
+                hits = self._problems_with(
+                    "tests/checker-corpus/README.md",
+                    "**Current registered corpus: 3 programs — ACCEPT 1 · "
+                    "ACCEPT-MANAGED 0 · REJECT " + tail + "\n",
+                )
+                self.assertEqual(hits, [])
+
     def test_reject_count_with_prose_punctuation_remains_valid(self):
         for tail in ("2.", "2,", "2 — each with a header.", "2 (note)"):
             with self.subTest(tail=tail):
