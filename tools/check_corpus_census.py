@@ -81,7 +81,7 @@ README_BREAKDOWN = (
     "tests/checker-corpus/README.md",
     r"(?m)^\*\*Current registered corpus:[ \t]*(\d+) programs(?:\*\*)?[ \t]+—[ \t]+"
     r"ACCEPT[ \t]+(\d+)[ \t]+·[ \t]+ACCEPT-MANAGED[ \t]+(\d+)[ \t]+·"
-    r"(?:[ \t]+|[ \t]*\r?\n[ \t]*)REJECT[ \t]+(\d+)\b(?![.,]\d)",
+    r"(?:[ \t]+|[ \t]*\r?\n[ \t]*)REJECT[ \t]+(\d+)(?![.,]\d)(?=$|[ \t\r]|[.,;:)\]—–*`])",
 )
 
 
