@@ -266,3 +266,66 @@ fn main() {
         c
     );
 }
+
+#[test]
+fn defer_arg_stored_in_field_or_index_then_rebound_and_moved_rejects_e3003() {
+    let src_post = "\
+struct box {
+    m map[string]int
+}
+
+fn worker(b box) {
+    b.m[\"k\"] = 99
+}
+
+fn report(m map[string]int) {
+    m[\"k\"] = 1
+}
+
+fn main() {
+    m := map[string]int{\"k\": 0}
+    b := box{m: map[string]int{}}
+    defer report(m)
+    b.m = m
+    m = map[string]int{\"k\": 2}
+    task worker(move b)
+}
+";
+    let r_post = check(src_post);
+    let c_post = error_codes(&r_post);
+    assert!(
+        c_post.contains(&"HYB-E3003".to_string()),
+        "expected HYB-E3003 when deferred map is stored into struct field after defer and container is moved, got: {:?}",
+        c_post
+    );
+
+    let src_pre = "\
+struct box {
+    m map[string]int
+}
+
+fn worker(b box) {
+    b.m[\"k\"] = 99
+}
+
+fn report(m map[string]int) {
+    m[\"k\"] = 1
+}
+
+fn main() {
+    m := map[string]int{\"k\": 0}
+    b := box{m: map[string]int{}}
+    b.m = m
+    defer report(m)
+    m = map[string]int{\"k\": 2}
+    task worker(move b)
+}
+";
+    let r_pre = check(src_pre);
+    let c_pre = error_codes(&r_pre);
+    assert!(
+        c_pre.contains(&"HYB-E3003".to_string()),
+        "expected HYB-E3003 when deferred map is stored into struct field before defer and container is moved, got: {:?}",
+        c_pre
+    );
+}
