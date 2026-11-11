@@ -197,6 +197,9 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ) => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
+        ("log", "new" | "default" | "New" | "Default") => {
+            TypeShape::ForeignOpaque("log.logger".into())
+        }
         ("json" | "encoding/json", "new_decoder" | "NewDecoder") => {
             TypeShape::ForeignOpaque("json.decoder".into())
         }
@@ -451,6 +454,25 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     ];
     /// `bufio.Scanner` — Go standard library buffered scanner methods.
     const BUFIO_SCANNER: &[&str] = &["buffer", "bytes", "err", "scan", "split", "text"];
+    /// `log.Logger` — Go standard library logger handle (`*log.Logger`).
+    const LOG_LOGGER: &[&str] = &[
+        "fatal",
+        "fatalf",
+        "fatalln",
+        "flags",
+        "output",
+        "panic",
+        "panicf",
+        "panicln",
+        "prefix",
+        "print",
+        "printf",
+        "println",
+        "set_flags",
+        "set_output",
+        "set_prefix",
+        "writer",
+    ];
     /// `os.File` — standard library file handle. Go defines 24 methods on `*os.File`.
     const OS_FILE: &[&str] = &[
         "chdir",
@@ -655,6 +677,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "bufio.reader" | "bufio.Reader" => Some(BUFIO_READER),
         "bufio.writer" | "bufio.Writer" => Some(BUFIO_WRITER),
         "bufio.scanner" | "bufio.Scanner" => Some(BUFIO_SCANNER),
+        "log.logger" | "log.Logger" => Some(LOG_LOGGER),
         "os.file" | "os.File" => Some(OS_FILE),
         "io.pipe_reader" | "io.PipeReader" => Some(IO_PIPE_READER),
         "io.pipe_writer" | "io.PipeWriter" => Some(IO_PIPE_WRITER),
@@ -745,6 +768,10 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
             TypeShape::ForeignOpaque("http.response".into())
         }
         ("error" | "errors.error", "error") => TypeShape::Str,
+        ("log.logger" | "log.Logger", "flags") => TypeShape::Primitive,
+        ("log.logger" | "log.Logger", "prefix") => TypeShape::Str,
+        ("log.logger" | "log.Logger", "writer") => TypeShape::ForeignOpaque("io.writer".into()),
+        ("log.logger" | "log.Logger", "output") => TypeShape::ForeignOpaque("error".into()),
         ("net.addr" | "net.Addr", "network" | "string") => TypeShape::Str,
         ("net.error" | "net.Error", "error") => TypeShape::Str,
         ("net.error" | "net.Error", "temporary" | "timeout") => TypeShape::Primitive,
