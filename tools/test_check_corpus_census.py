@@ -239,5 +239,28 @@ class MultipleCurrentBreakdownTests(_ProblemsMixin, unittest.TestCase):
         self.assertTrue(all("line " in hit for hit in hits))
 
 
+
+class BreakdownBoundaryTests(_ProblemsMixin, unittest.TestCase):
+    def test_unrelated_prose_cannot_fake_the_corpus_breakdown(self):
+        # The old \D+ pattern stitched unrelated paragraphs together.
+        hits = self._problems_with(
+            "tests/checker-corpus/README.md",
+            "**Current registered corpus: 3 programs**\n\n"
+            "## Other statistics\nACCEPT 1\n\n"
+            "This is not the registered verdict breakdown.\n"
+            "ACCEPT-MANAGED 0\n\nREJECT 2\n",
+        )
+        self.assertEqual(len(hits), 1)
+        self.assertIn("no verdict breakdown", hits[0])
+
+    def test_canonical_current_breakdown_without_early_bold_close(self):
+        hits = self._problems_with(
+            "tests/checker-corpus/README.md",
+            "**Current registered corpus: 3 programs — ACCEPT 1 · "
+            "ACCEPT-MANAGED 0 · REJECT 2 — each with a header.\n",
+        )
+        self.assertEqual(hits, [])
+
+
 if __name__ == "__main__":
     unittest.main()
