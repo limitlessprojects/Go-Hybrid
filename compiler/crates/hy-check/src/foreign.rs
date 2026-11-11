@@ -215,6 +215,22 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("httptest" | "net/http/httptest", "new_recorder" | "NewRecorder") => {
             TypeShape::ForeignOpaque("httptest.response_recorder".into())
         }
+        ("gzip" | "compress/gzip", "new_reader" | "NewReader") => {
+            TypeShape::ForeignOpaque("gzip.reader".into())
+        }
+        (
+            "gzip" | "compress/gzip",
+            "new_writer" | "new_writer_level" | "NewWriter" | "NewWriterLevel",
+        ) => TypeShape::ForeignOpaque("gzip.writer".into()),
+        ("tar" | "archive/tar", "new_reader" | "NewReader") => {
+            TypeShape::ForeignOpaque("tar.reader".into())
+        }
+        ("tar" | "archive/tar", "new_writer" | "NewWriter") => {
+            TypeShape::ForeignOpaque("tar.writer".into())
+        }
+        ("tar" | "archive/tar", "file_info_header" | "FileInfoHeader") => {
+            TypeShape::ForeignOpaque("tar.header".into())
+        }
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -488,6 +504,16 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const IO_LIMITED_READER: &[&str] = &["read"];
     /// `io.OffsetWriter`.
     const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
+    /// `gzip.Reader` — Go standard library `compress/gzip` reader methods.
+    const GZIP_READER: &[&str] = &["close", "multistream", "read", "reset"];
+    /// `gzip.Writer` — Go standard library `compress/gzip` writer methods.
+    const GZIP_WRITER: &[&str] = &["close", "flush", "reset", "write"];
+    /// `tar.Reader` — Go standard library `archive/tar` reader methods.
+    const TAR_READER: &[&str] = &["next", "read"];
+    /// `tar.Writer` — Go standard library `archive/tar` writer methods.
+    const TAR_WRITER: &[&str] = &["add_fs", "close", "flush", "write", "write_header"];
+    /// `tar.Header` — Go standard library `archive/tar` header methods.
+    const TAR_HEADER: &[&str] = &["file_info"];
     const HTTP_CLIENT: &[&str] = &[
         "close_idle_connections",
         "do",
@@ -661,6 +687,11 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
         "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
         "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
+        "gzip.reader" | "gzip.Reader" => Some(GZIP_READER),
+        "gzip.writer" | "gzip.Writer" => Some(GZIP_WRITER),
+        "tar.reader" | "tar.Reader" => Some(TAR_READER),
+        "tar.writer" | "tar.Writer" => Some(TAR_WRITER),
+        "tar.header" | "tar.Header" => Some(TAR_HEADER),
         "http.client" | "http.Client" => Some(HTTP_CLIENT),
         "http.request" | "http.Request" => Some(HTTP_REQUEST),
         "http.response" | "http.Response" => Some(HTTP_RESPONSE),
@@ -749,6 +780,15 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("net.error" | "net.Error", "error") => TypeShape::Str,
         ("net.error" | "net.Error", "temporary" | "timeout") => TypeShape::Primitive,
         ("strings.reader" | "strings.Reader", "len" | "size") => TypeShape::Primitive,
+        ("gzip.reader" | "gzip.Reader", "close" | "reset")
+        | ("gzip.writer" | "gzip.Writer", "close" | "flush")
+        | ("tar.writer" | "tar.Writer", "add_fs" | "close" | "flush" | "write_header") => {
+            TypeShape::ForeignOpaque("error".into())
+        }
+        ("tar.reader" | "tar.Reader", "next") => TypeShape::ForeignOpaque("tar.header".into()),
+        ("tar.header" | "tar.Header", "file_info") => {
+            TypeShape::ForeignOpaque("os.file_info".into())
+        }
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
