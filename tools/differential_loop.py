@@ -284,6 +284,8 @@ def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None,
         )
     except subprocess.TimeoutExpired as exc:
         return False, f"build timed out after {exc.timeout}s"
+    except UnicodeDecodeError as exc:
+        return False, f"build output could not be decoded: {exc}"
     except OSError as exc:
         return False, f"build could not be run: {exc}"
     if build.returncode != 0:
@@ -297,6 +299,8 @@ def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None,
         )
     except subprocess.TimeoutExpired as exc:
         return False, f"run timed out after {exc.timeout}s"
+    except UnicodeDecodeError as exc:
+        return False, f"run output could not be decoded: {exc}"
     except OSError as exc:
         return False, f"run could not be run: {exc}"
     # The race detector reports on stderr and then lets the program run to

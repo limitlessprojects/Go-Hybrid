@@ -1,5 +1,10 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — differential output decoding (#1406, 2026-11-11)
+
+- On base `7cf29833`, invalid bytes from build/program stdout or stderr abort the differential corpus. Catch `UnicodeDecodeError` as a per-case failure; keep strict decoding and exact output matching. Independent real-process tests fail on all four invalid-byte combinations before the fix; Unicode controls pass. The updated harness suite passes 43 tests.
+- Linux ARM64, Rust 1.99.0 / Go 1.26.9: all workspace unit/integration/doc tests pass (3,285 tests; 498 integration targets run in batches to bound disk use), example target passes, checker corpus 139/139 and differential 47/47 accept + 92/92 reject. Temporary workspaces are inside this checkout (`TMPDIR`) because the sandbox exposes an invalid `/tmp/.git`; no build checks are disabled. An initial monolithic compile hit rustc SIGSEGV with low disk; the bounded retry passed. Registration, census, conflict-marker, Python compilation and whitespace guards pass. AI-assisted implementation and verification; hosted CI, maintainer review and any award remain pending.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.
