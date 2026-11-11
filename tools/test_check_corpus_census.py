@@ -262,5 +262,19 @@ class BreakdownBoundaryTests(_ProblemsMixin, unittest.TestCase):
         self.assertEqual(hits, [])
 
 
+    def test_blank_paragraphs_cannot_form_a_breakdown(self):
+        # The earlier \s+ separators could still bridge unrelated paragraphs.
+        for content in (
+            "**Current registered corpus: 3 programs**\n\n— ACCEPT 1 · ACCEPT-MANAGED 0 · REJECT 2\n",
+            "**Current registered corpus: 3 programs** —\n\nACCEPT 1 · ACCEPT-MANAGED 0 · REJECT 2\n",
+            "**Current registered corpus: 3 programs** — ACCEPT 1 ·\n\nACCEPT-MANAGED 0 · REJECT 2\n",
+            "**Current registered corpus: 3 programs** — ACCEPT 1 · ACCEPT-MANAGED 0 ·\n\nREJECT 2\n",
+        ):
+            with self.subTest(content=content):
+                hits = self._problems_with("tests/checker-corpus/README.md", content)
+                self.assertEqual(len(hits), 1)
+                self.assertIn("no verdict breakdown", hits[0])
+
+
 if __name__ == "__main__":
     unittest.main()
