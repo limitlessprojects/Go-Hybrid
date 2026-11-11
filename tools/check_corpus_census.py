@@ -79,7 +79,9 @@ TOTAL_SURFACES: list[tuple[str, str, str]] = [
 # the corpus README also restates the total and the verdict breakdown
 README_BREAKDOWN = (
     "tests/checker-corpus/README.md",
-    r"(?m)^\*\*Current registered corpus:[ \t]*(\d+) programs(?:\*\*)?\s+—\s+ACCEPT\s+(\d+)\s+·\s+ACCEPT-MANAGED\s+(\d+)\s+·\s+REJECT\s+(\d+)\b",
+    r"(?m)^\*\*Current registered corpus:[ \t]*(\d+) programs(?:\*\*)?[ \t]+—[ \t]+"
+    r"ACCEPT[ \t]+(\d+)[ \t]+·[ \t]+ACCEPT-MANAGED[ \t]+(\d+)[ \t]+·"
+    r"(?:[ \t]+|[ \t]*\r?\n[ \t]*)REJECT[ \t]+(\d+)\b",
 )
 
 
