@@ -613,10 +613,12 @@ impl Emitter {
         ty: &TypeExpr,
         fields: &[FieldInit],
     ) -> Result<String, EmitError> {
-        let field_decls = match self.n5_resolve_alias(ty) {
-            TypeExpr::Named { name, .. } => self.struct_lit_field_decls(&name),
+        let resolved_ty = self.n5_resolve_alias(ty);
+        let field_decls = match &resolved_ty {
+            TypeExpr::Named { name, .. } => self.struct_lit_field_decls(name),
             _ => None,
         };
+        let foreign_ty_name = super::base_ty_name(&resolved_ty).filter(|n| n.contains('.'));
         let mut parts = Vec::new();
         for f in fields {
             let exp_ty = field_decls.as_ref().and_then(|ds| {
@@ -625,7 +627,16 @@ impl Emitter {
                     .map(|d| d.ty.clone())
             });
             let v = self.emit_expr_exp(&f.value, 0, exp_ty.as_ref())?;
-            parts.push(format!("{}: {}", f.name, v));
+            let field_name = if let Some(ft) = foreign_ty_name.as_deref() {
+                if let Some(m) = lookup_member(ft, &f.name) {
+                    m.go.to_string()
+                } else {
+                    to_go_name(&f.name)
+                }
+            } else {
+                f.name.clone()
+            };
+            parts.push(format!("{}: {}", field_name, v));
         }
         let extra = self.n5_missing_fields(ty, fields);
         parts.extend(extra);
@@ -929,13 +940,11 @@ impl Emitter {
                 };
             }
         }
-        if let Expr::Ident { name: root, .. } = Self::unwrap_parens_and_addr(base) {
-            if matches!(
-                self.bindings.get(root),
-                Some(BindingKind::Foreign) | Some(BindingKind::ForeignTy(_))
-            ) {
-                return to_go_name(name);
-            }
+        if matches!(
+            self.binding_kind_of(base),
+            BindingKind::Foreign | BindingKind::ForeignTy(_)
+        ) {
+            return to_go_name(name);
         }
         self.member_name(base, name)
     }
@@ -947,20 +956,6 @@ impl Emitter {
         e
     }
 
-    fn unwrap_parens_and_addr(mut e: &Expr) -> &Expr {
-        loop {
-            match e {
-                Expr::Paren { inner, .. } => e = inner,
-                Expr::AddrOf { operand, .. }
-                | Expr::Unary {
-                    op: UnOp::Addr,
-                    operand,
-                    ..
-                } => e = operand,
-                _ => return e,
-            }
-        }
-    }
 
     pub(crate) fn assoc_index_type_arg(e: &Expr) -> Option<String> {
         match Self::unwrap_parens(e) {
@@ -1063,8 +1058,10 @@ impl Emitter {
         // `r.URL.Query().Get("a")`); generic Foreign falls back to M4.
         if let Expr::Field { base, name, .. } = callee {
             let base = Self::selector_base(base);
+            let mut shape_matched = false;
             if let Some(bt) = self.type_of_expr(base) {
                 if let Some(m) = lookup_member(bt, name) {
+                    shape_matched = true;
                     if m.kind == MemberKind::Method {
                         let b = self.emit_expr(base, ATOM)?;
                         let mut parts = Vec::new();
@@ -1078,15 +1075,18 @@ impl Emitter {
                     // — a clean failure, never a wrong emission.
                 }
             }
-            if let Expr::Ident { name: root, .. } = Self::unwrap_parens_and_addr(base) {
-                if let Some(BindingKind::Foreign) = self.bindings.get(root) {
-                    let b = self.emit_expr(base, ATOM)?;
-                    let mut parts = Vec::new();
-                    for a in args {
-                        parts.push(self.emit_call_arg(a)?);
-                    }
-                    return Ok(format!("{}.{}({})", b, to_go_name(name), parts.join(", ")));
+            if !shape_matched
+                && matches!(
+                    self.binding_kind_of(base),
+                    BindingKind::Foreign | BindingKind::ForeignTy(_)
+                )
+            {
+                let b = self.emit_expr(base, ATOM)?;
+                let mut parts = Vec::new();
+                for a in args {
+                    parts.push(self.emit_call_arg(a)?);
                 }
+                return Ok(format!("{}.{}({})", b, to_go_name(name), parts.join(", ")));
             }
         }
 
