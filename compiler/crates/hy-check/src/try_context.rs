@@ -17,6 +17,8 @@
 //! returns a non-error result, and `opt()?` when `opt` returns `option[T]`
 //! all passed check and then failed `go build` with an assignment mismatch.
 
+use std::collections::HashMap;
+
 use crate::model::{unwrap_parens, Checker};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
@@ -152,6 +154,8 @@ enum Ctx<'a> {
 struct TryWalker<'a, 'b> {
     ck: &'b mut Checker<'a>,
     scopes: Vec<Vec<String>>,
+    var_structs: Vec<HashMap<String, Option<String>>>,
+    var_fns: Vec<HashMap<String, Option<(Vec<FnResult>, Vec<String>)>>>,
     type_params: Vec<String>,
     return_e11: bool,
 }
@@ -159,16 +163,75 @@ struct TryWalker<'a, 'b> {
 impl<'a, 'b> TryWalker<'a, 'b> {
     fn push_scope(&mut self) {
         self.scopes.push(Vec::new());
+        self.var_structs.push(HashMap::new());
+        self.var_fns.push(HashMap::new());
     }
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.var_structs.pop();
+        self.var_fns.pop();
     }
     fn bind_name(&mut self, name: &str) {
+        self.bind_typed(name, None, None);
+    }
+    fn bind_typed(
+        &mut self,
+        name: &str,
+        struct_name: Option<String>,
+        fn_sig: Option<(Vec<FnResult>, Vec<String>)>,
+    ) {
         if name != "_" && !name.is_empty() {
             if let Some(top) = self.scopes.last_mut() {
                 top.push(name.to_string());
             }
+            if let Some(vs) = self.var_structs.last_mut() {
+                vs.insert(name.to_string(), struct_name);
+            }
+            if let Some(vf) = self.var_fns.last_mut() {
+                vf.insert(name.to_string(), fn_sig);
+            }
         }
+    }
+    fn update_assigned(
+        &mut self,
+        name: &str,
+        struct_name: Option<String>,
+        fn_sig: Option<(Vec<FnResult>, Vec<String>)>,
+    ) {
+        if name == "_" || name.is_empty() {
+            return;
+        }
+        for vs in self.var_structs.iter_mut().rev() {
+            if let Some(slot) = vs.get_mut(name) {
+                *slot = struct_name;
+                break;
+            }
+        }
+        for vf in self.var_fns.iter_mut().rev() {
+            if let Some(slot) = vf.get_mut(name) {
+                *slot = fn_sig;
+                break;
+            }
+        }
+    }
+    fn is_local_bound(&self, name: &str) -> bool {
+        self.scopes.iter().any(|s| s.iter().any(|n| n == name))
+    }
+    fn lookup_var_struct(&self, name: &str) -> Option<String> {
+        for vs in self.var_structs.iter().rev() {
+            if let Some(entry) = vs.get(name) {
+                return entry.clone();
+            }
+        }
+        None
+    }
+    fn lookup_var_fn(&self, name: &str) -> Option<(Vec<FnResult>, Vec<String>)> {
+        for vf in self.var_fns.iter().rev() {
+            if let Some(entry) = vf.get(name) {
+                return entry.clone();
+            }
+        }
+        None
     }
     fn is_unshadowed_pkg_root(&self, pkg: &str) -> bool {
         !(self.ck.fns.contains_key(pkg)
@@ -205,6 +268,8 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
     let mut w = TryWalker {
         ck,
         scopes: Vec::new(),
+        var_structs: Vec::new(),
+        var_fns: Vec::new(),
         type_params: Vec::new(),
         return_e11: false,
     };
@@ -234,10 +299,22 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
                 };
                 w.push_scope();
                 if let Some(r) = &f.receiver {
-                    w.bind_name(&r.name);
+                    let sn = resolve_struct_name(w.ck, &r.ty);
+                    let fsig = resolve_fn_type_results(w.ck, &r.ty).map(|rs| (rs, w.type_params.clone()));
+                    w.bind_typed(&r.name, sn, fsig);
                 }
-                f.params.iter().for_each(|p| w.bind_name(&p.name));
-                f.results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| w.bind_name(n));
+                for p in &f.params {
+                    let sn = resolve_struct_name(w.ck, &p.ty);
+                    let fsig = resolve_fn_type_results(w.ck, &p.ty).map(|rs| (rs, w.type_params.clone()));
+                    w.bind_typed(&p.name, sn, fsig);
+                }
+                for r in &f.results {
+                    if let Some(n) = r.name.as_deref() {
+                        let sn = resolve_struct_name(w.ck, &r.ty);
+                        let fsig = resolve_fn_type_results(w.ck, &r.ty).map(|rs| (rs, w.type_params.clone()));
+                        w.bind_typed(n, sn, fsig);
+                    }
+                }
                 let is_main = f.name == "main" && f.receiver.is_none();
                 let ctx = if is_main || results_end_in_error(w.ck, &f.results, &w.type_params) {
                     Ctx::Ok
@@ -304,7 +381,28 @@ fn walk_stmt(ck: &mut TryWalker<'_, '_>, s: &Stmt, ctx: Ctx<'_>) {
                 walk_type(ck, ty, val_ctx);
             }
             l.values.iter().for_each(|v| walk_expr(ck, v, val_ctx));
-            l.names.iter().for_each(|n| ck.bind_name(n));
+            let ty_sn = l.ty.as_ref().and_then(|ty| resolve_struct_name(ck.ck, ty));
+            let ty_fn = l
+                .ty
+                .as_ref()
+                .and_then(|ty| resolve_fn_type_results(ck.ck, ty))
+                .map(|rs| (rs, ck.type_params.clone()));
+            if l.names.len() == l.values.len() {
+                let mut inferred: Vec<(Option<String>, Option<(Vec<FnResult>, Vec<String>)>)> =
+                    Vec::with_capacity(l.values.len());
+                for v in &l.values {
+                    let sn = ty_sn.clone().or_else(|| expr_struct_name(ck, v));
+                    let fsig = ty_fn.clone().or_else(|| expr_fn_sig(ck, v));
+                    inferred.push((sn, fsig));
+                }
+                for (n, (sn, fsig)) in l.names.iter().zip(inferred) {
+                    ck.bind_typed(n, sn, fsig);
+                }
+            } else {
+                for n in &l.names {
+                    ck.bind_typed(n, ty_sn.clone(), ty_fn.clone());
+                }
+            }
         }
         Stmt::Assign {
             targets, values, ..
@@ -313,6 +411,24 @@ fn walk_stmt(ck: &mut TryWalker<'_, '_>, s: &Stmt, ctx: Ctx<'_>) {
                 walk_place(ck, &t.kind, ctx);
             }
             values.iter().for_each(|v| walk_expr(ck, v, ctx));
+            if targets.len() == values.len() {
+                let mut inferred: Vec<(Option<String>, Option<(Vec<FnResult>, Vec<String>)>)> =
+                    Vec::with_capacity(values.len());
+                for v in values {
+                    inferred.push((expr_struct_name(ck, v), expr_fn_sig(ck, v)));
+                }
+                for (t, (sn, fsig)) in targets.iter().zip(inferred) {
+                    if let PlaceKind::Ident(name) = &t.kind {
+                        ck.update_assigned(name, sn, fsig);
+                    }
+                }
+            } else {
+                for t in targets {
+                    if let PlaceKind::Ident(name) = &t.kind {
+                        ck.update_assigned(name, None, None);
+                    }
+                }
+            }
         }
         Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => walk_expr(ck, expr, ctx),
         Stmt::Send { chan, value, .. } => {
@@ -435,8 +551,18 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
         let saved_return_e11 = std::mem::replace(&mut ck.return_e11, false);
         ck.push_scope();
         let fnlit_scope_idx = ck.scopes.len() - 1;
-        params.iter().for_each(|p| ck.bind_name(&p.name));
-        results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| ck.bind_name(n));
+        for p in params {
+            let sn = resolve_struct_name(ck.ck, &p.ty);
+            let fsig = resolve_fn_type_results(ck.ck, &p.ty).map(|rs| (rs, ck.type_params.clone()));
+            ck.bind_typed(&p.name, sn, fsig);
+        }
+        for r in results {
+            if let Some(n) = r.name.as_deref() {
+                let sn = resolve_struct_name(ck.ck, &r.ty);
+                let fsig = resolve_fn_type_results(ck.ck, &r.ty).map(|rs| (rs, ck.type_params.clone()));
+                ck.bind_typed(n, sn, fsig);
+            }
+        }
         let ctx = if e11 {
             if fnlit_has_valid_e11_signature(ck.ck, params, results, http_before) {
                 Ctx::E11Handler { fnlit_scope_idx }
@@ -458,6 +584,131 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
 
 fn is_option_type(ck: &Checker<'_>, ty: &TypeExpr) -> bool {
     matches!(ck.resolve_type_alias(ty), TypeExpr::Option { .. })
+}
+
+fn resolve_struct_name(ck: &Checker<'_>, ty: &TypeExpr) -> Option<String> {
+    let mut cur = ck.resolve_type_alias(ty);
+    if let TypeExpr::Pointer { to, .. } = cur {
+        cur = ck.resolve_type_alias(&to);
+    }
+    let TypeExpr::Named { name, .. } = cur else {
+        return None;
+    };
+    let head = name.split('[').next().unwrap_or(name.as_str());
+    if ck.structs.contains_key(head) {
+        Some(head.to_string())
+    } else {
+        None
+    }
+}
+
+fn resolve_fn_type_results(ck: &Checker<'_>, ty: &TypeExpr) -> Option<Vec<FnResult>> {
+    let TypeExpr::Fn { results, .. } = ck.resolve_type_alias(ty) else {
+        return None;
+    };
+    Some(
+        results
+            .into_iter()
+            .map(|t| FnResult { name: None, ty: t })
+            .collect(),
+    )
+}
+
+fn expr_fn_sig(ck: &TryWalker<'_, '_>, e: &Expr) -> Option<(Vec<FnResult>, Vec<String>)> {
+    match unwrap_parens(e) {
+        Expr::Move { operand, .. } => expr_fn_sig(ck, operand),
+        Expr::FnLit { results, .. } => Some((results.clone(), ck.type_params.clone())),
+        Expr::Ident { name, .. } => {
+            if ck.is_local_bound(name) {
+                ck.lookup_var_fn(name)
+            } else {
+                let head = name.split('[').next().unwrap_or(name.as_str());
+                ck.ck
+                    .fns
+                    .get(head)
+                    .map(|f| (f.results.clone(), fn_decl_type_param_names(f)))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn expr_struct_name(ck: &TryWalker<'_, '_>, e: &Expr) -> Option<String> {
+    match unwrap_parens(e) {
+        Expr::Move { operand, .. }
+        | Expr::AddrOf { operand, .. }
+        | Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        }
+        | Expr::Try { operand, .. } => expr_struct_name(ck, operand),
+        Expr::Ident { name, .. } => ck.lookup_var_struct(name),
+        Expr::StructLit { ty: Some(t), .. } => resolve_struct_name(ck.ck, t),
+        Expr::Field { base, name, .. } => {
+            let sn = expr_struct_name(ck, base)?;
+            let fields = ck.ck.structs.get(sn.as_str())?;
+            let (_, fty) = fields.iter().find(|(fname, _)| fname == name)?;
+            resolve_struct_name(ck.ck, fty)
+        }
+        Expr::Call { callee, args, .. } => {
+            let mut callee_head = unwrap_parens(callee);
+            while let Expr::Index { base, .. } = callee_head {
+                callee_head = unwrap_parens(base);
+            }
+            match callee_head {
+                Expr::Ident { name, span } => {
+                    let head = name.split('[').next().unwrap_or(name.as_str());
+                    if head == "new" && !ck.is_local_bound("new") && !ck.ck.fns.contains_key("new") {
+                        if let Some(arg) = args.first() {
+                            if let Expr::Ident { name: tname, .. } = unwrap_parens(&arg.value) {
+                                if !ck.is_local_bound(tname) {
+                                    return resolve_struct_name(
+                                       ck.ck,
+                                       &TypeExpr::Named {
+                                           name: tname.clone(),
+                                           span: *span,
+                                       },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if ck.is_local_bound(head) {
+                        let (results, _) = ck.lookup_var_fn(head)?;
+                        return results
+                            .first()
+                            .and_then(|r| resolve_struct_name(ck.ck, &r.ty));
+                    }
+                    ck.ck
+                        .fns
+                        .get(head)
+                        .and_then(|f| f.results.first())
+                        .and_then(|r| resolve_struct_name(ck.ck, &r.ty))
+                }
+                Expr::Field { base, name, .. } => {
+                    let head = name.split('[').next().unwrap_or(name.as_str());
+                    if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                        if !ck.is_local_bound(pkg) {
+                            if let Some(f) = ck.ck.fns.get(&format!("{pkg}.{head}")) {
+                                return f
+                                    .results
+                                    .first()
+                                    .and_then(|r| resolve_struct_name(ck.ck, &r.ty));
+                            }
+                        }
+                    }
+                    let recv_sn = expr_struct_name(ck, base)?;
+                    let m = ck.ck.method_decls.get(&(recv_sn, head.to_string()))?;
+                    m.results
+                        .first()
+                        .and_then(|r| resolve_struct_name(ck.ck, &r.ty))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// E3/E4 operand half: `?` is postfix on an error-returning call only.
@@ -488,32 +739,64 @@ fn check_try_operand(ck: &mut TryWalker<'_, '_>, operand: &Expr, span: Span) {
     };
 
     let callee = unwrap_parens(callee);
+    let mut callee_head = callee;
+    while let Expr::Index { base, .. } = callee_head {
+        callee_head = unwrap_parens(base);
+    }
     // Judge *this callee's* results with *its* type params, not the walker's.
     // A file-level fn from `ck.fns` uses `fn_decl_type_param_names` (own params
     // plus receiver params — the same list `Decl::Fn` passes). An `FnLit` has
     // no type-param list; `walk_fnlit` judges that signature with the enclosing
     // function's type params, which are in scope for the literal.
-    let (results, type_params): (Option<&[FnResult]>, Vec<String>) = match callee {
+    let resolved_sig: Option<(Vec<FnResult>, Vec<String>)> = match callee_head {
         Expr::Ident { name, .. } => {
-            // A local binding shadows the file-level fn — fail open (closure
-            // values / rebinds do not always carry a recoverable signature here).
-            if ck.scopes.iter().any(|s| s.iter().any(|n| n == name)) {
-                return;
-            }
-            match ck.ck.fns.get(name.as_str()) {
-                Some(f) => (Some(f.results.as_slice()), fn_decl_type_param_names(f)),
-                None => (None, Vec::new()),
+            let head = name.split('[').next().unwrap_or(name.as_str());
+            if ck.is_local_bound(head) {
+                ck.lookup_var_fn(head)
+            } else {
+                ck.ck
+                    .fns
+                    .get(head)
+                    .map(|f| (f.results.clone(), fn_decl_type_param_names(f)))
             }
         }
-        Expr::FnLit { results, .. } => (Some(results.as_slice()), ck.type_params.clone()),
-        _ => (None, Vec::new()), // methods / selectors / computed: fail open
+        Expr::FnLit { results, .. } => Some((results.clone(), ck.type_params.clone())),
+        Expr::Field { base, name, .. } => {
+            let head = name.split('[').next().unwrap_or(name.as_str());
+            let assoc = if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                if !ck.is_local_bound(pkg) {
+                    ck.ck
+                        .fns
+                        .get(&format!("{pkg}.{head}"))
+                        .map(|f| (f.results.clone(), fn_decl_type_param_names(f)))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            assoc.or_else(|| {
+                let recv_sn = expr_struct_name(ck, base)?;
+                if let Some(m) = ck.ck.method_decls.get(&(recv_sn.clone(), head.to_string())) {
+                    return Some((m.results.clone(), fn_decl_type_param_names(m)));
+                }
+                let fields = ck.ck.structs.get(recv_sn.as_str())?;
+                let (_, fty) = fields.iter().find(|(fname, _)| fname == name)?;
+                let mut tps = ck.type_params.clone();
+                if let Some(stps) = ck.ck.struct_type_params.get(recv_sn.as_str()) {
+                    tps.extend(stps.iter().map(|tp| tp.name.clone()));
+                }
+                resolve_fn_type_results(ck.ck, fty).map(|rs| (rs, tps))
+            })
+        }
+        _ => None,
     };
 
-    let Some(results) = results else {
+    let Some((results, type_params)) = resolved_sig else {
         return;
     };
 
-    if results_end_in_error(ck.ck, results, &type_params) {
+    if results_end_in_error(ck.ck, &results, &type_params) {
         return;
     }
 
