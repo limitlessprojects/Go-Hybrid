@@ -1060,34 +1060,10 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     );
                     sync_nested_moves(st, nested);
                     collect_expr_direct_fnlits(expr, st, nested);
-                    let is_chan = matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_));
-                    let shapes = ck.iterate_var_shapes(st, expr, vars.len());
-                    let var_tys = ck.iterate_var_tys(st, expr, vars.len());
-                    for ((name, shape), var_ty) in vars.iter().zip(shapes).zip(var_tys) {
-                        let is_ref = shape.is_reference_alias();
-                        let may_share = ck.shape_may_share(&shape);
+                    for name in vars {
                         mark_nested_overwritten(st, name, nested);
-                        ck.define_binding(st, name, shape, var_ty, false, managed, false);
-                        if !is_chan {
-                            if may_share {
-                                ck.record_may_share(st, name, expr);
-                            }
-                            if is_ref {
-                                if let Some(root) = expr.root_ident() {
-                                    if ck.lookup_binding(st, root).is_some() {
-                                        st.aliases.insert(name.clone(), root.to_string());
-                                    }
-                                }
-                            }
-                            if let Some(b) = st.env_lookup_mut(name) {
-                                b.non_owned_origin = Some(format!(
-                                    "range variable `{}` iterating `{}` (the collection still holds the element)",
-                                    name,
-                                    expr.render()
-                                ));
-                            }
-                        }
                     }
+                    ck.bind_iterate_vars(st, vars, expr, managed);
                     sync_nested_moves(st, nested);
                 }
                 Range { var, lo, hi, .. } => {
@@ -2009,24 +1985,47 @@ fn update_pre_defer_peers(
                 let shapes = ck.iterate_var_shapes(st, expr, vars.len());
                 let mut refs = Vec::new();
                 expr_referenced_bindings(expr, &mut refs);
+                let mut pre_nodes: Vec<String> = refs.clone();
+                for r in &refs {
+                    if let Some(ps) = peers.get(r) {
+                        for p in ps {
+                            if !pre_nodes.contains(p) {
+                                pre_nodes.push(p.clone());
+                            }
+                        }
+                    }
+                }
+                let mut to_sever: Vec<String> = Vec::new();
+                let mut to_link: Vec<(String, String)> = Vec::new();
                 for (target, shape) in vars.iter().zip(shapes) {
                     if target == "_" {
                         continue;
                     }
                     let self_read = ck.value_reads_storage_of(st, expr, target);
-                    if !self_read {
-                        sever_peer_node(peers, target);
+                    if !self_read || !ck.shape_may_share(&shape) {
+                        to_sever.push(target.clone());
                     }
                     if ck.shape_may_share(&shape) {
-                        for r in &refs {
+                        for r in &pre_nodes {
+                            if r == target {
+                                continue;
+                            }
                             let may_share = ck
                                 .lookup_binding(st, r)
                                 .map(|b| ck.shape_may_share(&b.shape))
                                 .unwrap_or(true);
                             if may_share {
-                                link_peer_nodes(peers, target, r);
+                                to_link.push((target.clone(), r.clone()));
                             }
                         }
+                    }
+                }
+                for s in &to_sever {
+                    sever_peer_node(peers, s);
+                }
+                for (a, b) in to_link {
+                    if !to_sever.contains(&b) {
+                        link_peer_nodes(peers, &a, &b);
                     }
                 }
             }
@@ -2124,11 +2123,22 @@ fn update_post_defer_watch(
         } => {
             if !matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_)) {
                 let shapes = ck.iterate_var_shapes(st, expr, vars.len());
+                let pre_watch = watch.clone();
                 for (target, shape) in vars.iter().zip(shapes) {
-                    if ck.shape_may_share(&shape) {
-                        handle_bind(target, Some(expr));
+                    if target == "_" {
+                        continue;
+                    }
+                    if ck.shape_may_share(&shape)
+                        && pre_watch
+                            .iter()
+                            .any(|w| ck.value_reads_storage_of(st, expr, w))
+                    {
+                        watch.insert(target.clone());
                     } else {
-                        handle_bind(target, None);
+                        watch.remove(target);
+                        if target.as_str() == deferred_name {
+                            *rebound_self = true;
+                        }
                     }
                 }
             }

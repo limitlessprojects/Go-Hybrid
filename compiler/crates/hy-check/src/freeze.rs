@@ -962,26 +962,7 @@ impl<'a> Checker<'a> {
                 if let hy_syntax::Stmt::For { kind, .. } = stmt {
                     match kind {
                         hy_syntax::ForKind::Iterate { vars, expr, .. } => {
-                            let elem = match self.shape_of_expr(&replay_st, expr) {
-                                crate::model::TypeShape::Slice(e) | crate::model::TypeShape::Array(e) => *e,
-                                crate::model::TypeShape::Chan(e) => *e,
-                                crate::model::TypeShape::Map(k, v) => {
-                                    if vars.len() == 1 {
-                                        *k
-                                    } else {
-                                        *v
-                                    }
-                                },
-                                _ => crate::model::TypeShape::Unknown,
-                            };
-                            for (idx_var, v) in vars.iter().enumerate() {
-                                let shape = if idx_var == 0 && vars.len() > 1 {
-                                    crate::model::TypeShape::Primitive
-                                } else {
-                                    elem.clone()
-                                };
-                                self.define_binding(&mut replay_st, v, shape, None, false, managed, false);
-                            }
+                            self.bind_iterate_vars(&mut replay_st, vars, expr, managed);
                         }
                         hy_syntax::ForKind::Range { var, .. } => {
                             self.define_binding(
