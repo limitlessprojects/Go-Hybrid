@@ -8103,6 +8103,18 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none()
+                        && crate::foreign::is_curated_package_value(pkg, name)
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot call `{}.{}`: it is a package value, not a function (HYB-E1002)",
+                                pkg, name
+                            ),
+                            &format!("use `{}.{}` without call parentheses", pkg, name),
+                        );
+                    }
                     if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
