@@ -1492,6 +1492,23 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
+        if let Expr::Field { base, name, .. } = unwrap_parens(callee) {
+            if let Expr::Ident { name: type_name, .. } = unwrap_parens(base) {
+                if self.lookup_kind(type_name).is_none()
+                    && !self.scopes.iter().any(|layer| layer.contains_key(type_name.as_str()))
+                {
+                    let head = Checker::base_named_type_str(name);
+                    let assoc_key = format!("{}.{}", type_name, head);
+                    if let Some(fd) = self.ck.fns.get(assoc_key.as_str()) {
+                        if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                            return None;
+                        }
+                        return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                    }
+                }
+            }
+            return None;
+        }
         let Expr::Ident { name, .. } = unwrap_parens(callee) else {
             return None;
         };
@@ -4260,6 +4277,22 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
+                if let Expr::Ident { name: type_name, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(type_name).is_none()
+                        && !self.scopes.iter().any(|layer| layer.contains_key(type_name.as_str()))
+                    {
+                        let head = Checker::base_named_type_str(name);
+                        let assoc_key = format!("{}.{}", type_name, head);
+                        if let Some(f) = self.ck.fns.get(&assoc_key) {
+                            return Some(
+                                f.results
+                                    .iter()
+                                    .map(|r| self.kind_of_ty(&r.ty, 0))
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
                 // #2823: the option payload methods carry a real result kind —
                 // `unwrap()` / `or(d)` yield the payload, `is_some()` /
                 // `is_none()` yield `bool`. Member lookup on an option stays
@@ -8593,6 +8626,9 @@ impl<'a> Collector<'a> {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
                         self.check_fn_type_arg_arity(&assoc_key, name, span);
+                        let full_assoc_key = format!("{}.{}", pkg, name);
+                        self.check_user_fn_arity(&full_assoc_key, args, span);
+                        self.check_user_fn_arg_types(&assoc_key, args);
                     }
                 }
                 if let Some(m) = self.method_expr_decl(base, name) {
@@ -8653,6 +8689,25 @@ impl<'a> Collector<'a> {
                         );
                     }
                 } else if !has_method {
+                    if let Some(sn) = self.struct_base_name(&bk) {
+                        let assoc_key = format!("{}.{}", sn, name);
+                        if self.ck.fns.contains_key(&assoc_key) {
+                            if !self.diags.iter().any(|d| d.span == span && d.code == "HYB-E1002") {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`{}` has no field or method `{}` (type `{}`) — `{}` is an associated function, not a method (HYB-E1002)",
+                                        base.render(),
+                                        name,
+                                        bk.label(),
+                                        assoc_key
+                                    ),
+                                    "declare a method with a receiver, or call the associated function through its type (SPEC-LANGUAGE LX11)",
+                                );
+                            }
+                            return;
+                        }
+                    }
                     // #682 U2/U3: neither a declared method nor a field exists
                     // on the base. Go refuses the call with `<base>.<name>
                     // undefined (type <T> has no field or method <name>)`.
