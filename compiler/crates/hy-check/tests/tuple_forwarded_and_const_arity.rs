@@ -23,6 +23,18 @@ fn error_codes(r: &hy_check::CheckResult) -> Vec<String> {
         .collect()
 }
 
+fn assert_e2002_and_e1002(src: &str) {
+    let r = check(src);
+    let mut cs = error_codes(&r);
+    assert_eq!(r.verdict, Verdict::Reject, "expected Reject for:\n{src}");
+    cs.sort();
+    assert_eq!(
+        cs,
+        vec!["HYB-E1002".to_string(), "HYB-E2002".to_string()],
+        "expected [HYB-E1002, HYB-E2002], got {cs:?} for:\n{src}"
+    );
+}
+
 fn assert_e2002(src: &str) {
     let r = check(src);
     let cs = error_codes(&r);
@@ -158,7 +170,8 @@ fn single_value_return_and_forwarded_calls_reject_move_foreign_indirect_and_alia
     );
 
     // 3. `return fns[0](3, 9)` in a 1-result function (typed slice local and untyped slice const).
-    assert_only_e2002(
+    // Resolving the indirect callee also lets the return-arity check fire (E1002).
+    assert_e2002_and_e1002(
         "fn minmax(a int, b int) (int, int) { return a, b }\n\
          fn bad() int {\n\
              fns := []fn(a int, b int) int int{minmax}\n\
@@ -166,7 +179,7 @@ fn single_value_return_and_forwarded_calls_reject_move_foreign_indirect_and_alia
          }\n\
          fn main() { _ = bad() }\n",
     );
-    assert_only_e2002(
+    assert_e2002_and_e1002(
         "fn minmax(a int, b int) (int, int) { return a, b }\n\
          const fns = []fn(){ fn() { _ = minmax(3, 9) } }\n\
          fn bad() int {\n\
