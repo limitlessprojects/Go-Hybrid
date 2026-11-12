@@ -92,6 +92,9 @@ impl<'a> Checker<'a> {
         if let Some(target) = self.type_aliases.get(base) {
             return self.shape_of_type_depth(target, depth + 1);
         }
+        if self.enums.contains_key(base) {
+            return TypeShape::Primitive;
+        }
         // #884: the T9 prelude's `set[T]` lowers to a struct wrapping a Go
         // map (`type set[t comparable] struct { m map[t]struct{} }`), so a
         // shallow copy shares that map exactly like any other map-carrying
@@ -1541,6 +1544,35 @@ impl<'a> Checker<'a> {
     ) -> Vec<TypeShape> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
+            let unwrap_pipe = |call_e: &Expr| -> bool {
+                if let Expr::Call { callee, .. } = call_e {
+                    let mut base = callee.as_ref();
+                    while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
+                        base = inner.as_ref();
+                    }
+                    if let Expr::Field { base: pkg, name, .. } = base {
+                        if let Expr::Ident { name: pkg_name, .. } = pkg.as_ref() {
+                            let head = name.split('[').next().unwrap_or(name.as_str());
+                            if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") {
+                                return true;
+                            }
+                        }
+                    }
+                    if let Expr::Ident { name, .. } = base {
+                        let head = name.split('[').next().unwrap_or(name.as_str());
+                        if head == "pipe" || head == "new_pipe" {
+                            return true;
+                        }
+                    }
+                }
+                false
+            };
+            if unwrap_pipe(v) {
+                return vec![
+                    TypeShape::OwnHandle("hy.send_cap".into()),
+                    TypeShape::OwnHandle("hy.recv_cap".into()),
+                ];
+            }
             if let Expr::Index { base, .. } = v {
                 if let TypeShape::Map(_, val) = self.shape_of_expr(st, base) {
                     return vec![*val, TypeShape::Primitive]; // v, ok := m[k]
@@ -1585,6 +1617,41 @@ impl<'a> Checker<'a> {
     ) -> Vec<Option<TypeExpr>> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
+            let unwrap_pipe = |call_e: &Expr| -> bool {
+                if let Expr::Call { callee, .. } = call_e {
+                    let mut base = callee.as_ref();
+                    while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
+                        base = inner.as_ref();
+                    }
+                    if let Expr::Field { base: pkg, name, .. } = base {
+                        if let Expr::Ident { name: pkg_name, .. } = pkg.as_ref() {
+                            let head = name.split('[').next().unwrap_or(name.as_str());
+                            if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") {
+                                return true;
+                            }
+                        }
+                    }
+                    if let Expr::Ident { name, .. } = base {
+                        let head = name.split('[').next().unwrap_or(name.as_str());
+                        if head == "pipe" || head == "new_pipe" {
+                            return true;
+                        }
+                    }
+                }
+                false
+            };
+            if unwrap_pipe(v) {
+                return vec![
+                    Some(TypeExpr::Named {
+                        name: "hy.send_cap".into(),
+                        span: v.span(),
+                    }),
+                    Some(TypeExpr::Named {
+                        name: "hy.recv_cap".into(),
+                        span: v.span(),
+                    }),
+                ];
+            }
             if let Expr::Index { base, .. } = v {
                 if let Some(TypeExpr::Map { value: val_ty, .. }) = self.ty_of_expr(st, base).map(|t| self.peel_pointer_and_alias(&t)) {
                     return vec![Some(*val_ty), None];
