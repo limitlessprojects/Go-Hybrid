@@ -8668,6 +8668,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if (pkg == "adler32" || pkg == "hash/adler32") && self.lookup_kind(pkg).is_none() {
+                        self.check_adler32_package_call(name.as_str(), args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -10073,6 +10077,43 @@ impl<'a> Collector<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn check_adler32_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(member, "size") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `adler32.{member}`: package symbol is a constant, not a function (HYB-E1002)"),
+                &format!("refer to `adler32.{member}` as a constant rather than calling it"),
+            );
+            return;
+        }
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `adler32.{member}` (HYB-E1002)"),
+                &format!("`adler32.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new" => Some(0),
+            "checksum" => Some(1),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`adler32.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `adler32.{member}`"),
+                );
+            }
         }
     }
 }

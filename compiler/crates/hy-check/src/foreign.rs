@@ -128,6 +128,7 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
         ("serde_json", "parse" | "new_object" | "new_array")
         | ("flate2", "new_writer")
         | ("json" | "encoding/json", "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder")
+        | ("adler32" | "hash/adler32", "new" | "New")
         | (
             "httptest" | "net/http/httptest",
             "new_server"
@@ -203,6 +204,10 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("json" | "encoding/json", "new_encoder" | "NewEncoder") => {
             TypeShape::ForeignOpaque("json.encoder".into())
         }
+        ("adler32" | "hash/adler32", "new" | "New") => {
+            TypeShape::ForeignOpaque("adler32.hash32".into())
+        }
+        ("adler32" | "hash/adler32", "checksum" | "Checksum") => TypeShape::Primitive,
         (
             "httptest" | "net/http/httptest",
             "new_server"
@@ -763,7 +768,7 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
 }
 
 /// Human-readable M5 curated package allowlist string for HYB-E1001 diagnostics (#658).
-pub(crate) const CURATED_ALLOWLIST_DISPLAY: &str = "fmt, os, io, time, sort, strings, strconv, errors, sync, sync/atomic, bufio, net, net/http, net/http/httptest, net/url, encoding/json, encoding/hex, path, path/filepath, log, compress/gzip, archive/tar, rust/serde_json, rust/sha3, rust/regex";
+pub(crate) const CURATED_ALLOWLIST_DISPLAY: &str = "fmt, os, io, time, sort, strings, strconv, errors, sync, sync/atomic, bufio, net, net/http, net/http/httptest, net/url, encoding/json, encoding/hex, path, path/filepath, log, compress/gzip, archive/tar, hash/adler32, rust/serde_json, rust/sha3, rust/regex";
 
 /// Is `path` in SPEC M5's curated Go allowlist or M6's pinned Rust crate set (#658)?
 pub(crate) fn is_curated_import(path: &str) -> bool {
@@ -789,6 +794,8 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "httptest"
             | "net/url"
             | "url"
+            | "hash/adler32"
+            | "adler32"
             | "encoding/json"
             | "json"
             | "encoding/hex"
@@ -874,6 +881,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "log"
             | "gzip"
             | "tar"
+            | "adler32"
             | "serde_json"
             | "sha3"
             | "regex"
@@ -1745,6 +1753,7 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "view"
         ),
         "sha3" => matches!(m, "digest256" | "stream_checksum"),
+        "adler32" | "hash/adler32" => matches!(m, "new" | "checksum" | "size"),
         "regex" => matches!(m, "is_match" | "is_valid" | "compile" | "match_string"),
         "flate2" => matches!(m, "new_writer" | "write" | "finish" | "writer"),
         "hy" => matches!(m, "pipe" | "new_pipe" | "send_cap" | "recv_cap" | "channel"),
