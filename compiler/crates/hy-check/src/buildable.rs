@@ -5355,7 +5355,18 @@ impl<'a> Collector<'a> {
         span: Span,
     ) {
         let tn = base.render();
-        if args.iter().any(|a| a.spread) || self.multi_value_arg_count(args).is_some() {
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic method expression `{}.{}` — Go refuses `cannot use ... in call to non-variadic {}.{}` (HYB-E1002)",
+                    tn, name, tn, name
+                ),
+                "`...` (variadic spread) is only allowed on the variadic built-in `append`; methods are never variadic",
+            );
+            return;
+        }
+        if self.multi_value_arg_count(args).is_some() {
             return;
         }
         let want = m.params.len() + 1;
@@ -5643,6 +5654,16 @@ impl<'a> Collector<'a> {
     }
 
     fn check_fn_lit_call(&mut self, params: &[Param], args: &[CallArg], callee: &Expr, span: Span) {
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic function literal — Go refuses `cannot use ... in call to non-variadic func` (HYB-E1002)"
+                ),
+                "`...` (variadic spread) is only allowed on the variadic built-in `append`; function literals are never variadic",
+            );
+            return;
+        }
         if self.multi_value_arg_count(args).is_some() {
             return;
         }
@@ -8073,6 +8094,16 @@ impl<'a> Collector<'a> {
                         // A local bound to a closure or fn-typed value carries
                         // its declared parameter count, so the call's arity is
                         // checkable (#577 C9).
+                        OpKind::Fn(..) if args.iter().any(|a| a.spread) => {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot use `...` in call to non-variadic `{}` — Go refuses `cannot use ... in call to non-variadic {}` (HYB-E1002)",
+                                    name, name
+                                ),
+                                "`...` (variadic spread) is only allowed on the variadic built-in `append`; function values are never variadic",
+                            );
+                        }
                         OpKind::Fn(_, Some(ref want)) if want.len() != args.len() => {
                             self.report_local_arity(name, want.len(), args.len(), span)
                         }
@@ -8626,7 +8657,16 @@ impl<'a> Collector<'a> {
                     // `u.cb(1, 2)` where `cb fn(x int) int` — the field type
                     // states the count.
                     if !has_method {
-                        if let OpKind::Fn(_, Some(ref want)) = fk {
+                        if matches!(fk, OpKind::Fn(..)) && args.iter().any(|a| a.spread) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot use `...` in call to non-variadic `{}` — Go refuses `cannot use ... in call to non-variadic {}` (HYB-E1002)",
+                                    callee.render(), callee.render()
+                                ),
+                                "`...` (variadic spread) is only allowed on the variadic built-in `append`; function fields are never variadic",
+                            );
+                        } else if let OpKind::Fn(_, Some(ref want)) = fk {
                             if want.len() != args.len() {
                                 self.report_local_arity(&callee.render(), want.len(), args.len(), span);
                             }
@@ -8696,7 +8736,15 @@ impl<'a> Collector<'a> {
             }
             _ => {
                 let ck = self.kind_of_expr(bare);
-                if !matches!(ck, OpKind::Unknown | OpKind::Fn(..)) {
+                if matches!(ck, OpKind::Fn(..)) && args.iter().any(|a| a.spread) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "cannot use `...` in call to non-variadic function — Go refuses `cannot use ... in call to non-variadic func` (HYB-E1002)"
+                        ),
+                        "`...` (variadic spread) is only allowed on the variadic built-in `append`; functions are never variadic",
+                    );
+                } else if !matches!(ck, OpKind::Unknown | OpKind::Fn(..)) {
                     self.emit_e1002(
                         span,
                         format!(
