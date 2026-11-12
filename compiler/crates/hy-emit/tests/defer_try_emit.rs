@@ -24,7 +24,13 @@ fn run(path string) error {
 }
 "#;
     let go = emit(src);
-    assert!(go.contains("defer f.Close()"), "{go}");
-    assert!(go.contains("defer f.Seek("), "{go}");
+    // The deferred calls still run at exit (method values captured now)...
+    assert!(go.contains(":= f.Close"), "{go}");
+    assert!(go.contains(":= f.Seek"), "{go}");
+    // ...and their `?` is not dropped: each error lands in the fn's error
+    // result at exit (E3b: a `?` never silently discards an error).
+    assert!(!go.contains("defer f.Close()"), "{go}");
+    assert_eq!(go.matches("defer func() {").count(), 3, "{go}");
+    assert!(go.contains("hyErr == nil"), "{go}");
 }
 // Row 13 BUILDABLE regression test (#2384)
