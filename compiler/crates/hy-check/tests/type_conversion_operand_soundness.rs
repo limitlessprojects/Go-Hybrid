@@ -125,3 +125,21 @@ fn valid_interface_conversion_accepts() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Accept, "expected accept, got diagnostics: {:?}", r.diagnostics);
 }
+
+#[test]
+fn struct_conversion_from_distinct_struct_var_rejects_e1002() {
+    let src = "struct alpha {\n    x int\n}\nstruct beta {\n    name string\n}\nfn main() {\n    var a alpha\n    _ = beta(a)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("cannot convert `a` (type `struct alpha`) to type `beta`")));
+}
+
+#[test]
+fn struct_conversion_from_distinct_struct_identical_fields_rejects_e1002() {
+    let src = "struct alpha {\n    x int\n}\nstruct beta {\n    x int\n}\nfn main() {\n    var a alpha\n    _ = beta(a)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("cannot convert `a` (type `struct alpha`) to type `beta`")));
+}
