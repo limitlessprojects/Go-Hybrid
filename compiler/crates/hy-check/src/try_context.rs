@@ -29,14 +29,36 @@ use hy_syntax::{
 /// Log entry" — keep in sync with hy-emit's `CONVERSIONS[..].propagate`.
 const E11_PROPAGATING_TARGETS: &[&str] = &["http.handler"];
 
-fn is_builtin_error_type(ck: &Checker<'_>, ty: &TypeExpr, type_params: &[String]) -> bool {
+fn is_name_shadowed_as_non_type(
+    ck: &Checker<'_>,
+    name: &str,
+    type_params: &[String],
+    outer_scopes: &[Vec<String>],
+) -> bool {
+    type_params.iter().any(|tp| tp == name)
+        || outer_scopes.iter().any(|s| s.iter().any(|n| n == name))
+        || ck.fns.contains_key(name)
+        || ck.consts.contains_key(name)
+        || ck
+            .file
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Const(c) if c.name == name))
+}
+
+fn resolve_type_alias_unshadowed(
+    ck: &Checker<'_>,
+    ty: &TypeExpr,
+    type_params: &[String],
+    outer_scopes: &[Vec<String>],
+) -> TypeExpr {
     let mut cur = ty.clone();
     for _ in 0..8 {
         let TypeExpr::Named { name, .. } = &cur else {
-            return false;
+            break;
         };
-        if type_params.iter().any(|tp| tp == name) {
-            return false;
+        if is_name_shadowed_as_non_type(ck, name, type_params, outer_scopes) {
+            break;
         }
         if let Some(next) = ck.type_aliases.get(name.as_str()) {
             cur = next.clone();
@@ -44,8 +66,23 @@ fn is_builtin_error_type(ck: &Checker<'_>, ty: &TypeExpr, type_params: &[String]
             break;
         }
     }
+    cur
+}
+
+fn is_builtin_error_type(
+    ck: &Checker<'_>,
+    ty: &TypeExpr,
+    type_params: &[String],
+    outer_scopes: &[Vec<String>],
+) -> bool {
+    if let TypeExpr::Named { name, .. } = ty {
+        if is_name_shadowed_as_non_type(ck, name, type_params, outer_scopes) {
+            return false;
+        }
+    }
+    let cur = resolve_type_alias_unshadowed(ck, ty, type_params, outer_scopes);
     if !matches!(&cur, TypeExpr::Named { name, .. } if name == "error")
-        || type_params.iter().any(|tp| tp == "error")
+        || is_name_shadowed_as_non_type(ck, "error", type_params, outer_scopes)
         || ck.structs.contains_key("error")
         || ck.struct_type_params.contains_key("error")
         || ck.enums.contains_key("error")
@@ -53,14 +90,22 @@ fn is_builtin_error_type(ck: &Checker<'_>, ty: &TypeExpr, type_params: &[String]
         return false;
     }
     ck.type_aliases.get("error").is_none_or(|alias_ty| {
-        matches!(ck.resolve_type_alias(alias_ty), TypeExpr::Named { name, .. } if name == "error")
+        matches!(
+            resolve_type_alias_unshadowed(ck, alias_ty, type_params, outer_scopes),
+            TypeExpr::Named { name, .. } if name == "error"
+        )
     })
 }
 
-fn results_end_in_error(ck: &Checker<'_>, results: &[FnResult], type_params: &[String]) -> bool {
+fn results_end_in_error(
+    ck: &Checker<'_>,
+    results: &[FnResult],
+    type_params: &[String],
+    outer_scopes: &[Vec<String>],
+) -> bool {
     results
         .last()
-        .is_some_and(|r| is_builtin_error_type(ck, &r.ty, type_params))
+        .is_some_and(|r| is_builtin_error_type(ck, &r.ty, type_params, outer_scopes))
 }
 
 fn collect_receiver_type_params(ty: &TypeExpr, out: &mut Vec<String>) {
@@ -115,6 +160,8 @@ fn fnlit_has_valid_e11_signature(
     params: &[Param],
     results: &[FnResult],
     http_unshadowed: bool,
+    type_params: &[String],
+    outer_scopes: &[Vec<String>],
 ) -> bool {
     if !http_unshadowed
         || !results.is_empty()
@@ -128,11 +175,18 @@ fn fnlit_has_valid_e11_signature(
         return false;
     }
     let w_ok = matches!(&params[0].ty, TypeExpr::Named { name, .. } if name.is_empty())
-        || matches!(ck.resolve_type_alias(&params[0].ty), TypeExpr::Named { name, .. } if name == "http.response_writer");
+        || matches!(
+            resolve_type_alias_unshadowed(ck, &params[0].ty, type_params, outer_scopes),
+            TypeExpr::Named { name, .. } if name == "http.response_writer"
+        );
     let r_ok = matches!(&params[1].ty, TypeExpr::Named { name, .. } if name.is_empty())
         || matches!(
-            ck.resolve_type_alias(&params[1].ty),
-            TypeExpr::Pointer { to, .. } if matches!(ck.resolve_type_alias(&to), TypeExpr::Named { name, .. } if name == "http.request")
+            resolve_type_alias_unshadowed(ck, &params[1].ty, type_params, outer_scopes),
+            TypeExpr::Pointer { to, .. }
+                if matches!(
+                    resolve_type_alias_unshadowed(ck, &to, type_params, outer_scopes),
+                    TypeExpr::Named { name, .. } if name == "http.request"
+                )
         );
     w_ok && r_ok
 }
@@ -239,7 +293,7 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
                 f.params.iter().for_each(|p| w.bind_name(&p.name));
                 f.results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| w.bind_name(n));
                 let is_main = f.name == "main" && f.receiver.is_none();
-                let ctx = if is_main || results_end_in_error(w.ck, &f.results, &w.type_params) {
+                let ctx = if is_main || results_end_in_error(w.ck, &f.results, &w.type_params, &[]) {
                     Ctx::Ok
                 } else {
                     Ctx::NoErrorResult(f.name.as_str())
@@ -433,17 +487,25 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
         // E4: lexical, like `return` — the closure's OWN results decide.
         let http_before = ck.is_unshadowed_pkg_root("http");
         let saved_return_e11 = std::mem::replace(&mut ck.return_e11, false);
+        let outer_scopes = ck.scopes.clone();
         ck.push_scope();
         let fnlit_scope_idx = ck.scopes.len() - 1;
         params.iter().for_each(|p| ck.bind_name(&p.name));
         results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| ck.bind_name(n));
         let ctx = if e11 {
-            if fnlit_has_valid_e11_signature(ck.ck, params, results, http_before) {
+            if fnlit_has_valid_e11_signature(
+                ck.ck,
+                params,
+                results,
+                http_before,
+                &ck.type_params,
+                &outer_scopes,
+            ) {
                 Ctx::E11Handler { fnlit_scope_idx }
             } else {
                 Ctx::NoErrorResult("closure")
             }
-        } else if results_end_in_error(ck.ck, results, &ck.type_params) {
+        } else if results_end_in_error(ck.ck, results, &ck.type_params, &outer_scopes) {
             Ctx::Ok
         } else {
             Ctx::NoErrorResult("closure")
@@ -493,7 +555,11 @@ fn check_try_operand(ck: &mut TryWalker<'_, '_>, operand: &Expr, span: Span) {
     // plus receiver params — the same list `Decl::Fn` passes). An `FnLit` has
     // no type-param list; `walk_fnlit` judges that signature with the enclosing
     // function's type params, which are in scope for the literal.
-    let (results, type_params): (Option<&[FnResult]>, Vec<String>) = match callee {
+    // Outer lexical scopes for shadow checks: a file-level fn's result types are
+    // judged at file level (no enclosing locals, as `Decl::Fn` does); an `FnLit`'s
+    // result types are written inside the current scopes, as `walk_fnlit` judges them.
+    let (results, type_params, outer_scopes): (Option<&[FnResult]>, Vec<String>, Vec<Vec<String>>) =
+        match callee {
         Expr::Ident { name, .. } => {
             // A local binding shadows the file-level fn — fail open (closure
             // values / rebinds do not always carry a recoverable signature here).
@@ -501,19 +567,21 @@ fn check_try_operand(ck: &mut TryWalker<'_, '_>, operand: &Expr, span: Span) {
                 return;
             }
             match ck.ck.fns.get(name.as_str()) {
-                Some(f) => (Some(f.results.as_slice()), fn_decl_type_param_names(f)),
-                None => (None, Vec::new()),
+                Some(f) => (Some(f.results.as_slice()), fn_decl_type_param_names(f), Vec::new()),
+                None => (None, Vec::new(), Vec::new()),
             }
         }
-        Expr::FnLit { results, .. } => (Some(results.as_slice()), ck.type_params.clone()),
-        _ => (None, Vec::new()), // methods / selectors / computed: fail open
+        Expr::FnLit { results, .. } => {
+            (Some(results.as_slice()), ck.type_params.clone(), ck.scopes.clone())
+        }
+        _ => (None, Vec::new(), Vec::new()), // methods / selectors / computed: fail open
     };
 
     let Some(results) = results else {
         return;
     };
 
-    if results_end_in_error(ck.ck, results, &type_params) {
+    if results_end_in_error(ck.ck, results, &type_params, &outer_scopes) {
         return;
     }
 
