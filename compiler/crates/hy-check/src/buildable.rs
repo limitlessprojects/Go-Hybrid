@@ -8589,6 +8589,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if pkg == "log" && self.lookup_kind(pkg).is_none() {
+                        self.check_log_call_buildable(name, args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -9990,6 +9994,90 @@ impl<'a> Collector<'a> {
                         span,
                         "`io.multi_writer` requires at least 1 writer argument `(writers...)`, got 0 (HYB-E1002)".to_string(),
                         "write `io.multi_writer(w1, ...)`",
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn check_log_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "ldate"
+            | "ltime"
+            | "lmicroseconds"
+            | "llongfile"
+            | "lshortfile"
+            | "lutc"
+            | "lmsgprefix"
+            | "lstdflags"
+            | "logger" => {
+                self.emit_e1002(
+                    span,
+                    format!("cannot call `log.{}`: package symbol is a constant or type, not a function (HYB-E1002)", name),
+                    &format!("refer to `log.{}` as a value or type rather than calling it", name),
+                );
+            }
+            "flags" | "prefix" | "writer" => {
+                if !args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        format!("`log.{}` takes 0 arguments `()`, got {} (HYB-E1002)", name, args.len()),
+                        &format!("write `log.{}()`", name),
+                    );
+                }
+            }
+            "set_flags" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("`log.set_flags` takes exactly 1 argument `(flag)`, got {} (HYB-E1002)", args.len()),
+                        "write `log.set_flags(flag)`",
+                    );
+                }
+            }
+            "set_prefix" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("`log.set_prefix` takes exactly 1 argument `(prefix)`, got {} (HYB-E1002)", args.len()),
+                        "write `log.set_prefix(prefix)`",
+                    );
+                }
+            }
+            "set_output" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("`log.set_output` takes exactly 1 argument `(w)`, got {} (HYB-E1002)", args.len()),
+                        "write `log.set_output(w)`",
+                    );
+                }
+            }
+            "output" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("`log.output` takes exactly 2 arguments `(calldepth, s)`, got {} (HYB-E1002)", args.len()),
+                        "write `log.output(calldepth, s)`",
+                    );
+                }
+            }
+            "print" | "println" | "fatal" | "fatalln" | "panic" | "panicln" => {
+                if args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        format!("`log.{}` requires at least 1 argument `(v...)`, got 0 (HYB-E1002)", name),
+                        &format!("write `log.{}(\"message\")`", name),
+                    );
+                }
+            }
+            "printf" | "fatalf" | "panicf" => {
+                if args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        format!("`log.{}` requires at least 1 format string argument `(format[, ...])`, got 0 (HYB-E1002)", name),
+                        &format!("write `log.{}(\"%s\", ...)`", name),
                     );
                 }
             }
