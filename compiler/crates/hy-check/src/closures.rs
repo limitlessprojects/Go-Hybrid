@@ -45,6 +45,12 @@ pub(crate) fn check_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, body:
                     b.moved = b.moved.or_else(|| cur.moved.clone());
                     b.non_owned_origin = b.non_owned_origin.or_else(|| cur.non_owned_origin.clone());
                 }
+                if !s_aliases.get(k).is_some_and(|t| t == k)
+                    && !s_share.get(k).is_some_and(|ps| ps.contains(k))
+                {
+                    b.moved = v.moved.clone();
+                    b.non_owned_origin = v.non_owned_origin.clone();
+                }
                 scoped_st.env.insert(k.clone(), b);
             }
             for (k, v) in s_aliases {
@@ -240,10 +246,24 @@ fn check_one_closure(
             env.insert(k.clone(), v.clone());
         }
     }
+    let mut closure_cell_holders = std::collections::HashMap::new();
+    for (h, cells) in &st.closure_cell_holders {
+        if env.contains_key(h) {
+            let mapped: std::collections::HashSet<(String, usize)> = cells
+                .iter()
+                .filter(|(c, d)| st.lookup_depth(c) == Some(*d))
+                .map(|(c, _)| (c.clone(), 0))
+                .collect();
+            if !mapped.is_empty() {
+                closure_cell_holders.insert(h.clone(), mapped);
+            }
+        }
+    }
     let mut cst = FnState {
         env,
         aliases: st.aliases.clone(),
         may_share: st.may_share.clone(),
+        closure_cell_holders,
         type_params: st.type_params.clone(),
         closure_defs: st.closure_defs.clone(),
         closure_fnlits: st.closure_fnlits.clone(),
