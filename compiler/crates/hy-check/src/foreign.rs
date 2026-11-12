@@ -415,6 +415,57 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "compare_and_delete",
         "swap",
     ];
+    /// `net.Conn` — #4046: the address types had arms but the connection and
+    /// listener handles did not, so a phantom method on `net.conn` reached
+    /// ForeignOpaque and passed `hyb check` while `go build` said
+    /// "type net.Conn has no field or method ...". Method sets below are taken
+    /// from `go doc net.<Type>`, lowercased like the rest of this table.
+    const NET_CONN: &[&str] = &[
+        "close",
+        "local_addr",
+        "read",
+        "remote_addr",
+        "set_deadline",
+        "set_read_deadline",
+        "set_write_deadline",
+        "write",
+    ];
+    /// `net.Listener`.
+    const NET_LISTENER: &[&str] = &["accept", "addr", "close"];
+    /// `*net.TCPConn` — the concrete type, which adds the deadline/buffer and
+    /// half-close family on top of `net.Conn`.
+    const NET_TCP_CONN: &[&str] = &[
+        "close", "close_read", "close_write", "file", "local_addr", "multipath_tcp",
+        "read", "read_from", "remote_addr", "set_deadline", "set_keep_alive",
+        "set_keep_alive_config", "set_keep_alive_period", "set_linger", "set_no_delay",
+        "set_read_buffer", "set_read_deadline", "set_write_buffer", "set_write_deadline",
+        "syscall_conn", "write", "write_to",
+    ];
+    /// `*net.TCPListener`.
+    const NET_TCP_LISTENER: &[&str] = &[
+        "accept", "accept_tcp", "addr", "close", "file", "set_deadline", "syscall_conn",
+    ];
+    /// `*net.UDPConn`.
+    const NET_UDP_CONN: &[&str] = &[
+        "close", "file", "local_addr", "read", "read_from", "read_from_udp",
+        "read_from_udp_addr_port", "read_msg_udp", "read_msg_udp_addr_port",
+        "remote_addr", "set_deadline", "set_read_buffer", "set_read_deadline",
+        "set_write_buffer", "set_write_deadline", "syscall_conn", "write",
+        "write_msg_udp", "write_msg_udp_addr_port", "write_to", "write_to_udp",
+        "write_to_udp_addr_port",
+    ];
+    /// `*net.UnixConn`.
+    const NET_UNIX_CONN: &[&str] = &[
+        "close", "close_read", "close_write", "file", "local_addr", "read",
+        "read_from", "read_from_unix", "read_msg_unix", "remote_addr", "set_deadline",
+        "set_read_buffer", "set_read_deadline", "set_write_buffer", "set_write_deadline",
+        "syscall_conn", "write", "write_msg_unix", "write_to", "write_to_unix",
+    ];
+    /// `*net.UnixListener`.
+    const NET_UNIX_LISTENER: &[&str] = &[
+        "accept", "accept_unix", "addr", "close", "file", "set_deadline",
+        "set_unlink_on_close", "syscall_conn",
+    ];
     const TIME_TICKER: &[&str] = &["stop", "reset"];
     const TIME_TIMER: &[&str] = &["stop", "reset"];
     /// `bufio.Reader` — Go standard library buffered reader methods.
@@ -652,6 +703,13 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "sync.map" | "sync.Map" => Some(SYNC_MAP),
         "time.ticker" | "time.Ticker" => Some(TIME_TICKER),
         "time.timer" | "time.Timer" => Some(TIME_TIMER),
+        "net.conn" | "net.Conn" => Some(NET_CONN),
+        "net.listener" | "net.Listener" => Some(NET_LISTENER),
+        "net.tcp_conn" | "net.TCPConn" => Some(NET_TCP_CONN),
+        "net.tcp_listener" | "net.TCPListener" => Some(NET_TCP_LISTENER),
+        "net.udp_conn" | "net.UDPConn" => Some(NET_UDP_CONN),
+        "net.unix_conn" | "net.UnixConn" => Some(NET_UNIX_CONN),
+        "net.unix_listener" | "net.UnixListener" => Some(NET_UNIX_LISTENER),
         "bufio.reader" | "bufio.Reader" => Some(BUFIO_READER),
         "bufio.writer" | "bufio.Writer" => Some(BUFIO_WRITER),
         "bufio.scanner" | "bufio.Scanner" => Some(BUFIO_SCANNER),
