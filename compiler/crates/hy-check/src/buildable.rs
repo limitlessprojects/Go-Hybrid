@@ -8589,6 +8589,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if pkg == "errors" && self.lookup_kind(pkg).is_none() {
+                        self.check_errors_call_buildable(name, args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -9990,6 +9994,60 @@ impl<'a> Collector<'a> {
                         span,
                         "`io.multi_writer` requires at least 1 writer argument `(writers...)`, got 0 (HYB-E1002)".to_string(),
                         "write `io.multi_writer(w1, ...)`",
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Issue #4171 — the `errors` package call surface (Row 13 BUILDABLE).
+    /// Go contract: `errors.New(string)` = 1, `errors.Unwrap(error)` = 1,
+    /// `errors.Is(err, target)` = 2, `errors.As(err, target)` = 2,
+    /// `errors.Join(errs...)` >= 1; `errors.ErrUnsupported` is a variable and
+    /// must not be callable. `errors.wrap` is validated separately
+    /// (`check_errors_wrap_operands`, #3572).
+    fn check_errors_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "err_unsupported" => {
+                self.emit_e1002(
+                    span,
+                    "cannot call `errors.err_unsupported`: package symbol is a variable, not a function (HYB-E1002)".to_string(),
+                    "refer to `errors.err_unsupported` as a value rather than calling it",
+                );
+            }
+            "new" | "unwrap" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`errors.{}` takes exactly 1 argument, got {} (HYB-E1002)",
+                            name,
+                            args.len()
+                        ),
+                        "write `errors.new(\"message\")` or `errors.unwrap(err)`",
+                    );
+                }
+            }
+            "is" | "as" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`errors.{}` takes exactly 2 arguments `(err, target)`, got {} (HYB-E1002)",
+                            name,
+                            args.len()
+                        ),
+                        "write `errors.is(err, target)` or `errors.as(err, &target)`",
+                    );
+                }
+            }
+            "join" => {
+                if args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        "`errors.join` requires at least 1 error argument `(errs...)`, got 0 (HYB-E1002)".to_string(),
+                        "write `errors.join(err1, ...)`",
                     );
                 }
             }
