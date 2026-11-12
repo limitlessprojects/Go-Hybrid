@@ -1963,40 +1963,38 @@ fn update_pre_defer_peers(
             ..
         } => {
             for (i, t) in targets.iter().enumerate() {
-                if let hy_syntax::PlaceKind::Ident(target) = &t.kind {
-                    if target == "_" {
-                        continue;
-                    }
-                    let val = values.get(i).or_else(|| values.first());
-                    let mut refs = Vec::new();
-                    if let Some(v) = val {
-                        expr_referenced_bindings(v, &mut refs);
-                    }
+                let target = t.root();
+                if target == "_" {
+                    continue;
+                }
+                let val = values.get(i).or_else(|| values.first());
+                let mut refs = Vec::new();
+                if let Some(v) = val {
+                    expr_referenced_bindings(v, &mut refs);
+                }
+                // Rebinding the plain name severs its old peers. A field or
+                // index store only replaces one projection, so the root keeps
+                // its other sharing relationships (#4368).
+                if matches!(t.kind, hy_syntax::PlaceKind::Ident(_)) {
                     let self_read = val.is_some_and(|v| ck.value_reads_storage_of(st, v, target));
                     if !self_read {
                         sever_peer_node(peers, target);
                     }
-                    for r in refs {
-                        let may_share = ck
-                            .lookup_binding(st, &r)
-                            .map(|b| ck.shape_may_share(&b.shape))
-                            .unwrap_or(true);
-                        if may_share {
-                            link_peer_nodes(peers, target, &r);
-                        }
+                }
+                for r in refs {
+                    let may_share = ck
+                        .lookup_binding(st, &r)
+                        .map(|b| ck.shape_may_share(&b.shape))
+                        .unwrap_or(true);
+                    if may_share {
+                        link_peer_nodes(peers, target, &r);
                     }
                 }
             }
             if values.len() == 1 && targets.len() > 1 {
                 for (i, j) in ck.callee_shared_return_pairs(st, &values[0]) {
                     if let (Some(ta), Some(tb)) = (targets.get(i), targets.get(j)) {
-                        if let (
-                            hy_syntax::PlaceKind::Ident(a),
-                            hy_syntax::PlaceKind::Ident(b),
-                        ) = (&ta.kind, &tb.kind)
-                        {
-                            link_peer_nodes(peers, a, b);
-                        }
+                        link_peer_nodes(peers, ta.root(), tb.root());
                     }
                 }
             }
@@ -2074,7 +2072,15 @@ fn update_post_defer_watch(
     watch: &mut std::collections::HashSet<String>,
     rebound_self: &mut bool,
 ) {
-    let mut handle_bind = |target: &str, val: Option<&Expr>| {
+    fn handle_bind(
+        ck: &Checker<'_>,
+        st: &FnState,
+        target: &str,
+        val: Option<&Expr>,
+        deferred_name: &str,
+        watch: &mut std::collections::HashSet<String>,
+        rebound_self: &mut bool,
+    ) {
         if target == "_" {
             return;
         }
@@ -2096,13 +2102,13 @@ fn update_post_defer_watch(
                 *rebound_self = true;
             }
         }
-    };
+    }
 
     match stmt {
         Stmt::Local(l) => {
             for (i, target) in l.names.iter().enumerate() {
                 let val = l.values.get(i).or_else(|| l.values.first());
-                handle_bind(target, val);
+                handle_bind(ck, st, target, val, deferred_name, watch, rebound_self);
             }
         }
         Stmt::Assign {
@@ -2112,9 +2118,20 @@ fn update_post_defer_watch(
             ..
         } => {
             for (i, t) in targets.iter().enumerate() {
-                if let hy_syntax::PlaceKind::Ident(target) = &t.kind {
-                    let val = values.get(i).or_else(|| values.first());
-                    handle_bind(target, val);
+                let target = t.root();
+                let val = values.get(i).or_else(|| values.first());
+                if matches!(t.kind, hy_syntax::PlaceKind::Ident(_)) {
+                    handle_bind(ck, st, target, val, deferred_name, watch, rebound_self);
+                } else if let Some(v) = val {
+                    // A store into `b.m` / `b["k"]` puts the value's storage
+                    // inside b: if the value reads a watched binding, b now
+                    // carries deferred storage too (#4368). The root itself is
+                    // not rebound by a projection store, so never remove it.
+                    let reads_watched =
+                        watch.iter().any(|w| ck.value_reads_storage_of(st, v, w));
+                    if reads_watched {
+                        watch.insert(target.to_string());
+                    }
                 }
             }
         }
@@ -2126,9 +2143,17 @@ fn update_post_defer_watch(
                 let shapes = ck.iterate_var_shapes(st, expr, vars.len());
                 for (target, shape) in vars.iter().zip(shapes) {
                     if ck.shape_may_share(&shape) {
-                        handle_bind(target, Some(expr));
+                        handle_bind(
+                            ck,
+                            st,
+                            target,
+                            Some(expr),
+                            deferred_name,
+                            watch,
+                            rebound_self,
+                        );
                     } else {
-                        handle_bind(target, None);
+                        handle_bind(ck, st, target, None, deferred_name, watch, rebound_self);
                     }
                 }
             }
