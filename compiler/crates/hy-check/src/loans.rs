@@ -3370,7 +3370,11 @@ impl<'a> Checker<'a> {
                     self.append_outer_binding_slots(st, &mut bound, true, &mut slots);
                     return Some((slots, std::borrow::Cow::Owned(body.clone())));
                 }
-                let decl = *self.fns.get(name.as_str())?;
+                let base_name = Self::base_named_type_str(name);
+                let decl = *self
+                    .fns
+                    .get(name.as_str())
+                    .or_else(|| self.fns.get(base_name))?;
                 let body = decl.body.as_ref()?;
                 let mut slots = Vec::new();
                 let mut bound: HashSet<String> =
@@ -3385,9 +3389,13 @@ impl<'a> Checker<'a> {
                         }
                     });
                     if let Some(arg) = arg_opt {
+                        let mut slot_shape = self.shape_of_type(&p.ty);
+                        if matches!(slot_shape, TypeShape::Unknown) {
+                            slot_shape = self.shape_of_expr(st, &arg.value);
+                        }
                         slots.push((
                             p.name.clone(),
-                            self.shape_of_type(&p.ty),
+                            slot_shape,
                             Some(p.ty.clone()),
                             CalleeSlotSource::Arg(&arg.value),
                         ));
@@ -3401,9 +3409,37 @@ impl<'a> Checker<'a> {
                 name: method_name,
                 ..
             } => {
+                let mbase = Self::base_named_type_str(method_name).to_string();
                 if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
-                    if self.lookup_binding(st, pkg).is_none() && self.known_package(pkg) {
-                        return None;
+                    if self.lookup_binding(st, pkg).is_none() {
+                        if self.known_package(pkg) {
+                            return None;
+                        }
+                        let tbase = Self::base_named_type_str(pkg);
+                        let assoc = format!("{}.{}", tbase, mbase);
+                        if let Some(decl) = self.fns.get(assoc.as_str()).copied() {
+                            let body = decl.body.as_ref()?;
+                            let mut slots = Vec::new();
+                            let mut bound: HashSet<String> =
+                                decl.params.iter().map(|p| p.name.clone()).collect();
+                            bound.extend(decl.results.iter().filter_map(|r| r.name.clone()));
+                            for (i, p) in decl.params.iter().enumerate() {
+                                if let Some(arg) = cr.args.get(i) {
+                                    let mut slot_shape = self.shape_of_type(&p.ty);
+                                    if matches!(slot_shape, TypeShape::Unknown) {
+                                        slot_shape = self.shape_of_expr(st, &arg.value);
+                                    }
+                                    slots.push((
+                                        p.name.clone(),
+                                        slot_shape,
+                                        Some(p.ty.clone()),
+                                        CalleeSlotSource::Arg(&arg.value),
+                                    ));
+                                }
+                            }
+                            self.append_outer_binding_slots(st, &mut bound, false, &mut slots);
+                            return Some((slots, std::borrow::Cow::Borrowed(body)));
+                        }
                     }
                 }
                 let recv_struct = match self.shape_of_expr(st, base) {
@@ -3420,13 +3456,13 @@ impl<'a> Checker<'a> {
                 };
                 let decl = if let Some(s) = recv_struct {
                     self.method_decls
-                        .get(&(s, method_name.clone()))
+                        .get(&(s, mbase))
                         .copied()
                 } else {
                     let mut matching = self
                         .method_decls
                         .iter()
-                        .filter(|((_, m), _)| m == method_name)
+                        .filter(|((_, m), _)| m == &mbase)
                         .map(|(_, d)| *d);
                     let first = matching.next()?;
                     if matching.next().is_some() {
@@ -8001,9 +8037,10 @@ impl<'a> Checker<'a> {
             };
             if let Some(rname) = recv_base {
                 let rbase = Self::base_named_type_str(&rname).to_string();
+                let mbase = Self::base_named_type_str(method_name).to_string();
                 if let Some(decl) = self
                     .method_decls
-                    .get(&(rbase, method_name.clone()))
+                    .get(&(rbase, mbase))
                     .copied()
                 {
                     if let Some(r) = &decl.receiver {
@@ -8112,9 +8149,14 @@ impl<'a> Checker<'a> {
 
             let (param_is_ptr, mutates) = match callee {
                 Expr::Ident { name, .. } => {
+                    let base_name = Self::base_named_type_str(name);
                     if declared.contains(name) {
                         (false, true)
-                    } else if let Some(decl) = self.fns.get(name) {
+                    } else if let Some(decl) = self
+                        .fns
+                        .get(name.as_str())
+                        .or_else(|| self.fns.get(base_name))
+                    {
                         if cr.args.len() == 1 && decl.params.len() > 1 {
                             let is_ptr = decl.params.iter().any(|p| {
                                 matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
@@ -8163,6 +8205,18 @@ impl<'a> Checker<'a> {
                         };
                         (false, mutates)
                     } else {
+                        let mbase = Self::base_named_type_str(method_name).to_string();
+                        let assoc_decl = match crate::model::unwrap_parens(base) {
+                            Expr::Ident { name: pkg, .. } if self.lookup_binding(st, pkg).is_none() => {
+                                let tbase = Self::base_named_type_str(pkg);
+                                let assoc = format!("{}.{}", tbase, mbase);
+                                self.fns
+                                    .get(assoc.as_str())
+                                    .copied()
+                                    .or_else(|| self.method_decls.get(&(tbase.to_string(), mbase.clone())).copied())
+                            }
+                            _ => None,
+                        };
                         let recv_base = match self.shape_of_expr(st, base) {
                             TypeShape::Struct(Some(s)) => Some(s),
                             TypeShape::Pointer(inner) => match *inner {
@@ -8171,9 +8225,11 @@ impl<'a> Checker<'a> {
                             },
                             _ => None,
                         };
-                        if let Some(decl) = recv_base.as_ref().and_then(|rb| {
-                            let rbase = Self::base_named_type_str(rb).to_string();
-                            self.method_decls.get(&(rbase, method_name.clone())).copied()
+                        if let Some(decl) = assoc_decl.or_else(|| {
+                            recv_base.as_ref().and_then(|rb| {
+                                let rbase = Self::base_named_type_str(rb).to_string();
+                                self.method_decls.get(&(rbase, mbase.clone())).copied()
+                            })
                         }) {
                             match decl.params.get(i) {
                                 Some(p) => {
