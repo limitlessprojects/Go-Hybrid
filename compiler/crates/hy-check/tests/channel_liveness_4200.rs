@@ -718,3 +718,122 @@ fn main() {
         res.diagnostics
     );
 }
+
+#[test]
+fn test_send_after_close_method_reject() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    tx.close()
+    tx.send(42)
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for send after close: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_send_stmt_after_close_reject() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    tx.close()
+    tx <- 42
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for statement send after close: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_double_close_reject() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    tx.close()
+    tx.close()
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E4004"),
+        "Expected HYB-E4004 for double close: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_receive_after_drain_reject() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    tx.close()
+    rx.drain()
+    v := rx.recv()
+    _ = v
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for receive after drain: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_double_drain_reject() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    tx.close()
+    rx.drain()
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E4005"),
+        "Expected HYB-E4005 for double drain: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_select_send_after_close_reject() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    tx.close()
+    select {
+        tx <- 42 => {
+        }
+    }
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for select send after close: {:?}",
+        res.diagnostics
+    );
+}
+
