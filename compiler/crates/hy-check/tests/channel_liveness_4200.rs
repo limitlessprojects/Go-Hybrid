@@ -718,3 +718,127 @@ fn main() {
         res.diagnostics
     );
 }
+
+
+#[test]
+fn test_issue_4280_close_tx_does_not_drain_rx_reject() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(42)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task worker(move tx)
+    // tx is closed in worker, but rx is never drained or read
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E4005"),
+        "Expected HYB-E4005 for undrained receiver after close: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_issue_4280_close_tx_and_explicit_rx_drain_accept() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(42)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task worker(move tx)
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(
+        res.verdict,
+        Verdict::Accept,
+        "Explicit close and explicit drain must accept cleanly: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_issue_4280_nested_block_use_after_move_reject() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(42)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    {
+        task worker(move tx)
+    }
+    task worker(move tx)
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for double move across block scope: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_issue_4280_nested_if_double_move_reject() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(42)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    if true {
+        task worker(move tx)
+    }
+    task worker(move tx)
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for double move across if branch: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_issue_4280_nested_move_valid_exit_accept() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(42)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    if true {
+        task worker(move tx)
+    }
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(
+        res.verdict,
+        Verdict::Accept,
+        "Nested move without outer use must accept cleanly: {:?}",
+        res.diagnostics
+    );
+}
