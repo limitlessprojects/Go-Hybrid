@@ -1492,7 +1492,11 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+        let bare = unwrap_parens(callee);
+        if let Expr::FnLit { results, .. } = bare {
+            return Some(results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+        }
+        let Expr::Ident { name, .. } = bare else {
             return None;
         };
         if self
@@ -1522,6 +1526,32 @@ impl<'a> Collector<'a> {
             if let Some(s) = canonical_numeric_name(name) {
                 return Some(vec![Some(s)]);
             }
+        }
+        None
+    }
+
+    /// #3293 — exact result type names of a known call (top-level function or
+    /// function literal) for fixed-size array comparison.
+    fn call_result_type_names(&self, callee: &Expr) -> Option<Vec<Option<String>>> {
+        let bare = unwrap_parens(callee);
+        if let Expr::FnLit { results, .. } = bare {
+            return Some(results.iter().map(|r| Some(r.ty.render())).collect());
+        }
+        let Expr::Ident { name, .. } = bare else {
+            return None;
+        };
+        if self
+            .scopes
+            .iter()
+            .any(|layer| layer.contains_key(name.as_str()))
+        {
+            return None;
+        }
+        if let Some(fd) = self.ck.fns.get(name.as_str()) {
+            if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                return None;
+            }
+            return Some(fd.results.iter().map(|r| Some(r.ty.render())).collect());
         }
         None
     }
@@ -5476,14 +5506,17 @@ impl<'a> Collector<'a> {
         if let Some(n) = self.multi_value_arg_count(args) {
             if f.params.len() == n {
                 let got_kinds = self.multi_value_kinds(&args[0].value);
-                // #3293: `kinds_conflict` alone cannot see int32 vs int64 or
-                // float32 vs float64 -- `OpKind` collapses both. Ask the
-                // callee's own result scalars for the exact widths; a
-                // non-named callee or an untyped result gives None and the
-                // check fails open.
-                let got_scalars = match unwrap_parens(&args[0].value) {
-                    Expr::Call { callee, args, .. } => self.call_result_scalars(callee, args),
-                    _ => None,
+                // #3293: validate scalar width, array length, and int-float in multi-value call args
+                let mut inner_expr = unwrap_parens(&args[0].value);
+                while let Expr::Move { operand, .. } = inner_expr {
+                    inner_expr = unwrap_parens(operand);
+                }
+                let (got_scalars, got_types) = match inner_expr {
+                    Expr::Call { callee, args: inner_args, .. } => (
+                        self.call_result_scalars(callee, inner_args),
+                        self.call_result_type_names(callee),
+                    ),
+                    _ => (None, None),
                 };
                 for (i, (p, got)) in f.params.iter().zip(got_kinds.iter()).enumerate() {
                     let want = self.kind_of_ty(&p.ty, 0);
@@ -5495,13 +5528,29 @@ impl<'a> Collector<'a> {
                         (want_scalar, got_scalar),
                         (Some(w), Some(g)) if w != g
                     );
-                    if kinds_conflict(&want, got) || width_conflict {
+                    let int_to_float_conflict = want == OpKind::Float && *got == OpKind::Int;
+                    let array_diff = self.sized_array_names_differ(
+                        Some(p.ty.render().as_str()),
+                        got_types
+                            .as_ref()
+                            .and_then(|t| t.get(i).as_ref().and_then(|o| o.as_deref())),
+                    );
+                    if kinds_conflict(&want, got)
+                        || int_to_float_conflict
+                        || width_conflict
+                        || array_diff
+                    {
                         let got_label = got_scalar
                             .map(|s| s.to_string())
+                            .or_else(|| {
+                                got_types
+                                    .as_ref()
+                                    .and_then(|t| t.get(i).cloned().flatten())
+                            })
                             .unwrap_or_else(|| got.label());
                         let want_label = want_scalar
                             .map(|s| s.to_string())
-                            .unwrap_or_else(|| want.label());
+                            .unwrap_or_else(|| p.ty.render());
                         self.emit_e1002(
                             args[0].value.span(),
                             format!(
