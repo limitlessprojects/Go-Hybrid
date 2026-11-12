@@ -46,8 +46,13 @@
 TEXT ·spHeadroom(SB), NOSPLIT, $0-8
 	MOVD	OFF_g_stackguard0(g), R10
 	MOVD	RSP, R11
+	CMP	R10, R11
+	BLO	headroomzero
 	SUB	R10, R11
 	MOVD	R11, ret+0(FP)
+	RET
+headroomzero:
+	MOVD	ZR, ret+0(FP)
 	RET
 
 // ------------------------------- fast path (caller's goroutine stack)
@@ -63,6 +68,8 @@ TEXT ·callFast1(SB), NOSPLIT, $16-24
 	MOVD	a1+8(FP), R0
 	MOVD	OFF_g_stackguard0(g), R10
 	MOVD	RSP, R11
+	CMP	R10, R11
+	BLO	needsdeep1
 	SUB	R10, R11
 	CMP	$4096, R11
 	BLO	needsdeep1
@@ -81,6 +88,8 @@ TEXT ·callFast2(SB), NOSPLIT, $16-32
 	MOVD	a2+16(FP), R1
 	MOVD	OFF_g_stackguard0(g), R10
 	MOVD	RSP, R11
+	CMP	R10, R11
+	BLO	needsdeep2
 	SUB	R10, R11
 	CMP	$4096, R11
 	BLO	needsdeep2
@@ -100,6 +109,8 @@ TEXT ·callFast3(SB), NOSPLIT, $16-40
 	MOVD	a3+24(FP), R2
 	MOVD	OFF_g_stackguard0(g), R10
 	MOVD	RSP, R11
+	CMP	R10, R11
+	BLO	needsdeep3
 	SUB	R10, R11
 	CMP	$4096, R11
 	BLO	needsdeep3
@@ -120,6 +131,8 @@ TEXT ·callFast4(SB), NOSPLIT, $16-48
 	MOVD	a4+32(FP), R3
 	MOVD	OFF_g_stackguard0(g), R10
 	MOVD	RSP, R11
+	CMP	R10, R11
+	BLO	needsdeep4
 	SUB	R10, R11
 	CMP	$4096, R11
 	BLO	needsdeep4
@@ -143,6 +156,8 @@ TEXT ·callFast1S(SB), NOSPLIT, $16-24
 	MOVD	a1+8(FP), R0
 	MOVD	OFF_g_stackguard0(g), R10
 	MOVD	RSP, R11
+	CMP	R10, R11
+	BLO	needsdeep1s
 	SUB	R10, R11
 	CMP	$1024, R11
 	BLO	needsdeep1s
@@ -161,6 +176,8 @@ TEXT ·callFast2S(SB), NOSPLIT, $16-32
 	MOVD	a2+16(FP), R1
 	MOVD	OFF_g_stackguard0(g), R10
 	MOVD	RSP, R11
+	CMP	R10, R11
+	BLO	needsdeep2s
 	SUB	R10, R11
 	CMP	$1024, R11
 	BLO	needsdeep2s
@@ -180,6 +197,8 @@ TEXT ·callFast3S(SB), NOSPLIT, $16-40
 	MOVD	a3+24(FP), R2
 	MOVD	OFF_g_stackguard0(g), R10
 	MOVD	RSP, R11
+	CMP	R10, R11
+	BLO	needsdeep3s
 	SUB	R10, R11
 	CMP	$1024, R11
 	BLO	needsdeep3s
@@ -200,6 +219,8 @@ TEXT ·callFast4S(SB), NOSPLIT, $16-48
 	MOVD	a4+32(FP), R3
 	MOVD	OFF_g_stackguard0(g), R10
 	MOVD	RSP, R11
+	CMP	R10, R11
+	BLO	needsdeep4s
 	SUB	R10, R11
 	CMP	$1024, R11
 	BLO	needsdeep4s
