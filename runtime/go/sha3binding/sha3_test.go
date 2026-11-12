@@ -65,3 +65,23 @@ func TestStreamChecksumDeterministic(t *testing.T) {
 		t.Fatal("different iteration counts produced identical checksums")
 	}
 }
+
+func TestDigest256BorrowedMatchesPinned(t *testing.T) {
+	for _, n := range []int{0, 1, 1 << 10, 64 << 10} {
+		buf := make([]byte, n)
+		for i := range buf {
+			buf[i] = byte(i * 7)
+		}
+		want, err := Digest256(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := Digest256Borrowed(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("n=%d: borrowed digest differs from pinned digest", n)
+		}
+	}
+}

@@ -55,6 +55,38 @@ func Digest256(data []byte) ([]byte, error) {
 	return out, nil
 }
 
+// Digest256Borrowed is the zero-copy, pin-free variant of Digest256 for a
+// borrowed (non-escaping, caller-exclusive) `data` view — the shape a Tier-0
+// loan certificate would license (issue #3429).
+//
+// Why no runtime.Pinner for data: the crossing is a synchronous NOSPLIT
+// trampoline on the calling goroutine, so that goroutine cannot reach a Go
+// safepoint (and so cannot have its stack grown, shrunk or moved) until Rust
+// returns; a heap backing array never moves under Go's non-moving GC, and
+// KeepAlive holds it live across the call. Rust must not retain the pointer
+// (abi-types.md §2). The 32-byte output is still Go-owned and written by
+// Rust; it stays pinned-free for the same reasons. No payload byte is
+// copied; the Spike 3 P3 pin cost (~55 ns/crossing) is not paid.
+//
+// NOT YET MEASURED: the issue's ≥3x/0-alloc benchmark and the GC / stack-move
+// stress runs are pending (no Go/Rust toolchain was available when this was
+// written) — do not treat the throughput claim as verified.
+func Digest256Borrowed(data []byte) ([]byte, error) {
+	out := make([]byte, 32)
+	var dataPtr uintptr
+	if len(data) > 0 {
+		dataPtr = uintptr(unsafe.Pointer(&data[0]))
+	}
+	st := hybridge.Cross3S(FnDigest256, dataPtr, uintptr(len(data)),
+		uintptr(unsafe.Pointer(&out[0])))
+	runtime.KeepAlive(data)
+	runtime.KeepAlive(out)
+	if st != 0 {
+		return nil, ErrDigest
+	}
+	return out, nil
+}
+
 // StreamChecksum runs `iters` SHA3-256 permutations INSIDE Rust (one
 // boundary crossing — the hot-loop shape example 10 demonstrates) and
 // returns the deterministic fold. No pointers cross. SMALL class (guard
