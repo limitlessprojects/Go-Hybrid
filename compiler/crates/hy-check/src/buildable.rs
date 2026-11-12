@@ -2536,6 +2536,10 @@ impl<'a> Collector<'a> {
                         self.check_repeated_bindings(vars, *span);
                         self.check_single_value_position(expr, "a for-range expression", false);
                         self.expr(expr);
+                        // `for x in two_slices()` — the range expression is
+                        // one value; the iterator-kind walk would otherwise
+                        // read the first result and accept it (#1863).
+                        self.check_single_value_position(expr, "a for-in range", /*binding_position=*/ false);
                         let iter_kinds = self.iterate_var_kinds(expr, vars.len());
                         // #3065 / SPEC LX13: a string ranges over runes, so
                         // the element binding (the last var) is exactly
