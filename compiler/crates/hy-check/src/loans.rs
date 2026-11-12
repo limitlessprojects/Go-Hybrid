@@ -3406,27 +3406,32 @@ impl<'a> Checker<'a> {
                         return None;
                     }
                 }
-                let recv_struct = match self.shape_of_expr(st, base) {
-                    TypeShape::Struct(Some(s)) => {
-                        Some(Self::base_named_type_str(&s).to_string())
-                    }
-                    TypeShape::Pointer(inner) => match *inner {
+                let head = Self::base_named_type_str(method_name);
+                let recv_struct = self
+                    .ty_of_expr(st, base)
+                    .map(|t| self.resolve_type_alias(&t))
+                    .and_then(|t| Self::base_named_type(&t))
+                    .or_else(|| match self.shape_of_expr(st, base) {
                         TypeShape::Struct(Some(s)) => {
                             Some(Self::base_named_type_str(&s).to_string())
                         }
+                        TypeShape::Pointer(inner) => match *inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(&s).to_string())
+                            }
+                            _ => None,
+                        },
                         _ => None,
-                    },
-                    _ => None,
-                };
+                    });
                 let decl = if let Some(s) = recv_struct {
                     self.method_decls
-                        .get(&(s, method_name.clone()))
+                        .get(&(s, head.to_string()))
                         .copied()
                 } else {
                     let mut matching = self
                         .method_decls
                         .iter()
-                        .filter(|((_, m), _)| m == method_name)
+                        .filter(|((_, m), _)| m == head)
                         .map(|(_, d)| *d);
                     let first = matching.next()?;
                     if matching.next().is_some() {
@@ -7767,6 +7772,20 @@ impl<'a> Checker<'a> {
         let pre_st = st.clone();
         let mut overwritten = Vec::new();
         let is_let = l.kind == LocalKind::Let;
+        if l.values.is_empty() {
+            let shape = l
+                .ty
+                .as_ref()
+                .map(|t| self.shape_of_type(t))
+                .unwrap_or(TypeShape::Unknown);
+            let ty = l.ty.clone();
+            for name in &l.names {
+                self.define_binding(st, name, shape.clone(), ty.clone(), immutable, false, is_let);
+                st.aliases.remove(name);
+                st.share_clear(name);
+            }
+            return;
+        }
         if l.values.len() == 1 && l.names.len() > 1 {
             let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
             let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
@@ -7991,19 +8010,24 @@ impl<'a> Checker<'a> {
             ..
         } = callee
         {
-            let recv_base = match self.shape_of_expr(st, base) {
-                TypeShape::Struct(Some(s)) => Some(s),
-                TypeShape::Pointer(inner) => match *inner {
+            let head = Self::base_named_type_str(method_name);
+            let recv_base = self
+                .ty_of_expr(st, base)
+                .map(|t| self.resolve_type_alias(&t))
+                .and_then(|t| Self::base_named_type(&t))
+                .or_else(|| match self.shape_of_expr(st, base) {
                     TypeShape::Struct(Some(s)) => Some(s),
+                    TypeShape::Pointer(inner) => match *inner {
+                        TypeShape::Struct(Some(s)) => Some(s),
+                        _ => None,
+                    },
                     _ => None,
-                },
-                _ => None,
-            };
+                });
             if let Some(rname) = recv_base {
                 let rbase = Self::base_named_type_str(&rname).to_string();
                 if let Some(decl) = self
                     .method_decls
-                    .get(&(rbase, method_name.clone()))
+                    .get(&(rbase, head.to_string()))
                     .copied()
                 {
                     if let Some(r) = &decl.receiver {
@@ -8148,13 +8172,35 @@ impl<'a> Checker<'a> {
                     name: method_name,
                     ..
                 } => {
+                    let head = Self::base_named_type_str(method_name);
+                    let assoc_decl = match crate::model::unwrap_parens(base) {
+                        Expr::Ident { name: root, .. }
+                            if self.lookup_binding(st, root).is_none() =>
+                        {
+                            let full = format!("{}.{}", root, head);
+                            self.fns
+                                .get(format!("{}.{}", root, method_name).as_str())
+                                .or_else(|| self.fns.get(full.as_str()))
+                                .copied()
+                        }
+                        _ => None,
+                    };
                     let is_pkg = match crate::model::unwrap_parens(base) {
                         Expr::Ident { name: pkg, .. } => {
                             self.lookup_binding(st, pkg).is_none() && self.known_package(pkg)
                         }
                         _ => false,
                     };
-                    if is_pkg {
+                    if let Some(decl) = assoc_decl {
+                        match decl.params.get(i) {
+                            Some(p) => {
+                                let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                    || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
+                                (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
+                            }
+                            None => (false, true),
+                        }
+                    } else if is_pkg {
                         let mutates = match crate::model::unwrap_parens(base) {
                             Expr::Ident { name: pkg, .. } => {
                                 foreign::package_mutated_arg(pkg, method_name) == Some(i)
@@ -8163,18 +8209,42 @@ impl<'a> Checker<'a> {
                         };
                         (false, mutates)
                     } else {
-                        let recv_base = match self.shape_of_expr(st, base) {
-                            TypeShape::Struct(Some(s)) => Some(s),
-                            TypeShape::Pointer(inner) => match *inner {
+                        let recv_base = self
+                            .ty_of_expr(st, base)
+                            .map(|t| self.resolve_type_alias(&t))
+                            .and_then(|t| Self::base_named_type(&t))
+                            .or_else(|| match self.shape_of_expr(st, base) {
                                 TypeShape::Struct(Some(s)) => Some(s),
+                                TypeShape::Pointer(inner) => match *inner {
+                                    TypeShape::Struct(Some(s)) => Some(s),
+                                    _ => None,
+                                },
                                 _ => None,
-                            },
-                            _ => None,
-                        };
-                        if let Some(decl) = recv_base.as_ref().and_then(|rb| {
-                            let rbase = Self::base_named_type_str(rb).to_string();
-                            self.method_decls.get(&(rbase, method_name.clone())).copied()
-                        }) {
+                            });
+                        if let Some(decl) = recv_base
+                            .as_ref()
+                            .and_then(|rb| {
+                                let rbase = Self::base_named_type_str(rb).to_string();
+                                self.method_decls.get(&(rbase, head.to_string())).copied()
+                            })
+                            .or_else(|| {
+                                if recv_base.is_none() {
+                                    let mut matching = self
+                                        .method_decls
+                                        .iter()
+                                        .filter(|((_, m), _)| m == head)
+                                        .map(|(_, d)| *d);
+                                    let first = matching.next()?;
+                                    if matching.next().is_some() {
+                                        None
+                                    } else {
+                                        Some(first)
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                        {
                             match decl.params.get(i) {
                                 Some(p) => {
                                     let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
@@ -8184,7 +8254,8 @@ impl<'a> Checker<'a> {
                                 None => (false, true),
                             }
                         } else if let Some(field_fn_ptr) = recv_base.as_ref().and_then(|rb| {
-                            self.structs.get(rb).and_then(|fields| {
+                            let rbase = Self::base_named_type_str(rb);
+                            self.structs.get(rbase).and_then(|fields| {
                                 fields.iter().find(|(fname, _)| fname == method_name).and_then(|(_, fty)| {
                                     if let hy_syntax::TypeExpr::Fn { params, .. } = fty {
                                         params.get(i).map(|p| {
