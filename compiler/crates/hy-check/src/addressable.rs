@@ -104,7 +104,10 @@ impl<'a> Checker<'a> {
             })
     }
 
-    fn addr_expr_shape(&self, st: &FnState, e: &Expr) -> TypeShape {
+    fn addr_expr_shape(&self, st: &FnState, mut e: &Expr) -> TypeShape {
+        while let Some(inner) = as_addr_of(unwrap_parens_and_move(e)) {
+            e = inner;
+        }
         match self.shape_of_expr(st, e) {
             TypeShape::Unknown => self
                 .composite_type_expr(st, e)
@@ -186,7 +189,10 @@ impl<'a> Checker<'a> {
     }
 
     fn expr_unaddressable_at<'e>(&self, st: &FnState, e: &'e Expr) -> Option<&'e Expr> {
-        let e = unwrap_parens_and_move(e);
+        let mut e = unwrap_parens_and_move(e);
+        while let Some(inner) = as_addr_of(e) {
+            e = unwrap_parens_and_move(inner);
+        }
         match e {
             Expr::Index { base, .. } => match self.addr_expr_shape(st, base) {
                 TypeShape::Map(..) | TypeShape::Str => Some(e),
