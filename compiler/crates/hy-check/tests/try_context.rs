@@ -228,5 +228,16 @@ fn bad() (int, error) {
 fn main() {}
 "#;
     let r2 = check(const_shadowed_err);
-    assert_eq!(e2011(&r2), 1, "top-level const error shadow must reject E4 `?`: {:?}", r2.diagnostics);
+    // main also rejects the callee (`step` returns no `error`); this test pins the
+    // enclosing-function half: the const shadow means `bad` has no `error` result.
+    let enclosing = r2
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            d.severity == Severity::Error
+                && d.code == "HYB-E2011"
+                && d.message.contains("`bad` has none")
+        })
+        .count();
+    assert_eq!(enclosing, 1, "top-level const error shadow must reject E4 `?`: {:?}", r2.diagnostics);
 }

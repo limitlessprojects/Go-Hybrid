@@ -555,7 +555,11 @@ fn check_try_operand(ck: &mut TryWalker<'_, '_>, operand: &Expr, span: Span) {
     // plus receiver params — the same list `Decl::Fn` passes). An `FnLit` has
     // no type-param list; `walk_fnlit` judges that signature with the enclosing
     // function's type params, which are in scope for the literal.
-    let (results, type_params): (Option<&[FnResult]>, Vec<String>) = match callee {
+    // Outer lexical scopes for shadow checks: a file-level fn's result types are
+    // judged at file level (no enclosing locals, as `Decl::Fn` does); an `FnLit`'s
+    // result types are written inside the current scopes, as `walk_fnlit` judges them.
+    let (results, type_params, outer_scopes): (Option<&[FnResult]>, Vec<String>, Vec<Vec<String>>) =
+        match callee {
         Expr::Ident { name, .. } => {
             // A local binding shadows the file-level fn — fail open (closure
             // values / rebinds do not always carry a recoverable signature here).
@@ -563,19 +567,21 @@ fn check_try_operand(ck: &mut TryWalker<'_, '_>, operand: &Expr, span: Span) {
                 return;
             }
             match ck.ck.fns.get(name.as_str()) {
-                Some(f) => (Some(f.results.as_slice()), fn_decl_type_param_names(f)),
-                None => (None, Vec::new()),
+                Some(f) => (Some(f.results.as_slice()), fn_decl_type_param_names(f), Vec::new()),
+                None => (None, Vec::new(), Vec::new()),
             }
         }
-        Expr::FnLit { results, .. } => (Some(results.as_slice()), ck.type_params.clone()),
-        _ => (None, Vec::new()), // methods / selectors / computed: fail open
+        Expr::FnLit { results, .. } => {
+            (Some(results.as_slice()), ck.type_params.clone(), ck.scopes.clone())
+        }
+        _ => (None, Vec::new(), Vec::new()), // methods / selectors / computed: fail open
     };
 
     let Some(results) = results else {
         return;
     };
 
-    if results_end_in_error(ck.ck, results, &type_params) {
+    if results_end_in_error(ck.ck, results, &type_params, &outer_scopes) {
         return;
     }
 
