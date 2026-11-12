@@ -163,6 +163,11 @@ pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
         ) => Some(0),
         ("io", "read_full" | "read_at_least" | "ReadFull" | "ReadAtLeast") => Some(1),
         ("io", "copy_buffer" | "CopyBuffer") => Some(2),
+        ("hex", "decode" | "Encode" | "Decode") => Some(0),
+        ("json", "compact" | "indent" | "html_escape" | "Compact" | "Indent" | "HTMLEscape") => {
+            Some(0)
+        }
+        ("json", "unmarshal" | "Unmarshal") => Some(1),
         _ => None,
     }
 }
@@ -260,12 +265,15 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
         ) => Some(2),
         (
             "os",
-            "open" | "create" | "read_file" | "read_dir" | "getwd" | "user_home_dir"
+            "open" | "open_file" | "create" | "read_file" | "read_dir" | "getwd" | "hostname"
+            | "readlink" | "find_process" | "start_process" | "getgroups" | "user_home_dir"
             | "user_cache_dir" | "user_config_dir" | "executable" | "lookup_env" | "stat" | "lstat"
-            | "create_temp" | "mkdir_temp" | "Open" | "Create" | "ReadFile" | "ReadDir" | "Getwd"
-            | "UserHomeDir" | "UserCacheDir" | "UserConfigDir" | "Executable" | "LookupEnv"
-            | "Stat" | "Lstat" | "CreateTemp" | "MkdirTemp",
+            | "create_temp" | "mkdir_temp" | "Open" | "OpenFile" | "Create" | "ReadFile"
+            | "ReadDir" | "Getwd" | "Hostname" | "Readlink" | "FindProcess" | "StartProcess"
+            | "Getgroups" | "UserHomeDir" | "UserCacheDir" | "UserConfigDir" | "Executable"
+            | "LookupEnv" | "Stat" | "Lstat" | "CreateTemp" | "MkdirTemp",
         ) => Some(2),
+        ("os", "pipe" | "Pipe") => Some(3),
         (
             "io",
             "read_all" | "read_full" | "read_at_least" | "copy" | "copy_n" | "copy_buffer"
@@ -291,6 +299,12 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
             | "ResolveTCPAddr" | "LookupHost",
         ) => Some(2),
         ("net", "split_host_port" | "SplitHostPort") => Some(3),
+        (
+            "url",
+            "parse" | "parse_request_uri" | "parse_query" | "query_unescape" | "path_unescape"
+            | "Parse" | "ParseRequestURI" | "ParseQuery" | "QueryUnescape" | "PathUnescape",
+        ) => Some(2),
+        ("json", "marshal" | "marshal_indent" | "Marshal" | "MarshalIndent") => Some(2),
         ("hex", "decode_string" | "DecodeString") => Some(2),
         ("regex", "compile" | "match_string" | "Compile" | "MatchString") => Some(2),
         _ => None,
@@ -537,12 +551,41 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const CONTEXT_CONTEXT: &[&str] = &["deadline", "done", "err", "value"];
     /// `flag.FlagSet` — standard library flag set type.
     const FLAG_FLAG_SET: &[&str] = &[
-        "arg", "args", "bool", "bool_func", "bool_var", "duration", "duration_var",
-        "error_handling", "float64", "float64_var", "init", "int", "int_var",
-        "int64", "int64_var", "lookup", "name", "n_arg", "n_flag", "output",
-        "parse", "parsed", "print_defaults", "set", "set_output", "string",
-        "string_var", "text_var", "uint", "uint_var", "uint64", "uint64_var",
-        "var", "visit", "visit_all",
+        "arg",
+        "args",
+        "bool",
+        "bool_func",
+        "bool_var",
+        "duration",
+        "duration_var",
+        "error_handling",
+        "float64",
+        "float64_var",
+        "init",
+        "int",
+        "int_var",
+        "int64",
+        "int64_var",
+        "lookup",
+        "name",
+        "n_arg",
+        "n_flag",
+        "output",
+        "parse",
+        "parsed",
+        "print_defaults",
+        "set",
+        "set_output",
+        "string",
+        "string_var",
+        "text_var",
+        "uint",
+        "uint_var",
+        "uint64",
+        "uint64_var",
+        "var",
+        "visit",
+        "visit_all",
     ];
     const URL_URL: &[&str] = &[
         "escaped_fragment",
@@ -666,8 +709,12 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "http.response" | "http.Response" => Some(HTTP_RESPONSE),
         "http.server" | "http.Server" => Some(HTTP_SERVER),
         "http.cookie" | "http.Cookie" => Some(HTTP_COOKIE),
-        "http.response_writer" | "http.responsewriter" | "http.ResponseWriter" => Some(HTTP_RESPONSE_WRITER),
-        "http.round_tripper" | "http.roundtripper" | "http.RoundTripper" => Some(HTTP_ROUND_TRIPPER),
+        "http.response_writer" | "http.responsewriter" | "http.ResponseWriter" => {
+            Some(HTTP_RESPONSE_WRITER)
+        }
+        "http.round_tripper" | "http.roundtripper" | "http.RoundTripper" => {
+            Some(HTTP_ROUND_TRIPPER)
+        }
         "context.context" | "context.Context" => Some(CONTEXT_CONTEXT),
         "flag.flag_set" | "flag.flagset" | "flag.FlagSet" => Some(FLAG_FLAG_SET),
         "url.url" | "url.URL" => Some(URL_URL),
@@ -736,8 +783,12 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         | ("http.response" | "http.Response", "cookies") => {
             TypeShape::Slice(Box::new(TypeShape::ForeignOpaque("http.cookie".into())))
         }
-        ("http.request" | "http.Request", "cookie") => TypeShape::ForeignOpaque("http.cookie".into()),
-        ("http.response" | "http.Response", "location") => TypeShape::ForeignOpaque("url.url".into()),
+        ("http.request" | "http.Request", "cookie") => {
+            TypeShape::ForeignOpaque("http.cookie".into())
+        }
+        ("http.response" | "http.Response", "location") => {
+            TypeShape::ForeignOpaque("url.url".into())
+        }
         ("http.response_writer" | "http.responsewriter" | "http.ResponseWriter", "header") => {
             TypeShape::ForeignOpaque("http.header".into())
         }
