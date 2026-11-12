@@ -423,11 +423,12 @@ impl<'a> Checker<'a> {
     /// borrow-mode loan on the same handle (or an alias / may-share peer).
     fn check_a2_conflict(&mut self, st: &FnState, cr: &CallRef, root: &str, idx: usize) {
         let conflict = st.loans.iter().find(|l| {
+            let eff_last = self.effective_loan_last(st, l);
             matches!(
                 &l.target,
                 LoanTarget::Handle { handle } if a3_paths_conflict(st, handle, root)
             ) && l.created <= idx
-                && idx <= l.last
+                && idx <= eff_last
         });
         let Some(loan) = conflict else { return };
         let msg = format!("mutating call on `{}` while a borrow loan is live", root);
@@ -538,7 +539,11 @@ impl<'a> Checker<'a> {
         val: &Expr,
         idx: usize,
     ) {
-        let Expr::Ident { name: src, .. } = unwrap_parens(val) else {
+        let mut cur = val;
+        while let Expr::Paren { inner: e, .. } | Expr::Move { operand: e, .. } = cur {
+            cur = e;
+        }
+        let Expr::Ident { name: src, .. } = cur else {
             return;
         };
         let alias_last = st.last_use.get(alias_name).copied().unwrap_or(idx).max(idx);
@@ -617,15 +622,17 @@ impl<'a> Checker<'a> {
         what: &str,
     ) {
         let Some(loan) = st.loans.iter().find(|l| {
+            let eff_last = self.effective_loan_last(st, l);
             matches!(&l.target, LoanTarget::MapSlot { binding, path: p, key: k }
                 if owner != Some(binding.as_str())
                     && a3_paths_conflict(st, p, path)
                     && !matches!((k.as_deref(), key), (Some(a), Some(b)) if a != b))
                 && l.created <= idx
-                && idx <= l.last
+                && idx <= eff_last
         }) else {
             return;
         };
+        let eff_last = self.effective_loan_last(st, loan);
         let LoanTarget::MapSlot { binding, .. } = &loan.target else {
             unreachable!("filtered above");
         };
@@ -636,7 +643,7 @@ impl<'a> Checker<'a> {
         let notes = vec![
             format!(
                 "{} ({}:{}) is a unique loan on a slot of `{}`, live from creation to its last use (O8, non-lexical window ending at statement {})",
-                loan.desc, self.path, loan.span.start, path, loan.last
+                loan.desc, self.path, loan.span.start, path, eff_last
             ),
             format!(
                 "the loan lowers to copy-out / store-back, so this access and `{}` would silently overwrite each other — finish using `{}` first, or mutate the slot only through `{}`",
@@ -10345,6 +10352,38 @@ fn main() {
         assert!(
             check_codes(src_a6).iter().any(|c| c == "HYB-E3103"),
             "expected HYB-E3103 for parenthesized &(x) stored in struct field"
+        );
+    }
+
+    #[test]
+    fn newline_after_bare_return_and_slice_alias_enforces_tier0_checks() {
+        let src_loan_escape = "\
+type int_ptr = *int
+
+fn leak(fallback int_ptr) (out int_ptr) {
+    local := 1
+    out = &local
+    return
+    fallback
+}
+";
+        assert!(
+            check_codes(src_loan_escape).iter().any(|c| c == "HYB-E3104"),
+            "expected HYB-E3104 for bare return of named borrow result before next-line expression"
+        );
+
+        let src_const_alias = "\
+const xs = []int{10, 20}
+
+fn main() {
+    y := xs
+    [0]
+    y[0] = 99
+}
+";
+        assert!(
+            check_codes(src_const_alias).iter().any(|c| c == "HYB-E3006"),
+            "expected HYB-E3006 when mutating slice alias y := xs followed by [0] on next line"
         );
     }
 }

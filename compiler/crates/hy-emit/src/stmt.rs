@@ -49,7 +49,7 @@ impl Emitter {
                 self.push(&text);
                 Ok(())
             }
-            Stmt::Send { chan, value, .. } => {
+            Stmt::Send { chan, value, span, .. } => {
                 // `move` markers drop here: ownership transfer is a CHECKER
                 // concept; Go sends the value either way.
                 if Self::expr_has_hoistable_try(value) {
@@ -61,6 +61,8 @@ impl Emitter {
                 let ch = self.emit_expr(chan, 0)?;
                 let v = self.emit_expr(value, 0)?;
                 self.push(&format!("{} <- {}", ch, v));
+                self.witnesses
+                    .push(crate::witness::witness_send(chan, value, *span));
                 Ok(())
             }
             Stmt::If {
@@ -72,7 +74,7 @@ impl Emitter {
             } => self.emit_if(init.as_deref(), cond, then, otherwise.as_deref()),
             Stmt::For { kind, body, .. } => self.emit_for(kind, body),
             Stmt::Return { values, .. } => self.emit_return(values),
-            Stmt::Task { callee, args, .. } => {
+            Stmt::Task { callee, args, span, .. } => {
                 // task → go (spawn sites were checked by Tier-0; emission is
                 // a plain goroutine). Route through emit_call so argument
                 // variadic spread (`...`), pointer parameter auto-addressing,
@@ -80,6 +82,8 @@ impl Emitter {
                 self.hoist_tries_call(callee, args)?;
                 let call = self.emit_call(callee, args)?;
                 self.push(&format!("go {}", call));
+                self.witnesses
+                    .push(crate::witness::witness_task(callee, args, *span));
                 Ok(())
             }
             Stmt::Managed {
@@ -2629,27 +2633,47 @@ impl Emitter {
                         self.indent += 1;
                         self.push(&format!("{} = true", matched));
                         let breads = bind.is_some_and(|b| b != "_" && !greads && crate::rangebind::body_reads(&arm.body, b));
+                        let mut wraps_body = false;
                         if let Some(b) = bind {
                             if breads {
                                 self.push(&format!("{} := {}.val", b, temp));
+                                wraps_body = arm_body_redefines_binding(&arm.body, b);
                             } else if !greads {
                                 self.local_vars.remove(b);
                             }
                         }
+                        if wraps_body {
+                            self.push("{");
+                            self.indent += 1;
+                        }
                         self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                        if wraps_body {
+                            self.indent -= 1;
+                            self.push("}");
+                        }
                         self.indent -= 1;
                         self.push("}");
                     } else {
                         self.push(&format!("{} = true", matched));
                         let breads = bind.is_some_and(|b| b != "_" && crate::rangebind::body_reads(&arm.body, b));
+                        let mut wraps_body = false;
                         if let Some(b) = bind {
                             if breads {
                                 self.push(&format!("{} := {}.val", b, temp));
+                                wraps_body = arm_body_redefines_binding(&arm.body, b);
                             } else {
                                 self.local_vars.remove(b);
                             }
                         }
+                        if wraps_body {
+                            self.push("{");
+                            self.indent += 1;
+                        }
                         self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                        if wraps_body {
+                            self.indent -= 1;
+                            self.push("}");
+                        }
                     }
                     Ok(())
                 })();
@@ -2713,12 +2737,25 @@ impl Emitter {
                             self.push(&format!("if {} {{", gt));
                             self.indent += 1;
                             let prebound = prebound_guard_var.as_deref() == Some(binding.as_str());
-                            if *binding != "_" && !prebound && crate::rangebind::body_reads(&arm.body, binding) {
+                            let injects = *binding != "_"
+                                && !prebound
+                                && crate::rangebind::body_reads(&arm.body, binding);
+                            let wraps_body =
+                                injects && arm_body_redefines_binding(&arm.body, binding);
+                            if injects {
                                 self.push(&format!("{} := {}.val", binding, temp));
                             } else if !prebound {
                                 self.local_vars.remove(*binding);
                             }
+                            if wraps_body {
+                                self.push("{");
+                                self.indent += 1;
+                            }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                            if wraps_body {
+                                self.indent -= 1;
+                                self.push("}");
+                            }
                             self.indent -= 1;
                             chain_opened = true;
                             Ok(false)
@@ -2819,15 +2856,25 @@ impl Emitter {
                             self.push(&format!("if {} {{", gt));
                             self.indent += 1;
                             self.push(&format!("{} = true", matched_temp));
-                            if *binding != "_"
+                            let injects = *binding != "_"
                                 && !guard_reads
-                                && crate::rangebind::body_reads(&arm.body, binding)
-                            {
+                                && crate::rangebind::body_reads(&arm.body, binding);
+                            let wraps_body =
+                                injects && arm_body_redefines_binding(&arm.body, binding);
+                            if injects {
                                 self.push(&format!("{} := {}.val", binding, temp));
                             } else if !guard_reads {
                                 self.local_vars.remove(*binding);
                             }
+                            if wraps_body {
+                                self.push("{");
+                                self.indent += 1;
+                            }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                            if wraps_body {
+                                self.indent -= 1;
+                                self.push("}");
+                            }
                             self.indent -= 1;
                             self.push("}");
                         }
@@ -2921,15 +2968,25 @@ impl Emitter {
                     self.push(&format!("if {} {{", gt));
                     self.indent += 1;
                     self.push(&format!("{} = true", matched_temp));
-                    if *binding != "_"
+                    let injects = *binding != "_"
                         && !guard_reads
-                        && crate::rangebind::body_reads(&arm.body, binding)
-                    {
+                        && crate::rangebind::body_reads(&arm.body, binding);
+                    let wraps_body =
+                        injects && arm_body_redefines_binding(&arm.body, binding);
+                    if injects {
                         self.push(&format!("{} := {}.val", binding, temp));
                     } else if !guard_reads {
                         self.local_vars.remove(*binding);
                     }
+                    if wraps_body {
+                        self.push("{");
+                        self.indent += 1;
+                    }
                     self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                    if wraps_body {
+                        self.indent -= 1;
+                        self.push("}");
+                    }
                     self.indent -= 1;
                     self.push("}");
                     Ok(())
