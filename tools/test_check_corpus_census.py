@@ -239,5 +239,88 @@ class MultipleCurrentBreakdownTests(_ProblemsMixin, unittest.TestCase):
         self.assertTrue(all("line " in hit for hit in hits))
 
 
+
+class BreakdownBoundaryTests(_ProblemsMixin, unittest.TestCase):
+    def test_unrelated_prose_cannot_fake_the_corpus_breakdown(self):
+        # The old \D+ pattern stitched unrelated paragraphs together.
+        hits = self._problems_with(
+            "tests/checker-corpus/README.md",
+            "**Current registered corpus: 3 programs**\n\n"
+            "## Other statistics\nACCEPT 1\n\n"
+            "This is not the registered verdict breakdown.\n"
+            "ACCEPT-MANAGED 0\n\nREJECT 2\n",
+        )
+        self.assertEqual(len(hits), 1)
+        self.assertIn("no verdict breakdown", hits[0])
+
+    def test_canonical_current_breakdown_without_early_bold_close(self):
+        hits = self._problems_with(
+            "tests/checker-corpus/README.md",
+            "**Current registered corpus: 3 programs — ACCEPT 1 · "
+            "ACCEPT-MANAGED 0 · REJECT 2 — each with a header.\n",
+        )
+        self.assertEqual(hits, [])
+
+
+    def test_blank_paragraphs_cannot_form_a_breakdown(self):
+        # The earlier \s+ separators could still bridge unrelated paragraphs.
+        for content in (
+            "**Current registered corpus: 3 programs**\n\n— ACCEPT 1 · ACCEPT-MANAGED 0 · REJECT 2\n",
+            "**Current registered corpus: 3 programs** —\n\nACCEPT 1 · ACCEPT-MANAGED 0 · REJECT 2\n",
+            "**Current registered corpus: 3 programs** — ACCEPT 1 ·\n\nACCEPT-MANAGED 0 · REJECT 2\n",
+            "**Current registered corpus: 3 programs** — ACCEPT 1 · ACCEPT-MANAGED 0 ·\n\nREJECT 2\n",
+        ):
+            with self.subTest(content=content):
+                hits = self._problems_with("tests/checker-corpus/README.md", content)
+                self.assertEqual(len(hits), 1)
+                self.assertIn("no verdict breakdown", hits[0])
+
+
+    def test_reject_numeric_suffixes_fail_closed(self):
+        # A malformed decimal/thousands-group count is not its integer prefix.
+        for tail in ("2.5", "2.0", "2,000", "2,3"):
+            with self.subTest(tail=tail):
+                hits = self._problems_with(
+                    "tests/checker-corpus/README.md",
+                    "**Current registered corpus: 3 programs — ACCEPT 1 · "
+                    "ACCEPT-MANAGED 0 · REJECT " + tail + "\n",
+                )
+                self.assertEqual(len(hits), 1)
+                self.assertIn("no verdict breakdown", hits[0])
+
+    def test_reject_arithmetic_suffixes_fail_closed(self):
+        # A count followed by an operator is not a complete integer claim.
+        for tail in ("2/3", "2+1", "2#1", "2-1"):
+            with self.subTest(tail=tail):
+                hits = self._problems_with(
+                    "tests/checker-corpus/README.md",
+                    "**Current registered corpus: 3 programs — ACCEPT 1 · "
+                    "ACCEPT-MANAGED 0 · REJECT " + tail + "\n",
+                )
+                self.assertEqual(len(hits), 1)
+                self.assertIn("no verdict breakdown", hits[0])
+
+    def test_reject_markdown_and_crlf_suffixes_remain_valid(self):
+        for tail in ("2**", "2\x60", "2\r\n"):
+            with self.subTest(tail=tail):
+                hits = self._problems_with(
+                    "tests/checker-corpus/README.md",
+                    "**Current registered corpus: 3 programs — ACCEPT 1 · "
+                    "ACCEPT-MANAGED 0 · REJECT " + tail + "\n",
+                )
+                self.assertEqual(hits, [])
+
+    def test_reject_count_with_prose_punctuation_remains_valid(self):
+        for tail in ("2.", "2,", "2 — each with a header.", "2 (note)"):
+            with self.subTest(tail=tail):
+                hits = self._problems_with(
+                    "tests/checker-corpus/README.md",
+                    "**Current registered corpus: 3 programs — ACCEPT 1 · "
+                    "ACCEPT-MANAGED 0 · REJECT " + tail + "\n",
+                )
+                self.assertEqual(hits, [])
+
+
+
 if __name__ == "__main__":
     unittest.main()
