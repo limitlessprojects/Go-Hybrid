@@ -15,7 +15,8 @@
 //! inline closures, user-defined struct methods, indirect `fn`-typed callees
 //! (struct fields, array/slice/map elements, higher-order calls), and curated
 //! foreign package calls. `?`-unwrapped calls stay permissive (unwrapping the
-//! error produces a single value).
+//! error produces a single value), except that 3+ result calls bound to a single
+//! name reject with HYB-E2002.
 
 use crate::foreign;
 use crate::model::{unwrap_parens, Binding, Checker, FnState, TypeShape};
@@ -363,6 +364,31 @@ impl<'a> Checker<'a> {
     }
 
     fn check_multi_value_bind(&mut self, st: &FnState, value: &Expr, targets: usize, span: Span) {
+        let mut cur = unwrap_parens_and_move(value);
+        let mut is_try = false;
+        while let Expr::Try { operand, .. } = cur {
+            is_try = true;
+            cur = unwrap_parens_and_move(operand);
+        }
+        if is_try {
+            if let Expr::Call { callee, .. } = cur {
+                if let Some((name, count)) = self.callee_result_count(st, callee) {
+                    if count > 2 && targets == 1 {
+                        let msg = format!(
+                            "`{name}` returns {count} values, but 1 name is bound: a multi-value result is not a tuple (T23)"
+                        );
+                        self.diags.push(
+                            Diagnostic::error("HYB-E2002", self.path.clone(), span, msg).with_notes(vec![
+                                "why: Hybrid has no tuple type, and a 3+ result call unwrapped by `?` yields multiple values that cannot be bound to a single name".to_string(),
+                                "note: emitter (MVP-0) caps functions with 3+ results (max 2: value + error)".to_string(),
+                            ]),
+                        );
+                    }
+                }
+            }
+            return;
+        }
+
         let Some((name, results)) = self.static_result_count(st, value) else {
             // Non-call binding sources: a channel receive and a map index
             // yield at most two values (`v` or `v, ok`); indexing a slice,
@@ -544,6 +570,10 @@ impl<'a> Checker<'a> {
         let Expr::Call { callee, .. } = unwrap_parens_and_move(expr) else {
             return None;
         };
+        self.callee_result_count(st, callee)
+    }
+
+    fn callee_result_count(&self, st: &FnState, callee: &Expr) -> Option<(String, usize)> {
         match unwrap_parens_and_move(callee) {
             Expr::Ident { name, .. } => {
                 if st.type_params.contains(name.as_str()) {
