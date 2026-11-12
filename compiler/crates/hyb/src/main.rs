@@ -5,7 +5,10 @@
 //!   explain — offline reference page for a HYB-Exxxx code
 //!   build   — the walking skeleton: parse → check → emit Go → go build
 
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use hy_diag::{Diagnostic, Pos, Span};
 
@@ -20,6 +23,56 @@ const PINNED_RUST: &str = match option_env!("HYB_PINNED_RUST") {
     Some(v) => v,
     None => "1.99.0",
 };
+
+static NEXT_BUILD_SOURCE: AtomicUsize = AtomicUsize::new(0);
+
+struct BuildSource(PathBuf);
+
+impl BuildSource {
+    fn create(sidecar: &Path, output: &Path, source: &str) -> std::io::Result<Self> {
+        let parent = sidecar
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+
+        for _ in 0..100 {
+            let suffix = NEXT_BUILD_SOURCE.fetch_add(1, Ordering::Relaxed);
+            let path = parent.join(format!(
+                "hyb-build-{}-{}.go",
+                std::process::id(),
+                suffix
+            ));
+            if path.file_name() == output.file_name() {
+                continue;
+            }
+            let mut file = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            };
+            if let Err(error) = file.write_all(source.as_bytes()) {
+                let _ = std::fs::remove_file(&path);
+                return Err(error);
+            }
+            return Ok(Self(path));
+        }
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not reserve a temporary Go source path",
+        ))
+    }
+}
+
+impl Drop for BuildSource {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
 
 /// The Go binary: HYB_GO_BIN override, else PATH (tools/env.sh puts the
 /// pinned toolchain first; CI prepends /usr/local/go/bin). The version-pin
@@ -1112,6 +1165,19 @@ fn cmd_build(args: &[String]) -> ExitCode {
     // the single-file build.
     let go_bin = go_bin();
     if bindings.is_empty() {
+        let build_source =
+            match BuildSource::create(
+                std::path::Path::new(&go_path),
+                std::path::Path::new(&out_path),
+                &marked_go_src,
+            ) {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("error creating temporary Go source for {}: {}", go_path, error);
+                    return ExitCode::from(2);
+                }
+            };
+        let build_source_path = build_source.0.to_string_lossy().into_owned();
         let mut gb = Command::new(go_bin);
         gb.arg("build");
         if race {
@@ -1119,7 +1185,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
             gb.arg("-race");
         }
         let build = gb
-            .args(["-o", &out_path, &go_path])
+            .args(["-o", &out_path, &build_source_path])
             .env("GOFLAGS", "-p=2")
             // The race runtime needs cgo. Without --race we leave
             // CGO_ENABLED alone rather than pinning it to 0: the plain
