@@ -531,7 +531,8 @@ impl<'a> Checker<'a> {
     }
 
     /// Extend any live `LoanTarget::MapSlot` window when a slot-loan binding
-    /// (or an existing alias of one) is copied into `alias_name` (`p := s` or `p = s`).
+    /// (or an existing alias / pointer-carrying container or call result of one)
+    /// is copied into `alias_name` (`p := s`, `xs := []*T{s}`, `p := id_ptr(s)`, `xs[0] = s`).
     pub(crate) fn extend_map_slot_loan_to_alias(
         &self,
         st: &mut FnState,
@@ -539,18 +540,37 @@ impl<'a> Checker<'a> {
         val: &Expr,
         idx: usize,
     ) {
+        if alias_name.is_empty() || alias_name == "_" {
+            return;
+        }
+        let mut sources = Vec::new();
         let mut cur = val;
         while let Expr::Paren { inner: e, .. } | Expr::Move { operand: e, .. } = cur {
             cur = e;
         }
-        let Expr::Ident { name: src, .. } = cur else {
+        if let Expr::Ident { name: src, .. } = cur {
+            sources.push(src.clone());
+        } else {
+            self.collect_slot_loan_pointer_roots(st, val, &mut sources);
+        }
+        if sources.is_empty() {
             return;
-        };
+        }
         let alias_last = st.last_use.get(alias_name).copied().unwrap_or(idx).max(idx);
-        let resolved_src = crate::freeze::resolve_alias(st, src);
+        let resolved: Vec<(String, String)> = sources
+            .into_iter()
+            .map(|s| {
+                let r = crate::freeze::resolve_alias(st, &s);
+                (s, r)
+            })
+            .collect();
         for loan in &mut st.loans {
             if let LoanTarget::MapSlot { binding, .. } = &loan.target {
-                if (binding == src || *binding == resolved_src) && loan.created <= idx {
+                if loan.created <= idx
+                    && resolved
+                        .iter()
+                        .any(|(src, r)| binding == src || binding == r)
+                {
                     loan.last = loan.last.max(alias_last);
                 }
             }
@@ -1548,6 +1568,17 @@ impl<'a> Checker<'a> {
                     self.extend_map_slot_loan_to_alias(st, name, val, idx);
                 }
             }
+        } else if l.values.len() == 1 && l.names.len() > 1 {
+            let val = &l.values[0];
+            self.check_addr_of_const_loan(st, val);
+            let shapes = self.multi_value_shapes(st, val, l.names.len());
+            for (name, shape) in l.names.iter().zip(shapes.iter()) {
+                if self.shape_carries_slot_loan_pointer(shape)
+                    || matches!(shape, TypeShape::Unknown)
+                {
+                    self.extend_map_slot_loan_to_alias(st, name, val, idx);
+                }
+            }
         }
 
         // bindings. T22 (SPEC-LANGUAGE.md): only `const` is DEEPLY
@@ -1703,7 +1734,15 @@ impl<'a> Checker<'a> {
                 overwritten.push(info.name.clone());
                 let is_view = matches!(info.shape, TypeShape::BorrowHandle(_));
                 let carries = self.shape_may_share(&info.shape);
+                let rhs_slot_loan = (self.shape_carries_slot_loan_pointer(&info.shape)
+                    || matches!(info.shape, TypeShape::Unknown))
+                    && self.expr_carries_slot_loan_pointer(&pre_st, &l.values[0]);
                 self.define_binding(st, &info.name, info.shape.clone(), info.ty, immutable, managed, is_let);
+                if rhs_slot_loan {
+                    if let Some(b) = st.env_lookup_mut(&info.name) {
+                        b.slot_loan = true;
+                    }
+                }
                 if is_view {
                     self.extend_call_loans_to_view(st, &l.values[0], &info.name, idx);
                 }
@@ -1872,9 +1911,17 @@ impl<'a> Checker<'a> {
                         Expr::Ident { name: src, .. } => {
                             self.lookup_binding(&pre_st, src).is_some_and(|b| b.slot_loan)
                         }
-                        _ => false,
+                        _ => {
+                            (self.shape_carries_slot_loan_pointer(&shape)
+                                || matches!(shape, TypeShape::Unknown))
+                                && self.expr_carries_slot_loan_pointer(&pre_st, value)
+                        }
                     },
-                    _ => false,
+                    _ => {
+                        (self.shape_carries_slot_loan_pointer(&shape)
+                            || matches!(shape, TypeShape::Unknown))
+                            && self.expr_carries_slot_loan_pointer(&pre_st, value)
+                    }
                 };
                 if move_operand_ident(value).is_some()
                     || matches!(unwrap_parens(value), Expr::Move { .. })
@@ -6397,6 +6444,11 @@ impl<'a> Checker<'a> {
         let pre_moved = roots.iter().find_map(|r| {
             self.lookup_binding(st, r).and_then(|b| b.moved.clone())
         });
+        let pre_slot_loan = (self.shape_carries_slot_loan_pointer(&shape)
+            || matches!(shape, TypeShape::Unknown))
+            && (roots.iter().any(|r| {
+                self.lookup_binding(st, r).is_some_and(|b| b.slot_loan)
+            }) || self.expr_carries_slot_loan_pointer(st, subject));
         let pre_origin = if self.shape_may_share(&shape) {
             roots.iter().find_map(|r| {
                 self.non_owned_origin_of(st, r).map(|(o, via_share)| {
@@ -6532,6 +6584,10 @@ impl<'a> Checker<'a> {
             if b.non_owned_origin.is_none() {
                 b.non_owned_origin = pre_origin;
             }
+            b.slot_loan |= pre_slot_loan;
+        }
+        if pre_slot_loan {
+            self.extend_map_slot_loan_to_alias(st, name, subject, 0);
         }
     }
 
@@ -6583,6 +6639,27 @@ impl<'a> Checker<'a> {
                     if matches!(self.shape_of_expr(st, v), TypeShape::BorrowHandle(_)) {
                         self.extend_call_loans_to_view(st, v, name, idx);
                     }
+                } else if matches!(t.kind, PlaceKind::Index { .. } | PlaceKind::Field { .. }) {
+                    let root = t.root().to_string();
+                    let root_carries_ptr = self.lookup_binding(st, &root).is_some_and(|b| {
+                        self.shape_carries_slot_loan_pointer(&b.shape)
+                            || matches!(b.shape, TypeShape::Unknown)
+                    });
+                    if root_carries_ptr && self.expr_carries_slot_loan_pointer(st, v) {
+                        self.extend_map_slot_loan_to_alias(st, &root, v, idx);
+                    }
+                }
+            }
+        } else if op == AssignOp::Assign && values.len() == 1 && targets.len() > 1 {
+            let v = &values[0];
+            self.check_addr_of_const_loan(st, v);
+            let shapes = self.multi_value_shapes(st, v, targets.len());
+            for (t, shape) in targets.iter().zip(shapes.iter()) {
+                if self.shape_carries_slot_loan_pointer(shape)
+                    || matches!(shape, TypeShape::Unknown)
+                {
+                    let root = t.root().to_string();
+                    self.extend_map_slot_loan_to_alias(st, &root, v, idx);
                 }
             }
         }
