@@ -23,6 +23,73 @@ def step(name, code, hard=False, timeout=10):
             'hard': hard, 'timeout': timeout}
 
 
+class RunnerSummaryPublicationTests(unittest.TestCase):
+    def exercise(self, failure=None, existing=True, malformed=False):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            results = root / 'results'
+            results.mkdir()
+            dest = results / 'summary.json'
+            previous = b'{"reviewed": true}\n'
+            if existing:
+                dest.write_bytes(previous)
+            job_path = root / 'job.json'
+            job_path.write_text('{broken' if malformed else json.dumps({
+                'job': 'atomic-summary', 'commands': [{'run': ['unused']}],
+            }), encoding='utf-8')
+            def partial_dump(value, output, **kwargs):
+                output.write('{"partial":')
+                raise OSError('fixture disk full')
+            with patch.object(sys, 'argv', ['runner.py', str(job_path),
+                    '--results-dir', str(results), '--repo-dir', str(root / 'absent')]), \
+                    patch.dict(os.environ), \
+                    patch.object(runner, 'env_report', return_value={}), \
+                    patch.object(runner, 'run_cmd', return_value=(0, 0.0, 'ok')), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()), contextlib.ExitStack() as stack:
+                if failure == 'write':
+                    stack.enter_context(patch.object(runner.json, 'dump', side_effect=partial_dump))
+                elif failure == 'replace':
+                    stack.enter_context(patch.object(runner.os, 'replace', side_effect=OSError('fixture replace failure')))
+                try:
+                    runner.main()
+                except SystemExit as stopped:
+                    code = stopped.code
+                except OSError:
+                    code = 1  # Inspect old implementations after their write failure too.
+            if failure:
+                self.assertNotEqual(code, 0)
+                self.assertEqual(dest.read_bytes() if dest.exists() else None,
+                                 previous if existing else None)
+            else:
+                summary = json.loads(dest.read_text(encoding='utf-8'))
+                self.assertEqual(code, 1 if malformed else 0)
+                self.assertEqual(summary['ok'], not malformed)
+            self.assertEqual(sorted(p.name for p in results.iterdir()),
+                             ['summary.json'] if dest.exists() else [])
+
+    def test_partial_write_preserves_reviewed_summary(self):
+        self.exercise('write')
+
+    def test_partial_write_leaves_no_new_corrupt_summary(self):
+        self.exercise('write', existing=False)
+
+    def test_replace_failure_preserves_reviewed_summary(self):
+        self.exercise('replace')
+
+    def test_replace_failure_leaves_no_new_summary(self):
+        self.exercise('replace', existing=False)
+
+    def test_success_replaces_previous_summary(self):
+        self.exercise()
+
+    def test_success_creates_missing_summary(self):
+        self.exercise(existing=False)
+
+    def test_job_load_failure_still_publishes_failed_summary(self):
+        self.exercise(malformed=True)
+
+
 class RunnerFailureTests(unittest.TestCase):
     def run_job(self, setup, commands, expected_results=None):
         with tempfile.TemporaryDirectory() as directory:
