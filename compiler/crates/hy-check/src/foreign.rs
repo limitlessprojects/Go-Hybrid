@@ -35,6 +35,7 @@ pub(crate) const BUILTIN_PACKAGES: &[&str] = &[
     "sort",
     "strconv",
     "errors",
+    "hy",
 ];
 
 /// How a call uses its receiver / arguments (O7 handle modes + O13 consume).
@@ -85,21 +86,23 @@ pub(crate) fn is_unproven_atomic(name: &str) -> bool {
 /// Classify a dotted foreign type name; `None` = not a known foreign type
 /// (the caller falls back to local struct decls / `Unknown`).
 pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
-    if is_scalar_atomic(name) {
+    let base = name.split('[').next().unwrap_or(name);
+    if is_scalar_atomic(base) {
         return Some(TypeShape::Atomic);
     }
-    if is_unproven_atomic(name) {
+    if is_unproven_atomic(base) {
         // fail-closed (O4.9): Unknown → HYB-E3005 at spawn/send boundaries,
         // with the row-11 explanation (sendability.rs)
         return Some(TypeShape::Unknown);
     }
-    match name {
+    match base {
+        "hy.send_cap" | "hy.recv_cap" => Some(TypeShape::OwnHandle(base.into())),
         "error" => Some(TypeShape::ForeignOpaque("error".into())),
         "serde_json.value" => Some(TypeShape::OwnHandle("serde_json.value".into())),
         "serde_json.view" => Some(TypeShape::BorrowHandle("serde_json.view".into())),
         "flate2.writer" => Some(TypeShape::OwnHandle("flate2.writer".into())),
         _ => {
-            let root = name.split('.').next().unwrap_or("");
+            let root = base.split('.').next().unwrap_or("");
             if is_curated_package_root(root) {
                 Some(TypeShape::ForeignOpaque(name.to_string()))
             } else {
@@ -116,7 +119,7 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
 /// emitter supports ranging the value handle itself); other handles (e.g.
 /// `flate2.writer`) are NOT iterable and must stay rejected (issue #411).
 pub(crate) fn is_iterable_handle(name: &str) -> bool {
-    name == "serde_json.value"
+    name == "serde_json.value" || name == "hy.recv_cap"
 }
 
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
@@ -124,23 +127,18 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
         ("serde_json", "parse" | "new_object" | "new_array")
         | ("flate2", "new_writer")
-        | (
-            "json" | "encoding/json",
-            "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder",
-        )
+        | ("json" | "encoding/json", "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder")
         | (
             "httptest" | "net/http/httptest",
             "new_server"
-                | "new_tls_server"
-                | "new_unstarted_server"
-                | "new_recorder"
-                | "NewServer"
-                | "NewTLSServer"
-                | "NewUnstartedServer"
-                | "NewRecorder",
-        ) => {
-            CallMode::Produce
-        }
+            | "new_tls_server"
+            | "new_unstarted_server"
+            | "new_recorder"
+            | "NewServer"
+            | "NewTLSServer"
+            | "NewUnstartedServer"
+            | "NewRecorder",
+        ) => CallMode::Produce,
         ("serde_json", "to_string_pretty")
         | ("serde_json", "array")
         | ("serde_json", "get")
@@ -160,13 +158,10 @@ pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
     match (pkg, method) {
         (
             "sort",
-            "ints" | "strings" | "float64s" | "slice" | "slice_stable" | "sort" | "stable"
-            | "Ints" | "Strings" | "Float64s" | "Slice" | "SliceStable" | "Sort" | "Stable",
+            "ints" | "strings" | "float64s" | "slice" | "slice_stable" | "sort" | "stable" | "Ints"
+            | "Strings" | "Float64s" | "Slice" | "SliceStable" | "Sort" | "Stable",
         ) => Some(0),
-        (
-            "io",
-            "read_full" | "read_at_least" | "ReadFull" | "ReadAtLeast",
-        ) => Some(1),
+        ("io", "read_full" | "read_at_least" | "ReadFull" | "ReadAtLeast") => Some(1),
         ("io", "copy_buffer" | "CopyBuffer") => Some(2),
         _ => None,
     }
@@ -196,7 +191,10 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
         // `atomic.load_pointer` / `atomic.swap_pointer` return an
         // unsafe.Pointer to arbitrary state — not a primitive (row 11)
-        ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
+        (
+            "atomic",
+            "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer",
+        ) => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
         ("json" | "encoding/json", "new_decoder" | "NewDecoder") => {
@@ -208,16 +206,15 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         (
             "httptest" | "net/http/httptest",
             "new_server"
-                | "new_tls_server"
-                | "new_unstarted_server"
-                | "NewServer"
-                | "NewTLSServer"
-                | "NewUnstartedServer",
+            | "new_tls_server"
+            | "new_unstarted_server"
+            | "NewServer"
+            | "NewTLSServer"
+            | "NewUnstartedServer",
         ) => TypeShape::ForeignOpaque("httptest.server".into()),
-        (
-            "httptest" | "net/http/httptest",
-            "new_recorder" | "NewRecorder",
-        ) => TypeShape::ForeignOpaque("httptest.response_recorder".into()),
+        ("httptest" | "net/http/httptest", "new_recorder" | "NewRecorder") => {
+            TypeShape::ForeignOpaque("httptest.response_recorder".into())
+        }
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -257,20 +254,9 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
     match (pkg, method) {
         (
             "strconv",
-            "parse_int"
-                | "parse_uint"
-                | "parse_float"
-                | "parse_bool"
-                | "parse_complex"
-                | "atoi"
-                | "unquote"
-                | "ParseInt"
-                | "ParseUint"
-                | "ParseFloat"
-                | "ParseBool"
-                | "ParseComplex"
-                | "Atoi"
-                | "Unquote",
+            "parse_int" | "parse_uint" | "parse_float" | "parse_bool" | "parse_complex" | "atoi"
+            | "unquote" | "ParseInt" | "ParseUint" | "ParseFloat" | "ParseBool" | "ParseComplex"
+            | "Atoi" | "Unquote",
         ) => Some(2),
         (
             "os",
@@ -350,50 +336,22 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
         ) => Some(2),
         (
             "io",
-            "read_all"
-                | "read_full"
-                | "read_at_least"
-                | "copy"
-                | "copy_n"
-                | "copy_buffer"
-                | "write_string"
-                | "ReadAll"
-                | "ReadFull"
-                | "ReadAtLeast"
-                | "Copy"
-                | "CopyN"
-                | "CopyBuffer"
-                | "WriteString",
+            "read_all" | "read_full" | "read_at_least" | "copy" | "copy_n" | "copy_buffer"
+            | "write_string" | "ReadAll" | "ReadFull" | "ReadAtLeast" | "Copy" | "CopyN"
+            | "CopyBuffer" | "WriteString",
         ) => Some(2),
-        (
-            "strings",
-            "cut_prefix" | "cut_suffix" | "CutPrefix" | "CutSuffix",
-        ) => Some(2),
+        ("strings", "cut_prefix" | "cut_suffix" | "CutPrefix" | "CutSuffix") => Some(2),
         ("strings", "cut" | "Cut") => Some(3),
         (
             "filepath",
-            "abs"
-                | "rel"
-                | "eval_symlinks"
-                | "glob"
-                | "match"
-                | "split"
-                | "Abs"
-                | "Rel"
-                | "EvalSymlinks"
-                | "Glob"
-                | "Match"
-                | "Split",
+            "abs" | "rel" | "eval_symlinks" | "glob" | "match" | "split" | "Abs" | "Rel"
+            | "EvalSymlinks" | "Glob" | "Match" | "Split",
         ) => Some(2),
         ("path", "match" | "split" | "Match" | "Split") => Some(2),
         (
             "time",
-            "parse"
-                | "parse_duration"
-                | "load_location"
-                | "Parse"
-                | "ParseDuration"
-                | "LoadLocation",
+            "parse" | "parse_duration" | "load_location" | "Parse" | "ParseDuration"
+            | "LoadLocation",
         ) => Some(2),
         (
             "net",
@@ -465,10 +423,7 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
         // hy-check does not depend on hy-emit (that would be a crate cycle), so
         // no automated cross-crate pin is possible. The same-surface tests in
         // `tests/foreign_method_surface.rs` cover the checker side.
-        (
-            "serde_json.value" | "serde_json.view",
-            "array" | "int" | "string",
-        ) => CallMode::Borrow,
+        ("serde_json.value" | "serde_json.view", "array" | "int" | "string") => CallMode::Borrow,
         ("serde_json.value" | "serde_json.view", "set" | "push_string") => CallMode::Mutate,
         ("flate2.writer", "write") => CallMode::Mutate,
         ("flate2.writer", "finish") => CallMode::Consume,
@@ -508,18 +463,49 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     /// class as #2200, different handle.
     const SYNC_MUTEX: &[&str] = &["lock", "unlock", "try_lock"];
     /// `sync.RWMutex`.
-    const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
+    const SYNC_RWMUTEX: &[&str] = &[
+        "lock",
+        "unlock",
+        "try_lock",
+        "rlock",
+        "runlock",
+        "try_rlock",
+    ];
     const SYNC_WAIT_GROUP: &[&str] = &["add", "done", "wait"];
     const SYNC_ONCE: &[&str] = &["do"];
     const BYTES_BUFFER: &[&str] = &[
-        "write", "write_byte", "write_rune", "write_string", "write_to",
-        "read", "read_byte", "read_bytes", "read_from", "read_rune", "read_string",
-        "next", "grow", "reset", "string", "bytes", "len", "cap", "truncate",
-        "unread_byte", "unread_rune",
+        "write",
+        "write_byte",
+        "write_rune",
+        "write_string",
+        "write_to",
+        "read",
+        "read_byte",
+        "read_bytes",
+        "read_from",
+        "read_rune",
+        "read_string",
+        "next",
+        "grow",
+        "reset",
+        "string",
+        "bytes",
+        "len",
+        "cap",
+        "truncate",
+        "unread_byte",
+        "unread_rune",
     ];
     const STRINGS_BUILDER: &[&str] = &[
-        "write", "write_byte", "write_rune", "write_string",
-        "grow", "reset", "string", "len", "cap",
+        "write",
+        "write_byte",
+        "write_rune",
+        "write_string",
+        "grow",
+        "reset",
+        "string",
+        "len",
+        "cap",
     ];
     const SYNC_COND: &[&str] = &["wait", "signal", "broadcast"];
     const SYNC_POOL: &[&str] = &["get", "put"];
@@ -569,14 +555,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "write_string",
     ];
     /// `bufio.Scanner` — Go standard library buffered scanner methods.
-    const BUFIO_SCANNER: &[&str] = &[
-        "buffer",
-        "bytes",
-        "err",
-        "scan",
-        "split",
-        "text",
-    ];
+    const BUFIO_SCANNER: &[&str] = &["buffer", "bytes", "err", "scan", "split", "text"];
     /// `os.File` — standard library file handle. Go defines 24 methods on `*os.File`.
     const OS_FILE: &[&str] = &[
         "chdir",
@@ -643,12 +622,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "write",
         "write_proxy",
     ];
-    const HTTP_RESPONSE: &[&str] = &[
-        "cookies",
-        "location",
-        "proto_at_least",
-        "write",
-    ];
+    const HTTP_RESPONSE: &[&str] = &["cookies", "location", "proto_at_least", "write"];
     const HTTP_SERVER: &[&str] = &[
         "close",
         "listen_and_serve",
@@ -664,6 +638,17 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const HTTP_RESPONSE_WRITER: &[&str] = &["header", "write", "write_header"];
     /// `http.RoundTripper` — standard library HTTP transport round tripper interface.
     const HTTP_ROUND_TRIPPER: &[&str] = &["round_trip"];
+    /// `context.Context` — standard library context interface.
+    const CONTEXT_CONTEXT: &[&str] = &["deadline", "done", "err", "value"];
+    /// `flag.FlagSet` — standard library flag set type.
+    const FLAG_FLAG_SET: &[&str] = &[
+        "arg", "args", "bool", "bool_func", "bool_var", "duration", "duration_var",
+        "error_handling", "float64", "float64_var", "init", "int", "int_var",
+        "int64", "int64_var", "lookup", "name", "n_arg", "n_flag", "output",
+        "parse", "parsed", "print_defaults", "set", "set_output", "string",
+        "string_var", "text_var", "uint", "uint_var", "uint64", "uint64_var",
+        "var", "visit", "visit_all",
+    ];
     const URL_URL: &[&str] = &[
         "escaped_fragment",
         "escaped_path",
@@ -705,12 +690,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "write_header",
         "write_string",
     ];
-    const OS_PROCESS: &[&str] = &[
-        "kill",
-        "release",
-        "signal",
-        "wait",
-    ];
+    const OS_PROCESS: &[&str] = &["kill", "release", "signal", "wait"];
     const OS_PROCESS_STATE: &[&str] = &[
         "exit_code",
         "exited",
@@ -793,6 +773,8 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "http.cookie" | "http.Cookie" => Some(HTTP_COOKIE),
         "http.response_writer" | "http.responsewriter" | "http.ResponseWriter" => Some(HTTP_RESPONSE_WRITER),
         "http.round_tripper" | "http.roundtripper" | "http.RoundTripper" => Some(HTTP_ROUND_TRIPPER),
+        "context.context" | "context.Context" => Some(CONTEXT_CONTEXT),
+        "flag.flag_set" | "flag.flagset" | "flag.FlagSet" => Some(FLAG_FLAG_SET),
         "url.url" | "url.URL" => Some(URL_URL),
         "json.decoder" | "json.Decoder" => Some(JSON_DECODER),
         "json.encoder" | "json.Encoder" => Some(JSON_ENCODER),
@@ -855,7 +837,8 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
         ("url.url" | "url.URL", "query") => TypeShape::ForeignOpaque("url.values".into()),
-        ("http.request" | "http.Request", "cookies") | ("http.response" | "http.Response", "cookies") => {
+        ("http.request" | "http.Request", "cookies")
+        | ("http.response" | "http.Response", "cookies") => {
             TypeShape::Slice(Box::new(TypeShape::ForeignOpaque("http.cookie".into())))
         }
         ("http.request" | "http.Request", "cookie") => TypeShape::ForeignOpaque("http.cookie".into()),
@@ -885,7 +868,7 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
 }
 
 /// Human-readable M5 curated package allowlist string for HYB-E1001 diagnostics (#658).
-pub(crate) const CURATED_ALLOWLIST_DISPLAY: &str = "fmt, os, io, time, sort, strings, strconv, errors, sync, sync/atomic, bufio, net, net/http, net/http/httptest, net/url, encoding/json, encoding/hex, path, path/filepath, rust/serde_json, rust/sha3, rust/regex";
+pub(crate) const CURATED_ALLOWLIST_DISPLAY: &str = "fmt, os, io, time, sort, strings, strconv, errors, sync, sync/atomic, bufio, net, net/http, net/http/httptest, net/url, encoding/json, encoding/hex, path, path/filepath, log, compress/gzip, archive/tar, rust/serde_json, rust/sha3, rust/regex";
 
 /// Is `path` in SPEC M5's curated Go allowlist or M6's pinned Rust crate set (#658)?
 pub(crate) fn is_curated_import(path: &str) -> bool {
@@ -918,6 +901,11 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "path"
             | "path/filepath"
             | "filepath"
+            | "log"
+            | "compress/gzip"
+            | "gzip"
+            | "archive/tar"
+            | "tar"
             | "rust/serde_json"
             | "serde_json"
             | "rust/sha3"
@@ -938,7 +926,6 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
             | "syscall"
             | "unsafe"
             | "runtime"
-            | "log"
             | "flag"
             | "testing"
             | "unicode"
@@ -958,9 +945,7 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
             | "exec"
             | "signal"
             | "user"
-            | "gzip"
             | "zlib"
-            | "tar"
             | "zip"
     )
 }
@@ -969,9 +954,11 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
 pub(crate) fn is_curated_package_root(root: &str) -> bool {
     matches!(
         root,
-        "fmt"
+        "hy" | "fmt"
             | "os"
             | "io"
+            | "context"
+            | "flag"
             | "time"
             | "sort"
             | "strings"
@@ -989,6 +976,9 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "hex"
             | "path"
             | "filepath"
+            | "log"
+            | "gzip"
+            | "tar"
             | "serde_json"
             | "sha3"
             | "regex"
@@ -1448,7 +1438,8 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
             "mutex"
                 | "rw_mutex"
                 | "rwmutex"
-                | "wait_group" | "waitgroup"
+                | "wait_group"
+                | "waitgroup"
                 | "once"
                 | "cond"
                 | "map"
@@ -1861,7 +1852,67 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
         "sha3" => matches!(m, "digest256" | "stream_checksum"),
         "regex" => matches!(m, "is_match" | "is_valid" | "compile" | "match_string"),
         "flate2" => matches!(m, "new_writer" | "write" | "finish" | "writer"),
+        "hy" => matches!(m, "pipe" | "new_pipe" | "send_cap" | "recv_cap" | "channel"),
+        "log" => matches!(
+            m,
+            "ldate"
+                | "ltime"
+                | "lmicroseconds"
+                | "llongfile"
+                | "lshortfile"
+                | "lutc"
+                | "lmsgprefix"
+                | "lstdflags"
+                | "logger"
+                | "flags"
+                | "prefix"
+                | "writer"
+                | "set_flags"
+                | "set_prefix"
+                | "set_output"
+                | "output"
+                | "print"
+                | "println"
+                | "fatal"
+                | "fatalln"
+                | "panic"
+                | "panicln"
+                | "printf"
+                | "fatalf"
+                | "panicf"
+                | "new"
+                | "default"
+        ),
+        "gzip" => matches!(
+            m,
+            "no_compression"
+                | "best_speed"
+                | "best_compression"
+                | "default_compression"
+                | "huffman_only"
+                | "err_checksum"
+                | "err_header"
+                | "reader"
+                | "writer"
+                | "header"
+                | "new_reader"
+                | "new_writer"
+                | "new_writer_level"
+        ),
+        "tar" => matches!(
+            m,
+            "err_header"
+                | "err_write_too_long"
+                | "err_field_too_long"
+                | "err_write_after_close"
+                | "err_insecure_path"
+                | "header"
+                | "reader"
+                | "writer"
+                | "new_reader"
+                | "new_writer"
+                | "file_info_header"
+        ),
         _ => true,
     }
 }
-
