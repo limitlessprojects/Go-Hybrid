@@ -185,3 +185,35 @@ fn plain_break_outside_loop_unchanged() {
         r.diagnostics
     );
 }
+
+#[test]
+fn closure_break_loop_without_enclosing_loop_rejects_e3010() {
+    let src = "fn main() {\n    f := fn() {\n        break loop\n    }\n    f()\n}\n";
+    let r = check(src);
+    assert_eq!(first_code(&r), Some("HYB-E3010".to_string()));
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn closure_continue_loop_inside_outer_loop_rejects_e3010() {
+    let src = "fn main() {\n    loop {\n        f := fn() {\n            continue loop\n        }\n        f()\n        break\n    }\n}\n";
+    let r = check(src);
+    assert_eq!(first_code(&r), Some("HYB-E3010".to_string()));
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn closure_for_range_break_loop_without_closure_loop_rejects_e3010() {
+    let src = "fn main() {\n    loop {\n        f := fn() {\n            for i in 0..3 {\n                if i == 1 {\n                    break loop\n                }\n            }\n        }\n        f()\n        break\n    }\n}\n";
+    let r = check(src);
+    assert_eq!(first_code(&r), Some("HYB-E3010".to_string()));
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn closure_break_loop_inside_closure_own_loop_accepted() {
+    let src = "fn main() {\n    f := fn() {\n        loop {\n            break loop\n        }\n    }\n    f()\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Accept);
+    assert!(first_code(&r).is_none(), "no diagnostics: {:?}", r.diagnostics);
+}

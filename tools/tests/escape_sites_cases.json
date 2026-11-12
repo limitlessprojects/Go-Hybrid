@@ -1,0 +1,17 @@
+{
+  "schema": "escape_sites_v1",
+  "cases": [
+    {
+      "name": "example_06_http_server_zero_triples",
+      "file": "examples/06-http-server/program.hy",
+      "expected_count": 0,
+      "description": "Handler closures capture `next` but only call it — no capture writes → 0 triples"
+    },
+    {
+      "name": "corpus_10_a5_http_handler_one_triple",
+      "file": "tests/checker-corpus/10-a5-http-handler-capture.hy",
+      "expected_count": 1,
+      "description": "Closure writes `hits++` and passes to `mux.handle(...)` → 1 triple (capture=hits, foreign_call=mux.handle)"
+    }
+  ]
+}

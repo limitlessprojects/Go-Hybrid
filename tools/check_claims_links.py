@@ -24,7 +24,7 @@ from pathlib import Path
 
 TABLE_HEADING = "## The claims table"
 ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|")
-LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+LINK_RE = re.compile(r"\[([^\]]*)\]\((<[^<>\r\n]*>|[^)\s]+)(?:\s+\"[^\"]*\")?\)")
 INLINE_CORPUS_RE = re.compile(r"`(\d{2}-[a-z0-9][a-z0-9-]*(?:\.hy)?)`")
 CORPUS_NUM_RE = re.compile(r"\bcorpus\s+(\d{1,3})\b")
 MARKER_RE = re.compile(r"^\s*\((reject|accept|managed)\)", re.IGNORECASE)
@@ -98,6 +98,9 @@ def check(root):
         rows += 1
         for index, match in enumerate(LINK_RE.finditer(evidence)):
             target = match.group(2)
+            # Angle-delimited Markdown destinations may contain spaces or parentheses.
+            if target.startswith("<") and target.endswith(">"):
+                target = target[1:-1]
             if not is_checkable(target):
                 continue
             links += 1
@@ -148,6 +151,8 @@ def check(root):
             refs += 1
             if corpus_dir.is_dir() and not list(corpus_dir.glob("%02d-*.hy" % int(number))):
                 issues.append({"row": row_number, "kind": "missing-corpus-number", "target": number})
+    if not rows:
+        issues.append({"row": 0, "kind": "no-claims-rows", "target": "GUARANTEES.md"})
     return {"ok": not issues, "rows": rows, "links": links, "refs": refs, "issues": issues}
 
 
