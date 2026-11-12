@@ -145,6 +145,63 @@ class CheckClaimsLinksTest(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report["issues"][0]["kind"], "missing-claims-file")
 
+    def test_broken_reference_link_is_reported(self):
+        claims = CLAIMS.replace("[spec](SPEC-LANGUAGE.md)", "[proof][broken]") + \
+            "\n[broken]: tests/nonexistent.rs\n"
+        (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["links"], 4)
+        self.assertIn({"row": 1, "kind": "missing", "target": "tests/nonexistent.rs"},
+                      report["issues"])
+
+    def test_reference_forms_resolve(self):
+        # full, collapsed and shortcut forms all point at real files.
+        claims = CLAIMS.replace("[spec](SPEC-LANGUAGE.md)", "[spec][ref] [same][] [01-bad.hy]")
+        claims += ("\n[ref]: SPEC-LANGUAGE.md\n[same]: tests/checker-corpus/15-good.hy \"Title\"\n"
+                   "[01-bad.hy]: <tests/checker-corpus/01-bad.hy>\n")
+        (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        # 3 inline corpus links + SPEC-LANGUAGE.md, 15-good.hy and 01-bad.hy
+        # resolved through the full, collapsed and shortcut definitions.
+        self.assertEqual(report["links"], 6)
+        self.assertEqual(report["issues"], [])
+
+    def test_reference_labels_are_normalized(self):
+        claims = CLAIMS.replace("[spec](SPEC-LANGUAGE.md)", "[spec][ Multi  Word ]")
+        claims += "\n[multi WORD]: SPEC-LANGUAGE.md\n"
+        (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["links"], 4)
+
+    def test_reference_corpus_link_still_checks_verdict(self):
+        claims = CLAIMS.replace("[01](tests/checker-corpus/01-bad.hy) (reject)",
+                                "[01][c] (reject)")
+        claims += "\n[c]: tests/checker-corpus/01-bad.hy\n"
+        (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (self.root / "tests" / "checker-corpus" / "01-bad.hy").write_text(
+            "// EXPECTED-VERDICT: ACCEPT\n", encoding="utf-8")
+        result = self.run_tool()
+        report = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        mismatch = [issue for issue in report["issues"] if issue["kind"] == "verdict-mismatch"]
+        self.assertEqual(len(mismatch), 1)
+        self.assertEqual(mismatch[0]["target"], "tests/checker-corpus/01-bad.hy")
+
+    def test_bracketed_text_without_definition_is_ignored(self):
+        claims = CLAIMS.replace("[spec](SPEC-LANGUAGE.md)", "[just literal text][nope]")
+        (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["links"], 3)
+
     def test_empty_or_unrecognized_table_fails_closed(self):
         for text in ("", "# GUARANTEES\n", CLAIMS.replace(
                 "## The claims table", "## The evidence table"),
