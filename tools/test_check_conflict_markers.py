@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("check_conflict_markers.py")
 SPEC = importlib.util.spec_from_file_location("conflict_markers", SCRIPT)
@@ -203,6 +204,26 @@ class CliTests(unittest.TestCase):
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertIn("none", res.stdout)
 
+    def test_invalid_utf8_cannot_report_a_clean_scan(self):
+        for name in ("broken.py", ".github/workflows/ci.yml"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                source = Path(td, name)
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(b"\xff\n<<<<<<< HEAD\n=======\n>>>>>>> main\n")
+                res = self._run(td)
+                self.assertEqual(res.returncode, 2, res.stdout + res.stderr)
+                self.assertIn("scan error", res.stderr)
+                self.assertIn(str(source), res.stderr)
+                self.assertNotIn("conflict markers: none", res.stdout)
+                self.assertNotIn("Traceback", res.stderr)
+
+    def test_file_scanners_propagate_read_errors(self):
+        for scanner in (MOD.scan_file, MOD.scan_workflow_file):
+            with self.subTest(scanner=scanner.__name__):
+                with patch("builtins.open", side_effect=PermissionError("denied")):
+                    with self.assertRaises(OSError):
+                        scanner("unreadable.yml")
+
     def test_marker_exits_one_and_names_the_file(self):
         with tempfile.TemporaryDirectory() as td:
             Path(td, "broken.yml").write_text(
@@ -254,6 +275,17 @@ class CliTests(unittest.TestCase):
             res = self._run(td)
             self.assertEqual(res.returncode, 1)
             self.assertIn("conflict marker", res.stderr.lower())
+
+
+    def test_issue_1037_corpus_fixtures_scan_cleanly(self):
+        repo_root = SCRIPT.resolve().parent.parent
+        for rel in (
+            "tests/corpus/issue_1037_conflict_gate_accept.hy",
+            "tests/corpus/issue_1037_conflict_gate_reject.hy",
+        ):
+            path = repo_root / rel
+            self.assertTrue(path.is_file(), f"missing fixture {rel}")
+            self.assertEqual(MOD.scan_file(path), [])
 
 
 if __name__ == "__main__":
