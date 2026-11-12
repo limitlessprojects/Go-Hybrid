@@ -8589,6 +8589,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if pkg == "url" && self.lookup_kind(pkg).is_none() {
+                        self.check_url_call_buildable(name, args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -9996,6 +10000,41 @@ impl<'a> Collector<'a> {
             _ => {}
         }
     }
+
+    fn check_url_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "parse" | "parse_request_uri" | "parse_query" | "query_escape"
+            | "query_unescape" | "path_escape" | "path_unescape" | "user" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("`url.{}` takes exactly 1 argument, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 1 argument to `url.{}`", name),
+                    );
+                }
+            }
+            "user_password" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("`url.{}` takes exactly 2 arguments `(username, password)`, got {} (HYB-E1002)", name, args.len()),
+                        "pass 2 arguments to `url.user_password`",
+                    );
+                }
+            }
+            "join_path" => {
+                if args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        "`url.join_path` requires at least 1 argument `(base, ...elem)`, got 0 (HYB-E1002)".to_string(),
+                        "pass base URL string to `url.join_path`",
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
 }
 
 fn span_expr_label(lhs: &Expr, op: &str, rhs: &Expr) -> String {
