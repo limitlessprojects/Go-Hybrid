@@ -13,8 +13,8 @@ down.
    with no logs — blocking every open pull request, because a PR is tested
    against its base.
 
-2. A column-zero line inside `.github/workflows/*.{yml,yaml}` that is not a
-   top-level key. Workflow files are a mapping at column zero, so a stray
+2. A column-zero line inside a block-style `.github/workflows/*.{yml,yaml}`
+   that is not a top-level key. Workflow files are mappings, so a stray
    column-zero line is a parse error, and the most likely source is a
    duplicated shell line pasted out of a `run: |` block (the indentation is
    lost on the way through a tool round-trip, and the block scalar ends one
@@ -30,6 +30,7 @@ Markdown and this repository uses them.
 Stdlib only. Exit codes: 0 = clean, 1 = problems found, 2 = misuse.
 """
 import argparse
+import json
 import os
 import re
 import sys
@@ -96,7 +97,9 @@ def scan_file(path):
 def scan_workflow_file(path):
     """Return [(line_no, line)] for column-zero lines that cannot be YAML.
 
-    A workflow's top level is a mapping, so a non-blank line with zero
+    A complete JSON object is a valid YAML flow mapping and does not use
+    column-zero keys. Recognize it before applying the block-style check.
+    For block-style workflows, a non-blank line with zero
     indentation is only legal if it opens a key, is a comment, or is a
     document marker. Anything else — most often a shell line that fell out of
     a `run: |` block — makes the whole workflow unparseable, which is the
@@ -105,6 +108,14 @@ def scan_workflow_file(path):
     hits = []
     try:
         with open(path, encoding="utf-8") as f:
+            try:
+                document = json.load(f)
+            except ValueError:
+                pass
+            else:
+                if isinstance(document, dict):
+                    return []
+            f.seek(0)
             for n, line in enumerate(f, 1):
                 stripped = line.rstrip("\n")
                 if not stripped.strip():
