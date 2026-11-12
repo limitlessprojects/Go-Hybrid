@@ -581,6 +581,7 @@ pub fn import_path_of(root: &str) -> String {
         "hex" => "encoding/hex".to_string(),
         "gzip" => "compress/gzip".to_string(),
         "tar" => "archive/tar".to_string(),
+        "zip" => "archive/zip".to_string(),
         // 17: the code says `atomic.Int64` — Go's package name for the
         // path is `atomic`, but the PATH is sync/atomic (the naive last-
         // segment import `"atomic"` is not in std).

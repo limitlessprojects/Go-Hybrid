@@ -763,7 +763,7 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
 }
 
 /// Human-readable M5 curated package allowlist string for HYB-E1001 diagnostics (#658).
-pub(crate) const CURATED_ALLOWLIST_DISPLAY: &str = "fmt, os, io, time, sort, strings, strconv, errors, sync, sync/atomic, bufio, net, net/http, net/http/httptest, net/url, encoding/json, encoding/hex, path, path/filepath, log, compress/gzip, archive/tar, rust/serde_json, rust/sha3, rust/regex";
+pub(crate) const CURATED_ALLOWLIST_DISPLAY: &str = "fmt, os, io, time, sort, strings, strconv, errors, sync, sync/atomic, bufio, net, net/http, net/http/httptest, net/url, encoding/json, encoding/hex, path, path/filepath, log, compress/gzip, archive/tar, archive/zip, rust/serde_json, rust/sha3, rust/regex";
 
 /// Is `path` in SPEC M5's curated Go allowlist or M6's pinned Rust crate set (#658)?
 pub(crate) fn is_curated_import(path: &str) -> bool {
@@ -801,6 +801,8 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "gzip"
             | "archive/tar"
             | "tar"
+            | "archive/zip"
+            | "zip"
             | "rust/serde_json"
             | "serde_json"
             | "rust/sha3"
@@ -841,7 +843,6 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
             | "signal"
             | "user"
             | "zlib"
-            | "zip"
     )
 }
 
@@ -874,6 +875,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "log"
             | "gzip"
             | "tar"
+            | "zip"
             | "serde_json"
             | "sha3"
             | "regex"
@@ -1794,7 +1796,7 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "new_writer"
                 | "new_writer_level"
         ),
-        "tar" => matches!(
+        "tar" | "archive/tar" => matches!(
             m,
             "err_header"
                 | "err_write_too_long"
@@ -1807,6 +1809,28 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "new_reader"
                 | "new_writer"
                 | "file_info_header"
+        ),
+        "zip" | "archive/zip" => matches!(
+            m,
+            "compressor"
+                | "decompressor"
+                | "deflate"
+                | "err_algorithm"
+                | "err_checksum"
+                | "err_format"
+                | "err_insecure_path"
+                | "file"
+                | "file_header"
+                | "file_info_header"
+                | "new_reader"
+                | "new_writer"
+                | "open_reader"
+                | "read_closer"
+                | "reader"
+                | "register_compressor"
+                | "register_decompressor"
+                | "store"
+                | "writer"
         ),
         _ => true,
     }
