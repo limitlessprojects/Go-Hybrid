@@ -458,7 +458,7 @@ impl Emitter {
     fn emit_local_in_seq_inner(&mut self, l: &LocalDecl, rest: &[Stmt]) -> Result<(), EmitError> {
         self.note_closure_shapes(l);
         match l.kind {
-            LocalKind::Var => {
+            LocalKind::Var | LocalKind::Let if l.kind == LocalKind::Var || (l.ty.is_some() && !l.values.is_empty()) => {
                 let ty = l.ty.as_ref().map(|t| self.type_text(t));
                 let is_ptr_ty = l.ty.as_ref().map_or(true, |t| self.is_pointer_ty(t));
                 let alias = l
