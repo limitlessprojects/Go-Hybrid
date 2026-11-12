@@ -215,6 +215,134 @@ fn main() {
     );
 }
 
+/// closure-local maps, closure-parameter maps, loop/select/multi-value bound maps,
+/// and untyped `var m; m = map[...]` inside closure bodies must also enforce
+/// HYB-E2010, HYB-E2006, and HYB-E3104.
+#[test]
+fn rejects_closure_local_param_and_multival_map_element_store_and_loan() {
+    // 1. Closure-local map field store (`m["a"].bal = 3`) -> HYB-E2010.
+    rejects_with(
+        r#"struct acct {
+    bal int
+}
+
+fn main() {
+    f := fn() {
+        m := map[string]acct{"a": acct{bal: 1}}
+        m["a"].bal = 3
+        fmt.println("{m["a"].bal}")
+    }
+    f()
+}
+"#,
+        "HYB-E2010",
+    );
+
+    // 2. Closure-local map field loan (`q := &m["a"].bal`) -> HYB-E2010.
+    rejects_with(
+        r#"struct acct {
+    bal int
+}
+
+fn main() {
+    f := fn() {
+        m := map[string]acct{"a": acct{bal: 1}}
+        q := &m["a"].bal
+        fmt.println("{q}")
+    }
+    f()
+}
+"#,
+        "HYB-E2010",
+    );
+
+    // 3. Closure parameter map field store (`fn(m map[string]acct) { m["a"].bal = 3 }`) -> HYB-E2010.
+    rejects_with(
+        r#"struct acct {
+    bal int
+}
+
+fn main() {
+    f := fn(m map[string]acct) {
+        m["a"].bal = 3
+    }
+    f(map[string]acct{"a": acct{bal: 1}})
+}
+"#,
+        "HYB-E2010",
+    );
+
+    // 4. Multi-value short declaration inside a closure body (`m, ok := make_map()`)
+    // must bind `m`'s map shape in `cst`, rejecting `m["a"].bal = 3` (HYB-E2010),
+    // `m == m` (HYB-E2006), and `take(&m["a"])` (HYB-E3104).
+    rejects_with(
+        r#"struct acct {
+    bal int
+}
+
+fn make_map() (map[string]acct, bool) {
+    return map[string]acct{"a": acct{bal: 1}}, true
+}
+
+fn main() {
+    f := fn() {
+        m, ok := make_map()
+        m["a"].bal = 3
+        fmt.println("{m["a"].bal} {ok}")
+    }
+    f()
+}
+"#,
+        "HYB-E2010",
+    );
+
+    rejects_with(
+        r#"struct acct {
+    bal int
+}
+
+fn make_map() (map[string]acct, bool) {
+    return map[string]acct{"a": acct{bal: 1}}, true
+}
+
+fn main() {
+    f := fn() {
+        m, ok := make_map()
+        same := m == m
+        fmt.println("{same} {ok}")
+    }
+    f()
+}
+"#,
+        "HYB-E2006",
+    );
+
+    rejects_with(
+        r#"struct acct {
+    bal int
+}
+
+fn make_map() (map[string]acct, bool) {
+    return map[string]acct{"a": acct{bal: 1}}, true
+}
+
+fn take(p *acct) {
+    fmt.println("{p.bal}")
+}
+
+fn main() {
+    f := fn() {
+        m, ok := make_map()
+        take(&m["a"])
+        fmt.println("{ok}")
+    }
+    f()
+}
+"#,
+        "HYB-E3104",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Controls: Go-addressable shapes stay accepted
 // ---------------------------------------------------------------------------
