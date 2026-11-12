@@ -734,6 +734,8 @@ struct Collector<'a> {
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
     set_elem_scopes: Vec<HashMap<String, Option<String>>>,
+    /// Parallel scope stack tracking declared TypeExpr::Fn for fn-valued bindings (#2901).
+    fn_type_scopes: Vec<HashMap<String, Option<TypeExpr>>>,
     /// One layer per open scope, tracking `for ... in` element bindings
     /// whose kind is copy-semantics storage (`struct`/`array`). The emitter
     /// lowers them to Go's `for _, x := range xs`, so writes through the
@@ -811,6 +813,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             kind_scopes: Vec::new(),
             type_name_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
+            fn_type_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
@@ -885,6 +888,7 @@ impl<'a> Collector<'a> {
         self.scalar_scopes.push(HashMap::new());
         self.container_elem_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
+        self.fn_type_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
     }
 
@@ -895,6 +899,7 @@ impl<'a> Collector<'a> {
         self.scalar_scopes.pop();
         self.container_elem_scopes.pop();
         self.set_elem_scopes.pop();
+        self.fn_type_scopes.pop();
         self.copy_var_scopes.pop();
     }
 
@@ -1021,6 +1026,161 @@ impl<'a> Collector<'a> {
             // know the new binding is a set record it via bind_set_elem.
             if let Some(top) = self.set_elem_scopes.last_mut() {
                 top.insert(name.to_string(), None);
+            }
+            // Every (re)binding shadows an outer fn type binding (#2901).
+            if let Some(top) = self.fn_type_scopes.last_mut() {
+                top.insert(name.to_string(), None);
+            }
+        }
+    }
+
+    fn bind_fn_type(&mut self, name: &str, ty: Option<TypeExpr>) {
+        if name != "_" && ty.is_some() {
+            if let Some(top) = self.fn_type_scopes.last_mut() {
+                top.insert(name.to_string(), ty);
+            }
+        }
+    }
+
+    fn lookup_fn_type(&self, name: &str) -> Option<TypeExpr> {
+        for layer in self.fn_type_scopes.iter().rev() {
+            if let Some(opt) = layer.get(name) {
+                return opt.clone();
+            }
+        }
+        None
+    }
+
+    fn struct_fn_field_type(&self, base: &Expr, name: &str, peel_container: bool) -> Option<TypeExpr> {
+        let bk = self.kind_of_expr(base);
+        let sname = self.struct_base_name(&bk).or_else(|| self.struct_name(&bk))?;
+        let fields = self.ck.structs.get(&sname)?;
+        let f_ty = fields.iter().find(|(f_name, _)| f_name == name).map(|(_, ty)| ty)?;
+        if peel_container {
+            Self::fn_elem_of_ty(f_ty)
+        } else if matches!(f_ty, TypeExpr::Fn { .. }) {
+            Some(f_ty.clone())
+        } else {
+            None
+        }
+    }
+
+    fn fn_elem_of_ty(ty: &TypeExpr) -> Option<TypeExpr> {
+        match ty {
+            TypeExpr::Fn { .. } => Some(ty.clone()),
+            TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Self::fn_elem_of_ty(elem),
+            TypeExpr::Map { value, .. } => Self::fn_elem_of_ty(value),
+            _ => None,
+        }
+    }
+
+    fn fn_elem_of_val(&self, val: &Expr) -> Option<TypeExpr> {
+        match unwrap_parens(val) {
+            Expr::SliceLit { elem: Some(t), .. } => Self::fn_elem_of_ty(t),
+            Expr::MapLit { value, .. } => Self::fn_elem_of_ty(value),
+            Expr::FnLit { params, results, .. } => Some(TypeExpr::Fn {
+                params: params.clone(),
+                results: results.iter().map(|r| r.ty.clone()).collect(),
+                span: val.span(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn callee_fn_type(&self, e: &Expr) -> Option<TypeExpr> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                matches!(self.lookup_kind(name), Some(OpKind::Fn(..)))
+                    .then(|| self.lookup_fn_type(name))
+                    .flatten()
+            }
+            Expr::Index { base, .. } => match unwrap_parens(base) {
+                Expr::Ident { name, .. } => self.lookup_fn_type(name),
+                Expr::Field { base: fbase, name: fname, .. } => {
+                    self.struct_fn_field_type(fbase, fname, true)
+                }
+                _ => None,
+            },
+            Expr::Field { base, name, .. } => self.struct_fn_field_type(base, name, false),
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    let head = Checker::base_named_type_str(name);
+                    if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                        if f.results.len() == 1 {
+                            if let TypeExpr::Fn { .. } = &f.results[0].ty {
+                                return Some(f.results[0].ty.clone());
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn check_fn_type_args(
+        &mut self,
+        callee_name: &str,
+        params: &[Param],
+        args: &[CallArg],
+        span: Span,
+    ) {
+        if self.multi_value_arg_count(args).is_some() {
+            // Forwarded multi-value call argument mismatches for fn-typed values,
+            // fields, and closures are owned by T23 (HYB-E2002); do not double-report E1002.
+            return;
+        }
+        if params.len() != args.len() {
+            self.report_local_arity(callee_name, params.len(), args.len(), span);
+            return;
+        }
+        for (p, a) in params.iter().zip(args.iter()) {
+            let p_ty = if let TypeExpr::Named { name, span } = &p.ty {
+                if name.is_empty() {
+                    TypeExpr::Named {
+                        name: p.name.clone(),
+                        span: *span,
+                    }
+                } else {
+                    p.ty.clone()
+                }
+            } else {
+                p.ty.clone()
+            };
+            let want = self.kind_of_ty(&p_ty, 0);
+            let got = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = &want {
+                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            let int_to_float_conflict = want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            let scalar_mismatch = matches!(
+                (self.scalar_of_ty(&p_ty), self.typed_value_scalar(&a.value)),
+                (Some(w), Some(g)) if w != g
+            );
+            if kinds_conflict(&want, &got)
+                || int_to_float_conflict
+                || scalar_mismatch
+                || self.sized_array_names_differ(
+                    Some(p_ty.render().as_str()),
+                    self.typed_value_type_name(&a.value).as_deref(),
+                )
+            {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        a.value.render(),
+                        got.label(),
+                        want.label(),
+                        callee_name
+                    ),
+                    "argument types must match declared parameter types",
+                );
             }
         }
     }
@@ -1492,7 +1652,13 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+        let bare = unwrap_parens(callee);
+        if let Some(TypeExpr::Fn { results, .. }) = self.callee_fn_type(bare) {
+            if results.len() == 1 {
+                return Some(vec![self.scalar_of_ty(&results[0])]);
+            }
+        }
+        let Expr::Ident { name, .. } = bare else {
             return None;
         };
         if self
@@ -1994,6 +2160,7 @@ impl<'a> Collector<'a> {
             let ces = self.container_elem_scalar_of_ty(&p.ty);
             self.set_container_elem_scalar(&p.name, ces);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
+            self.bind_fn_type(&p.name, Self::fn_elem_of_ty(&p.ty));
             self.bind_type_name(&p.name, p.ty.render());
         }
         for r in &f.results {
@@ -2220,6 +2387,13 @@ impl<'a> Collector<'a> {
                 _ => None,
             })
             .collect();
+        let fn_types: Vec<Option<TypeExpr>> = (0..l.names.len())
+            .map(|i| match (&l.ty, l.values.len() == l.names.len()) {
+                (Some(t), _) => Self::fn_elem_of_ty(t),
+                (None, true) => self.fn_elem_of_val(&l.values[i]),
+                _ => None,
+            })
+            .collect();
         if let Some(t) = &l.ty {
             let tname = t.render();
             for name in &l.names {
@@ -2238,8 +2412,8 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        for ((((name, kind), scalar), set_elem), container_elem_scalar) in
-            l.names.iter().zip(kinds).zip(scalars).zip(set_elems).zip(container_elem_scalars)
+        for (((((name, kind), scalar), set_elem), container_elem_scalar), fn_ty) in
+            l.names.iter().zip(kinds).zip(scalars).zip(set_elems).zip(container_elem_scalars).zip(fn_types)
         {
             // #1031: a same-scope `:=` re-define keeps the EXISTING variable
             // (and its type) in Go, so only a fresh binding takes the
@@ -2254,6 +2428,7 @@ impl<'a> Collector<'a> {
                 self.set_container_elem_scalar(name, container_elem_scalar);
             }
             self.bind_set_elem(name, set_elem);
+            self.bind_fn_type(name, fn_ty);
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -3233,6 +3408,7 @@ impl<'a> Collector<'a> {
                     let ces = self.container_elem_scalar_of_ty(&p.ty);
                     self.set_container_elem_scalar(&p.name, ces);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
+                    self.bind_fn_type(&p.name, Self::fn_elem_of_ty(&p.ty));
                     self.bind_type_name(&p.name, p.ty.render());
                 }
                 for r in results {
@@ -4295,7 +4471,12 @@ impl<'a> Collector<'a> {
                 }
                 None
             }
-            _ => None,
+            _ => {
+                if let Some(TypeExpr::Fn { results, .. }) = self.callee_fn_type(bare) {
+                    return Some(results.iter().map(|r| self.kind_of_ty(r, 0)).collect());
+                }
+                None
+            }
         }
     }
 
@@ -5721,6 +5902,11 @@ impl<'a> Collector<'a> {
                         return;
                     }
                     let (nr, nw) = (res.len(), want.len());
+                    if matches!(unwrap_parens(callee), Expr::Index { .. }) && nr >= 2 && nw == 1 {
+                        // T23 (HYB-E2002) in tuple.rs already owns indirect multi-value calls
+                        // in single-value return positions (SPEC-LANGUAGE §2.8).
+                        return;
+                    }
                     let msg = match (nw, nr) {
                         (0, _) => format!(
                             "`return` supplies `{}` with {nr} result{} in a function that declares no results — Go refuses `too many return values` (HYB-E1002)",
@@ -8071,12 +8257,18 @@ impl<'a> Collector<'a> {
                 if let Some(k) = self.lookup_kind(name) {
                     match k {
                         // A local bound to a closure or fn-typed value carries
-                        // its declared parameter count, so the call's arity is
-                        // checkable (#577 C9).
-                        OpKind::Fn(_, Some(ref want)) if want.len() != args.len() => {
-                            self.report_local_arity(name, want.len(), args.len(), span)
+                        // its declared parameter count and types, so the call is
+                        // checkable (#577 C9, #2901).
+                        OpKind::Fn(_, ref want) => {
+                            if let Some(TypeExpr::Fn { params, .. }) = self.lookup_fn_type(name) {
+                                self.check_fn_type_args(name, &params, args, span);
+                            } else if let Some(ref want) = want {
+                                if want.len() != args.len() {
+                                    self.report_local_arity(name, want.len(), args.len(), span);
+                                }
+                            }
                         }
-                        OpKind::Fn(..) | OpKind::Unknown => {}
+                        OpKind::Unknown => {}
                         _ => self.emit_e1002(
                             span,
                             format!(
@@ -8626,7 +8818,9 @@ impl<'a> Collector<'a> {
                     // `u.cb(1, 2)` where `cb fn(x int) int` — the field type
                     // states the count.
                     if !has_method {
-                        if let OpKind::Fn(_, Some(ref want)) = fk {
+                        if let Some(TypeExpr::Fn { params, .. }) = self.callee_fn_type(callee) {
+                            self.check_fn_type_args(&callee.render(), &params, args, span);
+                        } else if let OpKind::Fn(_, Some(ref want)) = fk {
                             if want.len() != args.len() {
                                 self.report_local_arity(&callee.render(), want.len(), args.len(), span);
                             }
@@ -8696,7 +8890,9 @@ impl<'a> Collector<'a> {
             }
             _ => {
                 let ck = self.kind_of_expr(bare);
-                if !matches!(ck, OpKind::Unknown | OpKind::Fn(..)) {
+                if let Some(TypeExpr::Fn { params, .. }) = self.callee_fn_type(callee) {
+                    self.check_fn_type_args(&callee.render(), &params, args, span);
+                } else if !matches!(ck, OpKind::Unknown | OpKind::Fn(..)) {
                     self.emit_e1002(
                         span,
                         format!(
