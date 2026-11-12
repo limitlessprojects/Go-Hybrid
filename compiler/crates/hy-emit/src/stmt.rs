@@ -162,6 +162,18 @@ impl Emitter {
                 }
 
                 let c = self.emit_expr(operand, 0)?;
+                // #3209: a deferred call that mentions a live O8 slot loan
+                // (`p := &xs[0]; defer fn() { p.n = 7 }()`) runs at function
+                // exit, AFTER the inline store-back at the end of the body,
+                // so its write would land on a dead copy. Register a deferred
+                // store-back just before the user's defer: Go runs defers
+                // LIFO, so it fires after the user's call. The inline
+                // store-back stays for reads between here and the exit.
+                // Closure bodies get fresh loan frames, so only loans of the
+                // function this `defer` belongs to are visible here.
+                for store in self.deferred_loan_stores(operand) {
+                    self.push(&format!("defer func() {{ {} }}()", store));
+                }
                 self.push(&format!("defer {}", c));
                 Ok(())
             }
@@ -3742,6 +3754,28 @@ impl Emitter {
                     || Self::expr_mentions_ident(index, target)
             }
         }
+    }
+
+    /// #3209: the store-back statements of every active slot loan (in this
+    /// function's loan frames) that a deferred operand mentions, directly or
+    /// through a recorded alias. Innermost frame first; each loan once.
+    fn deferred_loan_stores(&self, operand: &Expr) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for frame in self.loan_frames.iter().rev() {
+            for (loan, store) in frame {
+                if loan.is_empty() || out.contains(store) {
+                    continue;
+                }
+                let mentions = Self::expr_mentions_ident(operand, loan)
+                    || self.loan_aliases.get(loan).is_some_and(|aliases| {
+                        aliases.iter().any(|a| Self::expr_mentions_ident(operand, a))
+                    });
+                if mentions {
+                    out.push(store.clone());
+                }
+            }
+        }
+        out
     }
 
     fn expr_mentions_ident(e: &Expr, target: &str) -> bool {
