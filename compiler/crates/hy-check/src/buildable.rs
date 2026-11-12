@@ -918,6 +918,7 @@ impl<'a> Collector<'a> {
     fn slice_element_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
         match bare {
+            Expr::Move { operand, .. } => self.slice_element_type_name(operand),
             Expr::Ident { name, .. } => {
                 if let Some(tname) = self.lookup_type_name(name) {
                     if let Some(elem) = tname.strip_prefix("[]") {
@@ -974,14 +975,141 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #2817 — the exact numeric element type of a channel expression, when
-    /// the channel is a plain identifier whose declared element type is a
-    /// predeclared numeric type. `var ch chan int64` renders its declared type
-    /// into `type_name_scopes` as `chan int64`; direction qualifiers
-    /// (`<-chan int`, `chan<- int`) normalize to the element. Named types,
-    /// non-numeric elements, and unresolved bindings return `None` so the
-    /// caller stays fail-open.
+    /// #3273: Resolve the element type name from a channel type name or alias.
+    fn chan_elem_from_type_name(&self, tname: &str) -> Option<String> {
+        let trimmed = tname.trim();
+        if let Some(rest) = trimmed.strip_prefix("chan<-") {
+            return Some(rest.trim_start().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("<-chan") {
+            return Some(rest.trim_start().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("chan") {
+            return Some(rest.trim_start().to_string());
+        }
+        let head = Checker::base_named_type_str(trimmed);
+        if let Some(ty) = self.ck.type_aliases.get(head) {
+            let resolved = self.ck.resolve_type_alias(ty);
+            if let TypeExpr::Chan { elem, .. } = resolved {
+                return Some(elem.render());
+            }
+        }
+        None
+    }
+
+    /// Check whether two channel type spellings conflict under Go channel assignability rules.
+    fn chan_types_conflict(&self, want_ty: &str, got_ty: &str) -> bool {
+        let (Some(w_elem), Some(g_elem)) = (self.chan_elem_from_type_name(want_ty), self.chan_elem_from_type_name(got_ty)) else {
+            return false;
+        };
+        if w_elem != g_elem {
+            return true;
+        }
+        let w_trimmed = want_ty.trim();
+        let g_trimmed = got_ty.trim();
+        let g_is_bidir = g_trimmed.starts_with("chan ") || g_trimmed == "chan";
+        let w_is_bidir = w_trimmed.starts_with("chan ") || w_trimmed == "chan";
+        if g_is_bidir {
+            false
+        } else if w_is_bidir {
+            true
+        } else {
+            let g_is_recv = g_trimmed.starts_with("<-chan");
+            let w_is_recv = w_trimmed.starts_with("<-chan");
+            g_is_recv != w_is_recv
+        }
+    }
+
+    /// #3273: Extract channel element type name from a channel expression.
+    fn chan_element_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    return self.chan_elem_from_type_name(&tname);
+                }
+                None
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            let fbare = unwrap_parens(&first.value);
+                            match fbare {
+                                Expr::StructLit {
+                                    ty: Some(TypeExpr::Chan { elem, .. }),
+                                    ..
+                                } => return Some(elem.render()),
+                                Expr::Ident { name, .. } => {
+                                    return self.chan_elem_from_type_name(name);
+                                }
+                                _ => {}
+                            }
+                        }
+                    } else if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                        if fd.results.len() == 1 {
+                            let resolved = self.ck.resolve_type_alias(&fd.results[0].ty);
+                            if let TypeExpr::Chan { elem, .. } = resolved {
+                                return Some(elem.render());
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// #3273: Resolve predeclared numeric scalar name, expanding type aliases if necessary.
+    fn resolve_scalar_name(&self, name: &str) -> Option<&'static str> {
+        if let Some(s) = canonical_numeric_name(name) {
+            return Some(s);
+        }
+        let head = Checker::base_named_type_str(name);
+        if let Some(ty) = self.ck.type_aliases.get(head) {
+            let resolved = self.ck.resolve_type_alias(ty);
+            return self.scalar_of_ty(&resolved);
+        }
+        None
+    }
+
+    /// #3273: Parse length and element type from a sized array type spelling (e.g. `[2]int`).
+    fn parse_sized_array_spec(&self, s: &str) -> Option<(usize, String)> {
+        let t = s.trim();
+        if !t.starts_with('[') {
+            return None;
+        }
+        let close = t.find(']')?;
+        let len: usize = t[1..close].parse().ok()?;
+        let elem = t[close + 1..].trim().to_string();
+        Some((len, elem))
+    }
+
+    /// #3273: Compare two sized array type spellings for dimension or scalar mismatch.
+    fn sized_array_names_differ_or_scalar(&self, a: Option<&str>, b: Option<&str>) -> bool {
+        let (Some(x), Some(y)) = (a, b) else {
+            return false;
+        };
+        if !is_sized_array_spelling(x) || !is_sized_array_spelling(y) {
+            return false;
+        }
+        if let (Some((l1, e1)), Some((l2, e2))) = (self.parse_sized_array_spec(x), self.parse_sized_array_spec(y)) {
+            if l1 != l2 {
+                return true;
+            }
+            let s1 = self.resolve_scalar_name(&e1).unwrap_or(e1.as_str());
+            let s2 = self.resolve_scalar_name(&e2).unwrap_or(e2.as_str());
+            return s1 != s2;
+        }
+        x != y
+    }
+
+    /// #2817 / #3273 — the exact numeric element type of a channel expression.
     fn chan_element_scalar(&self, e: &Expr) -> Option<&'static str> {
+        if let Some(tname) = self.chan_element_type_name(e) {
+            if let Some(s) = self.resolve_scalar_name(&tname) {
+                return Some(s);
+            }
+        }
         let Expr::Ident { name, .. } = unwrap_parens(e) else {
             return None;
         };
@@ -992,6 +1120,54 @@ impl<'a> Collector<'a> {
         let t = t.trim_start();
         let t = t.strip_prefix("<-").unwrap_or(t).trim();
         canonical_numeric_name(t)
+    }
+
+    /// #3273: channel send requires the sent value to match the
+    /// channel element type's scalar width, array dimensions, and slice element scalar (HYB-E1002).
+    fn check_chan_send_operands(&mut self, chan: &Expr, value: &Expr, span: Span) -> bool {
+        if let Some(elem_ty_name) = self.chan_element_type_name(chan) {
+            let elem_scalar = self.resolve_scalar_name(&elem_ty_name);
+            let val_scalar = self.typed_value_scalar(value);
+            let scalar_mismatch = matches!(
+                (elem_scalar, val_scalar),
+                (Some(t), Some(v)) if t != v
+            );
+
+            let val_type_name = self.typed_value_type_name(value);
+            let array_len_mismatch = self.sized_array_names_differ_or_scalar(
+                Some(&elem_ty_name),
+                val_type_name.as_deref(),
+            );
+
+            let slice_elem_mismatch = if let Some(dst_elem) = elem_ty_name.strip_prefix("[]") {
+                let dst_s = self.resolve_scalar_name(dst_elem.trim());
+                let val_elem = self.slice_element_type_name(value)
+                    .or_else(|| val_type_name.as_deref().and_then(|t| t.strip_prefix("[]").map(str::trim).map(String::from)));
+                let val_s = val_elem.as_deref().and_then(|s| self.resolve_scalar_name(s));
+                matches!((dst_s, val_s), (Some(d), Some(v)) if d != v)
+            } else {
+                false
+            };
+
+            if scalar_mismatch || array_len_mismatch || slice_elem_mismatch {
+                let got_type = val_scalar
+                    .map(|s| s.to_string())
+                    .or(val_type_name)
+                    .unwrap_or_else(|| self.kind_of_expr(value).label().to_string());
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot use `{}` (type `{}`) as `{}` value in send (HYB-E1002)",
+                        value.render(),
+                        got_type,
+                        elem_ty_name
+                    ),
+                    "channel element type is fixed; convert the value explicitly or adjust the channel type",
+                );
+                return true;
+            }
+        }
+        false
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -1231,6 +1407,7 @@ impl<'a> Collector<'a> {
                 let bk = self.kind_of_expr(base);
                 self.struct_field_type_name(&bk, name)
             }
+            Expr::Move { operand, .. } => self.typed_value_type_name(operand),
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
             _ => None,
         }
@@ -1555,6 +1732,7 @@ impl<'a> Collector<'a> {
                 operand,
                 ..
             } => self.typed_value_scalar(operand),
+            Expr::Move { operand, .. } => self.typed_value_scalar(operand),
             Expr::Call { callee, args, .. } => match self.call_result_scalars(callee, args) {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
@@ -2235,6 +2413,8 @@ impl<'a> Collector<'a> {
                     self.bind_type_name(name, format!("[]{}", elem));
                 } else if let Some(tp) = self.expr_type_param(val) {
                     self.bind_type_name(name, tp);
+                } else if let Some(chan_elem) = self.chan_element_type_name(val) {
+                    self.bind_type_name(name, format!("chan {}", chan_elem));
                 }
             }
         }
@@ -2491,10 +2671,9 @@ impl<'a> Collector<'a> {
                 self.check_single_value_position(value, "a channel send", false);
                 self.expr(value);
                 self.check_send_elem(chan, value);
-                // #2817: the sent value must be assignable to the channel's
-                // element type; Go refuses `ch <- f` for mismatched widths.
-                self.check_send_assignability(chan, value);
-            }
+                // #2817 / #3273: the sent value must be assignable to the channel's
+                // element type; Go refuses `ch <- f` for mismatched widths, array dims, or slice elems.
+                self.check_send_assignability(chan, value);            }
             Stmt::If {
                 init,
                 cond,
@@ -2751,9 +2930,8 @@ impl<'a> Collector<'a> {
                             self.expr(chan);
                             self.expr(value);
                             self.check_send_elem(chan, value);
-                            // #2817: same assignability rule inside `select`.
-                            self.check_send_assignability(chan, value);
-                        }
+                            // #2817 / #3273: same assignability rule inside `select`.
+                            self.check_send_assignability(chan, value);                        }
                         SelectArmKind::Recv { names, chan } => {
                             self.check_repeated_bindings(names, chan.span());
                             self.expr(chan);
@@ -4822,8 +5000,10 @@ impl<'a> Collector<'a> {
                         inner.len() == 1 && inner.chars().all(|c| c.is_ascii_lowercase())
                     };
                     let container_or_alias_mismatch = match (&got_type_name, &want, &got) {
-                        (Some(gname), OpKind::Chan(_), OpKind::Chan(_))
-                        | (Some(gname), OpKind::Map(_, _), OpKind::Map(_, _))
+                        (Some(gname), OpKind::Chan(_), OpKind::Chan(_)) => {
+                            self.chan_types_conflict(field_type_name, gname.as_str())
+                        }
+                        (Some(gname), OpKind::Map(_, _), OpKind::Map(_, _))
                         | (Some(gname), OpKind::Slice(_), OpKind::Slice(_))
                         | (Some(gname), OpKind::Pointer(_), OpKind::Pointer(_))
                         | (Some(gname), OpKind::Array(_), OpKind::Array(_)) => {
@@ -6115,6 +6295,11 @@ impl<'a> Collector<'a> {
             _ => return,
         };
         let got = self.kind_of_expr(value);
+
+        // #3273: Verify exact scalar widths, array dimensions, and slice elements
+        if self.check_chan_send_operands(chan, value, value.span()) {
+            return;
+        }
         if want.is_numeric() && got.is_numeric() {
             if let (Some(w), Some(g)) =
                 (self.chan_element_scalar(chan), self.typed_value_scalar(value))
