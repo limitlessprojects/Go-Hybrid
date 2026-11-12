@@ -1014,3 +1014,33 @@
 **State**: main `76512806` == origin (asserted). Tests 3293, suites 508, corpus 139/139, differential FULL.
 
 **Scouted next**: #4378 (matrixneoaiagent examples-restore from #4236 tree — dedupe vs #4311/#4335, my #4290 archaeology applies: 00bfd96a restored Session-1 not Phase-2; any restore PR must pick its canonical state explicitly), #4380 (BP202302 tools: differential report decode), #4336 (cryptowebbuild tools: check_claims_links percent-encoding), #4333 (knk97874 test battery), #4337 (rrios13 test guard fd redirect). seenorht family #4331/#4347/#4364 + #4281 await author rebase (all conflict on channel_liveness_4200.rs lineage). Pending authors: #4199, #4206, #4097, #4217, #4219, #743.
+
+## Session 187-cont — 2026-11-12 16:10 (+08; 08:10 UTC) — READ-ONLY TICK (all credentials dead)
+
+**Credential event**: `.gh_token` token `ghp_Pte…` (the one that landed #4350 earlier this session) now 401 on REST **and** GraphQL (Bad credentials). Origin/fork remote-embedded tokens: all same dead token (propagated into scripts/followbot2/followbot2.py + scripts/sweeper_close.py stashes — both tested DEAD). Anonymous REST pool pre-burned 0/60 by shared egress 8.212.10.159 (reset 08:48 UTC, after tick budget). Push impossible; PR comments impossible → doctrine "every PR gets a written reply" DEFERRED to next tick, verdicts recorded here instead. Git protocol unaffected (fetch/pull work anonymously). #4350 closure verified via HTML (non-API): merged + maintainer reply posted 2026-11-12 + worklog `b1f689c2` asserted on origin.
+
+**Dedupe adjudication — #4378 / #4335 / #4311 (examples-restore for #4236)**:
+- `git diff pr4335 pr4378` = EMPTY → #4378 and #4335 are byte-identical trees (same merge-base 7cf2983). Pure duplicate pair. Canonical = **#4335** (earlier number).
+- #4311: same examples/ content (diff vs pr4378 examples/ = empty), older base 17dbe9f, merge-tree CLEAN into main (adds nothing stale to channel_liveness lineage — file absent at its base). Fully superseded once #4335 lands.
+- All three restore examples/ **byte-exact vs 3188bee1** (Session-158 pre-accident tree) — archaeologically sound, unlike the #4290 bundle S185 stripped. main is currently in the accidental S159-rollback state for 03/07/08 (struct job/result defs, LRU touch() impl, typed `[]node_id{from}` stack all missing).
+- **ex10 revised verdict (corrects my earlier in-merge-fix plan)**: `tools/run_examples.sh:93` MASKS the milliseconds field of actual output (`sed 's/^1M hashes in [0-9]+ms,/1M hashes in 0ms,/'`) before diffing; digests + checksum are exact-compared. So S158's expected.txt `1M hashes in 0ms, checksum=14551410093072352038` is the harness-canonical masked form, NOT a false timing claim (S185 measured 339ms real → masked to 0ms → would match). Conversely 00bfd96a's placeholder expected.txt (`<200ms`, `<deterministic per pinned crate>`) can NEVER match masked real output → root cause of the "pre-existing baseline red" in the examples suite (wminno's Nov 11 note). The PR's ex10 hunk is the FIX, not a revert. No in-merge fixture fixup needed for ex10.
+- Remaining empirical risk: 03/07/08 expected.txt are NOT touched by the PR while program behavior changes (real touch() vs stub) — run_examples.sh must confirm restored programs still produce the pinned expected output. Gate will adjudicate.
+
+**Next tick landing recipe — #4335**: token needed for push+replies. 1) fetch pull/4335/head; 2) merge gate (merge-tree already CLEAN, re-verify); 3) four gates per verify_pr.sh + run `tools/run_examples.sh` (expect ex10 flips baseline red → green; 03/07/08 output pin check); 4) land with credit @matrixneoaiagent (check actual author), close #4236; 5) written replies: land-reply on #4335, duplicate/superseded notice on #4378 + #4311 (pointing at #4335 landing SHA), thanks-but-superseded on #4311 optionally.
+
+**Scouting unchanged**: #4380 (BP202302 tools), #4336 (cryptowebbuild tools), #4333 (knk97874 test battery), #4337 (rrios13 test guard); seenorht family #4281/#4331/#4347/#4364 await author rebase; pending authors #4199, #4206, #4097, #4217, #4219, #743.
+
+## Session 187-cont2 — 2026-11-12 17:00 (+08; 09:00 UTC) — token restored, #4335 LANDED
+
+**Token restored** (maintainer re-supplied `ghp_8erO…`, identity limitlessprojects; pools 5000/5000 both). Worklog `fa0c56bf` push+assert PASS first thing.
+
+**Landed: #4335** (vandurmedries / restore executable worker-pool, LRU, graph and SHA3 fixtures, fixes #4236) — merge `6d45267d` (base `fa0c56bf`), push+assert PASS, landing reply posted (`6826664332`).
+- Dedupe adjudication executed per S187-cont verdicts: #4378 byte-identical tree → superseded notice posted (`6826664701`); #4311 same content older base → superseded notice posted (`6826665028`). Credit author confirmed via API = vandurmedries (scouting note had wrongly guessed matrixneoaiagent — API check saved a mis-credit).
+- **Five gates on exact landed tree**: merge CLEAN; battery **3293/0** (508 suites, baseline preserved); corpus **139/139** (tripwire 2.2% not fired); differential **FULL 47/47+92/92**; **run_examples.sh 11/11 ALL PASS — ex10 baseline red REPAIRED** (masked-form restored; digests+checksum exact-compared and reproduce).
+- ex10 masked-form analysis confirmed empirically: run_examples.sh masks ms field pre-diff; 00bfd96a placeholder could never match → old baseline red root cause; restored S158 form is the fix. 03/07/08 output pins hold with real program bodies (touch() impl produces same expected output as the stub).
+
+**Ops**: sandbox recycled mid-tick again (rustup/go vanished once between messages; 3rd cold install this cycle). ENOSPC recurrence: dev-profile debug info bloated target to 5.7G → linker Bus errors at 94% disk; cargo clean + FULL recipe (DEV+TEST DEBUG=0, no-keep-memory) rebuilt clean. Lesson refined: the DEBUG=0 recipe must include CARGO_PROFILE_DEV_DEBUG=0, not just TEST.
+
+**State**: main `6d45267d` == origin (asserted). Tests 3293, suites 508, corpus 139/139, differential FULL, examples 11/11 (examples suite now green for the first time since the s159 trim).
+
+**Scouted next**: #4380 (BP202302 tools: differential report decode), #4336 (cryptowebbuild tools: check_claims_links percent-encoding), #4333 (knk97874 test battery), #4337 (rrios13 test guard fd redirect). Full triage scan deferred (this tick spent REST on approve 40/85 + replies; scan next tick on fresh pool). seenorht family #4281/#4331/#4347/#4364 await author rebase; pending authors #4199, #4206, #4097, #4217, #4219, #743.
