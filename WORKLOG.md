@@ -973,3 +973,17 @@
 **State**: local main `efe19789` (merge) — **AHEAD of origin, unpushed (auth)**. Awaiting token restoration: push, ls-remote assert, post #4290 reply (draft at notes/reply-4290.md), then resume queue.
 
 **Scouted next**: after push — #4281 supersession review, SADIQ2M band (#4296/#4288/#4285/#4283/#4276) vs dextermos band (#4319/#4303/#4302/#4301/#4300/#4294) OVERLAP (same packages/files — pick one series), #4290-clean screen done S184 (all base==main PRs zero-literal-rewrites), #4290/#4281 see above, #4316 (SPEC X4 static archaeology done S184: folding semantics untouched), stale set #4320/#4321/#4314/#4311/#4240/#4323/#4305/#4307/#4292 (rebase first; #4314 conflicts with landed #4299 channel_liveness changes). Pending authors: #4199, #4206, #4097, #4217, #4219, #743.
+
+## Session 185-cont — 2026-11-11 ~06:15 UTC (token restored by maintainer mid-window; #4290 landing completed)
+
+**Token restored**: new PAT installed (.gh_token + remote URL; old token + all 5 remote-embedded tokens were dead since S184). Push `7cf29833..17dbe9f9` **ASSERT PASS**, #4290 landing reply posted (comment 6815893111). **#4290 fully landed.**
+
+**Rate-limit incident**: full triage scan (~1242 items, ~5000 core requests) burned the entire 5000/hr quota mid-run; second attempt 403. **DOCTRINE UPDATE: scan is a quota hazard — prefer targeted API passes (~15 recon PRs ≈ 20-30 requests) over full scans; full scans only when quota is fresh and a Pareto refresh is mandatory.** Reset ~06:52 UTC.
+
+**#4281 supersession verdict (static, line-level)**: every unique change vs its true base `7cf29833` (register_pipe refactor, Assign 2-target pipe registration, else-scope isolation) is **identical to landed #4290**; branch predates #4290's loop backedge replay → naive merge would REGRESS it (diff shows replay block as removal). Superseded by #4290+#4299; fixes-#4280 halves delivered by #4290 (assigned pipes) + #4299 (scope-pop propagation). Reply drafted (notes/reply-4281.md) — POST WHEN QUOTA RESETS. Do not close silently.
+
+**Band oracle sweep (go1.26.9, local)**: SADIQ2M (#4296/#4288/#4285/#4283/#4276) vs dextermos (#4319/#4303/#4302/#4301/#4300/#4294) — crc32 tables byte-identical and ALL-CORRECT (NewIEEE 0, ChecksumIEEE/New/MakeTable 1, Checksum 2, Update 3); sha1 new 0/sum 1 ✓ (NOTE: oracle warned hash/sha1 does not exist — it's crypto/sha1; tables' member arities unaffected); md5 ✓; csv NewReader/NewWriter 1 ✓; xml diverges but both sides correct: SADIQ2M covers new_token_decoder(1) which dextermos lacks, dextermos covers escape→**2** which is CORRECT (xml.Escape(w io.Writer, s []byte) — Go-1.0-compat 2-arg form, oracle-verified). bytes (#4294) visible arms all correct.
+
+**Band structural verdict (S177 dual-table rule)**: none of sha1/md5/crc32/xml/csv are on either curated surface in main (verified both tables) → these are NEW curated packages → both sides required. **SADIQ2M band: all 5 PRs carry foreign.rs + hy-emit/lib.rs + shapes.rs (dual-table complete). dextermos band: #4303/#4302/#4301/#4300/#4294 lack hy-emit/lib.rs (emit-side is_package_root missing = #4318 failure mode); only #4319 has it.** → Land SADIQ2M series first (start #4296); dextermos PRs become superseded/incomplete on overlap.
+
+**State**: main `17dbe9f9` == origin (asserted). Tests 3289, suites 507, corpus 139/139, differential FULL. Reply drafts staged: notes/reply-4281.md (post on reset). Next tick: post 4281 reply → approve CI → SADIQ2M #4296 four-gate verification → band dominoes.
