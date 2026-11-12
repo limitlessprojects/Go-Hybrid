@@ -7301,6 +7301,12 @@ impl<'a> Checker<'a> {
         check_writes: bool,
     ) -> FnState {
         let mut cst = st.clone();
+        if !check_writes {
+            cst.aliases.clear();
+            cst.may_share.clear();
+            cst.env.retain(|k, b| cst.named_results.contains(k) || b.non_owned_origin.as_deref().is_some_and(|o| o.starts_with("method ") || o.starts_with("parameter ")));
+            cst.env.values_mut().for_each(|b| b.immutable = false);
+        }
         let flat = walk::flatten_with_results(body, &cst.named_results);
         cst.last_use = flat.last_use.clone();
         let mut active_loops: Vec<(usize, usize, &Block)> = Vec::new();
@@ -7331,6 +7337,7 @@ impl<'a> Checker<'a> {
                             // binding over a const composite freezes like the
                             // const itself (E3006 surface); a plain binding
                             // shadows and clears alias/share state.
+                            let pre_m = cst.clone();
                             let mut roots = Vec::new();
                             collect_ref_roots(subject, &mut roots);
                             self.collect_callee_const_return_roots(&cst, subject, &mut roots, 0);
@@ -7372,6 +7379,8 @@ impl<'a> Checker<'a> {
                                 cst.aliases.remove(*name);
                                 cst.share_clear(name);
                             }
+                            cst = pre_m;
+                            self.bind_match_arm(&mut cst, name, subject, false);
                         }
                     }
                 }
@@ -7406,7 +7415,15 @@ impl<'a> Checker<'a> {
                     };
                     self.check_call_const_writes(&cst, &cr, &HashSet::new());
                 }
+            } else {
+                let mut calls = Vec::new();
+                walk::own_calls(stmt, &mut calls);
+                for cr in &calls {
+                    if matches!(crate::model::unwrap_parens(cr.callee), Expr::Ident { name, .. } if name == "copy") { self.record_copy_may_share(&mut cst, cr); }
+                    self.record_callee_param_stores(&mut cst, cr);
+                }
             }
+            self.check_own_const_method_values(&cst, stmt);
 
             match stmt {
                 Stmt::Local(l) => {
@@ -7629,15 +7646,17 @@ impl<'a> Checker<'a> {
                 // Also preserve any top-level alias/share edges from the completed
                 // enclosing state `st` for bindings that are not shadowed in an
                 // inner scope of `merged` (covers post-closure rebinds to a const).
+                for (k, b) in st.env.iter().filter(|(_, b)| b.immutable) { merged.env.entry(k.clone()).or_insert_with(|| b.clone()); }
+                let ok_post = |id: &str, m: &FnState| !m.scopes.iter().any(|s| s.contains_key(id)) && (m.env.contains_key(id) || !st.env.contains_key(id) || self.const_write_root(st, &Place { kind: PlaceKind::Ident(id.to_string()), span: sp }).is_some());
                 for (k, v) in &st.aliases {
-                    if !merged.scopes.iter().any(|s| s.contains_key(k)) {
+                    if ok_post(k, &merged) && ok_post(v, &merged) {
                         merged.aliases.entry(k.clone()).or_insert_with(|| v.clone());
                     }
                 }
                 for (k, peers) in &st.may_share {
-                    if !merged.scopes.iter().any(|s| s.contains_key(k)) {
+                    if ok_post(k, &merged) {
                         for p in peers {
-                            if !merged.scopes.iter().any(|s| s.contains_key(p)) {
+                            if ok_post(p, &merged) {
                                 merged.share_edge(k, p);
                             }
                         }
@@ -7646,7 +7665,7 @@ impl<'a> Checker<'a> {
                 self.scan_closure_body(&mut merged, flit, &HashSet::new());
             }
             if let Stmt::For { body: lbody, .. } = stmt {
-                let outer_depth = cst.scopes.len().saturating_sub(1);
+                let outer_depth = cst.scopes.len();
                 active_loops.push((flat.loop_end_of(idx), outer_depth, lbody));
             }
             while let Some(&(loop_end, outer_depth, lbody)) = active_loops.last() {
@@ -7767,6 +7786,11 @@ impl<'a> Checker<'a> {
         let pre_st = st.clone();
         let mut overwritten = Vec::new();
         let is_let = l.kind == LocalKind::Let;
+        if l.values.is_empty() {
+            let sh = l.ty.as_ref().map(|t| self.shape_of_type(t)).unwrap_or(TypeShape::Unknown);
+            l.names.iter().for_each(|n| self.define_binding(st, n, sh.clone(), l.ty.clone(), immutable, false, is_let));
+            return;
+        }
         if l.values.len() == 1 && l.names.len() > 1 {
             let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
             let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
@@ -7927,6 +7951,9 @@ impl<'a> Checker<'a> {
             }
             return None;
         }
+        if matches!(inner, Expr::Field { base, name, .. } if self.resolve_const_method_decl(st, base, name).is_some()) {
+            return None;
+        }
         if !self.expr_or_multi_call_may_share(st, inner) {
             return None;
         }
@@ -7964,6 +7991,76 @@ impl<'a> Checker<'a> {
             }
         }
         None
+    }
+
+    fn shape_carries_alias(&self, sh: &TypeShape) -> bool {
+        self.shape_may_share(sh) || matches!(sh, TypeShape::Pointer(_) | TypeShape::Unknown | TypeShape::ForeignOpaque(_))
+    }
+    fn is_pkg_ident<'b>(&self, st: &FnState, base: &'b Expr) -> Option<&'b str> {
+        match crate::model::unwrap_parens(base) {
+            Expr::Ident { name, .. } if self.lookup_binding(st, name).is_none() && (A3_PURE_PKGS.contains(&name.as_str()) || self.known_package(name)) => Some(name),
+            _ => None,
+        }
+    }
+    fn expr_struct_sname(&self, st: &FnState, e: &Expr) -> Option<String> {
+        match self.shape_of_expr(st, e) {
+            TypeShape::Struct(Some(s)) => Some(s),
+            TypeShape::Pointer(inner) => match *inner { TypeShape::Struct(Some(s)) => Some(s), _ => None },
+            _ => None,
+        }
+    }
+    fn canonical_recv_type(&self, mut ty: hy_syntax::TypeExpr) -> Option<String> {
+        for _ in 0..8 {
+            match self.resolve_type_alias(&ty) {
+                hy_syntax::TypeExpr::Pointer { to, .. } => ty = *to,
+                hy_syntax::TypeExpr::Named { name, .. } => return Some(Self::base_named_type_str(&name).to_string()),
+                _ => return match ty { hy_syntax::TypeExpr::Named { name, .. } => Some(Self::base_named_type_str(&name).to_string()), _ => None },
+            }
+        }
+        None
+    }
+    fn resolve_const_method_decl(&self, st: &FnState, base: &Expr, method_name: &str) -> Option<&'a FnDecl> {
+        if self.is_pkg_ident(st, base).is_some() || self.expr_struct_sname(st, base).and_then(|s| self.struct_fields_for_sname(&s)).is_some_and(|fs| fs.iter().any(|(fnm, _)| fnm == method_name)) { return None; }
+        let raw_head = self.ty_of_expr(st, base).and_then(|t| match match t { hy_syntax::TypeExpr::Pointer { to, .. } => *to, o => o } { hy_syntax::TypeExpr::Named { name, .. } => Some(Self::base_named_type_str(&name).to_string()), _ => None });
+        let canon = self.ty_of_expr(st, base).and_then(|t| self.canonical_recv_type(t)).or_else(|| self.expr_struct_sname(st, base).and_then(|s| self.canonical_recv_type(hy_syntax::TypeExpr::Named { name: s, span: base.span() })))?;
+        let mhead = Self::base_named_type_str(method_name);
+        self.method_decls.iter().find_map(|((r, m), d)| {
+            let ok = r == &canon || raw_head.as_deref() == Some(r.as_str()) || self.type_aliases.get(r.as_str()).and_then(|t| self.canonical_recv_type(t.clone())).as_deref() == Some(canon.as_str());
+            (m == mhead && ok).then_some(*d)
+        })
+    }
+    fn candidate_method_decls(&self, st: &FnState, base: &Expr, method_name: &str) -> Vec<&'a FnDecl> {
+        if let Some(d) = self.resolve_const_method_decl(st, base, method_name) { return vec![d]; }
+        if self.expr_struct_sname(st, base).is_some() || self.ty_of_expr(st, base).is_some() { return Vec::new(); }
+        let mhead = Self::base_named_type_str(method_name);
+        self.method_decls.iter().filter(|((_, m), _)| m == mhead).map(|(_, d)| *d).collect()
+    }
+    fn method_selector_const_write(&self, st: &FnState, base: &Expr, method_name: &str, declared: &HashSet<String>) -> Option<String> {
+        let decl = self.resolve_const_method_decl(st, base, method_name)?;
+        let r = decl.receiver.as_ref()?;
+        let r_shape = self.shape_of_type(&r.ty);
+        let ptr_recv = r.is_pointer || matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. }) || matches!(r_shape, TypeShape::Pointer(_));
+        let recv_const = if ptr_recv { self.const_arg_root(st, base, declared).or_else(|| self.const_arg_root(st, &Expr::AddrOf { operand: Box::new(base.clone()), span: base.span() }, declared)) } else { self.shape_carries_alias(&r_shape).then(|| self.const_arg_root(st, base, declared)).flatten() }?;
+        self.fn_mutates_const_param(decl, &r.name, 0).then_some(recv_const)
+    }
+    fn check_own_const_method_values(&mut self, st: &FnState, stmt: &Stmt) {
+        let empty = HashSet::new();
+        for_stmt_header_exprs(stmt, |e, c| self.check_expr_const_method_values(st, e, c, &empty));
+        if let Stmt::Match { subject, arms, .. } = stmt {
+            for arm in arms.iter().filter(|a| a.guard.is_some()) {
+                let mut gst = st.clone(); gst.scope_push();
+                if let hy_syntax::MatchPattern::Path { binding: Some(n), .. } = &arm.pattern { self.bind_match_arm(&mut gst, n, subject, false); }
+                self.check_expr_const_method_values(&gst, arm.guard.as_ref().unwrap(), false, &empty);
+            }
+        }
+    }
+    fn check_expr_const_method_values(&mut self, st: &FnState, expr: &Expr, is_callee: bool, declared: &HashSet<String>) {
+        if let (false, Expr::Field { base, name, span }) = (is_callee, expr) {
+            if let Some(cn) = self.method_selector_const_write(st, base, name, declared) {
+                if !self.diags.iter().any(|d| d.code == "HYB-E3006" && (d.span == *span || d.span == base.span())) { self.emit_const_write_error(&cn, *span); }
+            }
+        }
+        for_child_exprs(expr, is_callee, |x, c| self.check_expr_const_method_values(st, x, c, declared));
     }
 
     /// Issue #188: interprocedural T22 enforcement (`HYB-E3006`). When a
@@ -8084,6 +8181,11 @@ impl<'a> Checker<'a> {
                     hits.push((const_name, base.span()));
                 }
             }
+            if hits.is_empty() && self.resolve_const_method_decl(st, base, method_name).is_some() {
+                if let Some(const_name) = self.method_selector_const_write(st, base, method_name, declared) {
+                    hits.push((const_name, base.span()));
+                }
+            }
         }
         for (i, a) in cr.args.iter().enumerate() {
             let inner = crate::model::unwrap_parens(&a.value);
@@ -8174,7 +8276,7 @@ impl<'a> Checker<'a> {
                         if let Some(decl) = recv_base.as_ref().and_then(|rb| {
                             let rbase = Self::base_named_type_str(rb).to_string();
                             self.method_decls.get(&(rbase, method_name.clone())).copied()
-                        }) {
+                        }).or_else(|| self.resolve_const_method_decl(st, base, method_name)) {
                             match decl.params.get(i) {
                                 Some(p) => {
                                     let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
@@ -8183,6 +8285,9 @@ impl<'a> Checker<'a> {
                                 }
                                 None => (false, true),
                             }
+                        } else if !self.candidate_method_decls(st, base, method_name).is_empty() {
+                            let cands = self.candidate_method_decls(st, base, method_name);
+                            (cands.iter().any(|d| d.params.get(i).is_some_and(|p| matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. }) || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_)))), cands.iter().any(|d| d.params.get(i).map_or(true, |p| self.fn_mutates_const_param(d, &p.name, 0))))
                         } else if let Some(field_fn_ptr) = recv_base.as_ref().and_then(|rb| {
                             self.structs.get(rb).and_then(|fields| {
                                 fields.iter().find(|(fname, _)| fname == method_name).and_then(|(_, fty)| {
@@ -8205,13 +8310,14 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                Expr::FnLit { params, body, .. } => match params.get(i) {
+                Expr::FnLit { params, results, body, .. } => match params.get(i) {
                     Some(p) => {
                         let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
                             || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
                         let mut aliases = HashSet::new();
                         aliases.insert(p.name.clone());
-                        (is_ptr, self.block_mutates_const_param(body, &mut aliases, 0))
+                        let mut pst = self.bind_fnlit_sig(st, params, results);
+                        (is_ptr, self.block_mutates_const_param(&mut pst, body, &mut aliases, 0))
                     }
                     None => (false, true),
                 },
@@ -8259,6 +8365,12 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn bind_fnlit_sig(&self, st: &FnState, params: &[hy_syntax::Param], results: &[hy_syntax::FnResult]) -> FnState {
+        let mut inner = st.clone(); inner.scope_push();
+        params.iter().for_each(|p| self.define_binding(&mut inner, &p.name, self.shape_of_type(&p.ty), Some(p.ty.clone()), false, false, false));
+        results.iter().filter_map(|r| r.name.as_deref().filter(|n| *n != "_").map(|n| (n, &r.ty))).for_each(|(n, t)| self.define_binding(&mut inner, n, self.shape_of_type(t), Some(t.clone()), false, false, false));
+        inner
+    }
     fn fn_mutates_const_param(&self, decl: &FnDecl, param: &str, depth: usize) -> bool {
         if depth > 4 {
             return true;
@@ -8266,22 +8378,36 @@ impl<'a> Checker<'a> {
         let Some(body) = &decl.body else {
             return false;
         };
+        let can_mut = |ty: &hy_syntax::TypeExpr, ptr: bool| ptr || matches!(ty, hy_syntax::TypeExpr::Pointer { .. }) || self.shape_carries_alias(&self.shape_of_type(ty));
+        if decl.receiver.as_ref().is_some_and(|r| r.name == param && !can_mut(&r.ty, r.is_pointer)) || decl.params.iter().any(|p| p.name == param && !can_mut(&p.ty, false)) { return false; }
+        let mut pst = self.bind_fnlit_sig(&FnState::default(), &decl.params, &decl.results);
+        decl.type_params.iter().for_each(|tp| { pst.type_params.insert(tp.name.clone()); });
+        if let Some(r) = &decl.receiver {
+            self.receiver_type_params(&r.ty).into_iter().for_each(|rtp| { pst.type_params.insert(rtp); });
+            let bsh = self.shape_of_type(&r.ty);
+            let (sh, ty) = if r.is_pointer && !matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. }) { (TypeShape::Pointer(Box::new(bsh)), Some(hy_syntax::TypeExpr::Pointer { to: Box::new(r.ty.clone()), span: r.ty.span() })) } else { (bsh, Some(r.ty.clone())) };
+            self.define_binding(&mut pst, &r.name, sh, ty, false, false, false);
+        }
         let mut aliases = HashSet::new();
         aliases.insert(param.to_string());
-        self.block_mutates_const_param(body, &mut aliases, depth)
+        self.block_mutates_const_param(&mut pst, body, &mut aliases, depth)
     }
 
     fn block_mutates_const_param(
         &self,
+        pst: &mut FnState,
         block: &Block,
         aliases: &mut HashSet<String>,
         depth: usize,
     ) -> bool {
+        pst.scope_push();
         for s in &block.stmts {
-            if self.stmt_mutates_const_param(s, aliases, depth) {
+            if self.stmt_mutates_const_param(pst, s, aliases, depth) {
+                pst.scope_pop();
                 return true;
             }
         }
+        pst.scope_pop();
         false
     }
 
@@ -8305,12 +8431,47 @@ impl<'a> Checker<'a> {
         roots.iter().any(|r| aliases.contains(r))
     }
 
+    fn expr_has_const_method_value(&self, pst: &FnState, expr: &Expr, is_callee: bool, aliases: &HashSet<String>, depth: usize) -> bool {
+        if (matches!(as_addr_of(expr).map(unwrap_parens), Some(Expr::Index { .. } | Expr::Field { .. }))
+            && Self::expr_reaches_const_aliases(expr, aliases))
+            || (!is_callee && matches!(expr, Expr::Field { base, name, .. }
+                if Self::expr_reaches_const_aliases(base, aliases) && self.is_pkg_ident(pst, base).is_none()
+                    && self.candidate_method_decls(pst, base, name).iter().any(|d| d.receiver.as_ref().is_some_and(|r| self.fn_mutates_const_param(d, &r.name, depth + 1)))))
+        {
+            return true;
+        }
+        if let Expr::FnLit { params, results, body, .. } = expr {
+            let mut inner_aliases = aliases.clone();
+            for p in params { inner_aliases.remove(&p.name); }
+            for r in results { if let Some(name) = &r.name { inner_aliases.remove(name); } }
+            return !inner_aliases.is_empty() && (self.expr_fnlit_mutates_const_param(expr, aliases, depth)
+                || self.block_mutates_const_param(&mut self.bind_fnlit_sig(pst, params, results), body, &mut inner_aliases, depth));
+        }
+        let mut child_mut = false;
+        for_child_exprs(expr, is_callee, |x, c| child_mut |= self.expr_has_const_method_value(pst, x, c, aliases, depth));
+        child_mut
+    }
+    fn expr_full_mutates_const_param(&self, pst: &FnState, expr: &Expr, is_callee: bool, aliases: &mut HashSet<String>, depth: usize) -> bool {
+        let mut calls = Vec::new();
+        walk::expr_calls(expr, &mut calls);
+        calls.iter().any(|cr| {
+            let m = self.call_mutates_const_param(pst, cr, aliases, depth);
+            if !m { self.record_call_const_alias_stores(cr, aliases); }
+            m
+        }) || self.expr_has_const_method_value(pst, expr, is_callee, aliases, depth) || self.expr_fnlit_mutates_const_param(expr, aliases, depth)
+    }
     fn stmt_mutates_const_param(
         &self,
+        pst: &mut FnState,
         stmt: &Stmt,
         aliases: &mut HashSet<String>,
         depth: usize,
     ) -> bool {
+        if !matches!(stmt, Stmt::If { .. } | Stmt::Match { .. } | Stmt::For { .. }) {
+            let mut hdr_mut = false;
+            for_stmt_header_exprs(stmt, |e, c| hdr_mut |= self.expr_full_mutates_const_param(pst, e, c, aliases, depth));
+            if hdr_mut { return true; }
+        }
         match stmt {
             Stmt::Assign {
                 targets, values, ..
@@ -8359,6 +8520,16 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                for (i, t) in targets.iter().enumerate() {
+                    if let PlaceKind::Ident(name) = &t.kind {
+                        let rhs_ty = values.get(i).map(|v| (self.shape_of_expr(pst, v), self.ty_of_expr(pst, v)));
+                        if let Some(((sh, ty), b)) = rhs_ty.zip(pst.env_lookup_mut(name)) {
+                            if matches!(b.shape, TypeShape::Unknown) { b.shape = sh; }
+                            if b.ty.is_none() { b.ty = ty; }
+                        }
+                        if self.lookup_binding(pst, name).is_some_and(|b| !self.shape_carries_alias(&b.shape)) { aliases.remove(name); }
+                    }
+                }
             }
             Stmt::Local(l) => {
                 for v in &l.values {
@@ -8388,6 +8559,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                self.process_closure_const_local(pst, l);
+                l.names.iter().for_each(|n| if self.lookup_binding(pst, n).is_some_and(|b| !self.shape_carries_alias(&b.shape)) { aliases.remove(n); });
             }
             Stmt::Send { value, .. } => {
                 if Self::expr_reaches_const_aliases(value, aliases) {
@@ -8406,7 +8579,7 @@ impl<'a> Checker<'a> {
                     args,
                     span: *span,
                 };
-                if self.call_mutates_const_param(&cr, aliases, depth) {
+                if self.call_mutates_const_param(pst, &cr, aliases, depth) {
                     return true;
                 }
             }
@@ -8427,7 +8600,7 @@ impl<'a> Checker<'a> {
         let mut calls = Vec::new();
         walk::own_calls(stmt, &mut calls);
         for cr in &calls {
-            if self.call_mutates_const_param(cr, aliases, depth) {
+            if self.call_mutates_const_param(pst, cr, aliases, depth) {
                 return true;
             }
             self.record_call_const_alias_stores(cr, aliases);
@@ -8435,28 +8608,38 @@ impl<'a> Checker<'a> {
         match stmt {
             Stmt::If {
                 init,
+                cond,
                 then,
                 otherwise,
                 ..
             } => {
                 let mut branch_aliases = aliases.clone();
+                pst.scope_push();
                 if let Some(i) = init {
-                    if self.stmt_mutates_const_param(i, &mut branch_aliases, depth) {
+                    if self.stmt_mutates_const_param(pst, i, &mut branch_aliases, depth) {
+                        pst.scope_pop();
                         return true;
                     }
                 }
+                if self.expr_full_mutates_const_param(pst, cond, false, &mut branch_aliases, depth) {
+                    pst.scope_pop();
+                    return true;
+                }
                 let mut then_aliases = branch_aliases.clone();
-                if self.block_mutates_const_param(then, &mut then_aliases, depth) {
+                if self.block_mutates_const_param(pst, then, &mut then_aliases, depth) {
+                    pst.scope_pop();
                     return true;
                 }
                 aliases.extend(then_aliases);
                 if let Some(o) = otherwise {
                     let mut else_aliases = branch_aliases;
-                    if self.stmt_mutates_const_param(o, &mut else_aliases, depth) {
+                    if self.stmt_mutates_const_param(pst, o, &mut else_aliases, depth) {
+                        pst.scope_pop();
                         return true;
                     }
                     aliases.extend(else_aliases);
                 }
+                pst.scope_pop();
             }
             Stmt::For { kind, body, .. } => {
                 // #2309: an alias made late in the body is live at the top of
@@ -8466,25 +8649,34 @@ impl<'a> Checker<'a> {
                 let mut entry = aliases.clone();
                 loop {
                     let mut body_aliases = entry.clone();
+                    let mut hdr_mut = false;
+                    for_stmt_header_exprs(stmt, |e, c| hdr_mut |= self.expr_full_mutates_const_param(pst, e, c, &mut body_aliases, depth));
+                    if hdr_mut { return true; }
+                    pst.scope_push();
                     match kind {
                         hy_syntax::ForKind::Iterate { vars, expr } => {
-                            let reaches = Self::expr_reaches_const_aliases(expr, &body_aliases);
-                            for v in vars {
-                                if reaches {
+                            let reaches = Self::expr_reaches_const_aliases(expr, &body_aliases)
+                                && !matches!(self.shape_of_expr(pst, expr), TypeShape::Chan(_));
+                            for (v, sh) in vars.iter().zip(self.iterate_var_shapes(pst, expr, vars.len())) {
+                                if reaches && self.shape_carries_alias(&sh) {
                                     body_aliases.insert(v.clone());
                                 } else {
                                     body_aliases.remove(v);
                                 }
+                                self.define_binding(pst, v, sh, None, false, false, false);
                             }
                         }
                         hy_syntax::ForKind::Range { var, .. } => {
                             body_aliases.remove(var);
+                            self.define_binding(pst, var, TypeShape::Primitive, None, false, false, false);
                         }
                         _ => {}
                     }
-                    if self.block_mutates_const_param(body, &mut body_aliases, depth) {
+                    if self.block_mutates_const_param(pst, body, &mut body_aliases, depth) {
+                        pst.scope_pop();
                         return true;
                     }
+                    pst.scope_pop();
                     if body_aliases.is_subset(&entry) {
                         break;
                     }
@@ -8494,51 +8686,69 @@ impl<'a> Checker<'a> {
             }
             Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
                 let mut body_aliases = aliases.clone();
-                if self.block_mutates_const_param(body, &mut body_aliases, depth) {
+                if self.block_mutates_const_param(pst, body, &mut body_aliases, depth) {
                     return true;
                 }
                 aliases.extend(body_aliases);
             }
             Stmt::Match { subject, arms, .. } => {
-                let subject_reaches = Self::expr_reaches_const_aliases(subject, aliases);
+                if self.expr_full_mutates_const_param(pst, subject, false, aliases, depth) { return true; }
+                let sub_shape = self.shape_of_expr(pst, subject);
+                let sub_ty = match self.ty_of_expr(pst, subject).map(|t| self.resolve_type_alias(&t)) { Some(hy_syntax::TypeExpr::Option { elem, .. }) => Some(*elem), _ => self.ty_of_expr(pst, subject) };
+                let subject_reaches = Self::expr_reaches_const_aliases(subject, aliases) && self.shape_carries_alias(&sub_shape);
                 for arm in arms {
                     let mut arm_aliases = aliases.clone();
+                    pst.scope_push();
+                    let mut bound = None;
                     if let hy_syntax::MatchPattern::Path {
                         binding: Some(bname),
                         ..
                     } = &arm.pattern
                     {
+                        self.define_binding(pst, bname, sub_shape.clone(), sub_ty.clone(), false, false, false);
                         if subject_reaches {
                             arm_aliases.insert(bname.clone());
                         } else {
                             arm_aliases.remove(bname);
                         }
+                        bound = Some(bname.as_str());
                     }
-                    if self.block_mutates_const_param(&arm.body, &mut arm_aliases, depth) {
+                    if arm.guard.as_ref().is_some_and(|g| self.expr_full_mutates_const_param(pst, g, false, &mut arm_aliases, depth))
+                        || self.block_mutates_const_param(pst, &arm.body, &mut arm_aliases, depth)
+                    {
+                        pst.scope_pop();
                         return true;
                     }
+                    pst.scope_pop();
+                    if let Some(bn) = bound.filter(|bn| !aliases.contains(*bn)) { arm_aliases.remove(bn); }
                     aliases.extend(arm_aliases);
                 }
             }
             Stmt::Select { arms, .. } => {
                 for arm in arms {
                     let mut arm_aliases = aliases.clone();
+                    pst.scope_push();
                     match &arm.kind {
                         hy_syntax::SelectArmKind::Send { value, .. } => {
                             if Self::expr_reaches_const_aliases(value, aliases) {
+                                pst.scope_pop();
                                 return true;
                             }
                         }
-                        hy_syntax::SelectArmKind::Recv { names, .. } => {
-                            for n in names {
+                        hy_syntax::SelectArmKind::Recv { names, chan } => {
+                            let elem = match self.shape_of_expr(pst, chan) { TypeShape::Chan(e) => *e, _ => TypeShape::Unknown };
+                            for (i, n) in names.iter().enumerate() {
+                                self.define_binding(pst, n, if i == 0 { elem.clone() } else { TypeShape::Primitive }, None, false, false, false);
                                 arm_aliases.remove(n);
                             }
                         }
                         _ => {}
                     }
-                    if self.block_mutates_const_param(&arm.body, &mut arm_aliases, depth) {
+                    if self.block_mutates_const_param(pst, &arm.body, &mut arm_aliases, depth) {
+                        pst.scope_pop();
                         return true;
                     }
+                    pst.scope_pop();
                     aliases.extend(arm_aliases);
                 }
             }
@@ -8722,7 +8932,8 @@ impl<'a> Checker<'a> {
                             return true;
                         }
                     }
-                    self.block_mutates_const_param(body, &mut inner_aliases, depth)
+                    let mut inner_pst = self.bind_fnlit_sig(&FnState::default(), params, results);
+                    self.block_mutates_const_param(&mut inner_pst, body, &mut inner_aliases, depth)
                 }
             }
             Expr::Paren { inner, .. }
@@ -8765,6 +8976,7 @@ impl<'a> Checker<'a> {
 
     fn call_mutates_const_param(
         &self,
+        pst: &FnState,
         cr: &CallRef,
         aliases: &HashSet<String>,
         depth: usize,
@@ -8807,17 +9019,28 @@ impl<'a> Checker<'a> {
                         return false;
                     }
                 }
+                if let Some(pkg) = self.is_pkg_ident(pst, base) {
+                    return foreign::package_mutated_arg(pkg, method_name)
+                        .and_then(|idx| cr.args.get(idx))
+                        .is_some_and(&arg_reaches_alias);
+                }
+                if self.expr_struct_sname(pst, base).and_then(|s| self.struct_fields_for_sname(&s)).is_some_and(|fs| fs.iter().any(|(fnm, _)| fnm == method_name)) {
+                    return cr.args.iter().any(&arg_reaches_alias);
+                }
                 let matching: Vec<&FnDecl> = self
                     .method_decls
                     .iter()
                     .filter(|((_, m), _)| m == method_name)
                     .map(|(_, d)| *d)
                     .collect();
+                let _ = matching;
+                let matching = self.candidate_method_decls(pst, base, method_name);
+                let recv_known = !matching.is_empty() || self.expr_struct_sname(pst, base).is_some();
                 if Self::expr_reaches_const_aliases(base, aliases)
                     && ((method_name == "pop"
                         && cr.args.is_empty()
                         && !matches!(crate::model::unwrap_parens(base), Expr::Ident { .. }))
-                        || matching.is_empty()
+                        || (matching.is_empty() && !recv_known)
                         || matching.iter().any(|d| {
                             d.receiver
                                 .as_ref()
@@ -8874,7 +9097,8 @@ impl<'a> Checker<'a> {
                 if inner_aliases.is_empty() {
                     false
                 } else {
-                    self.block_mutates_const_param(body, &mut inner_aliases, depth + 1)
+                    let mut inner_pst = self.bind_fnlit_sig(pst, params, results);
+                    self.block_mutates_const_param(&mut inner_pst, body, &mut inner_aliases, depth + 1)
                 }
             }
             _ => cr.args.iter().any(&arg_reaches_alias),
@@ -9313,20 +9537,23 @@ fn collect_capture_idents_stmt(
             }
         }
         hy_syntax::Stmt::For { kind, body, .. } => {
+            let mut fb = bound.clone();
             match kind {
                 hy_syntax::ForKind::While { cond } => {
                     collect_capture_idents_expr(cond, bound, out)
                 }
-                hy_syntax::ForKind::Range { lo, hi, .. } => {
+                hy_syntax::ForKind::Range { var, lo, hi, .. } => {
                     collect_capture_idents_expr(lo, bound, out);
                     collect_capture_idents_expr(hi, bound, out);
+                    fb.insert(var.clone());
                 }
-                hy_syntax::ForKind::Iterate { expr, .. } => {
-                    collect_capture_idents_expr(expr, bound, out)
+                hy_syntax::ForKind::Iterate { vars, expr } => {
+                    collect_capture_idents_expr(expr, bound, out);
+                    fb.extend(vars.iter().cloned());
                 }
                 hy_syntax::ForKind::Infinite => {}
             }
-            collect_capture_idents_block(body, bound, out);
+            collect_capture_idents_block(body, &mut fb, out);
         }
         hy_syntax::Stmt::Return { values, .. } => {
             for v in values {
@@ -9343,10 +9570,12 @@ fn collect_capture_idents_stmt(
         hy_syntax::Stmt::Match { subject, arms, .. } => {
             collect_capture_idents_expr(subject, bound, out);
             for arm in arms {
+                let mut ab = bound.clone();
+                if let hy_syntax::MatchPattern::Path { binding: Some(b), .. } = &arm.pattern { ab.insert(b.clone()); }
                 if let Some(g) = &arm.guard {
-                    collect_capture_idents_expr(g, bound, out);
+                    collect_capture_idents_expr(g, &mut ab, out);
                 }
-                collect_capture_idents_block(&arm.body, bound, out);
+                collect_capture_idents_block(&arm.body, &mut ab, out);
             }
         }
         hy_syntax::Stmt::Defer { call, .. } => collect_capture_idents_expr(call, bound, out),
@@ -9354,17 +9583,19 @@ fn collect_capture_idents_stmt(
         hy_syntax::Stmt::Block { block, .. } => collect_capture_idents_block(block, bound, out),
         hy_syntax::Stmt::Select { arms, .. } => {
             for arm in arms {
+                let mut ab = bound.clone();
                 match &arm.kind {
                     hy_syntax::SelectArmKind::Send { chan, value, .. } => {
                         collect_capture_idents_expr(chan, bound, out);
                         collect_capture_idents_expr(value, bound, out);
                     }
-                    hy_syntax::SelectArmKind::Recv { chan, .. } => {
-                        collect_capture_idents_expr(chan, bound, out)
+                    hy_syntax::SelectArmKind::Recv { names, chan } => {
+                        collect_capture_idents_expr(chan, bound, out);
+                        ab.extend(names.iter().cloned());
                     }
                     hy_syntax::SelectArmKind::Default => {}
                 }
-                collect_capture_idents_block(&arm.body, bound, out);
+                collect_capture_idents_block(&arm.body, &mut ab, out);
             }
         }
     }
@@ -9542,6 +9773,15 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        let (empty, no_decl) = (FnState::default(), HashSet::new());
+        for c in self.file.decls.iter().filter_map(|d| if let hy_syntax::Decl::Const(c) = d { Some(c) } else { None }) {
+            let (mut calls, mut fnlits) = (Vec::new(), Vec::new());
+            walk::expr_calls(&c.value, &mut calls);
+            calls.iter().for_each(|cr| { self.check_delete_const(&empty, cr, &no_decl); self.check_call_const_writes(&empty, cr, &no_decl); });
+            self.check_expr_const_method_values(&empty, &c.value, false, &no_decl);
+            walk::expr_fnlits(&c.value, &mut fnlits);
+            fnlits.into_iter().for_each(|fl| self.scan_closure_body(&mut FnState::default(), fl, &no_decl));
+        }
     }
 
     /// `var`/`let` statements are Locals; file-level const inference:
@@ -9571,6 +9811,58 @@ impl<'a> Checker<'a> {
             non_owned_origin,
             slot_loan: false,
         }
+    }
+}
+
+fn for_type_exprs<'b>(ty: &'b hy_syntax::TypeExpr, f: &mut impl FnMut(&'b Expr, bool)) {
+    match ty {
+        hy_syntax::TypeExpr::Array { len, elem, .. } => { len.iter().for_each(|x| f(x, false)); for_type_exprs(elem, f); }
+        hy_syntax::TypeExpr::Pointer { to, .. } | hy_syntax::TypeExpr::Slice { elem: to, .. } | hy_syntax::TypeExpr::Option { elem: to, .. } | hy_syntax::TypeExpr::Chan { elem: to, .. } => for_type_exprs(to, f),
+        hy_syntax::TypeExpr::Map { key, value, .. } => { for_type_exprs(key, f); for_type_exprs(value, f); }
+        hy_syntax::TypeExpr::Fn { params, results, .. } => { params.iter().for_each(|p| for_type_exprs(&p.ty, f)); results.iter().for_each(|r| for_type_exprs(r, f)); }
+        hy_syntax::TypeExpr::Named { .. } => {}
+    }
+}
+fn for_child_exprs<'b>(e: &'b Expr, is_callee: bool, mut f: impl FnMut(&'b Expr, bool)) {
+    match e {
+        Expr::Interp { parts, .. } => parts.iter().for_each(|p| if let hy_syntax::InterpPart::Expr(x) = p { f(x, false); }),
+        Expr::Binary { lhs: a, rhs: b, .. } | Expr::Index { base: a, index: b, .. } => { f(a, false); f(b, false); }
+        Expr::Paren { inner: x, .. } => f(x, is_callee),
+        Expr::Unary { operand: x, .. } | Expr::AddrOf { operand: x, .. } | Expr::Move { operand: x, .. } | Expr::Try { operand: x, .. } | Expr::Receive { chan: x, .. } | Expr::Field { base: x, .. } => f(x, false),
+        Expr::Slice { base, lo, hi, .. } => { f(base, false); lo.iter().for_each(|x| f(x, false)); hi.iter().for_each(|x| f(x, false)); }
+        Expr::Call { callee, args, .. } => { f(callee, true); args.iter().for_each(|a| f(&a.value, false)); }
+        Expr::StructLit { ty, fields, .. } => { ty.iter().for_each(|t| for_type_exprs(t, &mut f)); fields.iter().for_each(|fl| f(&fl.value, false)); }
+        Expr::SliceLit { elem, items, .. } => { elem.iter().for_each(|t| for_type_exprs(t, &mut f)); items.iter().for_each(|it| f(it, false)); }
+        Expr::MapLit { key, value, entries, .. } => { for_type_exprs(key, &mut f); for_type_exprs(value, &mut f); entries.iter().for_each(|(k, v)| { f(k, false); f(v, false); }); }
+        Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => {}
+    }
+}
+fn for_place_exprs<'b>(place: &'b Place, f: &mut impl FnMut(&'b Expr, bool)) {
+    match &place.kind {
+        PlaceKind::Index { base, index } => { for_place_exprs(base, f); f(index, false); }
+        PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => for_place_exprs(base, f),
+        PlaceKind::Ident(_) => {}
+    }
+}
+fn for_stmt_header_exprs<'b>(stmt: &'b Stmt, mut f: impl FnMut(&'b Expr, bool)) {
+    match stmt {
+        Stmt::Local(l) => { l.ty.iter().for_each(|t| for_type_exprs(t, &mut f)); l.values.iter().for_each(|v| f(v, false)); }
+        Stmt::Assign { targets, values, .. } => { targets.iter().for_each(|t| for_place_exprs(t, &mut f)); values.iter().for_each(|v| f(v, false)); }
+        Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } | Stmt::If { cond: expr, .. } | Stmt::Match { subject: expr, .. } => f(expr, false),
+        Stmt::Send { chan, value, .. } => { f(chan, false); f(value, false); }
+        Stmt::For { kind, .. } => match kind {
+            hy_syntax::ForKind::While { cond } | hy_syntax::ForKind::Iterate { expr: cond, .. } => f(cond, false),
+            hy_syntax::ForKind::Range { lo, hi, .. } => { f(lo, false); f(hi, false); }
+            _ => {}
+        },
+        Stmt::Return { values, .. } => values.iter().for_each(|v| f(v, false)),
+        Stmt::Task { callee, args, .. } => { f(callee, true); args.iter().for_each(|a| f(&a.value, false)); }
+        Stmt::Select { arms, .. } => arms.iter().for_each(|arm| match &arm.kind {
+            hy_syntax::SelectArmKind::Send { chan, value, .. } => { f(chan, false); f(value, false); }
+            hy_syntax::SelectArmKind::Recv { chan, .. } => f(chan, false),
+            _ => {}
+        }),
+        _ => {}
     }
 }
 
