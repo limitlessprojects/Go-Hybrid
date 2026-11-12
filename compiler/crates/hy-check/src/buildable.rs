@@ -4373,6 +4373,95 @@ impl<'a> Collector<'a> {
         OpKind::Pointer(Box::new(inner))
     }
 
+    // Full `log` call surface — every member blessed in `foreign.rs` (#4210),
+    // checked against Go 1.26 `log` signatures:
+    //   - Non-callable constants/types: `ldate`, `ltime`, `lmicroseconds`,
+    //     `llongfile`, `lshortfile`, `lutc`, `lmsgprefix`, `lstdflags`, `logger`.
+    //   - 0-arg functions: `flags()`, `prefix()`, `writer()`, `default()`
+    //     (note: `default` is a language keyword in `.hy` source).
+    //   - 1-arg functions: `set_flags(flag)`, `set_prefix(prefix)`, `set_output(w)`.
+    //   - 2-arg function: `output(calldepth, s)`.
+    //   - 3-arg function: `new(out, prefix, flag)`.
+    //   - Format-variadic (`>= 1` arg): `printf(format, v...)`,
+    //     `fatalf(format, v...)`, `panicf(format, v...)`.
+    //   - Pure-variadic (`0+` args): `print(v...)`, `println(v...)`,
+    //     `fatal(v...)`, `fatalln(v...)`, `panic(v...)`, `panicln(v...)`
+    //     (0 arguments is legal Go for `func(v ...any)`).
+    fn check_log_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "ldate"
+                | "ltime"
+                | "lmicroseconds"
+                | "llongfile"
+                | "lshortfile"
+                | "lutc"
+                | "lmsgprefix"
+                | "lstdflags"
+                | "logger"
+        ) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`log.{member}` is not a function — it is a package-level constant/type and cannot be called (HYB-E1002)"
+                ),
+                &format!("reference `log.{member}` directly, do not call it"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "flags" | "prefix" | "writer" | "default" => Some(0),
+            "set_flags" | "set_prefix" | "set_output" => Some(1),
+            "output" => Some(2),
+            "new" => Some(3),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `log.{member}` (HYB-E1002)"),
+                    &format!("`log.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let go_name = {
+                    let mut out = String::new();
+                    for part in member.split('_') {
+                        if part.is_empty() {
+                            continue;
+                        }
+                        let mut cs = part.chars();
+                        if let Some(c) = cs.next() {
+                            out.extend(c.to_uppercase());
+                        }
+                        out.push_str(cs.as_str());
+                    }
+                    out
+                };
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`log.{member}` takes exactly {expected} {noun}, got {} (HYB-E1002)",
+                        args.len()
+                    ),
+                    &format!(
+                        "match the arity of the Go function this lowers to (`log.{go_name}`)"
+                    ),
+                );
+            }
+        } else if matches!(member, "printf" | "fatalf" | "panicf") && args.is_empty() {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`log.{member}` requires at least 1 format string argument `(format[, ...])`, got 0 (HYB-E1002)"
+                ),
+                &format!("write `log.{member}(\"%s\", ...)`"),
+            );
+        }
+    }
 
     fn check_filepath_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(
@@ -8317,6 +8406,9 @@ impl<'a> Collector<'a> {
                         }
                     }
 
+                    if pkg == "log" && self.lookup_kind(pkg).is_none() {
+                        self.check_log_package_call(name.as_str(), args, span);
+                    }
                     if pkg == "filepath" && self.lookup_kind(pkg).is_none() {
                         self.check_filepath_package_call(name.as_str(), args, span);
                     }
