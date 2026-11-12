@@ -1001,3 +1001,16 @@
 **#4350 (wminno, generic user-fn call arity, fixes #1961) — NEXT TICK LEAD**: merge-clean BUT branch forked pre-#4290-landing and bundles liveness-family content: channel_liveness.rs net-delta 141 lines vs main (needs read; likely #4281-style), test file net-delta 1341, and WORKLOG.md delta would silently delete Session-185 entries on auto-merge → landing REQUIRES in-merge WORKLOG restore + liveness-delta adjudication. Zero corruption markers (screen clean). Gates not yet run.
 
 **Scouted next**: #4350 full verification (in-merge fixups ready); #4378 matrixneoaiagent examples-restore (#4236 tree) — dedupe against #4311/#4335; #4380 BP202302 tools (differential reports decode); #4336 cryptowebbuild tools (check_claims_links); #4333 knk97874 test battery; #4337 rrios13 test guard. seenorht #4364/#4347/#4331 await author rebase (test-file lineage). Pending authors unchanged: #4199, #4206, #4097, #4217, #4219, #743.
+
+## Session 187 — 2026-11-12 15:10 (+08; 07:10 UTC)
+
+**Landed: #4350** (wminno / hy-check buildable.rs: call arity at generic user-fn call sites, fixes #1961) — merge `76512806`, pushed & asserted, reply posted via GraphQL `IC_kwDOVFB-j88AAAABllfp7A`.
+- In-merge resolution executed as pre-planned: liveness files (channel_liveness.rs + channel_liveness_4200.rs) kept byte-identical to main (PR's bundled deltas would have reverted register_pipe / Assign-path / loop replay / else-isolation / FnLit traversal — full adjudication read first); WORKLOG.md restored to main. Net = buildable.rs +81 + new test suite (+82, 4 tests).
+- Gates on exact landed tree: battery **3293/0** (508 suites, +1 suite +4 tests), corpus **139/139** (tripwire 2.2% not fired), differential **FULL 47/47+92/92**. #1961's remaining scope (generic call sites) now delivered; #4312 delivered the non-generic half.
+- Reply notes the adjudication transparently and invites the author to re-propose any wanted liveness hunks on a rebased standalone PR.
+
+**Ops**: REST core pool was reset on arrival (5000/5000); approve --max 40 = **40/78 approved** (64 calls). GraphQL used for reads/replies throughout (separate pool, resilient to core burn). Toolchain cold-reinstalled foreground (~5 min). Battery cold build+test <560s at jobs=2 with the DEBUG=0 recipe.
+
+**State**: main `76512806` == origin (asserted). Tests 3293, suites 508, corpus 139/139, differential FULL.
+
+**Scouted next**: #4378 (matrixneoaiagent examples-restore from #4236 tree — dedupe vs #4311/#4335, my #4290 archaeology applies: 00bfd96a restored Session-1 not Phase-2; any restore PR must pick its canonical state explicitly), #4380 (BP202302 tools: differential report decode), #4336 (cryptowebbuild tools: check_claims_links percent-encoding), #4333 (knk97874 test battery), #4337 (rrios13 test guard fd redirect). seenorht family #4331/#4347/#4364 + #4281 await author rebase (all conflict on channel_liveness_4200.rs lineage). Pending authors: #4199, #4206, #4097, #4217, #4219, #743.
