@@ -559,5 +559,90 @@ class CheckerProcessFailureCliTests(unittest.TestCase):
             OSError(2, "No such file or directory"), "could not be executed")
 
 
+class CorpusFailClosedIssue118Tests(unittest.TestCase):
+    """Fail-closed guards for unclassified Tier-0 errors and unreadable corpus paths (#118)."""
+
+    FIXTURE_NAMES = (
+        "issue_118_unclassified_diag_1.json",
+        "issue_118_unclassified_diag_2.json",
+        "issue_118_whitespace_rule_3.json",
+        "issue_118_nonstring_rule_4.json",
+    )
+
+    def test_unclassified_and_invalid_tier0_rule_fixtures_fail_closed(self):
+        fixtures_dir = Path(__file__).with_name("tests")
+        for fname in self.FIXTURE_NAMES:
+            with self.subTest(fixture=fname):
+                case = json.loads((fixtures_dir / fname).read_text(encoding="utf-8"))
+                got = corpus_harness.classify_got(case["summary"], case["diagnostics"])
+                self.assertEqual(got, ("reject", case["classified_rule"], []))
+                ok, why = corpus_harness.agree(tuple(case["expected"]), got)
+                self.assertIs(ok, case["agree"])
+                self.assertIn("expected reject", why)
+        for bad_rule in (None, "", "   ", 123, "<unclassified-error>"):
+            with self.subTest(bad_rule=bad_rule):
+                ok, _ = corpus_harness.agree(
+                    ("REJECT", "<unclassified-error>"), ("reject", bad_rule, [])
+                )
+                self.assertFalse(ok)
+        got_valid = corpus_harness.classify_got(
+            {"verdict": "reject"}, [{"severity": "error", "tier0_rule": " A1c "}]
+        )
+        self.assertEqual(got_valid, ("reject", "A1c", []))
+        self.assertEqual(
+            corpus_harness.agree(("REJECT", "A1c"), got_valid),
+            (True, "expected reject A1c, got reject A1c"),
+        )
+
+    def test_unreadable_corpus_file_raises_value_error_and_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checker = root / "hyb"
+            checker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            bad_utf8 = root / "01-bad.hy"
+            bad_utf8.write_bytes(b"\xff\xfe\x00")
+            dir_entry = root / "02-dir.hy"
+            dir_entry.mkdir()
+            for target in (bad_utf8, dir_entry):
+                with self.subTest(target=target.name):
+                    with self.assertRaisesRegex(ValueError, "cannot read corpus file"):
+                        corpus_harness.read_expected(str(target))
+                    with self.assertRaisesRegex(ValueError, "cannot read corpus file"):
+                        corpus_harness.read_expected_diagnostic(
+                            str(target), ("REJECT", "A1c")
+                        )
+            err = io.StringIO()
+            with patch.object(
+                sys,
+                "argv",
+                ["corpus_harness.py", "--bin", str(checker), "--corpus", str(root)],
+            ), contextlib.redirect_stderr(err):
+                status = corpus_harness.main()
+            self.assertEqual(status, 2)
+            self.assertIn("cannot read corpus file", err.getvalue())
+
+    def test_unreadable_or_missing_corpus_directory_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checker = root / "hyb"
+            checker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            missing_corpus = root / "missing-corpus"
+            err = io.StringIO()
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "corpus_harness.py",
+                    "--bin",
+                    str(checker),
+                    "--corpus",
+                    str(missing_corpus),
+                ],
+            ), contextlib.redirect_stderr(err):
+                status = corpus_harness.main()
+            self.assertEqual(status, 2)
+            self.assertIn("error: corpus directory not readable:", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
