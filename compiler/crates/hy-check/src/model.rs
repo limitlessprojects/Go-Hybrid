@@ -232,6 +232,8 @@ pub(crate) struct FnState {
     /// shadowed outer binding at `depth` as moved.
     pub shadow_links: HashMap<String, HashSet<(String, usize)>>,
     pub shadow_link_scopes: Vec<HashMap<String, HashSet<(String, usize)>>>,
+    pub closure_cell_holders: HashMap<String, HashSet<(String, usize)>>,
+    pub closure_cell_holder_scopes: Vec<HashMap<String, HashSet<(String, usize)>>>,
     /// Block scopes, innermost last (issue #14): a define inside a nested
     /// block lands in the top layer and DIES at block exit, so an inner
     /// `m := 1` can no longer overwrite the outer `m`'s binding and launder
@@ -316,6 +318,8 @@ impl FnState {
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
         self.shadow_link_scopes.push(self.shadow_links.clone());
+        self.closure_cell_holder_scopes
+            .push(self.closure_cell_holders.clone());
         self.fnlit_scopes.push(Vec::new());
     }
 
@@ -329,6 +333,7 @@ impl FnState {
                         snap_env.insert(k.clone(), v.clone());
                     }
                 }
+                snap_env.retain(|k, _| self.scopes.iter().any(|s| s.contains_key(k)));
                 let snap_aliases = self.aliases.clone();
                 let snap_share = self.may_share.clone();
                 for pos in fnlits {
@@ -440,9 +445,27 @@ impl FnState {
                 }
             }
         }
+        let popped_depth = self.scopes.len();
+        let mut inner_outer_cells: Vec<(String, (String, usize))> = Vec::new();
+        for (h, cells) in &self.closure_cell_holders {
+            let Some(oh) = to_outer_name(h, &self.aliases, &self.env, &self.scopes) else {
+                continue;
+            };
+            for (c, cd) in cells {
+                if *cd < popped_depth {
+                    inner_outer_cells.push((oh.clone(), (c.clone(), *cd)));
+                }
+            }
+        }
         self.scopes.pop();
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
+        }
+        if let Some(outer_cells) = self.closure_cell_holder_scopes.pop() {
+            self.closure_cell_holders = outer_cells;
+            for (oh, cell) in inner_outer_cells {
+                self.closure_cell_holders.entry(oh).or_default().insert(cell);
+            }
         }
         if let Some(outer_aliases) = self.alias_scopes.pop() {
             self.aliases = outer_aliases;
@@ -451,6 +474,20 @@ impl FnState {
                 for (a, b) in inner_outer_shares {
                     self.share_edge(&a, &b);
                 }
+            }
+            let mut cell_edges: Vec<(String, String)> = Vec::new();
+            for (h, cells) in &self.closure_cell_holders {
+                for (c, cd) in cells {
+                    if self.lookup_depth(c) == Some(*cd) {
+                        cell_edges.push((h.clone(), c.clone()));
+                        if let Some(mv) = self.env_lookup(c).and_then(|b| b.moved.clone()) {
+                            inner_root_moves.push((h.clone(), mv));
+                        }
+                    }
+                }
+            }
+            for (h, c) in cell_edges {
+                self.share_edge(&h, &c);
             }
             for (oa, orig) in inner_outer_origins {
                 if let Some(bo) = self.env_lookup_mut(&oa) {
