@@ -28,9 +28,12 @@ var (
 //         ArrayGet (clone), Set (drop of the REPLACED value), Release (drop),
 //         ToStringPretty/valueText (serialize) — plus the cleanup goroutine's
 //         release, which runs on an arbitrary goroutine.
-//   SMALL (Cross*S — guard 1024): NewObject, NewArray, GetInt, GetString
-//         (string clone is a heap copy, not a tree walk), ArrayLen,
-//         PushString — all O(1), no recursion on the value tree.
+//   SMALL (Cross*S — guard 1024): GetInt, ArrayLen — pure reads, no recursion
+//         on the value tree and NO allocator call.
+//   DEFAULT (Cross* — guard 4096): NewObject, NewArray, GetString, PushString
+//         — O(1) in the tree, but each grows a Vec / copies a string, which
+//         reaches malloc/realloc; an allocator slow path is not provably
+//         under 1 KiB, so these are not SMALL (interfaces/descriptors.md).
 //
 // SOUNDNESS NOTE (found while classifying, fixed by this table): routing
 // Parse through the default 4096-guard fast path was UNSOUND for deep
@@ -94,13 +97,13 @@ func Parse(data []byte) (Value, error) {
 // NewObject / NewArray: fresh containers.
 func NewObject() Value {
 	var id uint64
-	hybridge.Cross1S(FnNewObject, uintptr(unsafe.Pointer(&id))) // SMALL: table insert, O(1)
+	hybridge.Cross1(FnNewObject, uintptr(unsafe.Pointer(&id))) // DEFAULT: table insert may grow the Vec (allocator call)
 	return wrap(id)
 }
 
 func NewArray() Value {
 	var id uint64
-	hybridge.Cross1S(FnNewArray, uintptr(unsafe.Pointer(&id))) // SMALL: table insert, O(1)
+	hybridge.Cross1(FnNewArray, uintptr(unsafe.Pointer(&id))) // DEFAULT: table insert may grow the Vec (allocator call)
 	return wrap(id)
 }
 
@@ -164,8 +167,8 @@ func (v Value) String(key string) (string, error) {
 	var sid uint64
 	kptr, klen, pin, kb := pinCrossKey(key)
 	pin.Pin(&sid)
-	// SMALL: string clone is a heap copy, not a tree walk.
-	st := hybridge.Cross4S(FnGetString, uintptr(v.h.id), kptr, klen, uintptr(unsafe.Pointer(&sid)))
+	// DEFAULT: string clone + table insert reach the allocator (not provably under 1 KiB).
+	st := hybridge.Cross4(FnGetString, uintptr(v.h.id), kptr, klen, uintptr(unsafe.Pointer(&sid)))
 	pin.Unpin()
 	runtime.KeepAlive(pin)
 	runtime.KeepAlive(kb)
@@ -183,7 +186,7 @@ func (v Value) PushString(s string) error {
 		return ErrJSON
 	}
 	sptr, slen, pin, sb := pinCrossKey(s)
-	st := hybridge.Cross3S(FnPushString, uintptr(v.h.id), sptr, slen) // SMALL: Vec push + heap copy
+	st := hybridge.Cross3(FnPushString, uintptr(v.h.id), sptr, slen) // DEFAULT: Vec push + heap copy reach the allocator
 	pin.Unpin()
 	runtime.KeepAlive(pin)
 	runtime.KeepAlive(sb)

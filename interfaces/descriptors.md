@@ -42,11 +42,11 @@ nested value is DEEP regardless of the caller's input shape.**
 | `FnSet` | **DEEP** | `BTreeMap::insert` DROPS the replaced value; drop recurses |
 | `FnRelease` | **DEEP** | `*slot = None` drops the value; drop recurses. Includes the cleanup-goroutine release (arbitrary stacks) |
 | `FnToStringPretty` | **DEEP** | `to_writer` serializes by tree walk |
-| `FnNewObject` / `FnNewArray` | SMALL | table insert of an empty value, O(1) |
+| `FnNewObject` / `FnNewArray` | **DEFAULT** | table insert is O(1) in the tree but `slots.push` can realloc; allocator slow path not argued under 1 KiB (reclassified from SMALL, issue #375) |
 | `FnGetInt` | SMALL | BTreeMap lookup + scalar copy |
-| `FnGetString` | SMALL | string clone = heap copy, not a tree walk |
+| `FnGetString` | **DEFAULT** | no tree walk, but `to_string()` + table insert reach malloc/realloc; allocator depth not argued under 1 KiB (reclassified from SMALL, issue #375) |
 | `FnArrayLen` | SMALL | Vec len read |
-| `FnPushString` | SMALL | Vec push + heap copy of the string |
+| `FnPushString` | **DEFAULT** | `to_string()` + Vec push reach malloc/realloc; same allocator argument (reclassified from SMALL, issue #375) |
 
 ### regexbinding — ALL DEEP
 
