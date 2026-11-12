@@ -29,7 +29,7 @@ fn (g *graph) connect(from node_id, to node_id) {
 fn (g graph) reachable(from node_id, target node_id) bool {
     if from == target { return true }
     seen := set[node_id]{}
-    stack := [from]
+    stack := []node_id{from}
     for len(stack) > 0 {
         cur := stack.pop()
         if !seen.insert(cur) { continue }   // already visited
