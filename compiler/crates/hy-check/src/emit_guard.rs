@@ -1374,6 +1374,26 @@ impl<'a> Checker<'a> {
         // fields, aliases, local annotations, literals and conversions.
         let empty_st = crate::model::FnState::default();
         self.check_expr_builtin_args(st.unwrap_or(&empty_st), len);
+        let is_wrapped_ident_int_conv = matches!(
+            unwrap_parens(len),
+            Expr::Call { callee, args, .. }
+                if args.len() == 1
+                    && !args[0].spread
+                    && matches!(unwrap_parens(&args[0].value), Expr::Ident { .. })
+                    && matches!(
+                        unwrap_parens(callee),
+                        Expr::Ident { name, .. }
+                            if matches!(
+                                name.as_str(),
+                                "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "rune"
+                                    | "u8" | "uint8" | "byte" | "u16" | "uint16" | "u32" | "uint32"
+                            )
+                    )
+                    && self.const_int_value_at(&args[0].value, span.start, 0).is_some()
+        );
+        if !is_wrapped_ident_int_conv {
+            self.check_expr_type_conversions(len);
+        }
         // 1) A constant integer expression: must be non-negative.
         let direct_or_folded = const_int_value(len).or_else(|| {
             if matches!(unwrap_parens(len), Expr::Ident { .. }) {
