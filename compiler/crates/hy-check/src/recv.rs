@@ -386,7 +386,7 @@ impl<'a> Checker<'a> {
         use hy_syntax::TypeExpr;
         if let Some(ty) = self.ty_of_expr(st, expr) {
             let is_some_call = matches!(
-                expr,
+                crate::model::unwrap_parens(expr),
                 Expr::Call { callee, .. }
                     if matches!(crate::model::unwrap_parens(callee), Expr::Ident { name, .. } if name == "some")
             );
@@ -413,6 +413,24 @@ impl<'a> Checker<'a> {
                 to: Box::new(self.recv_chan_type_expr(st, operand)?),
                 span: *span,
             }),
+            Expr::SliceLit { elem, items, .. } => {
+                let elem_ty = match elem {
+                    Some(t) => t.clone(),
+                    None => Box::new(self.recv_chan_type_expr(st, items.first()?)?),
+                };
+                Some(TypeExpr::Slice {
+                    elem: elem_ty,
+                    span: expr.span(),
+                })
+            }
+            Expr::MapLit { key, value, .. } => Some(TypeExpr::Map {
+                key: key.clone(),
+                value: value.clone(),
+                span: expr.span(),
+            }),
+            Expr::StructLit {
+                ty: Some(ty), ..
+            } => Some(ty.clone()),
             Expr::Receive { chan, .. } => {
                 let outer_ty = self.recv_chan_type_expr(st, chan)?;
                 match self.resolve_type_alias(&outer_ty) {
@@ -432,7 +450,7 @@ impl<'a> Checker<'a> {
             // These arms mirror `sendability::dir_ty_of_expr`'s projections.
             Expr::Field { base, name, .. } => {
                 let base_ty = self.recv_chan_type_expr(st, base)?;
-                let resolved = self.resolve_type_alias(&base_ty);
+                let resolved = self.peel_pointer_and_alias(&base_ty);
                 if name == "pop" {
                     if let TypeExpr::Slice { elem, .. } = &resolved {
                         return Some(TypeExpr::Fn {
