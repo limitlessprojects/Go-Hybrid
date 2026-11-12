@@ -1,0 +1,15 @@
+use hy_check::{check_file, Verdict};
+use hy_diag::Severity;
+use hy_syntax::parse_file;
+
+fn assert_accept(src: &str, what: &str) {
+    let r = check_file(&parse_file("inline.hy", src).unwrap_or_else(|d| panic!("parse: {:?}", d)));
+    let errs: Vec<_> = r.diagnostics.iter().filter(|d| d.severity == Severity::Error).map(|d| (&d.code, d.span.start.line, &d.message)).collect();
+    assert_eq!(r.verdict, Verdict::Accept, "{}: got {:?}", what, errs);
+}
+const PRE: &str = "struct holder { m map[string]int }\nfn (h holder) get(k string) int { return h.m[k] }\nfn (h holder) stomp(v int) { h.m[\"k\"] = v }\nconst shared = holder{m: map[string]int{\"k\": 7}}\nstruct counter { n int }\nfn (c *counter) read() int { return c.n }\nfn (c *counter) inc(v int) { c.n = c.n + v }\nfn (c counter) bump_copy() int {\n    c.n = c.n + 1\n    return c.n\n}\nconst cnt = counter{n: 5}\n";
+#[test]
+fn readonly_value_copy_disambiguated_helpers_and_shadows_accept() {
+    assert_accept(&format!("{PRE}\nstruct mut_other {{ m map[string]int }}\nfn (o mut_other) get(k string) int {{\n    o.m[k] = 9\n    return 9\n}}\nfn (o mut_other) run() int {{\n    o.m[\"k\"] = 1\n    return 1\n}}\nstruct cb_box {{ run fn() int }}\nfn ok_run() int {{ return 3 }}\nconst cbox = cb_box{{run: ok_run}}\nfn apply_r(f fn() int) int {{ return f() }}\nfn val_h(c counter) fn(int) {{ return c.inc }}\nfn ptr_bc(p *counter) fn() int {{ return p.bump_copy }}\nfn read_h(h holder) fn(string) int {{ return h.get }}\nfn read_cb(b cb_box) int {{ return b.run() }}\nfn main() {{\n    g := shared.get\n    r := cnt.read\n    bc := cnt.bump_copy\n    cb := fn(f fn() int) int {{ return f() }}\n    vh := val_h(cnt)\n    vh(4)\n    pb := ptr_bc(cnt)\n    rg := read_h(shared)\n    _ = g(\"k\") + r() + bc() + apply_r(cnt.read) + cb(cnt.read) + pb() + rg(\"k\") + read_cb(cbox)\n}}\n"), "readonly + ACC_01..05");
+    assert_accept(&format!("{PRE}\nstruct wrap {{ opt option[holder] }}\nfn main() {{\n    c1 := counter{{n: 1}}\n    f1 := c1.inc\n    f1(2)\n    c2 := cnt\n    f2 := c2.inc\n    f2(3)\n    var c3 counter\n    f3 := c3.inc\n    f3(4)\n    x := holder{{m: map[string]int{{\"k\": 0}}}}\n    fx := x.stomp\n    fx(9)\n    x = shared\n    cnt := counter{{n: 10}}\n    fs := cnt.inc\n    fs(1)\n    lw := wrap{{opt: some(holder{{m: map[string]int{{\"k\": 0}}}}) }}\n    items := []holder{{holder{{m: map[string]int{{\"k\": 0}}}}}}\n    match lw.opt {{\n        some(shared) => {{\n            fm0 := shared.stomp\n            fm0(1)\n        }}\n        none => {{}}\n    }}\n    cl := fn() {{\n        for _, shared in items {{\n            fi := shared.stomp\n            fi(2)\n        }}\n        match lw.opt {{\n            some(shared) => {{\n                fm := shared.stomp\n                fm(1)\n            }}\n            none => {{}}\n        }}\n    }}\n    cl()\n    x2 := holder{{m: map[string]int{{\"k\": 0}}}}\n    cl2 := fn() {{\n        f2m := x2.stomp\n        f2m(9)\n    }}\n    shared := holder{{m: map[string]int{{\"k\": 1}}}}\n    x2 = shared\n    cl2()\n}}\n"), "mutable + shadows");
+}
