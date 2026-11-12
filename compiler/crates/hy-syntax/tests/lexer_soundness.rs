@@ -247,3 +247,84 @@ fn utf8_byte_escapes_in_strings_preserve_utf8_bytes_issue_1199() {
         .collect();
     assert_eq!(chars, vec!['é', 'é', 'é']);
 }
+
+#[test]
+fn malformed_escape_does_not_consume_closing_quotes_issue_3007() {
+    // Regression test for Issue #3007:
+    // Malformed or unknown escapes must not consume the closing quote or desynchronize code tokens.
+    let cases = [
+        r#"fn main() { s := "hello\z" x := 42 }"#,
+        r#"fn main() { s := "\x4" x := 42 }"#,
+        r#"fn main() { s := "\u004" x := 42 }"#,
+        r#"fn main() { s := "\U0001F60" x := 42 }"#,
+    ];
+    for src in cases {
+        let errs = lex_errs(src);
+        assert_eq!(
+            errs.len(),
+            1,
+            "expected exactly 1 escape diagnostic without quote desynchronization for `{src}`, got {errs:?}"
+        );
+        assert!(
+            !errs[0].message.contains("unterminated string literal"),
+            "closing quote must not be eaten on malformed escape: {errs:?}"
+        );
+    }
+
+    // Malformed rune escapes must also recover at closing delimiter without swallowing subsequent tokens:
+    for src in [
+        r#"fn main() { c := '\x4' x := 42 }"#,
+        r#"fn main() { c := '\u12' x := 42 }"#,
+        r#"fn main() { c := '\U0001F60' x := 42 }"#,
+    ] {
+        let errs = lex_errs(src);
+        assert_eq!(
+            errs.len(),
+            1,
+            "expected exactly 1 escape diagnostic without quote desynchronization for `{src}`, got {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn standard_4_digit_u_rune_escapes_accepted_issue_3007() {
+    // Standard 4-digit \uNNNN rune escapes are supported alongside \u{...} and \U (LX6)
+    let src = "fn main() { a := '\\u00e9' b := '\\u4e2d' c := '\\u0041' }";
+    let toks = lex("test.hy", src).expect("valid 4-digit rune escapes");
+    let chars: Vec<char> = toks
+        .into_iter()
+        .filter_map(|t| match t.tok {
+            Tok::CharLit(ch) => Some(ch),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chars, vec!['é', '中', 'A']);
+}
+
+#[test]
+fn eof_char_escape_fails_closed_issue_3007() {
+    // Truncated char literal hitting EOF immediately after backslash ('\)
+    let src = "fn main() { c := '\\";
+    let errs = lex_errs(src);
+    assert!(
+        errs.iter().any(|d| d.message.contains("unterminated char literal")),
+        "expected unterminated char literal on EOF after backslash, got {errs:?}"
+    );
+}
+
+#[test]
+fn utf8_bom_trivia_skipped_issue_3007() {
+    // UTF-8 BOM (\u{FEFF}) is treated as whitespace trivia at file start and inside expressions
+    let src1 = "\u{FEFF}fn main() { x := 42 }";
+    assert!(
+        parse_file("test.hy", src1).is_ok(),
+        "expected file with leading UTF-8 BOM to parse cleanly"
+    );
+
+    let src2 = "fn main() { m := map\u{FEFF}[string]int{} }";
+    assert!(
+        parse_file("test.hy", src2).is_ok(),
+        "expected map followed by UTF-8 BOM trivia to parse cleanly"
+    );
+}
+
