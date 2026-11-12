@@ -1492,7 +1492,20 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+        let bare_callee = unwrap_parens(callee);
+        if let Expr::Field { base, name, .. } = bare_callee {
+            let bk = self.kind_of_expr(base);
+            if let Some(sn) = self.struct_base_name(&bk) {
+                let head = Checker::base_named_type_str(name);
+                if let Some(m) = self.ck.method_decls.get(&(sn, head.to_string())) {
+                    if m.type_params.is_empty() {
+                        return Some(m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                    }
+                }
+            }
+            return None;
+        }
+        let Expr::Ident { name, .. } = bare_callee else {
             return None;
         };
         if self
@@ -1555,6 +1568,17 @@ impl<'a> Collector<'a> {
                 operand,
                 ..
             } => self.typed_value_scalar(operand),
+            Expr::Try { operand, .. } => {
+                let inner = unwrap_parens(operand);
+                if let Expr::Call { callee, args, .. } = inner {
+                    if let Some(rs) = self.call_result_scalars(callee, args) {
+                        if let Some(first) = rs.first().copied().flatten() {
+                            return Some(first);
+                        }
+                    }
+                }
+                self.typed_value_scalar(inner)
+            }
             Expr::Call { callee, args, .. } => match self.call_result_scalars(callee, args) {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
