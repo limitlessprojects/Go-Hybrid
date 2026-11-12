@@ -50,8 +50,30 @@ jobs:
       - name: Gate (W1 is read/comment/label — allowed at dry-run)
         run: python3 tools/shepherd.py gate --require read
 
+      - name: Restore last triage snapshot (pinned cache v4)
+        id: triage-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        continue-on-error: true
+        with:
+          path: /tmp/triage/TRIAGE.json
+          key: triage-v1-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: triage-v1-${{ github.repository_id }}-
+
       - name: Scan + classify every open PR
+        id: scan
         run: python3 tools/triage_bot.py --token-env GITHUB_TOKEN scan --out /tmp/triage --jobs 8
+
+      # Only default-branch runs publish reusable state; PR runs may read it.
+      - name: Save refreshed triage snapshot (pinned cache v4)
+        if: >-
+          success() && steps.scan.outcome == 'success' &&
+          github.event_name != 'pull_request' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        continue-on-error: true
+        with:
+          path: /tmp/triage/TRIAGE.json
+          key: triage-v1-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Rewrite the board issue in place
         run: python3 tools/triage_bot.py --token-env GITHUB_TOKEN board --post --from-scan /tmp/triage/TRIAGE.json
