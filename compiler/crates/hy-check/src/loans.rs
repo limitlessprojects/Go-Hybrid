@@ -9572,6 +9572,101 @@ impl<'a> Checker<'a> {
             slot_loan: false,
         }
     }
+
+    /// #3252 — detect recursive (infinite-size) value types.
+    pub(crate) fn check_recursive_value_types(&mut self) {
+        let struct_decls: Vec<(String, Span, Vec<(String, hy_syntax::TypeExpr)>)> = self
+            .file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                hy_syntax::Decl::Struct(s) if !s.fields.is_empty() => Some((
+                    s.name.clone(),
+                    s.span,
+                    s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect(),
+                )),
+                _ => None,
+            })
+            .collect();
+
+        let alias_decls: Vec<(String, Span, hy_syntax::TypeExpr)> = self
+            .file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                hy_syntax::Decl::TypeAlias(ta) => Some((ta.name.clone(), ta.span, ta.ty.clone())),
+                _ => None,
+            })
+            .collect();
+
+        for (sname, span, fields) in &struct_decls {
+            let mut visiting: Vec<String> = vec![sname.clone()];
+            for (_, fty) in fields {
+                if let Some(cycle_span) = self.value_type_cycle(fty, &mut visiting) {
+                    self.emit_recursive_type_diag(sname, *span, cycle_span);
+                    break;
+                }
+            }
+        }
+
+        for (aname, span, target) in &alias_decls {
+            let mut visiting: Vec<String> = vec![aname.clone()];
+            if let Some(cycle_span) = self.value_type_cycle(target, &mut visiting) {
+                self.emit_recursive_type_diag(aname, *span, cycle_span);
+            }
+        }
+    }
+
+    fn value_type_cycle(&self, ty: &hy_syntax::TypeExpr, visiting: &mut Vec<String>) -> Option<Span> {
+        use hy_syntax::TypeExpr;
+        match ty {
+            TypeExpr::Named { name, span } => {
+                if visiting.iter().any(|v| v == name) {
+                    return Some(*span);
+                }
+                let base = Self::base_named_type_str(name);
+                if let Some(target) = self.type_aliases.get(base) {
+                    visiting.push(name.clone());
+                    let result = self.value_type_cycle(target, visiting);
+                    visiting.pop();
+                    return result;
+                }
+                if self.structs.contains_key(base) {
+                    if let Some(fields) = self.struct_fields_for_sname(name) {
+                        visiting.push(name.clone());
+                        for (_, fty) in &fields {
+                            if let Some(s) = self.value_type_cycle(fty, visiting) {
+                                visiting.pop();
+                                return Some(s);
+                            }
+                        }
+                        visiting.pop();
+                    }
+                }
+                None
+            }
+            TypeExpr::Array { elem, .. } => self.value_type_cycle(elem, visiting),
+            TypeExpr::Option { elem, .. } => self.value_type_cycle(elem, visiting),
+            TypeExpr::Pointer { .. }
+            | TypeExpr::Slice { .. }
+            | TypeExpr::Map { .. }
+            | TypeExpr::Chan { .. }
+            | TypeExpr::Fn { .. } => None,
+        }
+    }
+
+    fn emit_recursive_type_diag(&mut self, type_name: &str, decl_span: Span, cycle_span: Span) {
+        let msg = format!("{} is a recursive value type it refers to itself through a by-value path, so it has infinite size (HYB-E1002)", type_name);
+        let notes = vec![
+            "why: Go rejects recursive value types at go build (BUILDABLE, Row 13)".to_string(),
+            "fix: break the cycle with a by-reference type".to_string(),
+            format!("the cycle closes at {}", cycle_span),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E1002", self.path.clone(), decl_span, msg)
+                .with_notes(notes),
+        );
+    }
 }
 
 fn field_borrow_kind(shape: &TypeShape) -> Option<&'static str> {
