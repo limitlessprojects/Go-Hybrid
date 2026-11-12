@@ -204,3 +204,158 @@ fn positive_control_loop_copy_and_return_without_shared_or_borrowed_backedge_acc
         r.diagnostics
     );
 }
+
+#[test]
+fn multi_hop_loop_backedge_and_post_loop_state_propagation() {
+    let r_2hop_freeze = check(
+        "fn worker(s [][]int, done chan<- bool) {\n\
+           s[0][0] = 99\n\
+           done <- true\n\
+         }\n\
+         fn bad_copy_freeze_2hop() {\n\
+           m2 := [][]int{[]int{2}}\n\
+           p := [][]int{[]int{1}}\n\
+           q := [][]int{[]int{0}}\n\
+           for i in 0..3 {\n\
+             dst := [][]int{[]int{0}}\n\
+             copy(dst, q)\n\
+             q = p\n\
+             p = m2\n\
+             if i == 2 {\n\
+               done := make(chan bool, 1)\n\
+               task worker(move dst, done)\n\
+               _ = m2[0][0]\n\
+               <-done\n\
+             }\n\
+           }\n\
+         }",
+    );
+    assert_eq!(r_2hop_freeze.verdict, Verdict::Reject, "{:?}", r_2hop_freeze.diagnostics);
+    assert!(
+        r_2hop_freeze.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+        "expected HYB-E3003 on 2-hop loop-carried copy share, got {:?}",
+        r_2hop_freeze.diagnostics
+    );
+
+    let r_2hop_param = check(
+        "fn worker(s [][]int, done chan<- bool) {\n\
+           s[0][0] = 99\n\
+           done <- true\n\
+         }\n\
+         fn leak_param_2hop(param [][]int) {\n\
+           p := [][]int{[]int{1}}\n\
+           q := [][]int{[]int{0}}\n\
+           for i in 0..3 {\n\
+             dst := [][]int{[]int{0}}\n\
+             copy(dst, q)\n\
+             q = p\n\
+             p = param\n\
+             if i == 2 {\n\
+               done := make(chan bool, 1)\n\
+               task worker(move dst, done)\n\
+               <-done\n\
+             }\n\
+           }\n\
+         }",
+    );
+    assert_eq!(r_2hop_param.verdict, Verdict::Reject, "{:?}", r_2hop_param.diagnostics);
+    assert!(
+        r_2hop_param.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+        "expected HYB-E3004 on 2-hop loop-carried non-owned param share, got {:?}",
+        r_2hop_param.diagnostics
+    );
+
+    let r_2hop_return = check(
+        "struct acct {\n\
+           bal int\n\
+         }\n\
+         fn escape_borrow_2hop(ext *acct) *acct {\n\
+           local_a := acct{bal: 1}\n\
+           p := ext\n\
+           q := ext\n\
+           for i in 0..3 {\n\
+             if i == 2 {\n\
+               return q\n\
+             }\n\
+             q = p\n\
+             p = &local_a\n\
+           }\n\
+           return ext\n\
+         }",
+    );
+    assert_eq!(r_2hop_return.verdict, Verdict::Reject, "{:?}", r_2hop_return.diagnostics);
+    assert!(
+        r_2hop_return.diagnostics.iter().any(|d| d.code == "HYB-E3104"),
+        "expected HYB-E3104 on 2-hop loop-carried borrow return, got {:?}",
+        r_2hop_return.diagnostics
+    );
+
+    let r_post_loop_alias = check(
+        "fn worker(s []int, done chan<- bool) {\n\
+           s[0] = 99\n\
+           done <- true\n\
+         }\n\
+         fn post_loop_race() {\n\
+           m := []int{1, 2, 3}\n\
+           t := []int{10, 20, 30}\n\
+           u := []int{40, 50, 60}\n\
+           for i in 0..2 {\n\
+             u = t\n\
+             t = m\n\
+           }\n\
+           done := make(chan bool, 1)\n\
+           task worker(move u, done)\n\
+           m[0] = 42\n\
+           <-done\n\
+         }",
+    );
+    assert_eq!(r_post_loop_alias.verdict, Verdict::Reject, "{:?}", r_post_loop_alias.diagnostics);
+    assert!(
+        r_post_loop_alias.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+        "expected HYB-E3003 when moving post-loop 2-hop alias u and writing m, got {:?}",
+        r_post_loop_alias.diagnostics
+    );
+
+    let r_post_loop_nonowned = check(
+        "fn worker(s []int, done chan<- bool) {\n\
+           s[0] = 99\n\
+           done <- true\n\
+         }\n\
+         fn post_loop_param(m []int) {\n\
+           t := []int{10, 20, 30}\n\
+           u := []int{40, 50, 60}\n\
+           for i in 0..2 {\n\
+             u = t\n\
+             t = m\n\
+           }\n\
+           done := make(chan bool, 1)\n\
+           task worker(move u, done)\n\
+           <-done\n\
+         }",
+    );
+    assert_eq!(r_post_loop_nonowned.verdict, Verdict::Reject, "{:?}", r_post_loop_nonowned.diagnostics);
+    assert!(
+        r_post_loop_nonowned.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+        "expected HYB-E3004 when moving post-loop 2-hop parameter alias u, got {:?}",
+        r_post_loop_nonowned.diagnostics
+    );
+
+    let r_ok = check(
+        "fn worker(s []int, done chan<- bool) {\n\
+           s[0] = 99\n\
+           done <- true\n\
+         }\n\
+         fn ok_fresh_rebinds() {\n\
+           t := []int{10, 20, 30}\n\
+           u := []int{40, 50, 60}\n\
+           for i in 0..3 {\n\
+             u = t\n\
+             t = []int{1, 2, 3}\n\
+           }\n\
+           done := make(chan bool, 1)\n\
+           task worker(move u, done)\n\
+           <-done\n\
+         }",
+    );
+    assert_eq!(r_ok.verdict, Verdict::Accept, "expected Accept, got {:?}", r_ok.diagnostics);
+}
