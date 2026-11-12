@@ -82,6 +82,169 @@ fn a3_paths_conflict(st: &FnState, loan_path: &str, event_path: &str) -> bool {
     false
 }
 
+/// Deterministic AST-node tag so loop fixed-point passes produce identical
+/// synthetic origin IDs on every iteration and converge cleanly.
+#[inline]
+fn ast_stmt_tag(stmt: &Stmt) -> usize {
+    stmt as *const Stmt as usize
+}
+
+type ConstDeferEntry<'ast> = (
+    &'ast Expr,
+    Vec<HashSet<String>>,
+    Option<(Vec<String>, Vec<String>, Block)>,
+    usize,
+);
+
+#[derive(Clone)]
+struct ConstRetState<'ast> {
+    cst: FnState,
+    aliases: HashMap<String, HashSet<String>>,
+    shadowed: HashSet<String>,
+    local_fnlits: HashMap<String, (Vec<String>, Vec<String>, Block)>,
+    defers: Vec<ConstDeferEntry<'ast>>,
+}
+
+type SharedFnLit = (
+    Vec<(String, Option<hy_syntax::TypeExpr>)>,
+    Vec<(String, Option<hy_syntax::TypeExpr>)>,
+    Block,
+);
+
+type SharedDeferEntry<'ast> = (&'ast Expr, Vec<HashSet<String>>, usize, Option<SharedFnLit>);
+
+#[derive(Clone)]
+struct SharedRetState<'ast> {
+    cst: FnState,
+    origins: HashMap<String, HashSet<String>>,
+    shadowed: HashSet<String>,
+    defers: Vec<SharedDeferEntry<'ast>>,
+}
+
+fn restore_map_entry<V: Clone>(
+    target: &mut HashMap<String, V>,
+    pre: &HashMap<String, V>,
+    key: &str,
+) {
+    match pre.get(key) {
+        Some(v) => {
+            target.insert(key.to_string(), v.clone());
+        }
+        None => {
+            target.remove(key);
+        }
+    }
+}
+
+fn exit_scoped_origin_state(
+    cst: &mut FnState,
+    pre_cst: &FnState,
+    map: &mut HashMap<String, HashSet<String>>,
+    pre_map: &HashMap<String, HashSet<String>>,
+    shadowed: &mut HashSet<String>,
+    pre_shadowed: &HashSet<String>,
+    locals: &HashSet<String>,
+) {
+    cst.scope_pop();
+    for name in locals {
+        restore_map_entry(map, pre_map, name);
+        if pre_shadowed.contains(name) {
+            shadowed.insert(name.clone());
+        } else {
+            shadowed.remove(name);
+        }
+        restore_map_entry(&mut cst.closure_fnlits, &pre_cst.closure_fnlits, name);
+        restore_map_entry(&mut cst.closure_defs, &pre_cst.closure_defs, name);
+        restore_map_entry(&mut cst.closure_mutates, &pre_cst.closure_mutates, name);
+    }
+}
+
+fn join_origin_maps_and_shadowed(
+    maps: &[&HashMap<String, HashSet<String>>],
+    shadow_sets: &[&HashSet<String>],
+) -> (HashMap<String, HashSet<String>>, HashSet<String>) {
+    let mut joined_map: HashMap<String, HashSet<String>> = HashMap::new();
+    for m in maps {
+        for (k, vs) in *m {
+            if !vs.is_empty() {
+                joined_map
+                    .entry(k.clone())
+                    .or_default()
+                    .extend(vs.iter().cloned());
+            }
+        }
+    }
+    let mut joined_shadowed = HashSet::new();
+    if let Some(first) = shadow_sets.first() {
+        for k in *first {
+            if shadow_sets[1..].iter().all(|s| s.contains(k)) && !joined_map.contains_key(k) {
+                joined_shadowed.insert(k.clone());
+            }
+        }
+    }
+    (joined_map, joined_shadowed)
+}
+
+fn join_fnstate_bindings(base: &mut FnState, others: &[&FnState]) {
+    for other in others {
+        for (k, ob) in other
+            .env
+            .iter()
+            .chain(other.scopes.iter().flat_map(|s| s.iter()))
+        {
+            if let Some(bb) = base.env_lookup_mut(k) {
+                if matches!(bb.shape, TypeShape::Unknown) && !matches!(ob.shape, TypeShape::Unknown)
+                {
+                    bb.shape = ob.shape.clone();
+                }
+                if bb.ty.is_none() && ob.ty.is_some() {
+                    bb.ty = ob.ty.clone();
+                }
+            }
+        }
+        for (k, fl) in &other.closure_fnlits {
+            base.closure_fnlits.entry(k.clone()).or_insert_with(|| fl.clone());
+        }
+        for (k, ds) in &other.closure_defs {
+            base.closure_defs.entry(k.clone()).or_insert_with(|| ds.clone());
+        }
+        for (k, ms) in &other.closure_mutates {
+            base.closure_mutates
+                .entry(k.clone())
+                .or_insert_with(|| ms.clone());
+        }
+    }
+}
+
+fn is_match_exhaustive(arms: &[hy_syntax::MatchArm]) -> bool {
+    let mut has_wildcard = false;
+    let mut has_some = false;
+    let mut has_none = false;
+    let mut has_ok = false;
+    let mut has_err = false;
+    for arm in arms {
+        if arm.guard.is_some() {
+            continue;
+        }
+        match &arm.pattern {
+            hy_syntax::MatchPattern::Wildcard => has_wildcard = true,
+            hy_syntax::MatchPattern::Path { segments, .. } => {
+                if let Some(last) = segments.last().map(|s| s.as_str()) {
+                    match last {
+                        "some" | "Some" => has_some = true,
+                        "none" | "None" => has_none = true,
+                        "ok" | "Ok" => has_ok = true,
+                        "err" | "Err" => has_err = true,
+                        _ => {}
+                    }
+                }
+            }
+            hy_syntax::MatchPattern::Lit(_) => {}
+        }
+    }
+    has_wildcard || (has_some && has_none) || (has_ok && has_err)
+}
+
 // ---------------------------------------------------------------------------
 // Call resolution + A2/A7 processing
 // ---------------------------------------------------------------------------
@@ -2751,9 +2914,7 @@ impl<'a> Checker<'a> {
                 if !carries {
                     return;
                 }
-                let mut roots = Vec::new();
-                collect_ref_roots(value, &mut roots);
-                self.collect_callee_const_return_roots(st, value, &mut roots, 0);
+                let (roots, const_roots) = self.collect_ref_and_callee_const_roots(st, value);
                 for root in roots {
                     if root == name {
                         continue;
@@ -2780,6 +2941,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                self.propagate_callee_const_roots(st, name, &result, &const_roots, false);
                 if let Some(origin) = self.moved_non_owned_origin_in_expr(st, value) {
                     if let Some(nb) = st.env_lookup_mut(name) {
                         if nb.non_owned_origin.is_none() {
@@ -4283,11 +4445,10 @@ impl<'a> Checker<'a> {
                 if other_shape.is_reference_alias()
                     || matches!(other_shape, TypeShape::OwnHandle(_))
                 {
-                    let mut roots = Vec::new();
-                    collect_ref_roots(value, &mut roots);
-                    self.collect_callee_const_return_roots(st, value, &mut roots, 0);
+                    let (roots, const_roots) = self.collect_ref_and_callee_const_roots(st, value);
                     let mut borrowed_roots = Vec::new();
                     self.collect_borrowed_roots(st, value, &mut borrowed_roots);
+                    let mut matched_alias = false;
                     for src in roots {
                         if src == name {
                             continue;
@@ -4309,8 +4470,18 @@ impl<'a> Checker<'a> {
                                     nb.non_owned_origin = Some(origin);
                                 }
                             }
+                            matched_alias = true;
                             break;
                         }
+                    }
+                    if !matched_alias {
+                        self.propagate_callee_const_roots(
+                            st,
+                            name,
+                            &other_shape,
+                            &const_roots,
+                            true,
+                        );
                     }
                 }
             }
@@ -4556,10 +4727,9 @@ impl<'a> Checker<'a> {
             return;
         }
         self.record_multi_value_may_share(st, name, shape, value);
-        let mut roots = Vec::new();
-        collect_ref_roots(value, &mut roots);
-        self.collect_callee_const_return_roots(st, value, &mut roots, 0);
+        let (roots, const_roots) = self.collect_ref_and_callee_const_roots(st, value);
         if shape.is_reference_alias() || matches!(shape, TypeShape::OwnHandle(_)) {
+            let mut matched_alias = false;
             for src in &roots {
                 if src == name {
                     let outer_b = if !st.scopes.is_empty() {
@@ -4586,6 +4756,7 @@ impl<'a> Checker<'a> {
                                     nb.non_owned_origin = Some(origin);
                                 }
                             }
+                            matched_alias = true;
                             break;
                         }
                     }
@@ -4606,8 +4777,12 @@ impl<'a> Checker<'a> {
                             nb.non_owned_origin = Some(origin);
                         }
                     }
+                    matched_alias = true;
                     break;
                 }
+            }
+            if !matched_alias {
+                self.propagate_callee_const_roots(st, name, shape, &const_roots, true);
             }
         }
     }
@@ -4622,9 +4797,7 @@ impl<'a> Checker<'a> {
         if !self.shape_may_share(shape) && !matches!(shape, TypeShape::Unknown) {
             return;
         }
-        let mut roots = Vec::new();
-        collect_ref_roots(value, &mut roots);
-        self.collect_callee_const_return_roots(st, value, &mut roots, 0);
+        let (roots, const_roots) = self.collect_ref_and_callee_const_roots(st, value);
         let mut borrowed_roots = Vec::new();
         self.collect_borrowed_roots(st, value, &mut borrowed_roots);
         for root in &roots {
@@ -4661,6 +4834,7 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        self.propagate_callee_const_roots(st, name, shape, &const_roots, false);
         for root in &borrowed_roots {
             if root != name {
                 st.share_edge(name, root);
@@ -5096,6 +5270,14 @@ impl<'a> Checker<'a> {
                 }
                 walked.insert(key.clone(), None);
                 let mark = out.len();
+                let is_closure = self.is_closure_call_target(st, callee);
+                let mut cst = if is_closure {
+                    let mut cloned = st.clone();
+                    cloned.scope_push();
+                    cloned
+                } else {
+                    FnState::default()
+                };
                 let mut shadowed: HashSet<String> =
                     typed_params.iter().map(|(n, _)| n.clone()).collect();
                 shadowed.extend(
@@ -5103,224 +5285,1041 @@ impl<'a> Checker<'a> {
                         .iter()
                         .filter_map(|(n, _)| if !n.is_empty() { Some(n.clone()) } else { None }),
                 );
+                for (p, pty) in &typed_params {
+                    let shape = pty
+                        .as_ref()
+                        .map(|t| self.shape_of_type(t))
+                        .unwrap_or(TypeShape::Unknown);
+                    self.define_binding(&mut cst, p, shape, pty.clone(), false, false, false);
+                }
+                for (nr, rty) in &typed_results {
+                    if nr.is_empty() || nr == "_" {
+                        continue;
+                    }
+                    let shape = rty
+                        .as_ref()
+                        .map(|t| self.shape_of_type(t))
+                        .unwrap_or(TypeShape::Unknown);
+                    self.define_binding(&mut cst, nr, shape, rty.clone(), false, false, false);
+                }
                 let mut aliases: HashMap<String, HashSet<String>> = HashMap::new();
                 for (cname, cb) in &self.consts {
                     if self.shape_may_share(&cb.shape) && !shadowed.contains(cname) {
                         aliases.insert(cname.clone(), HashSet::from([cname.clone()]));
                     }
                 }
-                for (local_name, lb) in &st.env {
-                    if !shadowed.contains(local_name) {
-                        if let Some(croot) = self.const_write_root(
-                            st,
-                            &Place {
-                                kind: PlaceKind::Ident(local_name.clone()),
-                                span: value.span(),
-                            },
-                        ) {
-                            if self.shape_may_share(&lb.shape) {
-                                aliases.insert(local_name.clone(), HashSet::from([croot]));
+                if is_closure {
+                    let mut visible_names: HashSet<String> = st.env.keys().cloned().collect();
+                    for scope in &st.scopes {
+                        visible_names.extend(scope.keys().cloned());
+                    }
+                    for local_name in visible_names {
+                        if shadowed.contains(&local_name) {
+                            continue;
+                        }
+                        if let Some(lb) = self.lookup_binding(st, &local_name) {
+                            if let Some(croot) = self.const_write_root(
+                                st,
+                                &Place {
+                                    kind: PlaceKind::Ident(local_name.clone()),
+                                    span: value.span(),
+                                },
+                            ) {
+                                if self.shape_may_share(&lb.shape) {
+                                    aliases.insert(local_name, HashSet::from([croot]));
+                                    continue;
+                                }
+                            }
+                            if self.consts.contains_key(&local_name) {
+                                aliases.remove(&local_name);
+                                shadowed.insert(local_name);
                             }
                         }
                     }
                 }
-                let expr_const_origins =
-                    |e: &Expr,
-                     aliases: &HashMap<String, HashSet<String>>,
-                     shadowed: &HashSet<String>,
-                     walked: &mut HashMap<String, Option<Vec<String>>>|
-                     -> HashSet<String> {
-                        let mut roots = Vec::new();
-                        collect_ref_roots(e, &mut roots);
-                        self.walk_callee_const_return_roots(st, e, &mut roots, depth + 1, walked);
-                        let mut set = HashSet::new();
-                        for r in roots {
-                            if let Some(cs) = aliases.get(&r) {
-                                set.extend(cs.iter().cloned());
-                            } else if !shadowed.contains(&r) {
-                                if let Some(cb) = self.consts.get(&r) {
-                                    if self.shape_may_share(&cb.shape) {
-                                        set.insert(r);
+                let mut state = ConstRetState {
+                    cst,
+                    aliases,
+                    shadowed,
+                    local_fnlits: HashMap::new(),
+                    defers: Vec::new(),
+                };
+                self.walk_block_const_return_roots(
+                    body,
+                    &mut state,
+                    None,
+                    &typed_results,
+                    out,
+                    depth,
+                    walked,
+                );
+                // The roots this callee contributed, for the replay path above.
+                walked.insert(key, Some(out[mark..].to_vec()));
+            }
+            _ => {}
+        }
+    }
+
+    fn is_closure_call_target(&self, st: &FnState, callee: &Expr) -> bool {
+        match unwrap_parens(callee) {
+            Expr::FnLit { .. } => true,
+            Expr::Ident { name, .. } => st.closure_fnlits.contains_key(name.as_str()),
+            _ => false,
+        }
+    }
+
+    fn eval_const_return_origins(
+        &self,
+        state: &ConstRetState<'_>,
+        e: &Expr,
+        depth: usize,
+        walked: &mut HashMap<String, Option<Vec<String>>>,
+    ) -> HashSet<String> {
+        let mut ref_roots = Vec::new();
+        collect_ref_roots(e, &mut ref_roots);
+        let mut callee_roots = Vec::new();
+        self.walk_callee_const_return_roots(&state.cst, e, &mut callee_roots, depth + 1, walked);
+        let mut set = HashSet::new();
+        for r in ref_roots {
+            if let Some(cs) = state.aliases.get(&r) {
+                set.extend(cs.iter().cloned());
+            } else if !state.shadowed.contains(&r) {
+                if let Some(cb) = self.consts.get(&r) {
+                    if self.shape_may_share(&cb.shape) {
+                        set.insert(r);
+                    }
+                }
+            }
+        }
+        for cr in callee_roots {
+            if self
+                .consts
+                .get(&cr)
+                .is_some_and(|cb| self.shape_may_share(&cb.shape))
+                || self
+                    .lookup_binding(&state.cst, &cr)
+                    .is_some_and(|b| b.immutable && self.shape_may_share(&b.shape))
+            {
+                set.insert(cr);
+            }
+        }
+        set
+    }
+
+    fn apply_calls_const_origins(
+        &self,
+        calls: &[CallRef<'_>],
+        state: &mut ConstRetState<'_>,
+        depth: usize,
+        walked: &mut HashMap<String, Option<Vec<String>>>,
+    ) {
+        for cr in calls {
+            if let Expr::Ident { name, .. } = unwrap_parens(cr.callee) {
+                if name == "copy" && cr.args.len() >= 2 {
+                    let src_cs =
+                        self.eval_const_return_origins(state, &cr.args[1].value, depth, walked);
+                    if !src_cs.is_empty() {
+                        let mut dst_roots = Vec::new();
+                        collect_ref_roots(&cr.args[0].value, &mut dst_roots);
+                        for dr in dst_roots.into_iter().filter(|r| r != "_") {
+                            state.shadowed.remove(&dr);
+                            state
+                                .aliases
+                                .entry(dr)
+                                .or_default()
+                                .extend(src_cs.iter().cloned());
+                        }
+                    }
+                }
+            }
+            if let Some((slots, cbody)) = self.resolve_callee_slots_and_body(&state.cst, cr) {
+                if slots.len() >= 2 {
+                    let slots_meta: Vec<(&str, TypeShape, Option<&hy_syntax::TypeExpr>)> = slots
+                        .iter()
+                        .map(|(n, sh, ty, _)| (n.as_str(), sh.clone(), ty.as_ref()))
+                        .collect();
+                    for (dst_idx, src_idx) in
+                        self.collect_callee_param_stores(&slots_meta, &cbody, 0)
+                    {
+                        if let (Some((_, _, _, dst_src)), Some((_, _, _, src_src))) =
+                            (slots.get(dst_idx), slots.get(src_idx))
+                        {
+                            let src_cs = match src_src {
+                                CalleeSlotSource::Arg(src_e) => {
+                                    self.eval_const_return_origins(state, src_e, depth, walked)
+                                }
+                                CalleeSlotSource::OuterBinding(bname) => {
+                                    state.aliases.get(bname).cloned().unwrap_or_default()
+                                }
+                            };
+                            if !src_cs.is_empty() {
+                                let mut dst_roots = Vec::new();
+                                match dst_src {
+                                    CalleeSlotSource::Arg(dst_e) => {
+                                        collect_ref_roots(dst_e, &mut dst_roots);
+                                        collect_addr_of_roots(dst_e, &mut dst_roots);
                                     }
+                                    CalleeSlotSource::OuterBinding(bname) => {
+                                        dst_roots.push(bname.clone());
+                                    }
+                                }
+                                for dr in dst_roots.into_iter().filter(|r| r != "_") {
+                                    state.shadowed.remove(&dr);
+                                    state
+                                        .aliases
+                                        .entry(dr)
+                                        .or_default()
+                                        .extend(src_cs.iter().cloned());
                                 }
                             }
                         }
-                        set
-                    };
-                let flat = walk::flatten(body);
-                let mut local_fnlits: HashMap<String, (Vec<String>, Vec<String>, Block)> =
-                    HashMap::new();
-                let mut defers: Vec<(&Expr, Vec<HashSet<String>>)> = Vec::new();
-                for (stmt, _) in &flat.stmts {
-                    match stmt {
-                        Stmt::Local(l) => {
-                            if l.values.is_empty() {
-                                for n in &l.names {
-                                    local_fnlits.remove(n);
-                                    aliases.remove(n);
-                                    shadowed.insert(n.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    fn exit_const_scope<'ast>(
+        state: &mut ConstRetState<'ast>,
+        pre: &ConstRetState<'ast>,
+        locals: &HashSet<String>,
+    ) {
+        exit_scoped_origin_state(
+            &mut state.cst,
+            &pre.cst,
+            &mut state.aliases,
+            &pre.aliases,
+            &mut state.shadowed,
+            &pre.shadowed,
+            locals,
+        );
+        for name in locals {
+            restore_map_entry(&mut state.local_fnlits, &pre.local_fnlits, name);
+        }
+    }
+
+    fn join_const_ret_states<'ast>(states: &[ConstRetState<'ast>]) -> ConstRetState<'ast> {
+        let maps: Vec<&HashMap<String, HashSet<String>>> =
+            states.iter().map(|s| &s.aliases).collect();
+        let shadows: Vec<&HashSet<String>> = states.iter().map(|s| &s.shadowed).collect();
+        let (aliases, shadowed) = join_origin_maps_and_shadowed(&maps, &shadows);
+        let mut cst = states[0].cst.clone();
+        let others: Vec<&FnState> = states[1..].iter().map(|s| &s.cst).collect();
+        join_fnstate_bindings(&mut cst, &others);
+        let mut local_fnlits = states[0].local_fnlits.clone();
+        for s in &states[1..] {
+            for (k, v) in &s.local_fnlits {
+                local_fnlits.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        let mut defers: Vec<ConstDeferEntry<'ast>> = Vec::new();
+        let mut seen: HashMap<usize, usize> = HashMap::new();
+        for s in states {
+            for (call, arg_cs, fl, tag) in &s.defers {
+                if let Some(&pos) = seen.get(tag) {
+                    let existing = &mut defers[pos].1;
+                    for (dst, src) in existing.iter_mut().zip(arg_cs.iter()) {
+                        dst.extend(src.iter().cloned());
+                    }
+                    if defers[pos].2.is_none() {
+                        defers[pos].2 = fl.clone();
+                    }
+                } else {
+                    seen.insert(*tag, defers.len());
+                    defers.push((*call, arg_cs.clone(), fl.clone(), *tag));
+                }
+            }
+        }
+        ConstRetState {
+            cst,
+            aliases,
+            shadowed,
+            local_fnlits,
+            defers,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk_scoped_block_const_return_roots<'ast>(
+        &self,
+        block: &'ast Block,
+        state: &mut ConstRetState<'ast>,
+        typed_results: &[(String, Option<hy_syntax::TypeExpr>)],
+        out: &mut Vec<String>,
+        depth: usize,
+        walked: &mut HashMap<String, Option<Vec<String>>>,
+    ) -> bool {
+        let pre = state.clone();
+        state.cst.scope_push();
+        let mut locals = HashSet::new();
+        let ret = self.walk_block_const_return_roots(
+            block,
+            state,
+            Some(&mut locals),
+            typed_results,
+            out,
+            depth,
+            walked,
+        );
+        Self::exit_const_scope(state, &pre, &locals);
+        ret
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk_block_const_return_roots<'ast>(
+        &self,
+        block: &'ast Block,
+        state: &mut ConstRetState<'ast>,
+        mut locals: Option<&mut HashSet<String>>,
+        typed_results: &[(String, Option<hy_syntax::TypeExpr>)],
+        out: &mut Vec<String>,
+        depth: usize,
+        walked: &mut HashMap<String, Option<Vec<String>>>,
+    ) -> bool {
+        for stmt in &block.stmts {
+            if self.walk_stmt_const_return_roots(
+                stmt,
+                state,
+                locals.as_deref_mut(),
+                typed_results,
+                out,
+                depth,
+                walked,
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk_stmt_const_return_roots<'ast>(
+        &self,
+        stmt: &'ast Stmt,
+        state: &mut ConstRetState<'ast>,
+        mut locals: Option<&mut HashSet<String>>,
+        typed_results: &[(String, Option<hy_syntax::TypeExpr>)],
+        out: &mut Vec<String>,
+        depth: usize,
+        walked: &mut HashMap<String, Option<Vec<String>>>,
+    ) -> bool {
+        match stmt {
+            Stmt::Local(l) => {
+                let is_let = matches!(l.kind, LocalKind::Let);
+                let mut own_calls = Vec::new();
+                walk::own_calls(stmt, &mut own_calls);
+                self.apply_calls_const_origins(&own_calls, state, depth, walked);
+                if l.values.is_empty() {
+                    let shape = l
+                        .ty
+                        .as_ref()
+                        .map(|t| self.shape_of_type(t))
+                        .unwrap_or(TypeShape::Unknown);
+                    for n in &l.names {
+                        if n == "_" {
+                            continue;
+                        }
+                        if let Some(ls) = locals.as_deref_mut() {
+                            ls.insert(n.clone());
+                        }
+                        self.define_binding(
+                            &mut state.cst,
+                            n,
+                            shape.clone(),
+                            l.ty.clone(),
+                            false,
+                            false,
+                            is_let,
+                        );
+                        state.cst.closure_mutates.remove(n);
+                        state.cst.closure_defs.remove(n);
+                        state.cst.closure_fnlits.remove(n);
+                        state.local_fnlits.remove(n);
+                        state.aliases.remove(n);
+                        state.shadowed.insert(n.clone());
+                    }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let shapes = self.multi_value_shapes(&state.cst, &l.values[0], l.names.len());
+                    let tys = self.multi_value_tys(&state.cst, &l.values[0], l.names.len());
+                    let cs =
+                        self.eval_const_return_origins(state, &l.values[0], depth, walked);
+                    for ((n, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                        if n == "_" {
+                            continue;
+                        }
+                        if let Some(ls) = locals.as_deref_mut() {
+                            ls.insert(n.clone());
+                        }
+                        self.define_binding(
+                            &mut state.cst,
+                            n,
+                            shape.clone(),
+                            ty,
+                            false,
+                            false,
+                            is_let,
+                        );
+                        state.cst.closure_mutates.remove(n);
+                        state.cst.closure_defs.remove(n);
+                        state.cst.closure_fnlits.remove(n);
+                        state.local_fnlits.remove(n);
+                        if !cs.is_empty()
+                            && (self.shape_may_share(&shape)
+                                || matches!(shape, TypeShape::Unknown | TypeShape::Array(_)))
+                        {
+                            state.shadowed.remove(n);
+                            state.aliases.insert(n.clone(), cs.clone());
+                        } else {
+                            state.aliases.remove(n);
+                            state.shadowed.insert(n.clone());
+                        }
+                    }
+                } else {
+                    let rhs: Vec<(TypeShape, Option<hy_syntax::TypeExpr>, HashSet<String>)> = l
+                        .values
+                        .iter()
+                        .map(|v| {
+                            let inf = self.shape_of_expr(&state.cst, v);
+                            let (sh, ty) = match (&l.ty, inf) {
+                                (Some(t), TypeShape::Unknown) => {
+                                    (self.shape_of_type(t), Some(t.clone()))
                                 }
-                            } else if l.values.len() == 1 && l.names.len() > 1 {
-                                let cs =
-                                    expr_const_origins(&l.values[0], &aliases, &shadowed, walked);
-                                for n in &l.names {
-                                    local_fnlits.remove(n);
-                                    if cs.is_empty() {
-                                        aliases.remove(n);
-                                        shadowed.insert(n.clone());
-                                    } else {
-                                        shadowed.remove(n);
-                                        aliases.insert(n.clone(), cs.clone());
+                                (_, s) => (s, self.ty_of_expr(&state.cst, v).or_else(|| l.ty.clone())),
+                            };
+                            let cs = self.eval_const_return_origins(state, v, depth, walked);
+                            (sh, ty, cs)
+                        })
+                        .collect();
+                    for ((n, v), (shape, ty, cs)) in l.names.iter().zip(l.values.iter()).zip(rhs) {
+                        if n == "_" {
+                            continue;
+                        }
+                        if let Some(ls) = locals.as_deref_mut() {
+                            ls.insert(n.clone());
+                        }
+                        self.define_binding(
+                            &mut state.cst,
+                            n,
+                            shape.clone(),
+                            ty,
+                            false,
+                            false,
+                            is_let,
+                        );
+                        state.cst.closure_mutates.remove(n);
+                        state.cst.closure_defs.remove(n);
+                        state.cst.closure_fnlits.remove(n);
+                        Self::record_local_fnlit_map(&mut state.local_fnlits, n, v);
+                        self.record_closure_mutations(&mut state.cst, n, v);
+                        if !cs.is_empty()
+                            && (self.shape_may_share(&shape)
+                                || matches!(shape, TypeShape::Unknown | TypeShape::Array(_)))
+                        {
+                            state.shadowed.remove(n);
+                            state.aliases.insert(n.clone(), cs);
+                        } else {
+                            state.aliases.remove(n);
+                            state.shadowed.insert(n.clone());
+                        }
+                    }
+                }
+                false
+            }
+            Stmt::Assign {
+                targets, op, values, ..
+            } => {
+                if *op == AssignOp::Assign && targets.len() == values.len() {
+                    let rhs: Vec<(TypeShape, Option<hy_syntax::TypeExpr>, HashSet<String>)> = values
+                        .iter()
+                        .map(|v| {
+                            (
+                                self.shape_of_expr(&state.cst, v),
+                                self.ty_of_expr(&state.cst, v),
+                                self.eval_const_return_origins(state, v, depth, walked),
+                            )
+                        })
+                        .collect();
+                    for ((t, v), (sh, ty, cs)) in targets.iter().zip(values.iter()).zip(rhs) {
+                        match &t.kind {
+                            PlaceKind::Ident(n) => {
+                                if n == "_" {
+                                    continue;
+                                }
+                                if let Some(b) = state.cst.env_lookup_mut(n) {
+                                    if !matches!(sh, TypeShape::Unknown) || b.ty.is_none() {
+                                        b.shape = sh;
+                                    }
+                                    if ty.is_some() || b.ty.is_none() {
+                                        b.ty = ty;
                                     }
                                 }
-                            } else {
-                                for (n, v) in l.names.iter().zip(l.values.iter()) {
-                                    Self::record_local_fnlit_map(&mut local_fnlits, n, v);
-                                    let cs = expr_const_origins(v, &aliases, &shadowed, walked);
-                                    if cs.is_empty() {
-                                        aliases.remove(n);
-                                        shadowed.insert(n.clone());
-                                    } else {
-                                        shadowed.remove(n);
-                                        aliases.insert(n.clone(), cs);
-                                    }
+                                state.cst.closure_mutates.remove(n);
+                                state.cst.closure_defs.remove(n);
+                                state.cst.closure_fnlits.remove(n);
+                                Self::record_local_fnlit_map(&mut state.local_fnlits, n, v);
+                                self.record_closure_mutations(&mut state.cst, n, v);
+                                let target_shares = self
+                                    .lookup_binding(&state.cst, n)
+                                    .map(|b| {
+                                        self.shape_may_share(&b.shape)
+                                            || matches!(
+                                                b.shape,
+                                                TypeShape::Unknown | TypeShape::Array(_)
+                                            )
+                                    })
+                                    .unwrap_or(true);
+                                if cs.is_empty() || !target_shares {
+                                    state.aliases.remove(n);
+                                    state.shadowed.insert(n.clone());
+                                } else {
+                                    state.shadowed.remove(n);
+                                    state.aliases.insert(n.clone(), cs);
                                 }
                             }
-                        }
-                        Stmt::Assign {
-                            targets, values, ..
-                        } => {
-                            if targets.len() == values.len() {
-                                let mut rhs_cs: Vec<HashSet<String>> =
-                                    Vec::with_capacity(values.len());
-                                for v in values {
-                                    rhs_cs.push(expr_const_origins(v, &aliases, &shadowed, walked));
+                            PlaceKind::Field { .. } | PlaceKind::Index { .. } => {
+                                let root = t.root();
+                                if !root.is_empty() && root != "_" && !cs.is_empty() {
+                                    state.shadowed.remove(root);
+                                    state
+                                        .aliases
+                                        .entry(root.to_string())
+                                        .or_default()
+                                        .extend(cs);
                                 }
-                                for ((t, v), cs) in targets.iter().zip(values.iter()).zip(rhs_cs) {
-                                    match &t.kind {
-                                        PlaceKind::Ident(n) => {
-                                            Self::record_local_fnlit_map(&mut local_fnlits, n, v);
-                                            if cs.is_empty() {
-                                                aliases.remove(n);
-                                                shadowed.insert(n.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if *op == AssignOp::Assign && values.len() == 1 && targets.len() > 1 {
+                    let shapes = self.multi_value_shapes(&state.cst, &values[0], targets.len());
+                    let tys = self.multi_value_tys(&state.cst, &values[0], targets.len());
+                    let cs =
+                        self.eval_const_return_origins(state, &values[0], depth, walked);
+                    for ((t, sh), ty) in targets.iter().zip(shapes).zip(tys) {
+                        match &t.kind {
+                            PlaceKind::Ident(n) => {
+                                if n == "_" {
+                                    continue;
+                                }
+                                if let Some(b) = state.cst.env_lookup_mut(n) {
+                                    if !matches!(sh, TypeShape::Unknown) || b.ty.is_none() {
+                                        b.shape = sh.clone();
+                                    }
+                                    if ty.is_some() || b.ty.is_none() {
+                                        b.ty = ty;
+                                    }
+                                }
+                                state.cst.closure_mutates.remove(n);
+                                state.cst.closure_defs.remove(n);
+                                state.cst.closure_fnlits.remove(n);
+                                state.local_fnlits.remove(n);
+                                let target_shares = self
+                                    .lookup_binding(&state.cst, n)
+                                    .map(|b| {
+                                        self.shape_may_share(&b.shape)
+                                            || matches!(
+                                                b.shape,
+                                                TypeShape::Unknown | TypeShape::Array(_)
+                                            )
+                                    })
+                                    .unwrap_or(true);
+                                if cs.is_empty() || !target_shares {
+                                    state.aliases.remove(n);
+                                    state.shadowed.insert(n.clone());
+                                } else {
+                                    state.shadowed.remove(n);
+                                    state.aliases.insert(n.clone(), cs.clone());
+                                }
+                            }
+                            PlaceKind::Field { .. } | PlaceKind::Index { .. } => {
+                                let root = t.root();
+                                if !root.is_empty() && root != "_" && !cs.is_empty() {
+                                    state.shadowed.remove(root);
+                                    state
+                                        .aliases
+                                        .entry(root.to_string())
+                                        .or_default()
+                                        .extend(cs.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                let mut calls = Vec::new();
+                walk::own_calls(stmt, &mut calls);
+                self.apply_calls_const_origins(&calls, state, depth, walked);
+                false
+            }
+            Stmt::Defer { call, .. } => {
+                let mut arg_cs = Vec::new();
+                let mut captured_fl = None;
+                if let Expr::Call { callee: dc, args: da, .. } = unwrap_parens(call) {
+                    for a in da {
+                        arg_cs.push(self.eval_const_return_origins(state, &a.value, depth, walked));
+                    }
+                    if let Expr::Ident { name, .. } = unwrap_parens(dc) {
+                        captured_fl = state.local_fnlits.get(name).cloned().or_else(|| {
+                            state.cst.closure_fnlits.get(name).map(|(p, r, b)| {
+                                (
+                                    p.iter().map(|(pn, _)| pn.clone()).collect(),
+                                    r.iter()
+                                        .filter_map(|(rn, _)| {
+                                            if !rn.is_empty() {
+                                                Some(rn.clone())
                                             } else {
-                                                shadowed.remove(n);
-                                                aliases.insert(n.clone(), cs);
+                                                None
                                             }
+                                        })
+                                        .collect(),
+                                    b.clone(),
+                                )
+                            })
+                        });
+                    }
+                }
+                let tag = ast_stmt_tag(stmt);
+                if let Some(existing) = state.defers.iter_mut().find(|d| d.3 == tag) {
+                    for (dst, src) in existing.1.iter_mut().zip(arg_cs.into_iter()) {
+                        dst.extend(src);
+                    }
+                } else {
+                    state.defers.push((call, arg_cs, captured_fl, tag));
+                }
+                false
+            }
+            Stmt::Return { values, .. } => {
+                let mut calls = Vec::new();
+                walk::own_calls(stmt, &mut calls);
+                self.apply_calls_const_origins(&calls, state, depth, walked);
+                for v in values {
+                    for c in self.eval_const_return_origins(state, v, depth, walked) {
+                        if !out.contains(&c) {
+                            out.push(c);
+                        }
+                    }
+                }
+                if !typed_results.is_empty() && (values.is_empty() || !state.defers.is_empty()) {
+                    let mut rals = state.aliases.clone();
+                    let mut rshd = state.shadowed.clone();
+                    if !state.defers.is_empty() {
+                        let init: Vec<HashSet<String>> = if values.len() == typed_results.len() {
+                            values
+                                .iter()
+                                .map(|v| {
+                                    self.eval_const_return_origins(state, v, depth, walked)
+                                })
+                                .collect()
+                        } else if values.len() == 1 && typed_results.len() > 1 {
+                            vec![
+                                self.eval_const_return_origins(state, &values[0], depth, walked);
+                                typed_results.len()
+                            ]
+                        } else {
+                            Vec::new()
+                        };
+                        for ((nr, _), cs) in typed_results.iter().zip(init) {
+                            if nr.is_empty() || nr == "_" {
+                                continue;
+                            }
+                            if cs.is_empty() {
+                                rals.remove(nr);
+                                rshd.insert(nr.clone());
+                            } else {
+                                rshd.remove(nr);
+                                rals.insert(nr.clone(), cs);
+                            }
+                        }
+                        let has_captured_fl = state.defers.iter().any(|(_, _, fl, _)| fl.is_some());
+                        let mut merged_fnlits;
+                        let def_fnlits = if has_captured_fl {
+                            merged_fnlits = state.local_fnlits.clone();
+                            for (dcall, _, fl, _) in &state.defers {
+                                if let Some(fl) = fl {
+                                    if let Expr::Call { callee: dc, .. } = unwrap_parens(dcall) {
+                                        if let Expr::Ident { name, .. } = unwrap_parens(dc) {
+                                            merged_fnlits.insert(name.clone(), fl.clone());
                                         }
-                                        PlaceKind::Field { .. } | PlaceKind::Index { .. } => {
-                                            let root = t.root();
-                                            if !root.is_empty() && !cs.is_empty() {
-                                                aliases
-                                                    .entry(root.to_string())
-                                                    .or_default()
-                                                    .extend(cs);
-                                            }
-                                        }
-                                        _ => {}
                                     }
                                 }
-                            } else if values.len() == 1 && targets.len() > 1 {
-                                let cs =
-                                    expr_const_origins(&values[0], &aliases, &shadowed, walked);
-                                for t in targets {
-                                    if let PlaceKind::Ident(n) = &t.kind {
-                                        if cs.is_empty() {
-                                            aliases.remove(n);
-                                            shadowed.insert(n.clone());
-                                        } else {
-                                            shadowed.remove(n);
-                                            aliases.insert(n.clone(), cs.clone());
-                                        }
-                                    }
+                            }
+                            &merged_fnlits
+                        } else {
+                            &state.local_fnlits
+                        };
+                        for (dcall, darg_cs, _, _) in state.defers.iter().rev() {
+                            self.replay_defer_const(
+                                &state.cst,
+                                dcall,
+                                darg_cs,
+                                def_fnlits,
+                                &mut rals,
+                                &mut rshd,
+                                depth,
+                                walked,
+                            );
+                        }
+                    }
+                    for (nr, _) in typed_results {
+                        if nr.is_empty() || nr == "_" {
+                            continue;
+                        }
+                        if let Some(cs) = rals.get(nr) {
+                            for c in cs {
+                                if !out.contains(c) {
+                                    out.push(c.clone());
                                 }
                             }
                         }
-                        Stmt::Defer { call, .. } => {
-                            let mut arg_cs = Vec::new();
-                            if let Expr::Call { args: da, .. } = unwrap_parens(call) {
-                                for a in da {
-                                    arg_cs.push(expr_const_origins(
-                                        &a.value, &aliases, &shadowed, walked,
-                                    ));
-                                }
+                    }
+                }
+                true
+            }
+            Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
+                self.walk_scoped_block_const_return_roots(
+                    block,
+                    state,
+                    typed_results,
+                    out,
+                    depth,
+                    walked,
+                )
+            }
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                let if_scope = init.as_deref().map(|init_stmt| {
+                    let pre_if = state.clone();
+                    state.cst.scope_push();
+                    let mut if_locals = HashSet::new();
+                    self.walk_stmt_const_return_roots(
+                        init_stmt,
+                        state,
+                        Some(&mut if_locals),
+                        typed_results,
+                        out,
+                        depth,
+                        walked,
+                    );
+                    (pre_if, if_locals)
+                });
+                let mut cond_calls = Vec::new();
+                walk::expr_calls(cond, &mut cond_calls);
+                self.apply_calls_const_origins(&cond_calls, state, depth, walked);
+
+                let mut then_st = state.clone();
+                let then_ret = self.walk_scoped_block_const_return_roots(
+                    then,
+                    &mut then_st,
+                    typed_results,
+                    out,
+                    depth,
+                    walked,
+                );
+                let mut always_returned = false;
+                if let Some(other_stmt) = otherwise.as_deref() {
+                    let pre_else = state.clone();
+                    let mut else_st = pre_else.clone();
+                    else_st.cst.scope_push();
+                    let mut else_locals = HashSet::new();
+                    let else_ret = self.walk_stmt_const_return_roots(
+                        other_stmt,
+                        &mut else_st,
+                        Some(&mut else_locals),
+                        typed_results,
+                        out,
+                        depth,
+                        walked,
+                    );
+                    Self::exit_const_scope(&mut else_st, &pre_else, &else_locals);
+                    let mut reachable = Vec::new();
+                    if !then_ret {
+                        reachable.push(then_st);
+                    }
+                    if !else_ret {
+                        reachable.push(else_st);
+                    }
+                    if reachable.is_empty() {
+                        always_returned = true;
+                    } else {
+                        *state = Self::join_const_ret_states(&reachable);
+                    }
+                } else if !then_ret {
+                    *state = Self::join_const_ret_states(&[state.clone(), then_st]);
+                }
+                if let Some((pre_if, if_locals)) = if_scope {
+                    Self::exit_const_scope(state, &pre_if, &if_locals);
+                }
+                always_returned
+            }
+            Stmt::For { kind, body, .. } => {
+                let mut pre_calls = Vec::new();
+                match kind {
+                    hy_syntax::ForKind::While { cond } => walk::expr_calls(cond, &mut pre_calls),
+                    hy_syntax::ForKind::Range { lo, hi, .. } => {
+                        walk::expr_calls(lo, &mut pre_calls);
+                        walk::expr_calls(hi, &mut pre_calls);
+                    }
+                    hy_syntax::ForKind::Iterate { expr, .. } => {
+                        walk::expr_calls(expr, &mut pre_calls)
+                    }
+                    hy_syntax::ForKind::Infinite => {}
+                }
+                self.apply_calls_const_origins(&pre_calls, state, depth, walked);
+                let iter_meta = match kind {
+                    hy_syntax::ForKind::Iterate { vars, expr } => {
+                        let is_chan =
+                            matches!(self.shape_of_expr(&state.cst, expr), TypeShape::Chan(_));
+                        let shapes = self.iterate_var_shapes(&state.cst, expr, vars.len());
+                        let iter_cs = if is_chan {
+                            HashSet::new()
+                        } else {
+                            self.eval_const_return_origins(state, expr, depth, walked)
+                        };
+                        Some((is_chan, shapes, iter_cs))
+                    }
+                    _ => None,
+                };
+                let pre = state.clone();
+                let mut loop_in = pre.clone();
+                for _ in 0..6 {
+                    let mut iter_st = loop_in.clone();
+                    iter_st.cst.scope_push();
+                    let mut body_locals = HashSet::new();
+                    match kind {
+                        hy_syntax::ForKind::Range { var, .. } => {
+                            if var != "_" {
+                                body_locals.insert(var.clone());
+                                self.define_binding(
+                                    &mut iter_st.cst,
+                                    var,
+                                    TypeShape::Primitive,
+                                    None,
+                                    false,
+                                    false,
+                                    false,
+                                );
+                                iter_st.aliases.remove(var);
+                                iter_st.shadowed.insert(var.clone());
                             }
-                            defers.push((call, arg_cs));
                         }
-                        Stmt::Return { values, .. } => {
-                            for v in values {
-                                for c in expr_const_origins(v, &aliases, &shadowed, walked) {
-                                    if !out.contains(&c) {
-                                        out.push(c);
+                        hy_syntax::ForKind::Iterate { vars, .. } => {
+                            if let Some((is_chan, shapes, iter_cs)) = &iter_meta {
+                                for (name, shape) in vars.iter().zip(shapes.iter()) {
+                                    if name == "_" {
+                                        continue;
                                     }
-                                }
-                            }
-                            if !typed_results.is_empty() {
-                                let mut rals = aliases.clone();
-                                let mut rshd = shadowed.clone();
-                                if !defers.is_empty() {
-                                    let init: Vec<HashSet<String>> = if values.len() == typed_results.len() {
-                                        let mut tmp = Vec::with_capacity(values.len());
-                                        for v in values {
-                                            tmp.push(expr_const_origins(v, &rals, &rshd, walked));
-                                        }
-                                        tmp
-                                    } else if values.len() == 1 && typed_results.len() > 1 {
-                                        vec![
-                                            expr_const_origins(&values[0], &rals, &rshd, walked);
-                                            typed_results.len()
-                                        ]
+                                    body_locals.insert(name.clone());
+                                    self.define_binding(
+                                        &mut iter_st.cst,
+                                        name,
+                                        shape.clone(),
+                                        None,
+                                        false,
+                                        false,
+                                        false,
+                                    );
+                                    if !*is_chan
+                                        && !iter_cs.is_empty()
+                                        && (self.shape_may_share(shape)
+                                            || matches!(
+                                                shape,
+                                                TypeShape::Unknown | TypeShape::Array(_)
+                                            ))
+                                    {
+                                        iter_st.shadowed.remove(name);
+                                        iter_st.aliases.insert(name.clone(), iter_cs.clone());
                                     } else {
-                                        Vec::new()
-                                    };
-                                    for ((nr, _), cs) in typed_results.iter().zip(init) {
-                                        if nr.is_empty() {
-                                            continue;
-                                        }
-                                        if cs.is_empty() {
-                                            rals.remove(nr);
-                                            rshd.insert(nr.clone());
-                                        } else {
-                                            rshd.remove(nr);
-                                            rals.insert(nr.clone(), cs);
-                                        }
-                                    }
-                                    for (dcall, darg_cs) in defers.iter().rev() {
-                                        self.replay_defer_const(
-                                            st,
-                                            dcall,
-                                            darg_cs,
-                                            &local_fnlits,
-                                            &mut rals,
-                                            &mut rshd,
-                                            depth,
-                                            walked,
-                                        );
-                                    }
-                                }
-                                if values.is_empty() || !defers.is_empty() {
-                                    for (nr, _) in &typed_results {
-                                        if nr.is_empty() {
-                                            continue;
-                                        }
-                                        if let Some(cs) = rals.get(nr) {
-                                            for c in cs {
-                                                if !out.contains(c) {
-                                                    out.push(c.clone());
-                                                }
-                                            }
-                                        }
+                                        iter_st.aliases.remove(name);
+                                        iter_st.shadowed.insert(name.clone());
                                     }
                                 }
                             }
                         }
                         _ => {}
                     }
+                    let _ = self.walk_block_const_return_roots(
+                        body,
+                        &mut iter_st,
+                        Some(&mut body_locals),
+                        typed_results,
+                        out,
+                        depth,
+                        walked,
+                    );
+                    Self::exit_const_scope(&mut iter_st, &loop_in, &body_locals);
+                    let next_in = Self::join_const_ret_states(&[pre.clone(), iter_st]);
+                    let converged = next_in.aliases == loop_in.aliases
+                        && next_in.shadowed == loop_in.shadowed
+                        && next_in.defers.len() == loop_in.defers.len();
+                    loop_in = next_in;
+                    if converged {
+                        break;
+                    }
                 }
-                // The roots this callee contributed, for the replay path above.
-                walked.insert(key, Some(out[mark..].to_vec()));
+                *state = loop_in;
+                false
             }
-            _ => {}
+            Stmt::Match { subject, arms, .. } => {
+                let mut subj_calls = Vec::new();
+                walk::expr_calls(subject, &mut subj_calls);
+                self.apply_calls_const_origins(&subj_calls, state, depth, walked);
+                let subj_cs = self.eval_const_return_origins(state, subject, depth, walked);
+                let subj_ty = self.ty_of_expr(&state.cst, subject).map(|t| match t {
+                    hy_syntax::TypeExpr::Option { elem, .. } => *elem,
+                    other => other,
+                });
+                let subj_shape = self.shape_of_expr(&state.cst, subject);
+                let pre = state.clone();
+                let mut reachable = Vec::new();
+                for arm in arms {
+                    let mut arm_st = pre.clone();
+                    arm_st.cst.scope_push();
+                    let mut arm_locals = HashSet::new();
+                    if let hy_syntax::MatchPattern::Path {
+                        binding: Some(bname),
+                        ..
+                    } = &arm.pattern
+                    {
+                        if bname != "_" {
+                            arm_locals.insert(bname.clone());
+                            self.define_binding(
+                                &mut arm_st.cst,
+                                bname,
+                                subj_shape.clone(),
+                                subj_ty.clone(),
+                                false,
+                                false,
+                                false,
+                            );
+                            if !subj_cs.is_empty()
+                                && (self.shape_may_share(&subj_shape)
+                                    || matches!(
+                                        subj_shape,
+                                        TypeShape::Unknown | TypeShape::Array(_)
+                                    ))
+                            {
+                                arm_st.shadowed.remove(bname);
+                                arm_st.aliases.insert(bname.clone(), subj_cs.clone());
+                            } else {
+                                arm_st.aliases.remove(bname);
+                                arm_st.shadowed.insert(bname.clone());
+                            }
+                        }
+                    }
+                    if let Some(g) = &arm.guard {
+                        let mut g_calls = Vec::new();
+                        walk::expr_calls(g, &mut g_calls);
+                        self.apply_calls_const_origins(&g_calls, &mut arm_st, depth, walked);
+                    }
+                    let arm_ret = self.walk_block_const_return_roots(
+                        &arm.body,
+                        &mut arm_st,
+                        Some(&mut arm_locals),
+                        typed_results,
+                        out,
+                        depth,
+                        walked,
+                    );
+                    Self::exit_const_scope(&mut arm_st, &pre, &arm_locals);
+                    if !arm_ret {
+                        reachable.push(arm_st);
+                    }
+                }
+                if arms.is_empty() {
+                    return false;
+                }
+                if !is_match_exhaustive(arms) {
+                    reachable.push(pre);
+                }
+                if reachable.is_empty() {
+                    true
+                } else {
+                    *state = Self::join_const_ret_states(&reachable);
+                    false
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                if arms.is_empty() {
+                    return false;
+                }
+                let pre = state.clone();
+                let mut reachable = Vec::new();
+                for arm in arms {
+                    let mut arm_st = pre.clone();
+                    arm_st.cst.scope_push();
+                    let mut arm_locals = HashSet::new();
+                    match &arm.kind {
+                        hy_syntax::SelectArmKind::Send { chan, value, .. } => {
+                            let mut scalls = Vec::new();
+                            walk::expr_calls(chan, &mut scalls);
+                            walk::expr_calls(value, &mut scalls);
+                            self.apply_calls_const_origins(&scalls, &mut arm_st, depth, walked);
+                        }
+                        hy_syntax::SelectArmKind::Recv { names, chan } => {
+                            let mut rcalls = Vec::new();
+                            walk::expr_calls(chan, &mut rcalls);
+                            self.apply_calls_const_origins(&rcalls, &mut arm_st, depth, walked);
+                            let elem = match self.shape_of_expr(&arm_st.cst, chan) {
+                                TypeShape::Chan(e) => *e,
+                                _ => TypeShape::Unknown,
+                            };
+                            for (i, n) in names.iter().enumerate() {
+                                if n == "_" {
+                                    continue;
+                                }
+                                arm_locals.insert(n.clone());
+                                let shape = if i == 0 {
+                                    elem.clone()
+                                } else {
+                                    TypeShape::Primitive
+                                };
+                                self.define_binding(
+                                    &mut arm_st.cst,
+                                    n,
+                                    shape,
+                                    None,
+                                    false,
+                                    false,
+                                    false,
+                                );
+                                arm_st.aliases.remove(n);
+                                arm_st.shadowed.insert(n.clone());
+                            }
+                        }
+                        hy_syntax::SelectArmKind::Default => {}
+                    }
+                    let arm_ret = self.walk_block_const_return_roots(
+                        &arm.body,
+                        &mut arm_st,
+                        Some(&mut arm_locals),
+                        typed_results,
+                        out,
+                        depth,
+                        walked,
+                    );
+                    Self::exit_const_scope(&mut arm_st, &pre, &arm_locals);
+                    if !arm_ret {
+                        reachable.push(arm_st);
+                    }
+                }
+                if reachable.is_empty() {
+                    true
+                } else {
+                    *state = Self::join_const_ret_states(&reachable);
+                    false
+                }
+            }
+            _ => {
+                let mut calls = Vec::new();
+                walk::own_calls(stmt, &mut calls);
+                self.apply_calls_const_origins(&calls, state, depth, walked);
+                false
+            }
         }
     }
 
@@ -5565,8 +6564,14 @@ impl<'a> Checker<'a> {
         else {
             return if self.is_opaque_interproc_call(st, callee) { vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] } else { Vec::new() };
         };
-        let mut cst = st.clone();
-        cst.scope_push();
+        let is_closure = self.is_closure_call_target(st, callee);
+        let mut cst = if is_closure {
+            let mut cloned = st.clone();
+            cloned.scope_push();
+            cloned
+        } else {
+            FnState::default()
+        };
         let mut origins: HashMap<String, HashSet<String>> = HashMap::new();
         let mut shadowed: HashSet<String> = HashSet::new();
         for (p, pty) in &typed_params {
@@ -5596,66 +6601,75 @@ impl<'a> Checker<'a> {
             shadowed.insert(nr.clone());
         }
 
-        let flat = walk::flatten(body);
+        let mut state = SharedRetState {
+            cst,
+            origins,
+            shadowed,
+            defers: Vec::new(),
+        };
         let mut pairs: Vec<(usize, usize)> = Vec::new();
-        let mut defers: Vec<(&Expr, Vec<HashSet<String>>, usize)> = Vec::new();
-        for (stmt, idx) in flat.stmts.iter().copied() {
-            let mut calls = Vec::new();
-            if let Stmt::Defer { call, .. } = stmt {
-                if let Expr::Call { callee: dc, args: da, .. } = unwrap_parens(call) {
-                    walk::expr_calls(dc, &mut calls);
-                    for a in da {
-                        walk::expr_calls(&a.value, &mut calls);
-                    }
-                }
-            } else {
-                walk::own_calls(stmt, &mut calls);
-            }
-            for cr in &calls {
-                if let Expr::Ident { name, .. } = unwrap_parens(cr.callee) {
-                    if name == "copy" && cr.args.len() >= 2 {
-                        let mut src_o = HashSet::new();
-                        self.collect_sharing_origins_expr(
-                            &cst,
-                            &cr.args[1].value,
-                            &origins,
-                            &shadowed,
-                            &mut src_o,
-                        );
+        self.walk_block_shared_return_pairs(body, &mut state, None, &typed_results, &mut pairs);
+        pairs.sort_unstable();
+        pairs.dedup();
+        pairs
+    }
+
+    fn apply_calls_shared_origins(&self, calls: &[CallRef<'_>], state: &mut SharedRetState<'_>) {
+        for cr in calls {
+            if let Expr::Ident { name, .. } = unwrap_parens(cr.callee) {
+                if name == "copy" && cr.args.len() >= 2 {
+                    let mut src_o = HashSet::new();
+                    self.collect_sharing_origins_expr(
+                        &state.cst,
+                        &cr.args[1].value,
+                        &state.origins,
+                        &state.shadowed,
+                        &mut src_o,
+                    );
+                    if !src_o.is_empty() {
                         let mut dst_roots = Vec::new();
                         collect_ref_roots(&cr.args[0].value, &mut dst_roots);
-                        for dr in dst_roots {
-                            if !src_o.is_empty() {
-                                origins.entry(dr).or_default().extend(src_o.iter().cloned());
-                            }
+                        for dr in dst_roots.into_iter().filter(|r| r != "_") {
+                            state.shadowed.remove(&dr);
+                            state
+                                .origins
+                                .entry(dr)
+                                .or_default()
+                                .extend(src_o.iter().cloned());
                         }
                     }
                 }
-                if let Some((slots, cbody)) = self.resolve_callee_slots_and_body(&cst, cr) {
-                    if slots.len() >= 2 {
-                        let slots_meta: Vec<(&str, TypeShape, Option<&hy_syntax::TypeExpr>)> = slots
-                            .iter()
-                            .map(|(n, sh, ty, _)| (n.as_str(), sh.clone(), ty.as_ref()))
-                            .collect();
-                        for (dst_idx, src_idx) in
-                            self.collect_callee_param_stores(&slots_meta, &cbody, 0)
+            }
+            if let Some((slots, cbody)) = self.resolve_callee_slots_and_body(&state.cst, cr) {
+                if slots.len() >= 2 {
+                    let slots_meta: Vec<(&str, TypeShape, Option<&hy_syntax::TypeExpr>)> = slots
+                        .iter()
+                        .map(|(n, sh, ty, _)| (n.as_str(), sh.clone(), ty.as_ref()))
+                        .collect();
+                    for (dst_idx, src_idx) in
+                        self.collect_callee_param_stores(&slots_meta, &cbody, 0)
+                    {
+                        if let (Some((_, _, _, dst_src)), Some((_, _, _, src_src))) =
+                            (slots.get(dst_idx), slots.get(src_idx))
                         {
-                            if let (Some((_, _, _, dst_src)), Some((_, _, _, src_src))) =
-                                (slots.get(dst_idx), slots.get(src_idx))
-                            {
-                                let mut src_o = HashSet::new();
-                                match src_src {
-                                    CalleeSlotSource::Arg(src_e) => {
-                                        self.collect_sharing_origins_expr(
-                                            &cst, src_e, &origins, &shadowed, &mut src_o,
-                                        );
-                                    }
-                                    CalleeSlotSource::OuterBinding(bname) => {
-                                        if let Some(os) = origins.get(bname) {
-                                            src_o.extend(os.iter().cloned());
-                                        }
+                            let mut src_o = HashSet::new();
+                            match src_src {
+                                CalleeSlotSource::Arg(src_e) => {
+                                    self.collect_sharing_origins_expr(
+                                        &state.cst,
+                                        src_e,
+                                        &state.origins,
+                                        &state.shadowed,
+                                        &mut src_o,
+                                    );
+                                }
+                                CalleeSlotSource::OuterBinding(bname) => {
+                                    if let Some(os) = state.origins.get(bname) {
+                                        src_o.extend(os.iter().cloned());
                                     }
                                 }
+                            }
+                            if !src_o.is_empty() {
                                 let mut dst_roots = Vec::new();
                                 match dst_src {
                                     CalleeSlotSource::Arg(dst_e) => {
@@ -5666,242 +6680,482 @@ impl<'a> Checker<'a> {
                                         dst_roots.push(bname.clone());
                                     }
                                 }
-                                for dr in dst_roots {
-                                    if !src_o.is_empty() {
-                                        origins
-                                            .entry(dr)
-                                            .or_default()
-                                            .extend(src_o.iter().cloned());
-                                    }
+                                for dr in dst_roots.into_iter().filter(|r| r != "_") {
+                                    state.shadowed.remove(&dr);
+                                    state
+                                        .origins
+                                        .entry(dr)
+                                        .or_default()
+                                        .extend(src_o.iter().cloned());
                                 }
                             }
                         }
                     }
                 }
             }
-            match stmt {
-                Stmt::Local(l) => {
-                    let is_let = matches!(l.kind, LocalKind::Let);
-                    if l.values.is_empty() {
-                        let shape = l
-                            .ty
-                            .as_ref()
-                            .map(|t| self.shape_of_type(t))
-                            .unwrap_or(TypeShape::Unknown);
-                        for name in &l.names {
-                            self.define_binding(
-                                &mut cst,
-                                name,
-                                shape.clone(),
-                                l.ty.clone(),
-                                false,
-                                false,
-                                is_let,
-                            );
-                            if self.shape_may_share(&shape)
-                                || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
-                            {
-                                origins.insert(
-                                    name.clone(),
-                                    HashSet::from([format!("local:{idx}:{name}")]),
-                                );
-                                shadowed.remove(name);
-                            } else {
-                                origins.remove(name);
-                                shadowed.insert(name.clone());
-                            }
+        }
+    }
+
+    fn join_shared_ret_states<'ast>(states: &[SharedRetState<'ast>]) -> SharedRetState<'ast> {
+        let maps: Vec<&HashMap<String, HashSet<String>>> =
+            states.iter().map(|s| &s.origins).collect();
+        let shadows: Vec<&HashSet<String>> = states.iter().map(|s| &s.shadowed).collect();
+        let (origins, shadowed) = join_origin_maps_and_shadowed(&maps, &shadows);
+        let mut cst = states[0].cst.clone();
+        let others: Vec<&FnState> = states[1..].iter().map(|s| &s.cst).collect();
+        join_fnstate_bindings(&mut cst, &others);
+        let mut defers: Vec<SharedDeferEntry<'ast>> = Vec::new();
+        let mut seen: HashMap<usize, usize> = HashMap::new();
+        for s in states {
+            for (call, arg_os, tag, fl) in &s.defers {
+                if let Some(&pos) = seen.get(tag) {
+                    let existing = &mut defers[pos].1;
+                    for (dst, src) in existing.iter_mut().zip(arg_os.iter()) {
+                        dst.extend(src.iter().cloned());
+                    }
+                    if defers[pos].3.is_none() {
+                        defers[pos].3 = fl.clone();
+                    }
+                } else {
+                    seen.insert(*tag, defers.len());
+                    defers.push((*call, arg_os.clone(), *tag, fl.clone()));
+                }
+            }
+        }
+        SharedRetState {
+            cst,
+            origins,
+            shadowed,
+            defers,
+        }
+    }
+
+    fn walk_scoped_block_shared_return_pairs<'ast>(
+        &self,
+        block: &'ast Block,
+        state: &mut SharedRetState<'ast>,
+        typed_results: &[(String, Option<hy_syntax::TypeExpr>)],
+        pairs: &mut Vec<(usize, usize)>,
+    ) -> bool {
+        let pre = state.clone();
+        state.cst.scope_push();
+        let mut locals = HashSet::new();
+        let ret = self.walk_block_shared_return_pairs(
+            block,
+            state,
+            Some(&mut locals),
+            typed_results,
+            pairs,
+        );
+        exit_scoped_origin_state(
+            &mut state.cst,
+            &pre.cst,
+            &mut state.origins,
+            &pre.origins,
+            &mut state.shadowed,
+            &pre.shadowed,
+            &locals,
+        );
+        ret
+    }
+
+    fn walk_block_shared_return_pairs<'ast>(
+        &self,
+        block: &'ast Block,
+        state: &mut SharedRetState<'ast>,
+        mut locals: Option<&mut HashSet<String>>,
+        typed_results: &[(String, Option<hy_syntax::TypeExpr>)],
+        pairs: &mut Vec<(usize, usize)>,
+    ) -> bool {
+        for stmt in &block.stmts {
+            if self.walk_stmt_shared_return_pairs(
+                stmt,
+                state,
+                locals.as_deref_mut(),
+                typed_results,
+                pairs,
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn walk_stmt_shared_return_pairs<'ast>(
+        &self,
+        stmt: &'ast Stmt,
+        state: &mut SharedRetState<'ast>,
+        mut locals: Option<&mut HashSet<String>>,
+        typed_results: &[(String, Option<hy_syntax::TypeExpr>)],
+        pairs: &mut Vec<(usize, usize)>,
+    ) -> bool {
+        let tag = ast_stmt_tag(stmt);
+        match stmt {
+            Stmt::Local(l) => {
+                let mut calls = Vec::new();
+                walk::own_calls(stmt, &mut calls);
+                self.apply_calls_shared_origins(&calls, state);
+                let is_let = matches!(l.kind, LocalKind::Let);
+                if l.values.is_empty() {
+                    let shape = l
+                        .ty
+                        .as_ref()
+                        .map(|t| self.shape_of_type(t))
+                        .unwrap_or(TypeShape::Unknown);
+                    for name in &l.names {
+                        if name == "_" {
+                            continue;
                         }
-                    } else if l.values.len() == 1 && l.names.len() > 1 {
-                        let shapes = self.multi_value_shapes(&cst, &l.values[0], l.names.len());
-                        let tys = self.multi_value_tys(&cst, &l.values[0], l.names.len());
-                        let mut base_o = HashSet::new();
-                        self.collect_sharing_origins_expr(
-                            &cst,
-                            &l.values[0],
-                            &origins,
-                            &shadowed,
-                            &mut base_o,
+                        if let Some(ls) = locals.as_deref_mut() {
+                            ls.insert(name.clone());
+                        }
+                        self.define_binding(
+                            &mut state.cst,
+                            name,
+                            shape.clone(),
+                            l.ty.clone(),
+                            false,
+                            false,
+                            is_let,
                         );
-                        for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
-                            self.define_binding(&mut cst, name, shape.clone(), ty, false, false, is_let);
-                            if self.shape_may_share(&shape)
-                                || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
-                            {
-                                let mut s = base_o.clone();
-                                if s.is_empty() {
-                                    s.insert(format!("local:{idx}:{name}"));
-                                }
-                                origins.insert(name.clone(), s);
-                                shadowed.remove(name);
-                            } else {
-                                origins.remove(name);
-                                shadowed.insert(name.clone());
-                            }
-                        }
-                    } else {
-                        let rhs_info: Vec<(
-                            TypeShape,
-                            Option<hy_syntax::TypeExpr>,
-                            HashSet<String>,
-                        )> = l
-                            .values
-                            .iter()
-                            .map(|v| {
-                                let inf = self.shape_of_expr(&cst, v);
-                                let (sh, ty) = match (&l.ty, inf) {
-                                    (Some(t), TypeShape::Unknown) => {
-                                        (self.shape_of_type(t), Some(t.clone()))
-                                    }
-                                    (_, s) => (s, self.ty_of_expr(&cst, v).or_else(|| l.ty.clone())),
-                                };
-                                let mut os = HashSet::new();
-                                self.collect_sharing_origins_expr(
-                                    &cst, v, &origins, &shadowed, &mut os,
-                                );
-                                (sh, ty, os)
-                            })
-                            .collect();
-                        for ((name, v), (shape, ty, mut s)) in
-                            l.names.iter().zip(l.values.iter()).zip(rhs_info)
+                        state.cst.closure_mutates.remove(name);
+                        state.cst.closure_defs.remove(name);
+                        state.cst.closure_fnlits.remove(name);
+                        if self.shape_may_share(&shape)
+                            || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
                         {
-                            self.define_binding(&mut cst, name, shape.clone(), ty, false, false, is_let);
-                            self.record_closure_mutations(&mut cst, name, v);
-                            if self.shape_may_share(&shape)
-                                || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
-                            {
-                                if s.is_empty() {
-                                    s.insert(format!("local:{idx}:{name}"));
-                                }
-                                origins.insert(name.clone(), s);
-                                shadowed.remove(name);
-                            } else {
-                                origins.remove(name);
-                                shadowed.insert(name.clone());
+                            state.origins.insert(
+                                name.clone(),
+                                HashSet::from([format!("local:{tag}:{name}")]),
+                            );
+                            state.shadowed.remove(name);
+                        } else {
+                            state.origins.remove(name);
+                            state.shadowed.insert(name.clone());
+                        }
+                    }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let shapes = self.multi_value_shapes(&state.cst, &l.values[0], l.names.len());
+                    let tys = self.multi_value_tys(&state.cst, &l.values[0], l.names.len());
+                    let mut base_o = HashSet::new();
+                    self.collect_sharing_origins_expr(
+                        &state.cst,
+                        &l.values[0],
+                        &state.origins,
+                        &state.shadowed,
+                        &mut base_o,
+                    );
+                    for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                        if name == "_" {
+                            continue;
+                        }
+                        if let Some(ls) = locals.as_deref_mut() {
+                            ls.insert(name.clone());
+                        }
+                        self.define_binding(
+                            &mut state.cst,
+                            name,
+                            shape.clone(),
+                            ty,
+                            false,
+                            false,
+                            is_let,
+                        );
+                        state.cst.closure_mutates.remove(name);
+                        state.cst.closure_defs.remove(name);
+                        state.cst.closure_fnlits.remove(name);
+                        if self.shape_may_share(&shape)
+                            || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
+                        {
+                            let mut s = base_o.clone();
+                            if s.is_empty() {
+                                s.insert(format!("local:{tag}:{name}"));
                             }
+                            state.origins.insert(name.clone(), s);
+                            state.shadowed.remove(name);
+                        } else {
+                            state.origins.remove(name);
+                            state.shadowed.insert(name.clone());
+                        }
+                    }
+                } else {
+                    let rhs_info: Vec<(
+                        TypeShape,
+                        Option<hy_syntax::TypeExpr>,
+                        HashSet<String>,
+                    )> = l
+                        .values
+                        .iter()
+                        .map(|v| {
+                            let inf = self.shape_of_expr(&state.cst, v);
+                            let (sh, ty) = match (&l.ty, inf) {
+                                (Some(t), TypeShape::Unknown) => {
+                                    (self.shape_of_type(t), Some(t.clone()))
+                                }
+                                (_, s) => {
+                                    (s, self.ty_of_expr(&state.cst, v).or_else(|| l.ty.clone()))
+                                }
+                            };
+                            let mut os = HashSet::new();
+                            self.collect_sharing_origins_expr(
+                                &state.cst,
+                                v,
+                                &state.origins,
+                                &state.shadowed,
+                                &mut os,
+                            );
+                            (sh, ty, os)
+                        })
+                        .collect();
+                    for ((name, v), (shape, ty, mut s)) in
+                        l.names.iter().zip(l.values.iter()).zip(rhs_info)
+                    {
+                        if name == "_" {
+                            continue;
+                        }
+                        if let Some(ls) = locals.as_deref_mut() {
+                            ls.insert(name.clone());
+                        }
+                        self.define_binding(
+                            &mut state.cst,
+                            name,
+                            shape.clone(),
+                            ty,
+                            false,
+                            false,
+                            is_let,
+                        );
+                        state.cst.closure_mutates.remove(name);
+                        state.cst.closure_defs.remove(name);
+                        state.cst.closure_fnlits.remove(name);
+                        self.record_closure_mutations(&mut state.cst, name, v);
+                        if self.shape_may_share(&shape)
+                            || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
+                        {
+                            if s.is_empty() {
+                                s.insert(format!("local:{tag}:{name}"));
+                            }
+                            state.origins.insert(name.clone(), s);
+                            state.shadowed.remove(name);
+                        } else {
+                            state.origins.remove(name);
+                            state.shadowed.insert(name.clone());
                         }
                     }
                 }
-                Stmt::Assign {
-                    targets, values, ..
-                } => {
-                    if targets.len() == values.len() {
-                        let rhs_sets: Vec<(
-                            TypeShape,
-                            Option<hy_syntax::TypeExpr>,
-                            HashSet<String>,
-                        )> = values
-                            .iter()
-                            .map(|v| {
-                                let sh = self.shape_of_expr(&cst, v);
-                                let ty = self.ty_of_expr(&cst, v);
-                                let mut os = HashSet::new();
-                                self.collect_sharing_origins_expr(
-                                    &cst, v, &origins, &shadowed, &mut os,
-                                );
-                                (sh, ty, os)
-                            })
-                            .collect();
-                        for ((t, v), (sh, ty, mut s)) in
-                            targets.iter().zip(values.iter()).zip(rhs_sets)
-                        {
-                            match &t.kind {
-                                PlaceKind::Ident(name) => {
-                                    if let Some(b) = cst.env_lookup_mut(name) {
-                                        if !matches!(sh, TypeShape::Unknown) || b.ty.is_none() {
-                                            b.shape = sh.clone();
-                                        }
-                                        if ty.is_some() || b.ty.is_none() {
-                                            b.ty = ty;
-                                        }
+                false
+            }
+            Stmt::Assign {
+                targets, op, values, ..
+            } => {
+                let mut calls = Vec::new();
+                walk::own_calls(stmt, &mut calls);
+                self.apply_calls_shared_origins(&calls, state);
+                if *op == AssignOp::Assign && targets.len() == values.len() {
+                    let rhs_sets: Vec<(
+                        TypeShape,
+                        Option<hy_syntax::TypeExpr>,
+                        HashSet<String>,
+                    )> = values
+                        .iter()
+                        .map(|v| {
+                            let sh = self.shape_of_expr(&state.cst, v);
+                            let ty = self.ty_of_expr(&state.cst, v);
+                            let mut os = HashSet::new();
+                            self.collect_sharing_origins_expr(
+                                &state.cst,
+                                v,
+                                &state.origins,
+                                &state.shadowed,
+                                &mut os,
+                            );
+                            (sh, ty, os)
+                        })
+                        .collect();
+                    for ((t, v), (sh, ty, mut s)) in
+                        targets.iter().zip(values.iter()).zip(rhs_sets)
+                    {
+                        match &t.kind {
+                            PlaceKind::Ident(name) => {
+                                if name == "_" {
+                                    continue;
+                                }
+                                if let Some(b) = state.cst.env_lookup_mut(name) {
+                                    if !matches!(sh, TypeShape::Unknown) || b.ty.is_none() {
+                                        b.shape = sh;
                                     }
-                                    cst.closure_mutates.remove(name);
-                                    cst.closure_defs.remove(name);
-                                    cst.closure_fnlits.remove(name);
-                                    self.record_closure_mutations(&mut cst, name, v);
-                                    let target_shares = self
-                                        .lookup_binding(&cst, name)
-                                        .map(|b| {
-                                            self.shape_may_share(&b.shape)
-                                                || matches!(
-                                                    b.shape,
-                                                    TypeShape::Unknown | TypeShape::Array(_)
-                                                )
-                                        })
-                                        .unwrap_or(true);
-                                    if target_shares {
-                                        if s.is_empty() {
-                                            s.insert(format!("rebind:{idx}:{name}"));
-                                        }
-                                        origins.insert(name.clone(), s);
-                                        shadowed.remove(name);
-                                    } else {
-                                        origins.remove(name);
-                                        shadowed.insert(name.clone());
+                                    if ty.is_some() || b.ty.is_none() {
+                                        b.ty = ty;
                                     }
                                 }
-                                PlaceKind::Field { .. } | PlaceKind::Index { .. } => {
-                                    let root = t.root();
-                                    if !root.is_empty() && !s.is_empty() {
-                                        origins.entry(root.to_string()).or_default().extend(s);
+                                state.cst.closure_mutates.remove(name);
+                                state.cst.closure_defs.remove(name);
+                                state.cst.closure_fnlits.remove(name);
+                                self.record_closure_mutations(&mut state.cst, name, v);
+                                let target_shares = self
+                                    .lookup_binding(&state.cst, name)
+                                    .map(|b| {
+                                        self.shape_may_share(&b.shape)
+                                            || matches!(
+                                                b.shape,
+                                                TypeShape::Unknown | TypeShape::Array(_)
+                                            )
+                                    })
+                                    .unwrap_or(true);
+                                if target_shares {
+                                    if s.is_empty() {
+                                        s.insert(format!("rebind:{tag}:{name}"));
                                     }
+                                    state.origins.insert(name.clone(), s);
+                                    state.shadowed.remove(name);
+                                } else {
+                                    state.origins.remove(name);
+                                    state.shadowed.insert(name.clone());
                                 }
-                                _ => {}
                             }
+                            PlaceKind::Field { .. } | PlaceKind::Index { .. } => {
+                                let root = t.root();
+                                if !root.is_empty() && root != "_" && !s.is_empty() {
+                                    state.shadowed.remove(root);
+                                    state
+                                        .origins
+                                        .entry(root.to_string())
+                                        .or_default()
+                                        .extend(s);
+                                }
+                            }
+                            _ => {}
                         }
-                    } else if values.len() == 1 && targets.len() > 1 {
-                        let shapes = self.multi_value_shapes(&cst, &values[0], targets.len());
-                        let mut base_o = HashSet::new();
-                        self.collect_sharing_origins_expr(
-                            &cst,
-                            &values[0],
-                            &origins,
-                            &shadowed,
-                            &mut base_o,
-                        );
-                        for (t, sh) in targets.iter().zip(shapes) {
-                            if let PlaceKind::Ident(name) = &t.kind {
+                    }
+                } else if *op == AssignOp::Assign && values.len() == 1 && targets.len() > 1 {
+                    let shapes = self.multi_value_shapes(&state.cst, &values[0], targets.len());
+                    let tys = self.multi_value_tys(&state.cst, &values[0], targets.len());
+                    let mut base_o = HashSet::new();
+                    self.collect_sharing_origins_expr(
+                        &state.cst,
+                        &values[0],
+                        &state.origins,
+                        &state.shadowed,
+                        &mut base_o,
+                    );
+                    for ((t, sh), ty) in targets.iter().zip(shapes).zip(tys) {
+                        match &t.kind {
+                            PlaceKind::Ident(name) => {
+                                if name == "_" {
+                                    continue;
+                                }
+                                if let Some(b) = state.cst.env_lookup_mut(name) {
+                                    if !matches!(sh, TypeShape::Unknown) || b.ty.is_none() {
+                                        b.shape = sh.clone();
+                                    }
+                                    if ty.is_some() || b.ty.is_none() {
+                                        b.ty = ty;
+                                    }
+                                }
+                                state.cst.closure_mutates.remove(name);
+                                state.cst.closure_defs.remove(name);
+                                state.cst.closure_fnlits.remove(name);
                                 if self.shape_may_share(&sh)
                                     || matches!(sh, TypeShape::Unknown | TypeShape::Array(_))
                                 {
                                     let mut s = base_o.clone();
                                     if s.is_empty() {
-                                        s.insert(format!("rebind:{idx}:{name}"));
+                                        s.insert(format!("rebind:{tag}:{name}"));
                                     }
-                                    origins.insert(name.clone(), s);
-                                    shadowed.remove(name);
+                                    state.origins.insert(name.clone(), s);
+                                    state.shadowed.remove(name);
                                 } else {
-                                    origins.remove(name);
-                                    shadowed.insert(name.clone());
+                                    state.origins.remove(name);
+                                    state.shadowed.insert(name.clone());
                                 }
                             }
+                            PlaceKind::Field { .. } | PlaceKind::Index { .. } => {
+                                let root = t.root();
+                                if !root.is_empty() && root != "_" && !base_o.is_empty() {
+                                    state.shadowed.remove(root);
+                                    state
+                                        .origins
+                                        .entry(root.to_string())
+                                        .or_default()
+                                        .extend(base_o.iter().cloned());
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
-                Stmt::Defer { call, .. } => {
-                    let arg_os = match unwrap_parens(call) {
-                        Expr::Call { args: da, .. } => da
-                            .iter()
+                false
+            }
+            Stmt::Defer { call, .. } => {
+                let mut calls = Vec::new();
+                if let Expr::Call {
+                    callee: dc,
+                    args: da,
+                    ..
+                } = unwrap_parens(call)
+                {
+                    walk::expr_calls(dc, &mut calls);
+                    for a in da {
+                        walk::expr_calls(&a.value, &mut calls);
+                    }
+                }
+                self.apply_calls_shared_origins(&calls, state);
+                let mut captured_fl = None;
+                let arg_os = match unwrap_parens(call) {
+                    Expr::Call {
+                        callee: dc,
+                        args: da,
+                        ..
+                    } => {
+                        if let Expr::Ident { name, .. } = unwrap_parens(dc) {
+                            captured_fl = state.cst.closure_fnlits.get(name.as_str()).cloned();
+                        }
+                        da.iter()
                             .map(|a| {
                                 let mut os = HashSet::new();
-                                self.collect_sharing_origins_expr(&cst, &a.value, &origins, &shadowed, &mut os);
+                                self.collect_sharing_origins_expr(
+                                    &state.cst,
+                                    &a.value,
+                                    &state.origins,
+                                    &state.shadowed,
+                                    &mut os,
+                                );
                                 os
                             })
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    defers.push((call, arg_os, idx));
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
+                if let Some(existing) = state.defers.iter_mut().find(|d| d.2 == tag) {
+                    for (dst, src) in existing.1.iter_mut().zip(arg_os.into_iter()) {
+                        dst.extend(src);
+                    }
+                } else {
+                    state.defers.push((call, arg_os, tag, captured_fl));
                 }
-                Stmt::Return { values, .. } => {
-                    let sets: Vec<HashSet<String>> = if !typed_results.is_empty() && !defers.is_empty() {
+                false
+            }
+            Stmt::Return { values, .. } => {
+                let mut calls = Vec::new();
+                walk::own_calls(stmt, &mut calls);
+                self.apply_calls_shared_origins(&calls, state);
+                let sets: Vec<HashSet<String>> =
+                    if !typed_results.is_empty() && !state.defers.is_empty() {
                         if typed_results.len() < 2 {
-                            continue;
+                            return true;
                         }
                         self.deferred_return_origin_sets(
-                            &cst, &typed_results, values, &origins, &shadowed, &defers, idx,
+                            &state.cst,
+                            typed_results,
+                            values,
+                            &state.origins,
+                            &state.shadowed,
+                            &state.defers,
+                            tag,
                         )
                     } else if values.is_empty() {
                         if typed_results.len() < 2 {
-                            continue;
+                            return true;
                         }
                         typed_results
                             .iter()
@@ -5909,13 +7163,13 @@ impl<'a> Checker<'a> {
                                 if nr.is_empty() || nr == "_" {
                                     HashSet::new()
                                 } else {
-                                    origins.get(nr).cloned().unwrap_or_default()
+                                    state.origins.get(nr).cloned().unwrap_or_default()
                                 }
                             })
                             .collect()
                     } else {
                         if values.len() < 2 {
-                            continue;
+                            return true;
                         }
                         values
                             .iter()
@@ -5925,27 +7179,426 @@ impl<'a> Checker<'a> {
                                 } else {
                                     let mut os = HashSet::new();
                                     self.collect_sharing_origins_expr(
-                                        &cst, v, &origins, &shadowed, &mut os,
+                                        &state.cst,
+                                        v,
+                                        &state.origins,
+                                        &state.shadowed,
+                                        &mut os,
                                     );
                                     os
                                 }
                             })
                             .collect()
                     };
-                    for i in 0..sets.len() {
-                        for j in (i + 1)..sets.len() {
-                            if !sets[i].is_empty() && !sets[i].is_disjoint(&sets[j]) {
-                                pairs.push((i, j));
-                            }
+                for i in 0..sets.len() {
+                    for j in (i + 1)..sets.len() {
+                        if !sets[i].is_empty() && !sets[i].is_disjoint(&sets[j]) {
+                            pairs.push((i, j));
                         }
                     }
                 }
-                _ => {}
+                true
+            }
+            Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
+                self.walk_scoped_block_shared_return_pairs(
+                    block,
+                    state,
+                    typed_results,
+                    pairs,
+                )
+            }
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                let if_scope = init.as_deref().map(|init_stmt| {
+                    let pre_if = state.clone();
+                    state.cst.scope_push();
+                    let mut if_locals = HashSet::new();
+                    self.walk_stmt_shared_return_pairs(
+                        init_stmt,
+                        state,
+                        Some(&mut if_locals),
+                        typed_results,
+                        pairs,
+                    );
+                    (pre_if, if_locals)
+                });
+                let mut cond_calls = Vec::new();
+                walk::expr_calls(cond, &mut cond_calls);
+                self.apply_calls_shared_origins(&cond_calls, state);
+
+                let mut then_st = state.clone();
+                let then_ret = self.walk_scoped_block_shared_return_pairs(
+                    then,
+                    &mut then_st,
+                    typed_results,
+                    pairs,
+                );
+                let mut always_returned = false;
+                if let Some(other_stmt) = otherwise.as_deref() {
+                    let pre_else = state.clone();
+                    let mut else_st = pre_else.clone();
+                    else_st.cst.scope_push();
+                    let mut else_locals = HashSet::new();
+                    let else_ret = self.walk_stmt_shared_return_pairs(
+                        other_stmt,
+                        &mut else_st,
+                        Some(&mut else_locals),
+                        typed_results,
+                        pairs,
+                    );
+                    exit_scoped_origin_state(
+                        &mut else_st.cst,
+                        &pre_else.cst,
+                        &mut else_st.origins,
+                        &pre_else.origins,
+                        &mut else_st.shadowed,
+                        &pre_else.shadowed,
+                        &else_locals,
+                    );
+                    let mut reachable = Vec::new();
+                    if !then_ret {
+                        reachable.push(then_st);
+                    }
+                    if !else_ret {
+                        reachable.push(else_st);
+                    }
+                    if reachable.is_empty() {
+                        always_returned = true;
+                    } else {
+                        *state = Self::join_shared_ret_states(&reachable);
+                    }
+                } else if !then_ret {
+                    *state = Self::join_shared_ret_states(&[state.clone(), then_st]);
+                }
+                if let Some((pre_if, if_locals)) = if_scope {
+                    exit_scoped_origin_state(
+                        &mut state.cst,
+                        &pre_if.cst,
+                        &mut state.origins,
+                        &pre_if.origins,
+                        &mut state.shadowed,
+                        &pre_if.shadowed,
+                        &if_locals,
+                    );
+                }
+                always_returned
+            }
+            Stmt::For { kind, body, .. } => {
+                let mut pre_calls = Vec::new();
+                match kind {
+                    hy_syntax::ForKind::While { cond } => walk::expr_calls(cond, &mut pre_calls),
+                    hy_syntax::ForKind::Range { lo, hi, .. } => {
+                        walk::expr_calls(lo, &mut pre_calls);
+                        walk::expr_calls(hi, &mut pre_calls);
+                    }
+                    hy_syntax::ForKind::Iterate { expr, .. } => {
+                        walk::expr_calls(expr, &mut pre_calls)
+                    }
+                    hy_syntax::ForKind::Infinite => {}
+                }
+                self.apply_calls_shared_origins(&pre_calls, state);
+                let iter_meta = match kind {
+                    hy_syntax::ForKind::Iterate { vars, expr } => {
+                        let is_chan =
+                            matches!(self.shape_of_expr(&state.cst, expr), TypeShape::Chan(_));
+                        let shapes = self.iterate_var_shapes(&state.cst, expr, vars.len());
+                        let mut iter_os = HashSet::new();
+                        if !is_chan {
+                            self.collect_sharing_origins_expr(
+                                &state.cst,
+                                expr,
+                                &state.origins,
+                                &state.shadowed,
+                                &mut iter_os,
+                            );
+                        }
+                        Some((is_chan, shapes, iter_os))
+                    }
+                    _ => None,
+                };
+                let pre = state.clone();
+                let mut loop_in = pre.clone();
+                for _ in 0..6 {
+                    let mut iter_st = loop_in.clone();
+                    iter_st.cst.scope_push();
+                    let mut body_locals = HashSet::new();
+                    match kind {
+                        hy_syntax::ForKind::Range { var, .. } => {
+                            if var != "_" {
+                                body_locals.insert(var.clone());
+                                self.define_binding(
+                                    &mut iter_st.cst,
+                                    var,
+                                    TypeShape::Primitive,
+                                    None,
+                                    false,
+                                    false,
+                                    false,
+                                );
+                                iter_st.origins.remove(var);
+                                iter_st.shadowed.insert(var.clone());
+                            }
+                        }
+                        hy_syntax::ForKind::Iterate { vars, .. } => {
+                            if let Some((is_chan, shapes, iter_os)) = &iter_meta {
+                                for (name, shape) in vars.iter().zip(shapes.iter()) {
+                                    if name == "_" {
+                                        continue;
+                                    }
+                                    body_locals.insert(name.clone());
+                                    self.define_binding(
+                                        &mut iter_st.cst,
+                                        name,
+                                        shape.clone(),
+                                        None,
+                                        false,
+                                        false,
+                                        false,
+                                    );
+                                    if self.shape_may_share(shape)
+                                        || matches!(
+                                            shape,
+                                            TypeShape::Unknown | TypeShape::Array(_)
+                                        )
+                                    {
+                                        let mut s = if *is_chan {
+                                            HashSet::new()
+                                        } else {
+                                            iter_os.clone()
+                                        };
+                                        if s.is_empty() {
+                                            s.insert(format!("iter:{tag}:{name}"));
+                                        }
+                                        iter_st.origins.insert(name.clone(), s);
+                                        iter_st.shadowed.remove(name);
+                                    } else {
+                                        iter_st.origins.remove(name);
+                                        iter_st.shadowed.insert(name.clone());
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    let _ = self.walk_block_shared_return_pairs(
+                        body,
+                        &mut iter_st,
+                        Some(&mut body_locals),
+                        typed_results,
+                        pairs,
+                    );
+                    exit_scoped_origin_state(
+                        &mut iter_st.cst,
+                        &loop_in.cst,
+                        &mut iter_st.origins,
+                        &loop_in.origins,
+                        &mut iter_st.shadowed,
+                        &loop_in.shadowed,
+                        &body_locals,
+                    );
+                    let next_in = Self::join_shared_ret_states(&[pre.clone(), iter_st]);
+                    let converged = next_in.origins == loop_in.origins
+                        && next_in.shadowed == loop_in.shadowed
+                        && next_in.defers.len() == loop_in.defers.len();
+                    loop_in = next_in;
+                    if converged {
+                        break;
+                    }
+                }
+                *state = loop_in;
+                false
+            }
+            Stmt::Match { subject, arms, .. } => {
+                let mut subj_calls = Vec::new();
+                walk::expr_calls(subject, &mut subj_calls);
+                self.apply_calls_shared_origins(&subj_calls, state);
+                let mut subj_os = HashSet::new();
+                self.collect_sharing_origins_expr(
+                    &state.cst,
+                    subject,
+                    &state.origins,
+                    &state.shadowed,
+                    &mut subj_os,
+                );
+                let subj_ty = self.ty_of_expr(&state.cst, subject).map(|t| match t {
+                    hy_syntax::TypeExpr::Option { elem, .. } => *elem,
+                    other => other,
+                });
+                let subj_shape = self.shape_of_expr(&state.cst, subject);
+                let pre = state.clone();
+                let mut reachable = Vec::new();
+                for arm in arms {
+                    let mut arm_st = pre.clone();
+                    arm_st.cst.scope_push();
+                    let mut arm_locals = HashSet::new();
+                    if let hy_syntax::MatchPattern::Path {
+                        binding: Some(bname),
+                        ..
+                    } = &arm.pattern
+                    {
+                        if bname != "_" {
+                            arm_locals.insert(bname.clone());
+                            self.define_binding(
+                                &mut arm_st.cst,
+                                bname,
+                                subj_shape.clone(),
+                                subj_ty.clone(),
+                                false,
+                                false,
+                                false,
+                            );
+                            if self.shape_may_share(&subj_shape)
+                                || matches!(subj_shape, TypeShape::Unknown | TypeShape::Array(_))
+                            {
+                                let mut s = subj_os.clone();
+                                if s.is_empty() {
+                                    s.insert(format!("match:{tag}:{bname}"));
+                                }
+                                arm_st.origins.insert(bname.clone(), s);
+                                arm_st.shadowed.remove(bname);
+                            } else {
+                                arm_st.origins.remove(bname);
+                                arm_st.shadowed.insert(bname.clone());
+                            }
+                        }
+                    }
+                    if let Some(g) = &arm.guard {
+                        let mut g_calls = Vec::new();
+                        walk::expr_calls(g, &mut g_calls);
+                        self.apply_calls_shared_origins(&g_calls, &mut arm_st);
+                    }
+                    let arm_ret = self.walk_block_shared_return_pairs(
+                        &arm.body,
+                        &mut arm_st,
+                        Some(&mut arm_locals),
+                        typed_results,
+                        pairs,
+                    );
+                    exit_scoped_origin_state(
+                        &mut arm_st.cst,
+                        &pre.cst,
+                        &mut arm_st.origins,
+                        &pre.origins,
+                        &mut arm_st.shadowed,
+                        &pre.shadowed,
+                        &arm_locals,
+                    );
+                    if !arm_ret {
+                        reachable.push(arm_st);
+                    }
+                }
+                if arms.is_empty() {
+                    return false;
+                }
+                if !is_match_exhaustive(arms) {
+                    reachable.push(pre);
+                }
+                if reachable.is_empty() {
+                    true
+                } else {
+                    *state = Self::join_shared_ret_states(&reachable);
+                    false
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                if arms.is_empty() {
+                    return false;
+                }
+                let pre = state.clone();
+                let mut reachable = Vec::new();
+                for arm in arms {
+                    let mut arm_st = pre.clone();
+                    arm_st.cst.scope_push();
+                    let mut arm_locals = HashSet::new();
+                    match &arm.kind {
+                        hy_syntax::SelectArmKind::Send { chan, value, .. } => {
+                            let mut scalls = Vec::new();
+                            walk::expr_calls(chan, &mut scalls);
+                            walk::expr_calls(value, &mut scalls);
+                            self.apply_calls_shared_origins(&scalls, &mut arm_st);
+                        }
+                        hy_syntax::SelectArmKind::Recv { names, chan } => {
+                            let mut rcalls = Vec::new();
+                            walk::expr_calls(chan, &mut rcalls);
+                            self.apply_calls_shared_origins(&rcalls, &mut arm_st);
+                            let elem = match self.shape_of_expr(&arm_st.cst, chan) {
+                                TypeShape::Chan(e) => *e,
+                                _ => TypeShape::Unknown,
+                            };
+                            for (i, n) in names.iter().enumerate() {
+                                if n == "_" {
+                                    continue;
+                                }
+                                arm_locals.insert(n.clone());
+                                let shape = if i == 0 {
+                                    elem.clone()
+                                } else {
+                                    TypeShape::Primitive
+                                };
+                                self.define_binding(
+                                    &mut arm_st.cst,
+                                    n,
+                                    shape.clone(),
+                                    None,
+                                    false,
+                                    false,
+                                    false,
+                                );
+                                if self.shape_may_share(&shape)
+                                    || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
+                                {
+                                    arm_st.origins.insert(
+                                        n.clone(),
+                                        HashSet::from([format!("recv:{tag}:{n}")]),
+                                    );
+                                    arm_st.shadowed.remove(n);
+                                } else {
+                                    arm_st.origins.remove(n);
+                                    arm_st.shadowed.insert(n.clone());
+                                }
+                            }
+                        }
+                        hy_syntax::SelectArmKind::Default => {}
+                    }
+                    let arm_ret = self.walk_block_shared_return_pairs(
+                        &arm.body,
+                        &mut arm_st,
+                        Some(&mut arm_locals),
+                        typed_results,
+                        pairs,
+                    );
+                    exit_scoped_origin_state(
+                        &mut arm_st.cst,
+                        &pre.cst,
+                        &mut arm_st.origins,
+                        &pre.origins,
+                        &mut arm_st.shadowed,
+                        &pre.shadowed,
+                        &arm_locals,
+                    );
+                    if !arm_ret {
+                        reachable.push(arm_st);
+                    }
+                }
+                if reachable.is_empty() {
+                    true
+                } else {
+                    *state = Self::join_shared_ret_states(&reachable);
+                    false
+                }
+            }
+            _ => {
+                let mut calls = Vec::new();
+                walk::own_calls(stmt, &mut calls);
+                self.apply_calls_shared_origins(&calls, state);
+                false
             }
         }
-        pairs.sort_unstable();
-        pairs.dedup();
-        pairs
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5956,7 +7609,7 @@ impl<'a> Checker<'a> {
         values: &[Expr],
         origins: &HashMap<String, HashSet<String>>,
         shadowed: &HashSet<String>,
-        defers: &[(&Expr, Vec<HashSet<String>>, usize)],
+        defers: &[(&Expr, Vec<HashSet<String>>, usize, Option<SharedFnLit>)],
         idx: usize,
     ) -> Vec<HashSet<String>> {
         let (mut rorig, mut rshd) = (origins.clone(), shadowed.clone());
@@ -5986,7 +7639,7 @@ impl<'a> Checker<'a> {
                 rshd.insert(nr.clone());
             }
         }
-        for (dcall, darg_os, d_idx) in defers.iter().rev() {
+        for (dcall, darg_os, d_idx, d_fnlit) in defers.iter().rev() {
             let Expr::Call { callee: dc, args: da, span: dspan } = unwrap_parens(dcall) else { continue };
             if matches!(unwrap_parens(dc), Expr::Ident { name, .. } if name == "copy") && da.len() >= 2 {
                 if let Some(so) = darg_os.get(1).filter(|s| !s.is_empty()) {
@@ -5999,8 +7652,20 @@ impl<'a> Checker<'a> {
                 }
                 continue;
             }
+            let mut patched_cst;
+            let eff_cst = if let Some(fl) = d_fnlit {
+                if let Expr::Ident { name, .. } = unwrap_parens(dc) {
+                    patched_cst = cst.clone();
+                    patched_cst.closure_fnlits.insert(name.clone(), fl.clone());
+                    &patched_cst
+                } else {
+                    cst
+                }
+            } else {
+                cst
+            };
             let cr = CallRef { callee: dc, args: da, span: *dspan };
-            if let Some((slots, cbody)) = self.resolve_callee_slots_and_body(cst, &cr) {
+            if let Some((slots, cbody)) = self.resolve_callee_slots_and_body(eff_cst, &cr) {
                 let meta: Vec<_> = slots.iter().map(|(n, sh, ty, _)| (n.as_str(), sh.clone(), ty.as_ref())).collect();
                 for (di, si) in self.collect_callee_param_stores(&meta, &cbody, 0) {
                     if let (Some((_, _, _, dsrc)), Some((_, _, _, ssrc))) = (slots.get(di), slots.get(si)) {
@@ -6009,7 +7674,7 @@ impl<'a> Checker<'a> {
                                 .iter()
                                 .position(|a| std::ptr::eq(*se, &a.value))
                                 .and_then(|p| darg_os.get(p).cloned())
-                                .unwrap_or_else(|| eval_o(cst, se, &rorig, &rshd)),
+                                .unwrap_or_else(|| eval_o(eff_cst, se, &rorig, &rshd)),
                             CalleeSlotSource::OuterBinding(b) => rorig.get(b).cloned().unwrap_or_default(),
                         };
                         if !so.is_empty() {
@@ -6027,9 +7692,9 @@ impl<'a> Checker<'a> {
                 }
             }
             let is_cl = matches!(unwrap_parens(dc), Expr::FnLit { .. })
-                || matches!(unwrap_parens(dc), Expr::Ident { name, .. } if cst.closure_fnlits.contains_key(name.as_str()));
-            let Some((dps, drs, dbody)) = (if is_cl { self.resolve_call_expr_decl_or_fnlit(cst, dc) } else { None }) else { continue };
-            let (mut icst, mut iorig, mut ishd, mut iloc) = (cst.clone(), rorig.clone(), rshd.clone(), HashSet::new());
+                || matches!(unwrap_parens(dc), Expr::Ident { name, .. } if eff_cst.closure_fnlits.contains_key(name.as_str()));
+            let Some((dps, drs, dbody)) = (if is_cl { self.resolve_call_expr_decl_or_fnlit(eff_cst, dc) } else { None }) else { continue };
+            let (mut icst, mut iorig, mut ishd, mut iloc) = (eff_cst.clone(), rorig.clone(), rshd.clone(), HashSet::new());
             icst.scope_push();
             for (i, (p, pty)) in dps.iter().enumerate() {
                 iloc.insert(p.clone());
@@ -6385,9 +8050,7 @@ impl<'a> Checker<'a> {
             other => other,
         };
 
-        let mut roots = Vec::new();
-        collect_ref_roots(subject, &mut roots);
-        self.collect_callee_const_return_roots(st, subject, &mut roots, 0);
+        let (mut roots, const_roots) = self.collect_ref_and_callee_const_roots(st, subject);
 
         let pre_tainted = roots.iter().any(|r| {
             self.lookup_binding(st, r)
@@ -6397,7 +8060,7 @@ impl<'a> Checker<'a> {
         let pre_moved = roots.iter().find_map(|r| {
             self.lookup_binding(st, r).and_then(|b| b.moved.clone())
         });
-        let pre_origin = if self.shape_may_share(&shape) {
+        let mut pre_origin = if self.shape_may_share(&shape) {
             roots.iter().find_map(|r| {
                 self.non_owned_origin_of(st, r).map(|(o, via_share)| {
                     if via_share || (!shape.is_reference_alias() && r != name) {
@@ -6410,13 +8073,31 @@ impl<'a> Checker<'a> {
         } else {
             None
         };
-        let pre_const_root = roots.iter().find_map(|r| {
-            let p = Place {
-                kind: PlaceKind::Ident(r.clone()),
-                span: subject.span(),
-            };
-            self.const_write_root(st, &p)
-        });
+        if pre_origin.is_none() && self.shape_may_share(&shape) {
+            pre_origin = const_roots.iter().find_map(|cr| {
+                self.lookup_callee_const_binding(st, cr).and_then(|(cb, _)| {
+                    cb.non_owned_origin.clone().map(|o| {
+                        if !shape.is_reference_alias() && cr != name {
+                            format!("a may-share peer of {}", o)
+                        } else {
+                            o
+                        }
+                    })
+                })
+            });
+        }
+        let pre_const_root = self.find_const_write_in_roots(
+            st,
+            &roots,
+            &const_roots,
+            subject.span(),
+            None,
+        );
+        for cr in &const_roots {
+            if !self.caller_shadows_file_const(st, cr) && !roots.contains(cr) {
+                roots.push(cr.clone());
+            }
+        }
 
         let mut pre_share_peers: Vec<String> = Vec::new();
         let mut pre_alias_root: Option<String> = None;
@@ -6519,7 +8200,7 @@ impl<'a> Checker<'a> {
                 .or_insert_with(|| name.to_string());
         }
         if let Some(croot) = pre_const_root {
-            if croot != name {
+            if croot != name && !self.caller_shadows_file_const(st, &croot) {
                 st.share_edge(name, &croot);
                 st.aliases.entry(name.to_string()).or_insert(croot);
             }
@@ -6943,9 +8624,8 @@ impl<'a> Checker<'a> {
             let moved_non_owned = self.moved_non_owned_origin_in_expr(st, &values[0]);
             let shapes = self.multi_value_shapes(st, &values[0], targets.len());
             let tys = self.multi_value_tys(st, &values[0], targets.len());
-            let mut ref_roots = Vec::new();
-            collect_ref_roots(&values[0], &mut ref_roots);
-            self.collect_callee_const_return_roots(st, &values[0], &mut ref_roots, 0);
+            let (ref_roots, const_roots) =
+                self.collect_ref_and_callee_const_roots(st, &values[0]);
             for (i, ((t, shape), ty)) in targets.iter().zip(shapes).zip(tys).enumerate() {
                 if is_const_write.get(i).copied().unwrap_or(false) {
                     continue;
@@ -6954,7 +8634,9 @@ impl<'a> Checker<'a> {
                     let may_share = self.shape_may_share(&shape);
                     let reads_self = may_share
                         && (self.value_reads_storage_of(st, &values[0], name)
-                            || ref_roots.iter().any(|r| r == name));
+                            || ref_roots.iter().any(|r| r == name)
+                            || (const_roots.iter().any(|r| r == name)
+                                && !self.caller_shadows_file_const(st, name)));
                     let prior_alias = if reads_self {
                         st.aliases.get(name).cloned()
                     } else {
@@ -7131,6 +8813,153 @@ impl<'a> Checker<'a> {
         );
     }
 
+    /// True when `root` in caller `st` resolves to a shadowing local (not the
+    /// file-level composite `const` of the same name).
+    fn caller_shadows_file_const(&self, st: &FnState, root: &str) -> bool {
+        let Some(fb) = self.consts.get(root) else {
+            return false;
+        };
+        if matches!(
+            fb.shape,
+            TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic
+        ) {
+            return false;
+        }
+        self.lookup_binding(st, root).is_some_and(|lb| {
+            !lb.immutable
+                || lb.non_owned_origin != fb.non_owned_origin
+                || matches!(
+                    lb.shape,
+                    TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic
+                )
+        })
+    }
+
+    /// Resolve a root returned by `collect_callee_const_return_roots`, returning
+    /// `(binding, shadowed_in_caller)`. When `shadowed_in_caller` is `true`,
+    /// callers must attach `non_owned_origin` without linking aliases/share
+    /// edges to caller's shadowing local.
+    fn lookup_callee_const_binding<'c>(
+        &'c self,
+        st: &'c FnState,
+        root: &str,
+    ) -> Option<(&'c Binding, bool)> {
+        if self.caller_shadows_file_const(st, root) {
+            self.consts.get(root).map(|cb| (cb, true))
+        } else {
+            self.lookup_binding(st, root).map(|b| (b, false))
+        }
+    }
+
+    fn collect_ref_and_callee_const_roots(
+        &self,
+        st: &FnState,
+        value: &Expr,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut ref_roots = Vec::new();
+        collect_ref_roots(value, &mut ref_roots);
+        let mut const_roots = Vec::new();
+        self.collect_callee_const_return_roots(st, value, &mut const_roots, 0);
+        (ref_roots, const_roots)
+    }
+
+    fn propagate_callee_const_roots(
+        &self,
+        st: &mut FnState,
+        name: &str,
+        target_shape: &TypeShape,
+        const_roots: &[String],
+        require_ref_alias: bool,
+    ) {
+        let is_own_handle = matches!(target_shape, TypeShape::OwnHandle(_));
+        for cr in const_roots {
+            let Some((cb, shadowed)) = self.lookup_callee_const_binding(st, cr) else {
+                continue;
+            };
+            let ok = if require_ref_alias {
+                if is_own_handle {
+                    self.shape_carries_handle(&cb.shape)
+                } else {
+                    cb.shape.is_reference_alias()
+                }
+            } else {
+                !(cb.shape.is_handle()
+                    && !self.shape_carries_handle(target_shape)
+                    && !matches!(target_shape, TypeShape::Unknown))
+                    && self.shape_may_share(&cb.shape)
+            };
+            if !ok {
+                continue;
+            }
+            let origin = cb.non_owned_origin.clone();
+            if !shadowed && cr != name {
+                if require_ref_alias {
+                    st.aliases.insert(name.to_string(), cr.clone());
+                } else {
+                    st.share_edge(name, cr);
+                }
+            }
+            if let Some(origin) = origin {
+                if let Some(nb) = st.env_lookup_mut(name) {
+                    if nb.non_owned_origin.is_none() {
+                        nb.non_owned_origin = Some(origin);
+                    }
+                }
+            }
+            if require_ref_alias {
+                break;
+            }
+        }
+    }
+
+    fn find_const_write_in_roots(
+        &self,
+        st: &FnState,
+        ref_roots: &[String],
+        const_roots: &[String],
+        span: Span,
+        declared: Option<&HashSet<String>>,
+    ) -> Option<String> {
+        for r in ref_roots {
+            if declared.is_some_and(|d| d.contains(r.as_str())) {
+                continue;
+            }
+            let place = Place {
+                kind: PlaceKind::Ident(r.clone()),
+                span,
+            };
+            if let Some(hit) = self.const_write_root(st, &place) {
+                return Some(hit);
+            }
+        }
+        for cr in const_roots {
+            if declared.is_some_and(|d| d.contains(cr.as_str())) {
+                continue;
+            }
+            if let Some((cb, shadowed)) = self.lookup_callee_const_binding(st, cr) {
+                if shadowed {
+                    if cb.immutable
+                        && !matches!(
+                            cb.shape,
+                            TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic
+                        )
+                    {
+                        return Some(cr.clone());
+                    }
+                } else {
+                    let place = Place {
+                        kind: PlaceKind::Ident(cr.clone()),
+                        span,
+                    };
+                    if let Some(hit) = self.const_write_root(st, &place) {
+                        return Some(hit);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// The binding name at the ROOT of place `p` when that binding is a
     /// `const` (fn-local `LocalKind::Const` or a file-level const — both
     /// carry `immutable: true`, and `lookup_binding` resolves locals first,
@@ -7151,7 +8980,14 @@ impl<'a> Checker<'a> {
                         // must stay writable. Only consts that can share backing storage
                         // (#123: map/slice/pointer/handle/struct-or-array containing them)
                         // make a write through the copy a write to the const.
-                        if let Some(cb) = self.lookup_binding(st, const_name) {
+                        let cb_opt = if origin.contains("file-level `const ") {
+                            self.consts
+                                .get(const_name)
+                                .or_else(|| self.lookup_binding(st, const_name))
+                        } else {
+                            self.lookup_binding(st, const_name)
+                        };
+                        if let Some(cb) = cb_opt {
                             if matches!(
                                 cb.shape,
                                 TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic
@@ -7226,21 +9062,16 @@ impl<'a> Checker<'a> {
             return;
         }
         let mut roots = Vec::new();
+        let mut const_roots = Vec::new();
         if let Some(root) = operand.root_ident() {
             roots.push(root.to_string());
         } else if !self.addr_operand_returns_fresh_copy(st, operand) {
-            collect_ref_roots(operand, &mut roots);
-            self.collect_callee_const_return_roots(st, operand, &mut roots, 0);
+            (roots, const_roots) = self.collect_ref_and_callee_const_roots(st, operand);
         }
-        for root in roots {
-            let place = Place {
-                kind: PlaceKind::Ident(root),
-                span: val.span(),
-            };
-            if let Some(const_name) = self.const_write_root(st, &place) {
-                self.emit_const_write_error(&const_name, val.span());
-                break;
-            }
+        if let Some(const_name) =
+            self.find_const_write_in_roots(st, &roots, &const_roots, val.span(), None)
+        {
+            self.emit_const_write_error(&const_name, val.span());
         }
     }
 
@@ -7331,21 +9162,38 @@ impl<'a> Checker<'a> {
                             // binding over a const composite freezes like the
                             // const itself (E3006 surface); a plain binding
                             // shadows and clears alias/share state.
-                            let mut roots = Vec::new();
-                            collect_ref_roots(subject, &mut roots);
-                            self.collect_callee_const_return_roots(&cst, subject, &mut roots, 0);
-                            let croot = roots.iter().find_map(|r| {
-                                if self.lookup_binding(&cst, r).is_none() {
-                                    return None;
-                                }
-                                let p = Place {
-                                    kind: PlaceKind::Ident(r.clone()),
-                                    span: subject.span(),
-                                };
-                                self.const_write_root(&cst, &p)
-                            });
+                            let (ref_roots, const_roots) =
+                                self.collect_ref_and_callee_const_roots(&cst, subject);
+                            let croot = self.find_const_write_in_roots(
+                                &cst,
+                                &ref_roots,
+                                &const_roots,
+                                subject.span(),
+                                None,
+                            );
                             if let Some(cr) = &croot {
-                                if name == cr {
+                                if self.caller_shadows_file_const(&cst, cr) {
+                                    self.define_binding(
+                                        &mut cst,
+                                        name,
+                                        TypeShape::Unknown,
+                                        None,
+                                        false,
+                                        false,
+                                        false,
+                                    );
+                                    cst.aliases.remove(*name);
+                                    cst.share_clear(name);
+                                    let origin = self
+                                        .consts
+                                        .get(cr)
+                                        .and_then(|cb| cb.non_owned_origin.clone());
+                                    if let Some(origin) = origin {
+                                        if let Some(nb) = cst.env_lookup_mut(name) {
+                                            nb.non_owned_origin = Some(origin);
+                                        }
+                                    }
+                                } else if name == cr {
                                     self.define_binding(
                                         &mut cst,
                                         name,
@@ -7578,23 +9426,48 @@ impl<'a> Checker<'a> {
                         let is_chan =
                             matches!(self.shape_of_expr(&cst, expr), TypeShape::Chan(_));
                         let shapes = self.iterate_var_shapes(&cst, expr, vars.len());
+                        let (ref_roots, const_roots) =
+                            self.collect_ref_and_callee_const_roots(&cst, expr);
+                        let ref_info: Vec<(String, bool)> = ref_roots
+                            .into_iter()
+                            .filter(|r| self.lookup_binding(&cst, r).is_some())
+                            .map(|r| {
+                                let ms = self.binding_may_share(&cst, &r);
+                                (r, ms)
+                            })
+                            .collect();
                         for (name, shape) in vars.iter().zip(shapes) {
                             let is_ref = shape.is_reference_alias() || shape.is_handle();
                             let carries = self.shape_may_share(&shape);
-                            self.define_binding(&mut cst, name, shape, None, false, false, false);
+                            self.define_binding(&mut cst, name, shape.clone(), None, false, false, false);
                             if !is_chan {
-                                let mut roots = Vec::new();
-                                collect_ref_roots(expr, &mut roots);
-                                self.collect_callee_const_return_roots(&cst, expr, &mut roots, 0);
-                                for root in roots {
-                                    if self.lookup_binding(&cst, &root).is_some() {
+                                for (root, root_ms) in &ref_info {
+                                    if root != name {
                                         if is_ref {
                                             cst.aliases.insert(name.clone(), root.clone());
                                         }
-                                        if carries && self.binding_may_share(&cst, &root) {
-                                            cst.share_edge(name, &root);
+                                        if carries && *root_ms {
+                                            cst.share_edge(name, root);
                                         }
                                     }
+                                }
+                                if carries {
+                                    self.propagate_callee_const_roots(
+                                        &mut cst,
+                                        name,
+                                        &shape,
+                                        &const_roots,
+                                        false,
+                                    );
+                                }
+                                if is_ref {
+                                    self.propagate_callee_const_roots(
+                                        &mut cst,
+                                        name,
+                                        &shape,
+                                        &const_roots,
+                                        true,
+                                    );
                                 }
                             }
                         }
@@ -7907,34 +9780,29 @@ impl<'a> Checker<'a> {
         let inner = crate::model::unwrap_parens(expr);
         if let Some(addr_op) = as_addr_of(inner) {
             let mut roots = Vec::new();
+            let mut const_roots = Vec::new();
             if let Some(root) = addr_op.root_ident() {
                 roots.push(root.to_string());
             } else if !self.addr_operand_returns_fresh_copy(st, addr_op) {
-                collect_ref_roots(addr_op, &mut roots);
-                self.collect_callee_const_return_roots(st, addr_op, &mut roots, 0);
+                (roots, const_roots) = self.collect_ref_and_callee_const_roots(st, addr_op);
             }
-            for root in roots {
-                if declared.contains(&root) {
-                    continue;
-                }
-                let place = Place {
-                    kind: PlaceKind::Ident(root),
-                    span: expr.span(),
-                };
-                if let Some(hit) = self.const_write_root(st, &place) {
-                    return Some(hit);
-                }
+            if let Some(hit) = self.find_const_write_in_roots(
+                st,
+                &roots,
+                &const_roots,
+                expr.span(),
+                Some(declared),
+            ) {
+                return Some(hit);
             }
             return None;
         }
         if !self.expr_or_multi_call_may_share(st, inner) {
             return None;
         }
-        let mut roots = Vec::new();
-        collect_ref_roots(inner, &mut roots);
-        self.collect_callee_const_return_roots(st, inner, &mut roots, 0);
+        let (mut roots, const_roots) = self.collect_ref_and_callee_const_roots(st, inner);
         collect_move_ident_sources(inner, &mut roots);
-        if roots.is_empty() {
+        if roots.is_empty() && const_roots.is_empty() {
             if let Some(r) = inner.root_ident() {
                 roots.push(r.to_string());
             }
@@ -7951,19 +9819,13 @@ impl<'a> Checker<'a> {
                 roots.push(r.to_string());
             }
         }
-        for root in roots {
-            if declared.contains(&root) {
-                continue;
-            }
-            let place = Place {
-                kind: PlaceKind::Ident(root),
-                span: expr.span(),
-            };
-            if let Some(hit) = self.const_write_root(st, &place) {
-                return Some(hit);
-            }
-        }
-        None
+        self.find_const_write_in_roots(
+            st,
+            &roots,
+            &const_roots,
+            expr.span(),
+            Some(declared),
+        )
     }
 
     /// Issue #188: interprocedural T22 enforcement (`HYB-E3006`). When a
@@ -8013,22 +9875,20 @@ impl<'a> Checker<'a> {
                             self.const_arg_root(st, base, declared).or_else(|| {
                                 let base_inner = crate::model::unwrap_parens(base);
                                 let mut roots: Vec<String> = Vec::new();
+                                let mut const_roots: Vec<String> = Vec::new();
                                 if let Some(root) = base_inner.root_ident() {
                                     roots.push(root.to_string());
                                 } else {
-                                    collect_ref_roots(base_inner, &mut roots);
-                                    self.collect_callee_const_return_roots(st, base_inner, &mut roots, 0);
+                                    (roots, const_roots) =
+                                        self.collect_ref_and_callee_const_roots(st, base_inner);
                                 }
-                                roots
-                                    .into_iter()
-                                    .filter(|root| !declared.contains(root.as_str()))
-                                    .find_map(|root| {
-                                        let place = Place {
-                                            kind: PlaceKind::Ident(root),
-                                            span: base.span(),
-                                        };
-                                        self.const_write_root(st, &place)
-                                    })
+                                self.find_const_write_in_roots(
+                                    st,
+                                    &roots,
+                                    &const_roots,
+                                    base.span(),
+                                    Some(declared),
+                                )
                             })
                         } else {
                             self.const_arg_root(st, base, declared)
@@ -8066,19 +9926,15 @@ impl<'a> Checker<'a> {
                     .or_else(|| self.const_arg_root(st, base, declared))
                     .or_else(|| {
                         let base_inner = crate::model::unwrap_parens(base);
-                        let mut roots: Vec<String> = Vec::new();
-                        collect_ref_roots(base_inner, &mut roots);
-                        self.collect_callee_const_return_roots(st, base_inner, &mut roots, 0);
-                        roots
-                            .into_iter()
-                            .filter(|root| !declared.contains(root.as_str()))
-                            .find_map(|root| {
-                                let place = Place {
-                                    kind: PlaceKind::Ident(root),
-                                    span: base.span(),
-                                };
-                                self.const_write_root(st, &place)
-                            })
+                        let (roots, const_roots) =
+                            self.collect_ref_and_callee_const_roots(st, base_inner);
+                        self.find_const_write_in_roots(
+                            st,
+                            &roots,
+                            &const_roots,
+                            base.span(),
+                            Some(declared),
+                        )
                     });
                 if let Some(const_name) = recv_const {
                     hits.push((const_name, base.span()));
@@ -8225,22 +10081,20 @@ impl<'a> Checker<'a> {
             let const_name = self.const_arg_root(st, &a.value, declared).or_else(|| {
                 if param_is_ptr && is_addressable && !already_ptr {
                     let mut roots: Vec<String> = Vec::new();
+                    let mut const_roots: Vec<String> = Vec::new();
                     if let Some(root) = inner.root_ident() {
                         roots.push(root.to_string());
                     } else {
-                        collect_ref_roots(inner, &mut roots);
-                        self.collect_callee_const_return_roots(st, inner, &mut roots, 0);
+                        (roots, const_roots) =
+                            self.collect_ref_and_callee_const_roots(st, inner);
                     }
-                    roots
-                        .into_iter()
-                        .filter(|root| !declared.contains(root.as_str()))
-                        .find_map(|root| {
-                            let place = Place {
-                                kind: PlaceKind::Ident(root),
-                                span: a.value.span(),
-                            };
-                            self.const_write_root(st, &place)
-                        })
+                    self.find_const_write_in_roots(
+                        st,
+                        &roots,
+                        &const_roots,
+                        a.value.span(),
+                        Some(declared),
+                    )
                 } else {
                     None
                 }
