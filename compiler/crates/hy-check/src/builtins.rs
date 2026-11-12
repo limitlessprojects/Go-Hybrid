@@ -430,7 +430,7 @@ impl<'a> Checker<'a> {
                     );
                     return;
                 }
-                if is_value_literal(&args[0].value) {
+                if is_value_literal(&args[0].value) || is_composite_literal(&args[0].value) {
                     self.emit_builtin(
                         span,
                         "`new` takes a type — not a value literal (HYB-E2005)".to_string(),
@@ -481,10 +481,10 @@ impl<'a> Checker<'a> {
                             args.len()
                         ),
                     );
-                } else if is_non_numeric_literal(&args[0].value) {
+                } else if is_non_numeric_or_composite_literal(&args[0].value) {
                     self.emit_builtin(
                         span,
-                        format!("`{name}` requires a numeric/complex argument — not a non-numeric literal (HYB-E2005)"),
+                        format!("`{name}` requires a complex value — not a string, bool, nil, or composite literal (HYB-E2005)"),
                     );
                 }
             }
@@ -497,10 +497,10 @@ impl<'a> Checker<'a> {
                             args.len()
                         ),
                     );
-                } else if args.iter().any(|a| is_non_numeric_literal(&a.value)) {
+                } else if args.iter().any(|a| is_non_numeric_or_composite_literal(&a.value)) {
                     self.emit_builtin(
                         span,
-                        "`complex` requires numeric arguments — not a non-numeric literal (HYB-E2005)".to_string(),
+                        "`complex` requires floating-point operands — not string, bool, nil, or composite literals (HYB-E2005)".to_string(),
                     );
                 }
             }
@@ -1599,12 +1599,23 @@ fn is_nil_literal(e: &Expr) -> bool {
     matches!(unwrap_parens(e), Expr::Lit { kind: LitKind::Nil, .. })
 }
 
-fn is_non_numeric_literal(e: &Expr) -> bool {
-    matches!(
-        unwrap_parens(e),
-        Expr::Lit {
-            kind: LitKind::Str(_) | LitKind::RawStr(_) | LitKind::Bool(_) | LitKind::Nil,
-            ..
-        }
-    )
+fn is_composite_literal(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::SliceLit { items, .. } => !items.is_empty(),
+        Expr::MapLit { entries, .. } => !entries.is_empty(),
+        Expr::StructLit { fields, .. } => !fields.is_empty(),
+        _ => false,
+    }
+}
+
+fn is_non_numeric_or_composite_literal(e: &Expr) -> bool {
+    let unwrapped = unwrap_parens(e);
+    match unwrapped {
+        Expr::Lit { kind, .. } => matches!(
+            kind,
+            LitKind::Str(_) | LitKind::RawStr(_) | LitKind::Bool(_) | LitKind::Nil
+        ),
+        Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. } => true,
+        _ => false,
+    }
 }
