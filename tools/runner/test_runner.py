@@ -24,11 +24,17 @@ def step(name, code, hard=False, timeout=10):
 
 
 class RunnerFailureTests(unittest.TestCase):
-    def run_job(self, setup, commands, expected_results=None):
+    def run_job(self, setup, commands, expected_results=None, pre_results=None):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             job_path = root / 'job.json'
             results = root / 'results'
+            # Stale artifacts: files an earlier invocation left behind, which a
+            # later run must not be able to certify as its own evidence (#2191).
+            for name, body in (pre_results or {}).items():
+                target = results / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(body, encoding='utf-8')
             job_path.write_text(json.dumps({'job': 'test', 'setup': setup,
                                           'commands': commands,
                                           'expected_results': [] if expected_results is None else expected_results}), encoding='utf-8')
@@ -42,6 +48,41 @@ class RunnerFailureTests(unittest.TestCase):
                     runner.main()
             summary = json.loads((results / 'summary.json').read_text(encoding='utf-8'))
             return stopped.exception.code, summary
+
+    def test_stale_expected_result_is_not_certified_as_current_evidence(self):
+        # Issue #2191: a file left behind by an earlier invocation satisfied
+        # `os.path.isfile`, so a run that produced nothing still reported ok.
+        code, summary = self.run_job(
+            [],
+            [step('no-output', 'print("nothing written")')],
+            expected_results=['results/measurement.json'],
+            pre_results={'measurement.json': '{}\n'})
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertEqual(summary['steps'][-1]['name'], 'expected-result')
+        self.assertIn('unchanged since before it started', summary['steps'][-1]['out_tail'])
+
+    def test_expected_result_rewritten_by_the_run_is_certified(self):
+        writer = ("import os\n"
+                  "p = os.path.join(os.environ['RESULTS_DIR'], 'measurement.json')\n"
+                  "open(p, 'w').write('{\"n\": 1}\\n')\n")
+        code, summary = self.run_job(
+            [], [step('write', writer)],
+            expected_results=['results/measurement.json'],
+            pre_results={'measurement.json': '{}\n'})
+        self.assertEqual(code, 0)
+        self.assertTrue(summary['ok'])
+
+    def test_expected_result_created_by_the_run_is_certified(self):
+        writer = ("import os\n"
+                  "p = os.path.join(os.environ['RESULTS_DIR'], 'measurement.json')\n"
+                  "open(p, 'w').write('{\"n\": 1}\\n')\n")
+        code, summary = self.run_job(
+            [], [step('write', writer)],
+            expected_results=['results/measurement.json'])
+        self.assertEqual(code, 0)
+        self.assertTrue(summary['ok'])
+
 
     def test_hard_setup_failure_skips_other_setup_and_commands(self):
         code, summary = self.run_job(
