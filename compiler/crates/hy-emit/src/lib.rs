@@ -701,6 +701,7 @@ pub struct Emitter {
 pub(crate) struct ScopeSnapshot {
     local_vars: BTreeSet<String>,
     bindings: BTreeMap<String, BindingKind>,
+    closure_shapes: BTreeMap<String, (usize, bool)>,
     var_ty: BTreeMap<String, (String, bool)>,
     var_struct: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
@@ -760,6 +761,7 @@ impl Emitter {
         ScopeSnapshot {
             local_vars: self.local_vars.clone(),
             bindings: self.bindings.clone(),
+            closure_shapes: self.closure_shapes.clone(),
             var_ty: self.var_ty.clone(),
             var_struct: self.var_struct.clone(),
             pointer_vars: self.pointer_vars.clone(),
@@ -770,6 +772,7 @@ impl Emitter {
     pub(crate) fn restore_scope(&mut self, saved: ScopeSnapshot) {
         self.local_vars = saved.local_vars;
         self.bindings = saved.bindings;
+        self.closure_shapes = saved.closure_shapes;
         self.var_ty = saved.var_ty;
         self.var_struct = saved.var_struct;
         self.pointer_vars = saved.pointer_vars;
@@ -897,7 +900,14 @@ impl Emitter {
         self.ptr_returning_fns = file
             .fns()
             .filter(|f| f.results.first().is_some_and(|r| self.is_pointer_ty(&r.ty)))
-            .map(|f| f.name.clone())
+            .filter_map(|f| match &f.receiver {
+                None => Some(f.name.clone()),
+                Some(recv) => {
+                    let recv_sn = base_ty_name(&recv.ty)
+                        .and_then(|n| self.resolve_to_struct_name(&n))?;
+                    Some(format!("{recv_sn}.{}", f.name))
+                }
+            })
             .collect();
         self.fn_ret_struct = file
             .fns()
@@ -950,10 +960,15 @@ impl Emitter {
                 // `func ... error` (assignment mismatch, accepted-then-fails-go-build).
                 let value_count = if err { f.results.len() - 1 } else { f.results.len() };
                 let key = match &f.receiver {
-                    Some(recv) => base_ty_name(&recv.ty)
-                        .and_then(|n| self.resolve_to_struct_name(&n))
-                        .map(|sn| format!("{sn}.{}", f.name))
-                        .unwrap_or_else(|| f.name.clone()),
+                    Some(recv) => {
+                        let recv_name = base_ty_name(&recv.ty);
+                        recv_name
+                            .as_deref()
+                            .and_then(|n| self.resolve_to_struct_name(n))
+                            .map(|sn| format!("{sn}.{}", f.name))
+                            .or_else(|| recv_name.map(|n| format!("{n}.{}", f.name)))
+                            .unwrap_or_else(|| format!("<method>.{}", f.name))
+                    }
                     None => f.name.clone(),
                 };
                 (key, (value_count, err, kind, ptr_params))
@@ -1546,9 +1561,7 @@ impl Emitter {
 
         // Hints from parameter types (dotted foreign types → Foreign).
         if let Some(recv) = &f.receiver {
-            if recv.name != "_" {
-                self.local_vars.insert(recv.name.clone());
-            }
+            self.shadow_local_name(&recv.name);
             if recv.is_pointer {
                 self.pointer_vars.insert(recv.name.clone());
             }
@@ -1769,15 +1782,56 @@ impl Emitter {
 
     pub(crate) fn expr_is_pointer(&self, e: &Expr) -> bool {
         match e {
-            Expr::AddrOf { .. } => true,
-            Expr::Paren { inner, .. } => self.expr_is_pointer(inner),
-            Expr::Try { operand, .. } => self.expr_is_pointer(operand),
+            Expr::AddrOf { .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                ..
+            } => true,
+            Expr::Paren { inner, .. }
+            | Expr::Try { operand: inner, .. }
+            | Expr::Move { operand: inner, .. } => self.expr_is_pointer(inner),
             Expr::Ident { name, .. } => self.pointer_vars.contains(name),
             Expr::Call { callee, .. } => {
-                if let Expr::Ident { name, .. } = callee.as_ref() {
-                    self.ptr_returning_fns.contains(name)
-                } else {
-                    false
+                let callee_head = match Self::peel_parens(callee) {
+                    Expr::Index { base, index, .. }
+                        if Self::assoc_index_type_arg(index).is_some() =>
+                    {
+                        Self::peel_parens(base)
+                    }
+                    other => other,
+                };
+                match callee_head {
+                    Expr::Ident { name, .. } => {
+                        if name == "new"
+                            && !self.local_vars.contains("new")
+                            && !self.fn_shapes.contains_key("new")
+                        {
+                            return true;
+                        }
+                        let fn_head = name.split('[').next().unwrap_or(name);
+                        !self.local_vars.contains(fn_head)
+                            && self.ptr_returning_fns.contains(fn_head)
+                    }
+                    Expr::Field { base, name, .. } => {
+                        let head = name.split('[').next().unwrap_or(name);
+                        if let Some(recv_sn) = self.user_struct_name_of(base) {
+                            return self
+                                .ptr_returning_fns
+                                .contains(&format!("{recv_sn}.{head}"));
+                        }
+                        if let Expr::Ident { name: root, .. } = Self::peel_parens(base) {
+                            if !self.local_vars.contains(root)
+                                && !self.is_unshadowed_pkg_root(root)
+                                && !self.bindings.contains_key(root)
+                            {
+                                return self
+                                    .ptr_returning_fns
+                                    .contains(&format!("{root}.{head}"));
+                            }
+                        }
+                        false
+                    }
+                    _ => false,
                 }
             }
             _ => false,
