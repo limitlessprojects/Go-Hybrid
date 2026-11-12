@@ -260,22 +260,40 @@ pub struct CheckSummary {
     pub managed: Option<ManagedReport>,
 }
 
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
 /// The `--report-managed` audit data (normative tooling requirement, O6.3).
 /// Row 14 (discussion #4) hardened it: the audit is a TABLE of invariants
 /// bypassed — per-category counts + every block's reason/tickets — not a
-/// bare number.
+/// bare number. Issue #4297 adds verified vs unverified synchronization
+/// contract counts so `--report-managed` serves as a precision metric.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ManagedReport {
     pub managed_blocks: usize,
     pub sites_via_managed: usize,
     pub total_sites: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub verified_blocks: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unverified_blocks: usize,
     /// Managed blocks by category (the closed set: mutex, atomic, actor,
     /// finalizer, interop, other). Empty when no blocks were seen.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub categories: BTreeMap<String, usize>,
-    /// Every managed block in source order (reason + category + tickets).
+    /// Every managed block in source order (reason + category + tickets + contract).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<ManagedBlockAudit>,
+}
+
+/// Machine-checked synchronization contract audit entry (#4297).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ManagedContractAudit {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guard: Option<String>,
+    pub protects: Vec<String>,
+    pub verified: bool,
 }
 
 /// One managed block's audit payload (row 14): what was bypassed, why, and
@@ -286,6 +304,8 @@ pub struct ManagedBlockAudit {
     pub category: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tickets: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract: Option<ManagedContractAudit>,
 }
 
 impl ManagedReport {

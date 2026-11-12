@@ -1004,10 +1004,20 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             reason,
             category,
             tickets,
+            contract,
             body,
             span,
         } => {
-            ck.audit_managed_block(reason, category, tickets, *span);
+            ck.audit_managed_block_with_contract(
+                st,
+                reason,
+                category,
+                tickets,
+                contract.as_ref(),
+                body,
+                None,
+                *span,
+            );
             st.scope_push();
             check_body_boundaries(ck, st, body, true, nested);
             pop_scope_and_sync(st, nested);

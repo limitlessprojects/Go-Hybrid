@@ -53,7 +53,7 @@ fn main() -> ExitCode {
             eprintln!("hyb — the Hybrid compiler CLI (MVP-0)");
             eprintln!();
             eprintln!("usage:");
-            eprintln!("  hyb check <file.hy> [--json] [--report-managed] [--deny-managed]");
+            eprintln!("  hyb check <file.hy> [--json] [--report-managed] [--deny-managed] [--require-managed-contracts]");
             eprintln!("  hyb generate [--check] [--binding-prefix <path>] <paths...>  (existing go.mod projects)");
             eprintln!("  hyb vendor-runtime <dir>  (vendored runtime for a go.mod project)");
             eprintln!("  hyb explain <HYB-Exxxx | Exxxx | xxxx | machine-name>");
@@ -92,11 +92,12 @@ fn cmd_explain(args: &[String]) -> ExitCode {
 
 fn cmd_check(args: &[String]) -> ExitCode {
     const USAGE: &str =
-        "usage: hyb check [--json] [--report-managed] [--deny-managed] [--] <file.hy>";
+        "usage: hyb check [--json] [--report-managed] [--deny-managed] [--require-managed-contracts] [--] <file.hy>";
     let mut file = None;
     let mut json = false;
     let mut report_managed = false;
     let mut deny_managed = false;
+    let mut require_managed_contracts = false;
     let mut end_of_options = false;
     // Validate the entire invocation before reading or checking any source.
     // Otherwise a second file or a mistyped option can silently go unchecked.
@@ -117,6 +118,10 @@ fn cmd_check(args: &[String]) -> ExitCode {
                 }
                 "--deny-managed" => {
                     deny_managed = true;
+                    continue;
+                }
+                "--require-managed-contracts" => {
+                    require_managed_contracts = true;
                     continue;
                 }
                 value if value.starts_with('-') => {
@@ -168,7 +173,12 @@ fn cmd_check(args: &[String]) -> ExitCode {
     };
 
     // check
-    let result = hy_check::check_file(&ast);
+    let result = hy_check::check_file_with_options(
+        &ast,
+        &hy_check::CheckOptions {
+            require_managed_contracts,
+        },
+    );
     let errors = result
         .diagnostics
         .iter()
@@ -217,6 +227,12 @@ fn cmd_check(args: &[String]) -> ExitCode {
                 result.managed.total_sites,
                 result.managed.pct()
             );
+            if result.managed.managed_blocks > 0 {
+                println!(
+                    "  contracts: {} verified, {} unverified",
+                    result.managed.verified_blocks, result.managed.unverified_blocks
+                );
+            }
             // Row 14 (discussion #4): the audit is a table of invariants
             // bypassed, not a bare number.
             if !result.managed.categories.is_empty() {
@@ -234,7 +250,19 @@ fn cmd_check(args: &[String]) -> ExitCode {
                 } else {
                     format!(" [{}]", b.tickets.join(", "))
                 };
-                println!("  block: [{}] \"{}\"{}", b.category, b.reason, tickets);
+                let contract_status = match &b.contract {
+                    Some(c) if c.verified => {
+                        format!(" (contract verified: protects [{}])", c.protects.join(", "))
+                    }
+                    Some(c) => {
+                        format!(" (contract FAILED: protects [{}])", c.protects.join(", "))
+                    }
+                    None => String::new(),
+                };
+                println!(
+                    "  block: [{}] \"{}\"{}{}",
+                    b.category, b.reason, tickets, contract_status
+                );
             }
         }
         if result.diagnostics.is_empty() {
