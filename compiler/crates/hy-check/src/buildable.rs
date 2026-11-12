@@ -1105,36 +1105,88 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #2915: `opt.or(default)` on an `option[T]` needs `default` of type `T`.
+    /// #2915, #3164: `option[T]` methods `unwrap()`, `is_some()`, `is_none()` take 0 arguments,
+    /// and `opt.or(default)` takes exactly 1 argument matching `T`.
     fn check_option_method_arg(&mut self, callee: &Expr, args: &[CallArg]) {
         let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
             return;
         };
-        if name != "or" || args.len() != 1 {
-            return;
-        }
         let bk = self.kind_of_expr(base);
         let OpKind::Option(elem) = bk else {
             return;
         };
-        let want = *elem;
-        let got = self.kind_of_expr(&args[0].value);
-        let int_to_float_conflict = want == OpKind::Float
-            && got == OpKind::Int
-            && !self.is_untyped_int_const(&args[0].value);
-        if kinds_conflict(&want, &got) || int_to_float_conflict {
+        let elem_label = elem.label();
+
+        // Variadic spread on option methods is strictly invalid in Go
+        if args.iter().any(|a| a.spread) {
             self.emit_e1002(
-                args[0].value.span(),
+                callee.span(),
                 format!(
-                    "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.or` on `option[{}]` (HYB-E1002)",
-                    args[0].value.render(),
-                    got.label(),
-                    want.label(),
+                    "cannot use `...` in call to method `{}.{}` on `option[{}]` (HYB-E1002)",
                     base.render(),
-                    want.label()
+                    name,
+                    elem_label
                 ),
-                "argument to `option.or` must match the option payload type",
+                "option methods are non-variadic and do not accept `...`",
             );
+            return;
+        }
+
+        match name.as_str() {
+            "unwrap" | "is_some" | "is_none" => {
+                if !args.is_empty() {
+                    self.emit_e1002(
+                        callee.span(),
+                        format!(
+                            "method `{}.{}` on `option[{}]` takes 0 arguments, found {} — Go refuses `too many arguments in call to {}.{}` (HYB-E1002)",
+                            base.render(),
+                            name,
+                            elem_label,
+                            args.len(),
+                            base.render(),
+                            name
+                        ),
+                        "option methods `unwrap`, `is_some`, and `is_none` take no arguments",
+                    );
+                }
+            }
+            "or" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        callee.span(),
+                        format!(
+                            "method `{}.or` on `option[{}]` takes exactly 1 argument, found {} — Go refuses `{} arguments in call to {}.or` (HYB-E1002)",
+                            base.render(),
+                            elem_label,
+                            args.len(),
+                            if args.is_empty() { "not enough" } else { "too many" },
+                            base.render()
+                        ),
+                        "method `option[T].or(default)` requires exactly one default value argument",
+                    );
+                    return;
+                }
+                let want = *elem;
+                let got = self.kind_of_expr(&args[0].value);
+                let int_to_float_conflict = want == OpKind::Float
+                    && got == OpKind::Int
+                    && !self.is_untyped_int_const(&args[0].value);
+                if kinds_conflict(&want, &got) || int_to_float_conflict {
+                    self.emit_e1002(
+                        args[0].value.span(),
+                        format!(
+                            "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.or` on `option[{}]` (HYB-E1002)",
+                            args[0].value.render(),
+                            got.label(),
+                            want.label(),
+                            base.render(),
+                            want.label()
+                        ),
+                        "argument to `option.or` must match the option payload type",
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
@@ -9144,14 +9196,24 @@ impl<'a> Collector<'a> {
     /// Family E1–E5 (#425): extend `HYB-E2005` (`BUILTIN-ARGS`) from literals
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
-        // #2701: among the built-ins only `append` is variadic; every other
+        // #2701, #3181: among the built-ins only `append` is variadic; every other
         // built-in rejects the `...` spread form (`invalid use of ... with
         // built-in <name>`). `append` is handled in its own arm below, where a
         // spread argument is legal.
         if matches!(
             name,
-            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
-                | "real" | "imag" | "complex"
+            "len"
+                | "cap"
+                | "close"
+                | "delete"
+                | "min"
+                | "max"
+                | "clear"
+                | "copy"
+                | "real"
+                | "imag"
+                | "complex"
+                | "some"
         ) && args.iter().any(|a| a.spread)
         {
             self.emit_e1002(
@@ -9165,6 +9227,20 @@ impl<'a> Collector<'a> {
             return;
         }
         match name {
+            // #3181: `some(v)` wraps exactly one value into an `option[T]`.
+            "some" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "built-in `some` takes exactly 1 argument, found {} — Go refuses `{} arguments in call to some` (HYB-E1002)",
+                            args.len(),
+                            if args.is_empty() { "not enough" } else { "too many" }
+                        ),
+                        "built-in `some(v)` wraps exactly one value into an option[T]",
+                    );
+                }
+            }
             "make" => {
                 for arg in args.iter().skip(1) {
                     if matches!(unwrap_parens(&arg.value), Expr::Lit { .. }) {
