@@ -12,6 +12,12 @@ fn test_curated_import_paths_normalized_to_std_paths() {
         ("import \"hex\"\nfn main() {\n    _ = hex.encode([]byte{1})\n}\n", "\"encoding/hex\""),
         ("import \"atomic\"\nfn main() {\n    var x atomic.int64\n    _ = x\n}\n", "\"sync/atomic\""),
         ("import \"filepath\"\nfn main() {\n    _ = filepath.base(\"a/b\")\n}\n", "\"path/filepath\""),
+        // #4229 M5 expansion: short roots map to full std paths
+        ("import \"gzip\"\nfn main() {\n    _ = gzip.best_speed\n}\n", "\"compress/gzip\""),
+        ("import \"tar\"\nfn main() {\n    _ = tar.file_info_header\n}\n", "\"archive/tar\""),
+        // Full-path forms of the expanded packages resolve identically
+        ("import \"compress/gzip\"\nfn main() {\n    _ = gzip.best_speed\n}\n", "\"compress/gzip\""),
+        ("import \"archive/tar\"\nfn main() {\n    _ = tar.file_info_header\n}\n", "\"archive/tar\""),
         // Full path imports remain preserved
         ("import \"net/http\"\nfn main() {\n    _ = http.status_ok\n}\n", "\"net/http\""),
         ("import \"encoding/json\"\nfn main() {\n    _ = json.marshal(1)\n}\n", "\"encoding/json\""),
@@ -45,6 +51,12 @@ fn test_curated_import_go_build_compilation() {
         ("import_atomic", "package main\nimport \"atomic\"\nfn main() {\n    var x atomic.int64\n    _ = x\n}\n"),
         ("import_filepath", "package main\nimport \"filepath\"\nfn main() {\n    _ = filepath.base(\"a/b\")\n}\n"),
         ("import_httptest", "package main\nimport \"httptest\"\nfn main() {\n    _ = httptest.new_recorder()\n}\n"),
+        // #4229 M5 expansion: members must emit Go-correct spellings and build
+        // (log flag constants go through the initialism table; gzip/tar are
+        // plain multi-segment snake → Camel).
+        ("import_log", "package main\nimport \"log\"\nfn main() {\n    _ = log.lstdflags\n    _ = log.lutc\n    _ = log.print\n}\n"),
+        ("import_gzip", "package main\nimport \"gzip\"\nfn main() {\n    _ = gzip.best_speed\n    _ = gzip.new_reader\n}\n"),
+        ("import_tar", "package main\nimport \"tar\"\nfn main() {\n    _ = tar.file_info_header\n    _ = tar.err_insecure_path\n}\n"),
     ];
 
     let tmp_dir = std::env::temp_dir();
