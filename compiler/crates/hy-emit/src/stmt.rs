@@ -1335,6 +1335,18 @@ impl Emitter {
                 return kind;
             }
         }
+        // #2207 - a `:=` binding of a foreign FIELD loses the shape, so every
+        // later member on the binding emits the raw Hybrid spelling
+        // (`u := r.url` then `u.path` -> `u.path`, not `u.Path`). Resolve the
+        // field's own result type before falling back to Plain: the receiver's
+        // shape is already known, and the shape table names what the field
+        // yields. Byte-identical to the building form one line shorter.
+        if let Expr::Field { .. } = e {
+            if let Some(t) = self.type_of_expr(e) {
+                return BindingKind::ForeignTy(t);
+            }
+        }
+
         let (call, args) = match e {
             Expr::Try { operand, .. } => match Self::peel_parens(operand) {
                 Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
