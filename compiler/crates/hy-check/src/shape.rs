@@ -138,10 +138,7 @@ impl<'a> Checker<'a> {
         if depth > 16 {
             return true;
         }
-        if shape.is_reference_alias()
-            || shape.is_handle()
-            || matches!(shape, TypeShape::Closure)
-        {
+        if shape.is_reference_alias() || shape.is_handle() || matches!(shape, TypeShape::Closure) {
             return true;
         }
         match shape {
@@ -434,7 +431,7 @@ impl<'a> Checker<'a> {
                             }
                             Some(other) => self.shape_of_expr(st, other),
                             None => TypeShape::Unknown,
-                        };
+                            };
                         TypeShape::Pointer(Box::new(pointee))
                     }
                     _ => {
@@ -863,11 +860,39 @@ impl<'a> Checker<'a> {
                 }
                 self.struct_fields_for_type(&resolved)?.into_iter().find(|(n, _)| n == name).map(|(_, t)| t)
             }
+            Expr::Receive { chan, .. } => {
+                let chan_ty = self.ty_of_expr(st, chan)?;
+                match self.resolve_type_alias(&chan_ty) {
+                    TypeExpr::Chan { elem, .. } => Some((*elem).clone()),
+                    _ => None,
+                }
+            }
             Expr::Index { base, .. } => {
                 let base_ty = self.ty_of_expr(st, base)?;
                 match self.peel_pointer_and_alias(&base_ty) {
                     TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(*elem),
                     TypeExpr::Map { value, .. } => Some(*value),
+                    TypeExpr::Pointer { to, .. } => match self.resolve_type_alias(&to) {
+                        TypeExpr::Array { elem, .. } => Some(*elem),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            Expr::Slice { base, span, .. } => {
+                let base_ty = self.ty_of_expr(st, base)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        Some(TypeExpr::Slice { elem, span: *span })
+                    }
+                    TypeExpr::Pointer { to, .. } => match self.resolve_type_alias(&to) {
+                        TypeExpr::Array { elem, .. } => Some(TypeExpr::Slice { elem, span: *span }),
+                        _ => None,
+                    },
+                    TypeExpr::Named { name, .. } if name == "string" => Some(TypeExpr::Named {
+                        name: "string".to_string(),
+                        span: *span,
+                    }),
                     _ => None,
                 }
             }
@@ -945,14 +970,22 @@ impl<'a> Checker<'a> {
                         });
                     }
                     if name == "make" {
-                        return args.first().and_then(|a| match crate::model::unwrap_parens(&a.value) {
+                        let first = args.first()?;
+                        return match crate::model::unwrap_parens(&first.value) {
+                            Expr::Ident { name, span } if self.type_aliases.contains_key(name) => {
+                                Some(TypeExpr::Named {
+                                    name: name.clone(),
+                                    span: *span,
+                                })
+                            }
                             Expr::Ident { name, .. } => self.type_aliases.get(name).cloned(),
                             other => self.ty_of_expr(st, other),
-                        });
+                        };
                     }
                     if name == "new" && args.len() == 1 && !self.fns.contains_key("new") { return Some(TypeExpr::Pointer { to: Box::new(self.type_arg_ty(st, &args[0].value)?), span: *span }); }
                     if args.len() == 1 {
-                        let is_type_name = crate::const_overflow::fixed_width_int_range(name).is_some()
+                        let is_type_name = crate::const_overflow::fixed_width_int_range(name)
+                            .is_some()
                             || crate::const_init::is_conversion_type_name(name)
                             || self.type_aliases.contains_key(name);
                         if is_type_name && !self.fns.contains_key(name.as_str()) {
@@ -1080,7 +1113,8 @@ impl<'a> Checker<'a> {
                         | hy_syntax::BinOp::BitOr
                         | hy_syntax::BinOp::BitXor
                 ) {
-                    self.ty_of_expr(st, lhs).or_else(|| self.ty_of_expr(st, rhs))
+                    self.ty_of_expr(st, lhs)
+                        .or_else(|| self.ty_of_expr(st, rhs))
                 } else {
                     None
                 }
@@ -1524,12 +1558,12 @@ impl<'a> Checker<'a> {
                 None
             }
             other => {
-                let callee_ty = self.ty_of_expr(st, other)?;
-                if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
-                    Some(results)
-                } else {
-                    None
+                if let Some(ty) = self.ty_of_expr(st, other) {
+                    if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&ty) {
+                        return Some(results);
+                    }
                 }
+                None
             }
         }
     }
@@ -1657,6 +1691,13 @@ impl<'a> Checker<'a> {
                     return vec![Some(*val_ty), None];
                 }
             }
+            if let Expr::Receive { chan, .. } = v {
+                if let Some(chan_ty) = self.ty_of_expr(st, chan) {
+                    if let TypeExpr::Chan { elem, .. } = self.resolve_type_alias(&chan_ty) {
+                        return vec![Some(*elem), None];
+                    }
+                }
+            }
         }
         let (call_expr, is_try) = match v {
             Expr::Try { operand, .. } => (crate::model::unwrap_parens(operand), true),
@@ -1670,11 +1711,7 @@ impl<'a> Checker<'a> {
                     results.len()
                 };
                 if avail == n_names {
-                    return results
-                        .into_iter()
-                        .take(n_names)
-                        .map(Some)
-                        .collect();
+                    return results.into_iter().take(n_names).map(Some).collect();
                 }
             }
         }
