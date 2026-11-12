@@ -567,6 +567,29 @@ impl<'a> Checker<'a> {
                 if let Some(TypeExpr::Fn { results, .. }) = self.resolve_fn_callee_ty(st, callee) {
                     return Some((name.clone(), results.len()));
                 }
+                // #4014: Built-in single-value calls and primitive / defined type conversions.
+                // In Go, built-ins like `len`, `cap`, `make`, `new`, `copy`, `min`, `max`, `complex`,
+                // `real`, `imag`, `some`, `recover` yield exactly 1 value. Primitive type conversions
+                // (`int(x)`, `string(x)`, etc.) and defined type conversions also yield exactly 1 value.
+                // Binding multiple variables to a single-value call fails Go compilation with
+                // `assignment mismatch: N variables but name returns 1 value` (Row 13 BUILDABLE).
+                if matches!(
+                    name.as_str(),
+                    "len" | "cap" | "make" | "new" | "copy" | "min" | "max" | "complex"
+                        | "real" | "imag" | "some" | "recover"
+                        | "int" | "int8" | "int16" | "int32" | "int64"
+                        | "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr"
+                        | "float32" | "float64" | "complex64" | "complex128"
+                        | "string" | "bool" | "byte" | "rune" | "any"
+                        | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
+                        | "f32" | "f64" | "c64" | "c128"
+                ) || self.type_aliases.contains_key(name.as_str())
+                    || self.type_aliases.contains_key(head)
+                    || self.structs.contains_key(name.as_str())
+                    || self.structs.contains_key(head)
+                {
+                    return Some((name.clone(), 1));
+                }
                 None
             }
             Expr::FnLit { results, .. } => Some(("fn".to_string(), results.len())),
