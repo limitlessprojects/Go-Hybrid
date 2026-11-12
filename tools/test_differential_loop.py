@@ -581,3 +581,71 @@ class RaceFlagPlumbingTests(unittest.TestCase):
         self.assertEqual(cmd[0], "hyb")
         self.assertEqual(cmd[1], "build")
         self.assertIn("case.hy", cmd)
+
+
+@unittest.skipUnless(os.name == "posix", "fixture programs use executable scripts")
+class AcceptOutputDecodeTests(unittest.TestCase):
+    """Real child-process decode faults must leave the corpus report intact."""
+
+    def check_corpus(self, stage, stream, payload, expected_status):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            corpus = root / "cases"
+            corpus.mkdir()
+            expected = "\u03bb"
+            for name in ("01-fault.hy", "02-control.hy"):
+                (corpus / name).write_text(
+                    "// EXPECTED-VERDICT: ACCEPT\n"
+                    f"// EXPECTED-OUTPUT: {expected}\nfn main() {{}}\n",
+                    encoding="utf-8")
+            # Choose the faulty leg independently from the harness, and write
+            # bytes through real pipes so subprocess performs the decoding.
+            program = (
+                f"#!{sys.executable}\nimport os\n"
+                f"os.write(1, {expected.encode('utf-8')!r})\n"
+            )
+            bad_program = program + f"os.write({stream}, {payload!r})\n"
+            builder = root / "builder"
+            builder.write_text("\n".join([
+                f"#!{sys.executable}",
+                "import os, pathlib, sys",
+                "fault = pathlib.Path(sys.argv[2]).name.startswith('01-')",
+                f"if fault and {stage!r} == 'build':",
+                f"    os.write({stream}, {payload!r})",
+                f"body = {bad_program!r} if fault and {stage!r} == 'run' else {program!r}",
+                "binary = pathlib.Path('a.out')",
+                "binary.write_text(body, encoding='utf-8')",
+                "binary.chmod(0o700)",
+                "",
+            ]), encoding="utf-8")
+            builder.chmod(0o700)
+            result = subprocess.run(
+                [sys.executable, str(HARNESS), "--corpus", str(corpus),
+                 "--bin", str(builder)],
+                env={**os.environ, "PYTHONUTF8": "1"},
+                capture_output=True, encoding="utf-8", timeout=15)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, expected_status, output)
+        self.assertIn("PASS  02-control.hy", output)
+        self.assertNotIn("Traceback", output)
+        if expected_status:
+            self.assertIn("FAIL  01-fault.hy", output)
+            self.assertIn(f"{stage} output could not be decoded", output)
+            self.assertIn("differential accept-side (build+run): 1/2", output)
+            self.assertIn("differential: 1 disagreement(s)", output)
+            self.assertNotIn("FULL AGREEMENT", output)
+        else:
+            self.assertIn("differential accept-side (build+run): 2/2", output)
+            self.assertIn("differential: FULL AGREEMENT", output)
+
+    def test_invalid_bytes_fail_one_case_on_each_accept_leg_and_stream(self):
+        for stage in ("build", "run"):
+            for stream in (1, 2):
+                with self.subTest(stage=stage, stream=stream):
+                    self.check_corpus(stage, stream, b"\xff", 1)
+
+    def test_valid_multibyte_output_preserves_exact_output_matching(self):
+        # Unicode diagnostics are harmless, while stdout must still match.
+        for stage in ("build", "run"):
+            with self.subTest(stage=stage):
+                self.check_corpus(stage, 2, "\u03bb".encode("utf-8"), 0)
