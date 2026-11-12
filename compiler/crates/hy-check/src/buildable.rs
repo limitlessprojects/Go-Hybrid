@@ -928,6 +928,9 @@ impl<'a> Collector<'a> {
                             return Some(elem[close + 1..].to_string());
                         }
                     }
+                    if let Some(elem) = self.named_slice_element_name(&tname) {
+                        return Some(elem);
+                    }
                 }
                 None
             }
