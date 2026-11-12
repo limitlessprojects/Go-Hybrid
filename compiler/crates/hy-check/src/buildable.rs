@@ -4950,6 +4950,170 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_net_package_call(&mut self, pkg: &str, member: &str, args: &[CallArg], span: Span) {
+        if pkg != "net" {
+            return;
+        }
+
+        let norm_owned = crate::foreign::normalize_go_ident_to_snake(member);
+        let m = norm_owned.as_str();
+
+        // Non-callable types, variables, and constants in package net
+        let is_non_callable = matches!(
+            m,
+            "conn"
+                | "listener"
+                | "packet_conn"
+                | "addr"
+                | "dialer"
+                | "listen_config"
+                | "resolver"
+                | "ip"
+                | "ip_mask"
+                | "ip_net"
+                | "ip_addr"
+                | "ip_conn"
+                | "tcp_addr"
+                | "tcp_conn"
+                | "tcp_listener"
+                | "udp_addr"
+                | "udp_conn"
+                | "unix_addr"
+                | "unix_conn"
+                | "unix_listener"
+                | "interface"
+                | "hardware_addr"
+                | "buffers"
+                | "error"
+                | "addr_error"
+                | "dns_config_error"
+                | "dns_error"
+                | "invalid_addr_error"
+                | "op_error"
+                | "parse_error"
+                | "unknown_network_error"
+                | "err_closed"
+                | "err_write_to_connected"
+                | "ipv4len"
+                | "ipv6len"
+                | "default_resolver"
+                | "flags"
+        );
+        if is_non_callable {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot call `net.{}` - `net.{}` is a package type, variable, or constant, not a function (HYB-E1002)",
+                    member, member
+                ),
+                "do not invoke package types, variables, or constants as functions",
+            );
+            return;
+        }
+
+        let want: Option<usize> = match m {
+            // 0 args
+            "interfaces" | "interface_addrs" | "pipe" => Some(0),
+
+            // 1 arg
+            "split_host_port"
+            | "lookup_addr"
+            | "lookup_cname"
+            | "lookup_host"
+            | "lookup_ip"
+            | "lookup_mx"
+            | "lookup_ns"
+            | "lookup_txt"
+            | "parse_cidr"
+            | "parse_ip"
+            | "parse_mac"
+            | "interface_by_index"
+            | "interface_by_name"
+            | "file_conn"
+            | "file_listener"
+            | "file_packet_conn" => Some(1),
+
+            // 2 args
+            "listen"
+            | "listen_packet"
+            | "listen_tcp"
+            | "listen_udp"
+            | "listen_ip"
+            | "listen_unix"
+            | "listen_unixgram"
+            | "dial"
+            | "join_host_port"
+            | "lookup_port"
+            | "cidr_mask"
+            | "resolve_ip_addr"
+            | "resolve_tcp_addr"
+            | "resolve_udp_addr"
+            | "resolve_unix_addr" => Some(2),
+
+            // 3 args
+            "dial_timeout"
+            | "dial_tcp"
+            | "dial_udp"
+            | "dial_ip"
+            | "dial_unix"
+            | "lookup_srv" => Some(3),
+
+            // 4 args
+            "ipv4" | "ipv4_mask" => Some(4),
+
+            _ => None,
+        };
+
+        let Some(want_arity) = want else {
+            return;
+        };
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic `net.{}` (HYB-E1002)",
+                    member
+                ),
+                "`net` package functions are non-variadic; pass discrete arguments",
+            );
+            return;
+        }
+
+        let got = args.len();
+        if got != want_arity {
+            let msg = if got < want_arity {
+                format!(
+                    "function `net.{}` takes {} argument{} but is called with {} - Go refuses `not enough arguments in call to net.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            } else {
+                format!(
+                    "function `net.{}` takes {} argument{} but is called with {} - Go refuses `too many arguments in call to net.{}` (HYB-E1002)",
+                    member,
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    got,
+                    member
+                )
+            };
+            self.emit_e1002(
+                span,
+                msg,
+                &format!(
+                    "pass exactly {} argument{} to `net.{}`",
+                    want_arity,
+                    if want_arity == 1 { "" } else { "s" },
+                    member
+                ),
+            );
+        }
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -8103,6 +8267,9 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        self.check_net_package_call(pkg, name, args, span);
+                    }
                     if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
