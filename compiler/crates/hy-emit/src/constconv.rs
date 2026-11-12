@@ -272,13 +272,16 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
                     let v = const_int_expr(&args[0].value)?;
                     return Some(WideInt::from_i128(v.truncate_to_width(bits, signed)));
                 }
-            } else if name == "len" && args.len() == 1 && !args[0].spread {
+            } else if (name == "len" || name == "cap") && args.len() == 1 && !args[0].spread {
                 let mut a = &args[0].value;
                 while let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = a {
                     a = inner;
                 }
                 if let Expr::Lit { kind: LitKind::Str(st) | LitKind::RawStr(st), .. } = a {
-                    return Some(WideInt::from_i128(st.len() as i128));
+                    return (name == "len").then(|| WideInt::from_i128(st.len() as i128));
+                }
+                if let (Some((len, _, _)), Expr::SliceLit { items, .. }) = (a.as_array_lit(), a) {
+                    return len.map_or_else(|| Some(WideInt::from_i128(items.len() as i128)), const_int_expr);
                 }
             } else if (name == "min" || name == "max") && !args.is_empty() && args.iter().all(|a| !a.spread) {
                 let mut acc = const_int_expr(&args[0].value)?;
