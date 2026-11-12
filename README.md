@@ -153,7 +153,9 @@ A pinned-toolchain image (Go 1.26.9 + release `hyb` + the prebuilt runtime —
 bridge programs included, no Rust needed at run time):
 
 ```bash
-docker run --rm -v "$PWD:/work" -w /work   ghcr.io/limitlessprojects/go-hybrid:latest   hyb build ./program.hy -o /work/out && /work/out
+docker run --rm -v "$PWD:/work" -w /work \
+  ghcr.io/limitlessprojects/go-hybrid:latest \
+  sh -c 'hyb build ./program.hy -o /work/out && /work/out'
 ```
 
 Also usable as a CI `container:` — `HYB_RUNTIME_DIR` is wired. The image is
