@@ -296,6 +296,10 @@ pub(crate) struct FnState {
     /// composite literal containing `&...`), for O2 `LOAN-ESCAPE` on
     /// named-result / variable returns (`out = &x; return` / `return out`).
     pub borrow_bindings: HashSet<String>,
+    /// Saved `borrow_bindings` snapshots for outer scopes when entering block
+    /// scopes so an inner shadowing local (`if true { out := []*int{} }`)
+    /// cannot wipe or taint the outer binding's `borrow_bindings` entry.
+    pub borrow_binding_scopes: Vec<HashSet<String>>,
     /// Local closure bindings -> `(params, results, body)` recorded at define/rebind
     /// time so call sites can analyze parameter/capture stores (`record_callee_param_stores`).
     pub closure_defs:
@@ -316,6 +320,7 @@ impl FnState {
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
         self.shadow_link_scopes.push(self.shadow_links.clone());
+        self.borrow_binding_scopes.push(self.borrow_bindings.clone());
         self.fnlit_scopes.push(Vec::new());
     }
 
@@ -443,6 +448,15 @@ impl FnState {
         self.scopes.pop();
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
+        }
+        if let Some(outer_borrows) = self.borrow_binding_scopes.pop() {
+            for shadowed in popped_scope.keys() {
+                if outer_borrows.contains(shadowed) {
+                    self.borrow_bindings.insert(shadowed.clone());
+                } else {
+                    self.borrow_bindings.remove(shadowed);
+                }
+            }
         }
         if let Some(outer_aliases) = self.alias_scopes.pop() {
             self.aliases = outer_aliases;
@@ -938,6 +952,9 @@ pub(crate) fn collect_addr_of_roots(e: &Expr, out: &mut Vec<String>) {
         }
         Expr::Try { operand, .. } => collect_addr_of_roots(operand, out),
         Expr::Move { operand, .. } => collect_addr_of_roots(operand, out),
+        Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::Slice { base, .. } => {
+            collect_addr_of_roots(base, out);
+        }
         Expr::StructLit { fields, .. } => {
             for f in fields {
                 collect_addr_of_roots(&f.value, out);
