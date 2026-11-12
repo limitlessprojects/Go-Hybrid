@@ -440,6 +440,20 @@ impl FnState {
                 }
             }
         }
+        for (k, v) in &popped_scope {
+            if v.moved.is_some() || v.non_owned_origin.is_some() {
+                for (s_env, _, _) in self.closure_scoped_envs.values_mut() {
+                    if let Some(sb) = s_env.get_mut(k) {
+                        if sb.moved.is_none() && v.moved.is_some() {
+                            sb.moved = v.moved.clone();
+                        }
+                        if sb.non_owned_origin.is_none() && v.non_owned_origin.is_some() {
+                            sb.non_owned_origin = v.non_owned_origin.clone();
+                        }
+                    }
+                }
+            }
+        }
         self.scopes.pop();
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
