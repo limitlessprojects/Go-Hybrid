@@ -430,3 +430,67 @@ fn main() {
         res_prim_copy.diagnostics
     );
 }
+
+#[test]
+fn generic_call_explicit_type_args_store_and_a3_conflict_rejected() {
+    let res_store = check(
+        r#"
+fn store[t](dst map[string]t, src t) {
+  dst["k"] = src
+}
+
+fn worker(outer map[string]map[string]int) {
+  outer["k"]["x"] = 99
+}
+
+fn main() {
+  inner := map[string]int{"x": 1}
+  outer := map[string]map[string]int{}
+  store[map[string]int](outer, inner)
+  task worker(move outer)
+  inner["x"] = 2
+}
+"#,
+    );
+    assert_eq!(
+        res_store.verdict,
+        Verdict::Reject,
+        "expected Reject for explicit generic call store before move, got: {:?}",
+        res_store.diagnostics
+    );
+    assert!(
+        res_store.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+        "expected HYB-E3003 after store[map[string]int](outer, inner) and move outer, got: {:?}",
+        res_store.diagnostics
+    );
+
+    let res_a3 = check(
+        r#"
+struct acct {
+  bal int
+}
+
+fn drop_key[t](m map[string]t) {
+  delete(m, "a")
+}
+
+fn main() {
+  m := map[string]acct{"a": acct{bal: 1}}
+  s := &m["a"]
+  drop_key[acct](m)
+  s.bal = 2
+}
+"#,
+    );
+    assert_eq!(
+        res_a3.verdict,
+        Verdict::Reject,
+        "expected Reject for explicit generic call mutating map during live slot loan, got: {:?}",
+        res_a3.diagnostics
+    );
+    assert!(
+        res_a3.diagnostics.iter().any(|d| d.code == "HYB-E3102"),
+        "expected HYB-E3102 for drop_key[acct](m) during live map-slot loan, got: {:?}",
+        res_a3.diagnostics
+    );
+}
