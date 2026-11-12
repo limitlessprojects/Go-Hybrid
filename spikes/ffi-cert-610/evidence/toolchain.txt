@@ -1,0 +1,14 @@
+# toolchain (captured 2026-10-24T10:12:28Z)
+rustc 1.99.0 (b940084d7 2026-09-28)
+binary: rustc
+commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4
+commit-date: 2026-09-28
+host: x86_64-unknown-linux-gnu
+release: 1.99.0
+LLVM version: 23.1.1
+cargo 1.99.0 (5f94df478 2026-08-27)
+Python 3.12.3
+go version go1.23.2 linux/amd64
+
+RUSTFLAGS="-Z emit-stack-sizes -C debuginfo=2" RUSTC_BOOTSTRAP=1
+base commit: 78e04dc93bd343b54579d5d8014c03f5b1450278
