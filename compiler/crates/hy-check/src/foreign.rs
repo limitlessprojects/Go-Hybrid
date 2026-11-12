@@ -35,6 +35,7 @@ pub(crate) const BUILTIN_PACKAGES: &[&str] = &[
     "sort",
     "strconv",
     "errors",
+    "hy",
 ];
 
 /// How a call uses its receiver / arguments (O7 handle modes + O13 consume).
@@ -85,20 +86,23 @@ pub(crate) fn is_unproven_atomic(name: &str) -> bool {
 /// Classify a dotted foreign type name; `None` = not a known foreign type
 /// (the caller falls back to local struct decls / `Unknown`).
 pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
-    if is_scalar_atomic(name) {
+    let base = name.split('[').next().unwrap_or(name);
+    if is_scalar_atomic(base) {
         return Some(TypeShape::Atomic);
     }
-    if is_unproven_atomic(name) {
+    if is_unproven_atomic(base) {
         // fail-closed (O4.9): Unknown → HYB-E3005 at spawn/send boundaries,
         // with the row-11 explanation (sendability.rs)
         return Some(TypeShape::Unknown);
     }
-    match name {
+    match base {
+        "hy.send_cap" | "hy.recv_cap" => Some(TypeShape::OwnHandle(base.into())),
+        "error" => Some(TypeShape::ForeignOpaque("error".into())),
         "serde_json.value" => Some(TypeShape::OwnHandle("serde_json.value".into())),
         "serde_json.view" => Some(TypeShape::BorrowHandle("serde_json.view".into())),
         "flate2.writer" => Some(TypeShape::OwnHandle("flate2.writer".into())),
         _ => {
-            let root = name.split('.').next().unwrap_or("");
+            let root = base.split('.').next().unwrap_or("");
             if is_curated_package_root(root) {
                 Some(TypeShape::ForeignOpaque(name.to_string()))
             } else {
@@ -115,15 +119,26 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
 /// emitter supports ranging the value handle itself); other handles (e.g.
 /// `flate2.writer`) are NOT iterable and must stay rejected (issue #411).
 pub(crate) fn is_iterable_handle(name: &str) -> bool {
-    name == "serde_json.value"
+    name == "serde_json.value" || name == "hy.recv_cap"
 }
 
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
-        ("serde_json", "parse" | "new_object" | "new_array") | ("flate2", "new_writer") => {
-            CallMode::Produce
-        }
+        ("serde_json", "parse" | "new_object" | "new_array")
+        | ("flate2", "new_writer")
+        | ("json" | "encoding/json", "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder")
+        | (
+            "httptest" | "net/http/httptest",
+            "new_server"
+            | "new_tls_server"
+            | "new_unstarted_server"
+            | "new_recorder"
+            | "NewServer"
+            | "NewTLSServer"
+            | "NewUnstartedServer"
+            | "NewRecorder",
+        ) => CallMode::Produce,
         ("serde_json", "to_string_pretty")
         | ("serde_json", "array")
         | ("serde_json", "get")
@@ -143,13 +158,10 @@ pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
     match (pkg, method) {
         (
             "sort",
-            "ints" | "strings" | "float64s" | "slice" | "slice_stable" | "sort" | "stable"
-            | "Ints" | "Strings" | "Float64s" | "Slice" | "SliceStable" | "Sort" | "Stable",
+            "ints" | "strings" | "float64s" | "slice" | "slice_stable" | "sort" | "stable" | "Ints"
+            | "Strings" | "Float64s" | "Slice" | "SliceStable" | "Sort" | "Stable",
         ) => Some(0),
-        (
-            "io",
-            "read_full" | "read_at_least" | "ReadFull" | "ReadAtLeast",
-        ) => Some(1),
+        ("io", "read_full" | "read_at_least" | "ReadFull" | "ReadAtLeast") => Some(1),
         ("io", "copy_buffer" | "CopyBuffer") => Some(2),
         _ => None,
     }
@@ -179,11 +191,59 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
         // `atomic.load_pointer` / `atomic.swap_pointer` return an
         // unsafe.Pointer to arbitrary state — not a primitive (row 11)
-        ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
+        (
+            "atomic",
+            "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer",
+        ) => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
+        ("json" | "encoding/json", "new_decoder" | "NewDecoder") => {
+            TypeShape::ForeignOpaque("json.decoder".into())
+        }
+        ("json" | "encoding/json", "new_encoder" | "NewEncoder") => {
+            TypeShape::ForeignOpaque("json.encoder".into())
+        }
+        (
+            "httptest" | "net/http/httptest",
+            "new_server"
+            | "new_tls_server"
+            | "new_unstarted_server"
+            | "NewServer"
+            | "NewTLSServer"
+            | "NewUnstartedServer",
+        ) => TypeShape::ForeignOpaque("httptest.server".into()),
+        ("httptest" | "net/http/httptest", "new_recorder" | "NewRecorder") => {
+            TypeShape::ForeignOpaque("httptest.response_recorder".into())
+        }
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
+    }
+}
+
+/// TypeExpr result of a curated package-level call whose channel
+/// *direction* must be visible to the sendability walker (#4076).
+/// `time.after(d)` is Go's `time.After`: it returns `<-chan Time`,
+/// receive-only. The `TypeShape::Chan` entry in `package_result` above
+/// carries no direction, and `dir_ty_of_expr` needs a `TypeExpr` — without
+/// this arm, `close(time.after(..))` and `time.after(..) <- v` resolve to
+/// `None` and both HYB-E3009 / HYB-E3008 checks fail open on programs
+/// whose Go emit cannot compile (GUARANTEES.md row 13 BUILDABLE).
+pub(crate) fn package_result_chan_ty(
+    pkg: &str,
+    method: &str,
+    span: hy_diag::Span,
+) -> Option<hy_syntax::TypeExpr> {
+    use hy_syntax::{ChanDir, TypeExpr};
+    match (pkg, method) {
+        ("time", "after" | "After") => Some(TypeExpr::Chan {
+            dir: ChanDir::Recv,
+            elem: Box::new(TypeExpr::Named {
+                name: "time.Time".to_string(),
+                span,
+            }),
+            span,
+        }),
+        _ => None,
     }
 }
 
@@ -194,109 +254,41 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
     match (pkg, method) {
         (
             "strconv",
-            "parse_int"
-                | "parse_uint"
-                | "parse_float"
-                | "parse_bool"
-                | "parse_complex"
-                | "atoi"
-                | "unquote"
-                | "ParseInt"
-                | "ParseUint"
-                | "ParseFloat"
-                | "ParseBool"
-                | "ParseComplex"
-                | "Atoi"
-                | "Unquote",
+            "parse_int" | "parse_uint" | "parse_float" | "parse_bool" | "parse_complex" | "atoi"
+            | "unquote" | "ParseInt" | "ParseUint" | "ParseFloat" | "ParseBool" | "ParseComplex"
+            | "Atoi" | "Unquote",
         ) => Some(2),
         (
             "os",
-            "open"
-                | "create"
-                | "read_file"
-                | "read_dir"
-                | "getwd"
-                | "user_home_dir"
-                | "user_cache_dir"
-                | "user_config_dir"
-                | "executable"
-                | "lookup_env"
-                | "stat"
-                | "lstat"
-                | "create_temp"
-                | "mkdir_temp"
-                | "Open"
-                | "Create"
-                | "ReadFile"
-                | "ReadDir"
-                | "Getwd"
-                | "UserHomeDir"
-                | "UserCacheDir"
-                | "UserConfigDir"
-                | "Executable"
-                | "LookupEnv"
-                | "Stat"
-                | "Lstat"
-                | "CreateTemp"
-                | "MkdirTemp",
+            "open" | "create" | "read_file" | "read_dir" | "getwd" | "user_home_dir"
+            | "user_cache_dir" | "user_config_dir" | "executable" | "lookup_env" | "stat" | "lstat"
+            | "create_temp" | "mkdir_temp" | "Open" | "Create" | "ReadFile" | "ReadDir" | "Getwd"
+            | "UserHomeDir" | "UserCacheDir" | "UserConfigDir" | "Executable" | "LookupEnv"
+            | "Stat" | "Lstat" | "CreateTemp" | "MkdirTemp",
         ) => Some(2),
         (
             "io",
-            "read_all"
-                | "read_full"
-                | "read_at_least"
-                | "copy"
-                | "copy_n"
-                | "copy_buffer"
-                | "write_string"
-                | "ReadAll"
-                | "ReadFull"
-                | "ReadAtLeast"
-                | "Copy"
-                | "CopyN"
-                | "CopyBuffer"
-                | "WriteString",
+            "read_all" | "read_full" | "read_at_least" | "copy" | "copy_n" | "copy_buffer"
+            | "write_string" | "ReadAll" | "ReadFull" | "ReadAtLeast" | "Copy" | "CopyN"
+            | "CopyBuffer" | "WriteString",
         ) => Some(2),
-        (
-            "strings",
-            "cut_prefix" | "cut_suffix" | "CutPrefix" | "CutSuffix",
-        ) => Some(2),
+        ("strings", "cut_prefix" | "cut_suffix" | "CutPrefix" | "CutSuffix") => Some(2),
         ("strings", "cut" | "Cut") => Some(3),
         (
             "filepath",
-            "abs"
-                | "rel"
-                | "eval_symlinks"
-                | "glob"
-                | "match"
-                | "split"
-                | "Abs"
-                | "Rel"
-                | "EvalSymlinks"
-                | "Glob"
-                | "Match"
-                | "Split",
+            "abs" | "rel" | "eval_symlinks" | "glob" | "match" | "split" | "Abs" | "Rel"
+            | "EvalSymlinks" | "Glob" | "Match" | "Split",
         ) => Some(2),
         ("path", "match" | "split" | "Match" | "Split") => Some(2),
         (
             "time",
-            "parse"
-                | "parse_duration"
-                | "load_location"
-                | "Parse"
-                | "ParseDuration"
-                | "LoadLocation",
+            "parse" | "parse_duration" | "load_location" | "Parse" | "ParseDuration"
+            | "LoadLocation",
         ) => Some(2),
         (
             "net",
-            "listen"
-                | "dial"
-                | "resolve_tcp_addr"
-                | "lookup_host"
-                | "Listen"
-                | "Dial"
-                | "ResolveTCPAddr"
-                | "LookupHost",
+            "listen" | "dial" | "resolve_tcp_addr" | "lookup_host" | "Listen" | "Dial"
+            | "ResolveTCPAddr" | "LookupHost",
         ) => Some(2),
         ("net", "split_host_port" | "SplitHostPort") => Some(3),
         ("hex", "decode_string" | "DecodeString") => Some(2),
@@ -326,10 +318,7 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
         // hy-check does not depend on hy-emit (that would be a crate cycle), so
         // no automated cross-crate pin is possible. The same-surface tests in
         // `tests/foreign_method_surface.rs` cover the checker side.
-        (
-            "serde_json.value" | "serde_json.view",
-            "array" | "int" | "string",
-        ) => CallMode::Borrow,
+        ("serde_json.value" | "serde_json.view", "array" | "int" | "string") => CallMode::Borrow,
         ("serde_json.value" | "serde_json.view", "set" | "push_string") => CallMode::Mutate,
         ("flate2.writer", "write") => CallMode::Mutate,
         ("flate2.writer", "finish") => CallMode::Consume,
@@ -369,14 +358,336 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     /// class as #2200, different handle.
     const SYNC_MUTEX: &[&str] = &["lock", "unlock", "try_lock"];
     /// `sync.RWMutex`.
-    const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
+    const SYNC_RWMUTEX: &[&str] = &[
+        "lock",
+        "unlock",
+        "try_lock",
+        "rlock",
+        "runlock",
+        "try_rlock",
+    ];
     const SYNC_WAIT_GROUP: &[&str] = &["add", "done", "wait"];
     const SYNC_ONCE: &[&str] = &["do"];
+    const BYTES_BUFFER: &[&str] = &[
+        "write",
+        "write_byte",
+        "write_rune",
+        "write_string",
+        "write_to",
+        "read",
+        "read_byte",
+        "read_bytes",
+        "read_from",
+        "read_rune",
+        "read_string",
+        "next",
+        "grow",
+        "reset",
+        "string",
+        "bytes",
+        "len",
+        "cap",
+        "truncate",
+        "unread_byte",
+        "unread_rune",
+    ];
+    const STRINGS_BUILDER: &[&str] = &[
+        "write",
+        "write_byte",
+        "write_rune",
+        "write_string",
+        "grow",
+        "reset",
+        "string",
+        "len",
+        "cap",
+    ];
+    const SYNC_COND: &[&str] = &["wait", "signal", "broadcast"];
+    const SYNC_POOL: &[&str] = &["get", "put"];
+    const SYNC_MAP: &[&str] = &[
+        "load",
+        "store",
+        "delete",
+        "load_or_store",
+        "load_and_delete",
+        "range",
+        "compare_and_swap",
+        "compare_and_delete",
+        "swap",
+    ];
+    const TIME_TICKER: &[&str] = &["stop", "reset"];
+    const TIME_TIMER: &[&str] = &["stop", "reset"];
+    /// `bufio.Reader` — Go standard library buffered reader methods.
+    const BUFIO_READER: &[&str] = &[
+        "buffered",
+        "discard",
+        "peek",
+        "read",
+        "read_byte",
+        "read_bytes",
+        "read_line",
+        "read_rune",
+        "read_slice",
+        "read_string",
+        "reset",
+        "size",
+        "unread_byte",
+        "unread_rune",
+        "write_to",
+    ];
+    /// `bufio.Writer` — Go standard library buffered writer methods.
+    const BUFIO_WRITER: &[&str] = &[
+        "available",
+        "available_buffer",
+        "buffered",
+        "flush",
+        "read_from",
+        "reset",
+        "size",
+        "write",
+        "write_byte",
+        "write_rune",
+        "write_string",
+    ];
+    /// `bufio.Scanner` — Go standard library buffered scanner methods.
+    const BUFIO_SCANNER: &[&str] = &["buffer", "bytes", "err", "scan", "split", "text"];
+    /// `os.File` — standard library file handle. Go defines 24 methods on `*os.File`.
+    const OS_FILE: &[&str] = &[
+        "chdir",
+        "chmod",
+        "chown",
+        "close",
+        "fd",
+        "name",
+        "read",
+        "read_at",
+        "read_dir",
+        "read_from",
+        "readdir",
+        "readdirnames",
+        "seek",
+        "set_deadline",
+        "set_read_deadline",
+        "set_write_deadline",
+        "stat",
+        "sync",
+        "syscall_conn",
+        "truncate",
+        "write",
+        "write_at",
+        "write_string",
+        "write_to",
+    ];
+    /// `io.PipeReader`.
+    const IO_PIPE_READER: &[&str] = &["close", "close_with_error", "read"];
+    /// `io.PipeWriter`.
+    const IO_PIPE_WRITER: &[&str] = &["close", "close_with_error", "write"];
+    /// `io.SectionReader`.
+    const IO_SECTION_READER: &[&str] = &["outer", "read", "read_at", "seek", "size"];
+    /// `io.LimitedReader`.
+    const IO_LIMITED_READER: &[&str] = &["read"];
+    /// `io.OffsetWriter`.
+    const IO_OFFSET_WRITER: &[&str] = &["seek", "write", "write_at"];
+    const HTTP_CLIENT: &[&str] = &[
+        "close_idle_connections",
+        "do",
+        "get",
+        "head",
+        "post",
+        "post_form",
+    ];
+    const HTTP_REQUEST: &[&str] = &[
+        "add_cookie",
+        "clone",
+        "context",
+        "cookie",
+        "cookies",
+        "form_file",
+        "form_value",
+        "multipart_reader",
+        "parse_form",
+        "parse_multipart_form",
+        "path_value",
+        "post_form_value",
+        "proto_at_least",
+        "referer",
+        "set_path_value",
+        "user_agent",
+        "with_context",
+        "write",
+        "write_proxy",
+    ];
+    const HTTP_RESPONSE: &[&str] = &["cookies", "location", "proto_at_least", "write"];
+    const HTTP_SERVER: &[&str] = &[
+        "close",
+        "listen_and_serve",
+        "listen_and_serve_tls",
+        "register_on_shutdown",
+        "serve",
+        "serve_tls",
+        "set_keep_alives_enabled",
+        "shutdown",
+    ];
+    const HTTP_COOKIE: &[&str] = &["string", "valid"];
+    /// `http.ResponseWriter` — standard library HTTP response writer interface.
+    const HTTP_RESPONSE_WRITER: &[&str] = &["header", "write", "write_header"];
+    /// `http.RoundTripper` — standard library HTTP transport round tripper interface.
+    const HTTP_ROUND_TRIPPER: &[&str] = &["round_trip"];
+    /// `context.Context` — standard library context interface.
+    const CONTEXT_CONTEXT: &[&str] = &["deadline", "done", "err", "value"];
+    /// `flag.FlagSet` — standard library flag set type.
+    const FLAG_FLAG_SET: &[&str] = &[
+        "arg", "args", "bool", "bool_func", "bool_var", "duration", "duration_var",
+        "error_handling", "float64", "float64_var", "init", "int", "int_var",
+        "int64", "int64_var", "lookup", "name", "n_arg", "n_flag", "output",
+        "parse", "parsed", "print_defaults", "set", "set_output", "string",
+        "string_var", "text_var", "uint", "uint_var", "uint64", "uint64_var",
+        "var", "visit", "visit_all",
+    ];
+    const URL_URL: &[&str] = &[
+        "escaped_fragment",
+        "escaped_path",
+        "hostname",
+        "is_abs",
+        "join_path",
+        "marshal_binary",
+        "port",
+        "query",
+        "redacted",
+        "request_uri",
+        "resolve_reference",
+        "string",
+        "unmarshal_binary",
+    ];
+    const JSON_DECODER: &[&str] = &[
+        "buffered",
+        "decode",
+        "disallow_unknown_fields",
+        "input_offset",
+        "more",
+        "token",
+        "use_number",
+    ];
+    const JSON_ENCODER: &[&str] = &["encode", "set_escape_html", "set_indent"];
+    const JSON_RAW_MESSAGE: &[&str] = &["marshal_json", "unmarshal_json"];
+    const HTTPTEST_SERVER: &[&str] = &[
+        "client",
+        "close",
+        "close_client_connections",
+        "start",
+        "start_tls",
+    ];
+    const HTTPTEST_RESPONSE_RECORDER: &[&str] = &[
+        "flush",
+        "header",
+        "result",
+        "write",
+        "write_header",
+        "write_string",
+    ];
+    const OS_PROCESS: &[&str] = &["kill", "release", "signal", "wait"];
+    const OS_PROCESS_STATE: &[&str] = &[
+        "exit_code",
+        "exited",
+        "pid",
+        "string",
+        "success",
+        "sys",
+        "sys_usage",
+        "system_time",
+        "user_time",
+    ];
+    const STRINGS_READER: &[&str] = &[
+        "len",
+        "read",
+        "read_at",
+        "read_byte",
+        "read_rune",
+        "reset",
+        "seek",
+        "size",
+        "unread_byte",
+        "unread_rune",
+        "write_to",
+    ];
+    const NET_IP: &[&str] = &[
+        "default_mask",
+        "equal",
+        "is_global_unicast",
+        "is_interface_local_multicast",
+        "is_link_local_multicast",
+        "is_link_local_unicast",
+        "is_loopback",
+        "is_multicast",
+        "is_private",
+        "is_unspecified",
+        "marshal_text",
+        "mask",
+        "string",
+        "to16",
+        "to4",
+        "unmarshal_text",
+    ];
+    const NET_IP_NET: &[&str] = &["contains", "network", "string"];
+    const NET_IP_MASK: &[&str] = &["size", "string"];
+    const NET_TCP_ADDR: &[&str] = &["addr_port", "network", "string"];
+    const NET_UDP_ADDR: &[&str] = &["addr_port", "network", "string"];
+    const NET_UNIX_ADDR: &[&str] = &["network", "string"];
+    const NET_IP_ADDR: &[&str] = &["network", "string"];
+    const BUILTIN_ERROR: &[&str] = &["error"];
+    const NET_ADDR: &[&str] = &["network", "string"];
+    const NET_ERROR: &[&str] = &["error", "temporary", "timeout"];
     match recv_type {
+        "error" | "errors.error" => Some(BUILTIN_ERROR),
+        "net.addr" | "net.Addr" => Some(NET_ADDR),
+        "net.error" | "net.Error" => Some(NET_ERROR),
         "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
         "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         "sync.wait_group" | "sync.waitgroup" | "sync.WaitGroup" => Some(SYNC_WAIT_GROUP),
         "sync.once" | "sync.Once" => Some(SYNC_ONCE),
+        "bytes.buffer" | "bytes.Buffer" => Some(BYTES_BUFFER),
+        "strings.builder" | "strings.Builder" => Some(STRINGS_BUILDER),
+        "sync.cond" | "sync.Cond" => Some(SYNC_COND),
+        "sync.pool" | "sync.Pool" => Some(SYNC_POOL),
+        "sync.map" | "sync.Map" => Some(SYNC_MAP),
+        "time.ticker" | "time.Ticker" => Some(TIME_TICKER),
+        "time.timer" | "time.Timer" => Some(TIME_TIMER),
+        "bufio.reader" | "bufio.Reader" => Some(BUFIO_READER),
+        "bufio.writer" | "bufio.Writer" => Some(BUFIO_WRITER),
+        "bufio.scanner" | "bufio.Scanner" => Some(BUFIO_SCANNER),
+        "os.file" | "os.File" => Some(OS_FILE),
+        "io.pipe_reader" | "io.PipeReader" => Some(IO_PIPE_READER),
+        "io.pipe_writer" | "io.PipeWriter" => Some(IO_PIPE_WRITER),
+        "io.section_reader" | "io.SectionReader" => Some(IO_SECTION_READER),
+        "io.limited_reader" | "io.LimitedReader" => Some(IO_LIMITED_READER),
+        "io.offset_writer" | "io.OffsetWriter" => Some(IO_OFFSET_WRITER),
+        "http.client" | "http.Client" => Some(HTTP_CLIENT),
+        "http.request" | "http.Request" => Some(HTTP_REQUEST),
+        "http.response" | "http.Response" => Some(HTTP_RESPONSE),
+        "http.server" | "http.Server" => Some(HTTP_SERVER),
+        "http.cookie" | "http.Cookie" => Some(HTTP_COOKIE),
+        "http.response_writer" | "http.responsewriter" | "http.ResponseWriter" => Some(HTTP_RESPONSE_WRITER),
+        "http.round_tripper" | "http.roundtripper" | "http.RoundTripper" => Some(HTTP_ROUND_TRIPPER),
+        "context.context" | "context.Context" => Some(CONTEXT_CONTEXT),
+        "flag.flag_set" | "flag.flagset" | "flag.FlagSet" => Some(FLAG_FLAG_SET),
+        "url.url" | "url.URL" => Some(URL_URL),
+        "json.decoder" | "json.Decoder" => Some(JSON_DECODER),
+        "json.encoder" | "json.Encoder" => Some(JSON_ENCODER),
+        "json.raw_message" | "json.rawmessage" | "json.RawMessage" => Some(JSON_RAW_MESSAGE),
+        "httptest.server" | "httptest.Server" => Some(HTTPTEST_SERVER),
+        "httptest.response_recorder"
+        | "httptest.responserecorder"
+        | "httptest.ResponseRecorder" => Some(HTTPTEST_RESPONSE_RECORDER),
+        "os.process" | "os.Process" => Some(OS_PROCESS),
+        "os.process_state" | "os.processstate" | "os.ProcessState" => Some(OS_PROCESS_STATE),
+        "strings.reader" | "strings.Reader" => Some(STRINGS_READER),
+        "net.ip" | "net.IP" => Some(NET_IP),
+        "net.ip_net" | "net.ipnet" | "net.IPNet" => Some(NET_IP_NET),
+        "net.ip_mask" | "net.ipmask" | "net.IPMask" => Some(NET_IP_MASK),
+        "net.tcp_addr" | "net.tcpaddr" | "net.TCPAddr" => Some(NET_TCP_ADDR),
+        "net.udp_addr" | "net.udpaddr" | "net.UDPAddr" => Some(NET_UDP_ADDR),
+        "net.unix_addr" | "net.unixaddr" | "net.UnixAddr" => Some(NET_UNIX_ADDR),
+        "net.ip_addr" | "net.ipaddr" | "net.IPAddr" => Some(NET_IP_ADDR),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -420,6 +731,24 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        ("url.url" | "url.URL", "query") => TypeShape::ForeignOpaque("url.values".into()),
+        ("http.request" | "http.Request", "cookies")
+        | ("http.response" | "http.Response", "cookies") => {
+            TypeShape::Slice(Box::new(TypeShape::ForeignOpaque("http.cookie".into())))
+        }
+        ("http.request" | "http.Request", "cookie") => TypeShape::ForeignOpaque("http.cookie".into()),
+        ("http.response" | "http.Response", "location") => TypeShape::ForeignOpaque("url.url".into()),
+        ("http.response_writer" | "http.responsewriter" | "http.ResponseWriter", "header") => {
+            TypeShape::ForeignOpaque("http.header".into())
+        }
+        ("http.round_tripper" | "http.roundtripper" | "http.RoundTripper", "round_trip") => {
+            TypeShape::ForeignOpaque("http.response".into())
+        }
+        ("error" | "errors.error", "error") => TypeShape::Str,
+        ("net.addr" | "net.Addr", "network" | "string") => TypeShape::Str,
+        ("net.error" | "net.Error", "error") => TypeShape::Str,
+        ("net.error" | "net.Error", "temporary" | "timeout") => TypeShape::Primitive,
+        ("strings.reader" | "strings.Reader", "len" | "size") => TypeShape::Primitive,
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
@@ -434,7 +763,7 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
 }
 
 /// Human-readable M5 curated package allowlist string for HYB-E1001 diagnostics (#658).
-pub(crate) const CURATED_ALLOWLIST_DISPLAY: &str = "fmt, os, io, time, sort, strings, strconv, errors, sync, sync/atomic, bufio, net, net/http, net/http/httptest, net/url, encoding/json, encoding/hex, path, path/filepath, rust/serde_json, rust/sha3, rust/regex";
+pub(crate) const CURATED_ALLOWLIST_DISPLAY: &str = "fmt, os, io, time, sort, strings, strconv, errors, sync, sync/atomic, bufio, net, net/http, net/http/httptest, net/url, encoding/json, encoding/hex, path, path/filepath, log, compress/gzip, archive/tar, rust/serde_json, rust/sha3, rust/regex";
 
 /// Is `path` in SPEC M5's curated Go allowlist or M6's pinned Rust crate set (#658)?
 pub(crate) fn is_curated_import(path: &str) -> bool {
@@ -451,6 +780,7 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "sync"
             | "sync/atomic"
             | "atomic"
+            | "bytes"
             | "bufio"
             | "net"
             | "net/http"
@@ -466,6 +796,11 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "path"
             | "path/filepath"
             | "filepath"
+            | "log"
+            | "compress/gzip"
+            | "gzip"
+            | "archive/tar"
+            | "tar"
             | "rust/serde_json"
             | "serde_json"
             | "rust/sha3"
@@ -486,7 +821,6 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
             | "syscall"
             | "unsafe"
             | "runtime"
-            | "log"
             | "flag"
             | "testing"
             | "unicode"
@@ -506,9 +840,7 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
             | "exec"
             | "signal"
             | "user"
-            | "gzip"
             | "zlib"
-            | "tar"
             | "zip"
     )
 }
@@ -517,9 +849,11 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
 pub(crate) fn is_curated_package_root(root: &str) -> bool {
     matches!(
         root,
-        "fmt"
+        "hy" | "fmt"
             | "os"
             | "io"
+            | "context"
+            | "flag"
             | "time"
             | "sort"
             | "strings"
@@ -527,6 +861,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "errors"
             | "sync"
             | "atomic"
+            | "bytes"
             | "bufio"
             | "net"
             | "http"
@@ -536,6 +871,9 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "hex"
             | "path"
             | "filepath"
+            | "log"
+            | "gzip"
+            | "tar"
             | "serde_json"
             | "sha3"
             | "regex"
@@ -995,7 +1333,8 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
             "mutex"
                 | "rw_mutex"
                 | "rwmutex"
-                | "wait_group" | "waitgroup"
+                | "wait_group"
+                | "waitgroup"
                 | "once"
                 | "cond"
                 | "map"
@@ -1045,6 +1384,49 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "swap_uint64"
                 | "swap_uintptr"
                 | "swap_pointer"
+        ),
+        "bytes" => matches!(
+            m,
+            "new_buffer"
+                | "new_buffer_string"
+                | "new_reader"
+                | "compare"
+                | "contains"
+                | "contains_any"
+                | "contains_rune"
+                | "count"
+                | "cut"
+                | "equal"
+                | "equal_fold"
+                | "fields"
+                | "has_prefix"
+                | "has_suffix"
+                | "index"
+                | "index_any"
+                | "index_byte"
+                | "index_rune"
+                | "join"
+                | "last_index"
+                | "last_index_any"
+                | "last_index_byte"
+                | "repeat"
+                | "replace"
+                | "replace_all"
+                | "runes"
+                | "split"
+                | "split_after"
+                | "split_after_n"
+                | "split_n"
+                | "title"
+                | "to_lower"
+                | "to_title"
+                | "to_upper"
+                | "trim"
+                | "trim_left"
+                | "trim_prefix"
+                | "trim_right"
+                | "trim_space"
+                | "trim_suffix"
         ),
         "bufio" => matches!(
             m,
@@ -1365,7 +1747,67 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
         "sha3" => matches!(m, "digest256" | "stream_checksum"),
         "regex" => matches!(m, "is_match" | "is_valid" | "compile" | "match_string"),
         "flate2" => matches!(m, "new_writer" | "write" | "finish" | "writer"),
+        "hy" => matches!(m, "pipe" | "new_pipe" | "send_cap" | "recv_cap" | "channel"),
+        "log" => matches!(
+            m,
+            "ldate"
+                | "ltime"
+                | "lmicroseconds"
+                | "llongfile"
+                | "lshortfile"
+                | "lutc"
+                | "lmsgprefix"
+                | "lstdflags"
+                | "logger"
+                | "flags"
+                | "prefix"
+                | "writer"
+                | "set_flags"
+                | "set_prefix"
+                | "set_output"
+                | "output"
+                | "print"
+                | "println"
+                | "fatal"
+                | "fatalln"
+                | "panic"
+                | "panicln"
+                | "printf"
+                | "fatalf"
+                | "panicf"
+                | "new"
+                | "default"
+        ),
+        "gzip" => matches!(
+            m,
+            "no_compression"
+                | "best_speed"
+                | "best_compression"
+                | "default_compression"
+                | "huffman_only"
+                | "err_checksum"
+                | "err_header"
+                | "reader"
+                | "writer"
+                | "header"
+                | "new_reader"
+                | "new_writer"
+                | "new_writer_level"
+        ),
+        "tar" => matches!(
+            m,
+            "err_header"
+                | "err_write_too_long"
+                | "err_field_too_long"
+                | "err_write_after_close"
+                | "err_insecure_path"
+                | "header"
+                | "reader"
+                | "writer"
+                | "new_reader"
+                | "new_writer"
+                | "file_info_header"
+        ),
         _ => true,
     }
 }
-

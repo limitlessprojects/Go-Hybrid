@@ -11,11 +11,16 @@
 //! result-less closure inside `main` was ACCEPTED and BUILT, its `?` writing
 //! main's hidden exit error and returning from the closure only — `main`
 //! kept running after the error (E3b: never a silent swallow).
+//!
+//! The operand half (E3 "calls only" / E4 "`?` on a non-error call" and
+//! "`?` on option") is also HYB-E2011: `1?`, `x.f?`, `foo()?` when `foo`
+//! returns a non-error result, and `opt()?` when `opt` returns `option[T]`
+//! all passed check and then failed `go build` with an assignment mismatch.
 
 use crate::model::{unwrap_parens, Checker};
-use hy_diag::Diagnostic;
+use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    Block, Decl, Expr, File, FnResult, ForKind, InterpPart, LocalKind, MatchPattern, Param,
+    Block, Decl, Expr, File, FnDecl, FnResult, ForKind, InterpPart, LocalKind, MatchPattern, Param,
     PlaceKind, SelectArmKind, Stmt, TypeExpr,
 };
 
@@ -120,6 +125,22 @@ fn collect_receiver_type_params(ty: &TypeExpr, out: &mut Vec<String>) {
         }
         _ => {}
     }
+}
+
+/// Type-parameter names that shadow `error` on this callable. Same collection
+/// as the `Decl::Fn` walk: declared params (skipping `_`), then receiver
+/// params parsed out of the receiver type (`fn (h holder[error]) ...`).
+fn fn_decl_type_param_names(f: &FnDecl) -> Vec<String> {
+    let mut type_params = Vec::new();
+    for tp in &f.type_params {
+        if !tp.name.is_empty() && tp.name != "_" {
+            type_params.push(tp.name.clone());
+        }
+    }
+    if let Some(r) = &f.receiver {
+        collect_receiver_type_params(&r.ty, &mut type_params);
+    }
+    type_params
 }
 
 fn is_e11_result_type(ck: &Checker<'_>, results: &[FnResult], http_unshadowed: bool) -> bool {
@@ -254,15 +275,7 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
             Decl::TypeAlias(a) => walk_type(&mut w, &a.ty, Ctx::NoErrorResult(a.name.as_str())),
             Decl::Enum(e) => e.variants.iter().filter_map(|v| v.payload.as_ref()).for_each(|p| walk_type(&mut w, p, Ctx::NoErrorResult(e.name.as_str()))),
             Decl::Fn(f) => {
-                w.type_params.clear();
-                for tp in &f.type_params {
-                    if !tp.name.is_empty() && tp.name != "_" {
-                        w.type_params.push(tp.name.clone());
-                    }
-                }
-                if let Some(r) = &f.receiver {
-                    collect_receiver_type_params(&r.ty, &mut w.type_params);
-                }
+                w.type_params = fn_decl_type_param_names(f);
                 let sig_ctx = Ctx::NoErrorResult(f.name.as_str());
                 if let Some(r) = &f.receiver {
                     walk_type(&mut w, &r.ty, sig_ctx);
@@ -505,6 +518,105 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
     }
 }
 
+fn is_option_type(ck: &Checker<'_>, ty: &TypeExpr) -> bool {
+    matches!(ck.resolve_type_alias(ty), TypeExpr::Option { .. })
+}
+
+/// E3/E4 operand half: `?` is postfix on an error-returning call only.
+/// Non-calls (`1?`, `x.f?`, `none?`) and known calls whose results do not
+/// end in `error` (including `option[T]`) are HYB-E2011. Unresolved /
+/// foreign / locally-shadowed callees stay fail-open — those shapes are
+/// owned by emit / other passes.
+fn check_try_operand(ck: &mut TryWalker<'_, '_>, operand: &Expr, span: Span) {
+    let op = unwrap_parens(operand);
+    let Expr::Call { callee, .. } = op else {
+        ck.ck.diags.push(
+            Diagnostic::error(
+                "HYB-E2011",
+                ck.ck.path.clone(),
+                span,
+                format!(
+                    "`?` applies only to an error-returning call (E3), but `{}` is not a call (HYB-E2011)",
+                    op.render()
+                ),
+            )
+            .with_notes(vec![
+                "E3: `v := f(args)?` unwraps a trailing `error` result; E4: `?` on a non-call or on `option` is a type error".to_string(),
+                "why: hy-emit always desugars `?` to `…, hyErr := <operand>`, so a non-call yields `assignment mismatch` / unbuildable Go (GUARANTEES Row 13)".to_string(),
+                "fix: call a function whose results end in `error`, or handle the value without `?`".to_string(),
+            ]),
+        );
+        return;
+    };
+
+    let callee = unwrap_parens(callee);
+    // Judge *this callee's* results with *its* type params, not the walker's.
+    // A file-level fn from `ck.fns` uses `fn_decl_type_param_names` (own params
+    // plus receiver params — the same list `Decl::Fn` passes). An `FnLit` has
+    // no type-param list; `walk_fnlit` judges that signature with the enclosing
+    // function's type params, which are in scope for the literal.
+    let (results, type_params): (Option<&[FnResult]>, Vec<String>) = match callee {
+        Expr::Ident { name, .. } => {
+            // A local binding shadows the file-level fn — fail open (closure
+            // values / rebinds do not always carry a recoverable signature here).
+            if ck.scopes.iter().any(|s| s.iter().any(|n| n == name)) {
+                return;
+            }
+            match ck.ck.fns.get(name.as_str()) {
+                Some(f) => (Some(f.results.as_slice()), fn_decl_type_param_names(f)),
+                None => (None, Vec::new()),
+            }
+        }
+        Expr::FnLit { results, .. } => (Some(results.as_slice()), ck.type_params.clone()),
+        _ => (None, Vec::new()), // methods / selectors / computed: fail open
+    };
+
+    let Some(results) = results else {
+        return;
+    };
+
+    if results_end_in_error(ck.ck, results, &type_params) {
+        return;
+    }
+
+    if results.len() == 1 && is_option_type(ck.ck, &results[0].ty) {
+        ck.ck.diags.push(
+            Diagnostic::error(
+                "HYB-E2011",
+                ck.ck.path.clone(),
+                span,
+                format!(
+                    "`?` on `option` is a type error — absence and failure stay distinct (E4/T20, HYB-E2011)"
+                ),
+            )
+            .with_notes(vec![
+                "E4: `?` unwraps a trailing `error`; `option[T]` uses `match` / `.unwrap()` / `.or(...)` instead".to_string(),
+                "why: hy-emit still desugars `?` as an error-pair binding, so `opt()?` fails `go build` with `assignment mismatch` (GUARANTEES Row 13)".to_string(),
+                "fix: `match opt() { some(v): …; none: … }` or `opt().or(default)`".to_string(),
+            ]),
+        );
+        return;
+    }
+
+    let label = callee.render();
+    ck.ck.diags.push(
+        Diagnostic::error(
+            "HYB-E2011",
+            ck.ck.path.clone(),
+            span,
+            format!(
+                "`?` on `{}` whose results do not end in `error` (E3/E4, HYB-E2011)",
+                label
+            ),
+        )
+        .with_notes(vec![
+            "E3: `?` unwraps a trailing `error` result from a call; E4: `?` on a non-error call is a type error".to_string(),
+            "why: hy-emit desugars `x := f()?` to `x, hyErr := f()`, so a call without a trailing `error` fails `go build` with `assignment mismatch` (GUARANTEES Row 13)".to_string(),
+            "fix: give the callee a trailing `error` result, or drop the `?` and handle the value directly".to_string(),
+        ]),
+    );
+}
+
 fn walk_expr(ck: &mut TryWalker<'_, '_>, e: &Expr, ctx: Ctx<'_>) {
     match e {
         Expr::Try { operand, span } => {
@@ -544,6 +656,7 @@ fn walk_expr(ck: &mut TryWalker<'_, '_>, e: &Expr, ctx: Ctx<'_>) {
                     ]),
                 );
             }
+            check_try_operand(ck, operand, *span);
             walk_expr(ck, operand, ctx);
         }
         Expr::FnLit { .. } => walk_fnlit(ck, e, false, ctx),

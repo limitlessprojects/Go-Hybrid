@@ -211,11 +211,18 @@ impl<'a> Checker<'a> {
                         self.check_expr_emit_guard(st, lo);
                         self.check_expr_emit_guard(st, hi);
                         if deep {
+                            let range_ty = self
+                                .typed_int_bound(st, lo)
+                                .or_else(|| self.typed_int_bound(st, hi))
+                                .map(|name| TypeExpr::Named {
+                                    name,
+                                    span: lo.span(),
+                                });
                             self.define_binding(
                                 st,
                                 var,
                                 TypeShape::Primitive,
-                                None,
+                                range_ty,
                                 false,
                                 false,
                                 false,
@@ -226,8 +233,9 @@ impl<'a> Checker<'a> {
                         self.check_expr_emit_guard(st, expr);
                         if deep {
                             let shapes = self.iterate_var_shapes(st, expr, vars.len());
-                            for (name, shape) in vars.iter().zip(shapes) {
-                                self.define_binding(st, name, shape, None, false, false, false);
+                            let var_tys = self.iterate_var_tys(st, expr, vars.len());
+                            for ((name, shape), var_ty) in vars.iter().zip(shapes).zip(var_tys) {
+                                self.define_binding(st, name, shape, var_ty, false, false, false);
                             }
                         }
                     }
@@ -626,6 +634,30 @@ impl<'a> Checker<'a> {
 
     fn check_call_const_overflow(&mut self, st: &FnState, callee: &Expr, args: &[CallArg]) {
         let unwrapped = crate::model::unwrap_parens(callee);
+
+        // 0. Foreign fmt calls take `any` (or `...any`), where untyped int constants default to `int`
+        if let Expr::Field { base, name: method_name, .. } = unwrapped {
+            if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
+                if self.lookup_binding(st, pkg).is_none() && pkg == "fmt" {
+                    let lower = method_name.to_ascii_lowercase();
+                    let m = lower.as_str();
+                    let start_any_idx = match m {
+                        "print" | "println" | "sprint" | "sprintln" | "eprint" | "eprintln" | "scan" | "scanln" => 0,
+                        "printf" | "sprintf" | "eprintf" | "errorf" => 1,
+                        "fprint" | "fprintln" => 1,
+                        "fprintf" => 2,
+                        _ => usize::MAX,
+                    };
+                    if start_any_idx < usize::MAX {
+                        for a in args.iter().skip(start_any_idx) {
+                            if !a.spread {
+                                self.check_default_int_overflow(&format!("argument to fmt.{}", method_name), &a.value, Some(st));
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // 1. Built-in: append(slice, items...) and delete(map, key)
         if let Expr::Ident { name, .. } = unwrapped {
@@ -1279,6 +1311,26 @@ impl<'a> Checker<'a> {
         // fields, aliases, local annotations, literals and conversions.
         let empty_st = crate::model::FnState::default();
         self.check_expr_builtin_args(st.unwrap_or(&empty_st), len);
+        let is_wrapped_ident_int_conv = matches!(
+            unwrap_parens(len),
+            Expr::Call { callee, args, .. }
+                if args.len() == 1
+                    && !args[0].spread
+                    && matches!(unwrap_parens(&args[0].value), Expr::Ident { .. })
+                    && matches!(
+                        unwrap_parens(callee),
+                        Expr::Ident { name, .. }
+                            if matches!(
+                                name.as_str(),
+                                "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "rune"
+                                    | "u8" | "uint8" | "byte" | "u16" | "uint16" | "u32" | "uint32"
+                            )
+                    )
+                    && self.const_int_value_at(&args[0].value, span.start, 0).is_some()
+        );
+        if !is_wrapped_ident_int_conv {
+            self.check_expr_type_conversions(len);
+        }
         // 1) A constant integer expression: must be non-negative.
         let direct_or_folded = const_int_value(len).or_else(|| {
             if matches!(unwrap_parens(len), Expr::Ident { .. }) {
