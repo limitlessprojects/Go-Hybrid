@@ -37,7 +37,7 @@ impl Emitter {
                 // the hoist emits the call + propagation — no value temp, so
                 // there is nothing left to emit afterwards.
                 let zero_try = matches!(
-                    expr,
+                    Self::peel_parens(expr),
                     Expr::Try { operand, .. } if self.call_results(operand) == Some((0, true))
                 );
                 // E3 expression form: hoist nested `?` first (Batch G).
@@ -46,7 +46,11 @@ impl Emitter {
                     return Ok(());
                 }
                 let text = self.emit_expr(expr, 0)?;
-                self.push(&text);
+                if matches!(Self::peel_parens(expr), Expr::Try { .. }) {
+                    self.push(&format!("_ = {text}"));
+                } else {
+                    self.push(&text);
+                }
                 Ok(())
             }
             Stmt::Send { chan, value, span, .. } => {
@@ -1069,35 +1073,90 @@ impl Emitter {
     /// binding methods, user-fn declarations, and the default rust-call
     /// convention (1, true). None = unknown → callers keep today's shape.
     fn call_results(&self, e: &Expr) -> Option<(usize, bool)> {
-        let callee = match e {
+        let callee = match Self::peel_parens(e) {
             Expr::Try { operand, .. } => match Self::peel_parens(operand) {
-                Expr::Call { callee, .. } => callee.as_ref(),
+                Expr::Call { callee, .. } => Self::peel_parens(callee),
                 _ => return None,
             },
-            Expr::Call { callee, .. } => callee.as_ref(),
+            Expr::Call { callee, .. } => Self::peel_parens(callee),
             _ => return None,
         };
         match callee {
-            // rust-crate calls: the descriptor's results field.
-            Expr::Field { base, name, .. } if matches!(base.as_ref(), Expr::Ident { .. }) => {
-                if let Expr::Ident { name: pkg, .. } = base.as_ref() {
+            Expr::Field { base, name, .. } => {
+                let head = name.split('[').next().unwrap_or(name.as_str());
+                if let Some(recv_sn) = self.user_struct_name_of(base) {
+                    if let Some((n, err, _, _)) = self.fn_shapes.get(&format!("{recv_sn}.{head}")) {
+                        return Some((*n, *err));
+                    }
+                }
+                if let Expr::Ident { name: pkg, .. } = Self::peel_parens(base) {
                     if self.is_unshadowed_pkg_root(pkg) {
                         if let Some(desc) = super::shapes::lookup_rust_crate(pkg) {
                             return desc
                                 .fns
                                 .iter()
-                                .find(|f| f.hy == name.as_str())
+                                .find(|f| f.hy == head)
                                 .map(|f| (f.results.0 as usize, f.results.1));
                         }
+                        if matches!(
+                            (pkg.as_str(), head),
+                            (
+                                "os",
+                                "remove"
+                                    | "remove_all"
+                                    | "mkdir"
+                                    | "mkdir_all"
+                                    | "write_file"
+                                    | "rename"
+                                    | "chmod"
+                                    | "chown"
+                                    | "chdir"
+                                    | "setenv"
+                                    | "unsetenv"
+                                    | "symlink"
+                                    | "link"
+                                    | "truncate"
+                                    | "Remove"
+                                    | "RemoveAll"
+                                    | "Mkdir"
+                                    | "MkdirAll"
+                                    | "WriteFile"
+                                    | "Rename"
+                                    | "Chmod"
+                                    | "Chown"
+                                    | "Chdir"
+                                    | "Setenv"
+                                    | "Unsetenv"
+                                    | "Symlink"
+                                    | "Link"
+                                    | "Truncate"
+                            ) | (
+                                "http",
+                                "listen_and_serve"
+                                    | "listen_and_serve_tls"
+                                    | "serve"
+                                    | "serve_tls"
+                                    | "ListenAndServe"
+                                    | "ListenAndServeTLS"
+                                    | "Serve"
+                                    | "ServeTLS"
+                            )
+                        ) {
+                            return Some((0, true));
+                        }
                         return None;
+                    } else if !self.local_vars.contains(pkg) && !self.bindings.contains_key(pkg) {
+                        if let Some((n, err, _, _)) = self.fn_shapes.get(&format!("{pkg}.{head}")) {
+                            return Some((*n, *err));
+                        }
                     }
                 }
                 // Typed binding methods: the METHOD_RESULTS table.
                 if let Some(bt) = self.type_of_expr(base) {
-                    if let Some(m) = super::shapes::lookup_member(bt, name) {
+                    if let Some(m) = super::shapes::lookup_member(bt, head) {
                         if m.kind == super::shapes::MemberKind::Method {
                             let (n, e) =
-                                super::shapes::lookup_method_results(bt, name).unwrap_or((1, true));
+                                super::shapes::lookup_method_results(bt, head).unwrap_or((1, true));
                             return Some((n as usize, e));
                         }
                     }
@@ -1109,10 +1168,14 @@ impl Emitter {
                 self.closure_shapes.get(name.as_str()).copied()
             }
             // User fns: the eagerly collected declared shape.
-            Expr::Ident { name, .. } => self
-                .fn_shapes
-                .get(name.as_str())
-                .map(|(n, err, _, _)| (*n, *err)),
+            Expr::Ident { name, .. } => {
+                let head = name.split('[').next().unwrap_or(name.as_str());
+                self.fn_shapes
+                    .get(name.as_str())
+                    .or_else(|| self.fn_shapes.get(head))
+                    .map(|(n, err, _, _)| (*n, *err))
+            }
+            Expr::FnLit { results, .. } => Some(super::result_shape(results)),
             _ => None,
         }
     }
@@ -2468,14 +2531,21 @@ impl Emitter {
         // the live named result variables instead of clobbering them to zero.
         if !(values.is_empty() && self.cur_fn_has_named_results) {
             if let Some(zeros) = &self.cur_fn_error_returns {
-                while vs.len() < zeros.len() {
-                    let i = vs.len();
-                    let z = &zeros[i];
-                    vs.push(if z.is_empty() {
-                        "nil".to_string()
-                    } else {
-                        z.clone()
-                    });
+                let already_full_arity = values.len() == 1
+                    && !matches!(Self::peel_parens(&values[0]), Expr::Try { .. })
+                    && self
+                        .call_results(&values[0])
+                        .is_some_and(|(n, err)| n + usize::from(err) >= zeros.len());
+                if !already_full_arity {
+                    while vs.len() < zeros.len() {
+                        let i = vs.len();
+                        let z = &zeros[i];
+                        vs.push(if z.is_empty() {
+                            "nil".to_string()
+                        } else {
+                            z.clone()
+                        });
+                    }
                 }
             }
         }
