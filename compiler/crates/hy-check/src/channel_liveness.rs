@@ -70,6 +70,28 @@ impl ChannelLivenessChecker {
     fn pop_scope(&mut self) {
         if let Some(scope) = self.scope_stack.pop() {
             self.check_terminal_invariants(&scope);
+            if let Some(parent) = self.scope_stack.last_mut() {
+                parent.moved_caps.extend(scope.moved_caps);
+            }
+        }
+    }
+
+    fn register_pipe(&mut self, tx_name: String, rx_name: String, def_span: Span) {
+        let pipe = PipeInfo {
+            tx: tx_name.clone(),
+            rx: rx_name.clone(),
+            tx_state: ChannelTypestate::Fresh,
+            rx_state: ChannelTypestate::Fresh,
+            def_span,
+        };
+
+        let p_idx = self.pipes_all.len();
+        self.pipes_all.push(pipe.clone());
+        self.cap_to_pipe.insert(tx_name, p_idx);
+        self.cap_to_pipe.insert(rx_name, p_idx);
+
+        if let Some(cur) = self.scope_stack.last_mut() {
+            cur.pipes.push(pipe);
         }
     }
 
@@ -119,25 +141,7 @@ impl ChannelLivenessChecker {
             Stmt::Local(decl) => {
                 if decl.names.len() == 2 && decl.values.len() == 1 {
                     if self.is_pipe_call(&decl.values[0]) {
-                        let tx_name = decl.names[0].clone();
-                        let rx_name = decl.names[1].clone();
-
-                        let pipe = PipeInfo {
-                            tx: tx_name.clone(),
-                            rx: rx_name.clone(),
-                            tx_state: ChannelTypestate::Fresh,
-                            rx_state: ChannelTypestate::Fresh,
-                            def_span: decl.span,
-                        };
-
-                        let p_idx = self.pipes_all.len();
-                        self.pipes_all.push(pipe.clone());
-                        self.cap_to_pipe.insert(tx_name, p_idx);
-                        self.cap_to_pipe.insert(rx_name, p_idx);
-
-                        if let Some(cur) = self.scope_stack.last_mut() {
-                            cur.pipes.push(pipe);
-                        }
+                        self.register_pipe(decl.names[0].clone(), decl.names[1].clone(), decl.span);
                         return;
                     }
                 }
@@ -145,7 +149,13 @@ impl ChannelLivenessChecker {
                     self.check_expr(v);
                 }
             }
-            Stmt::Assign { values, .. } => {
+            Stmt::Assign { targets, values, span, .. } => {
+                if targets.len() == 2 && values.len() == 1 && self.is_pipe_call(&values[0]) {
+                    if let (PlaceKind::Ident(tx_name), PlaceKind::Ident(rx_name)) = (&targets[0].kind, &targets[1].kind) {
+                        self.register_pipe(tx_name.clone(), rx_name.clone(), *span);
+                        return;
+                    }
+                }
                 for v in values {
                     self.check_expr(v);
                 }
@@ -180,14 +190,27 @@ impl ChannelLivenessChecker {
                 for s in &body.stmts {
                     self.check_stmt(s);
                 }
+                let has_unconditional_exit = matches!(
+                    body.stmts.last(),
+                    Some(Stmt::Break { .. } | Stmt::Return { .. })
+                );
+                if !has_unconditional_exit {
+                    for s in &body.stmts {
+                        self.check_stmt(s);
+                    }
+                }
                 self.pop_scope();
             }
             Stmt::If {
+                init,
                 cond,
                 then,
                 otherwise,
                 ..
             } => {
+                if let Some(i) = init {
+                    self.check_stmt(i);
+                }
                 self.check_expr(cond);
                 self.push_scope();
                 for s in &then.stmts {
@@ -195,12 +218,42 @@ impl ChannelLivenessChecker {
                 }
                 self.pop_scope();
                 if let Some(eb) = otherwise {
+                    self.push_scope();
                     self.check_stmt(eb);
+                    self.pop_scope();
                 }
             }
             Stmt::Block { block, .. } => {
                 self.push_scope();
                 for s in &block.stmts {
+                    self.check_stmt(s);
+                }
+                self.pop_scope();
+            }
+            Stmt::Match { subject, arms, .. } => {
+                self.check_expr(subject);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.check_expr(guard);
+                    }
+                    self.push_scope();
+                    for s in &arm.body.stmts {
+                        self.check_stmt(s);
+                    }
+                    self.pop_scope();
+                }
+            }
+            Stmt::Defer { call, .. } => {
+                self.check_expr(call);
+            }
+            Stmt::Return { values, .. } => {
+                for v in values {
+                    self.check_expr(v);
+                }
+            }
+            Stmt::Managed { body, .. } => {
+                self.push_scope();
+                for s in &body.stmts {
                     self.check_stmt(s);
                 }
                 self.pop_scope();
@@ -326,6 +379,30 @@ impl ChannelLivenessChecker {
 
     fn check_expr(&mut self, expr: &Expr) {
         match expr {
+            Expr::Move { operand, span } => {
+                if let Some(cap) = self.get_cap_name(operand) {
+                    if self.is_moved(&cap) {
+                        self.diags.push(Diagnostic::error(
+                            "HYB-E3001",
+                            &self.file_path,
+                            *span,
+                            format!("affine capability '{}' moved more than once", cap),
+                        ));
+                    } else {
+                        self.mark_moved(&cap);
+                    }
+                }
+            }
+            Expr::Try { operand, .. } => {
+                self.check_expr(operand);
+            }
+            Expr::FnLit { body, .. } => {
+                self.push_scope();
+                for s in &body.stmts {
+                    self.check_stmt(s);
+                }
+                self.pop_scope();
+            }
             Expr::Call { callee, args, span } => {
                 if let Expr::Field { base, name, .. } = callee.as_ref() {
                     if let Some(cap) = self.get_cap_name(base) {
@@ -342,7 +419,6 @@ impl ChannelLivenessChecker {
                         match name.as_str() {
                             "close" => {
                                 self.mark_tx_closed(&cap);
-                                self.mark_rx_drained(&cap);
                             }
                             "drain" => {
                                 self.mark_rx_drained(&cap);
@@ -361,6 +437,13 @@ impl ChannelLivenessChecker {
                 for a in args {
                     self.check_expr(&a.value);
                 }
+            }
+            Expr::FnLit { body, .. } => {
+                self.push_scope();
+                for s in &body.stmts {
+                    self.check_stmt(s);
+                }
+                self.pop_scope();
             }
             Expr::Receive { chan, span } => {
                 if let Some(cap) = self.get_cap_name(chan) {
@@ -406,9 +489,17 @@ impl ChannelLivenessChecker {
 
     fn is_pipe_call(&self, expr: &Expr) -> bool {
         let mut e = expr;
-        while let Expr::Paren { inner, .. } = e {
-            e = inner.as_ref();
-        }
+        while match e {
+            Expr::Paren { inner, .. } => {
+                e = inner.as_ref();
+                true
+            }
+            Expr::Try { operand, .. } => {
+                e = operand.as_ref();
+                true
+            }
+            _ => false,
+        } {}
         if let Expr::Call { callee, .. } = e {
             let mut base = callee.as_ref();
             while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
