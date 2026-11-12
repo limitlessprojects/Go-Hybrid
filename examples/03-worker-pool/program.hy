@@ -1,6 +1,16 @@
 // 03-worker-pool — stresses: tasks (goroutines), channels, select, WaitGroup-like join.
 // TARGET SYNTAX. Fixed input => deterministic output (sorted at the end).
 
+struct job {
+    input   int
+    cost_ms int
+}
+
+struct result {
+    worker int
+    value  int
+}
+
 fn worker(id int, jobs <-chan job, results chan<- result) {
     for j in jobs {                       // ranges until channel close
         // simulate uneven work
