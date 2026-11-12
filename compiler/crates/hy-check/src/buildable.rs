@@ -425,6 +425,32 @@ fn parse_sized_array(s: &str) -> Option<(&str, &str)> {
     Some((head, t[close + 1..].trim()))
 }
 
+/// #3352 — extract the payload type name from an option type string `option[T]`.
+fn option_payload_type_name(s: &str) -> Option<&str> {
+    let t = s.trim();
+    if !t.starts_with("option[") {
+        return None;
+    }
+    let rest = &t[7..];
+    let mut depth = 1;
+    for (i, c) in rest.char_indices() {
+        if c == '[' {
+            depth += 1;
+        } else if c == ']' {
+            depth -= 1;
+            if depth == 0 {
+                if rest[i + 1..].trim().is_empty() {
+                    let inner = rest[..i].trim();
+                    return if inner.is_empty() { None } else { Some(inner) };
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
+    None
+}
+
 /// #3280 — check whether two element type strings conflict (numeric scalar width,
 /// nested slice elements, or fixed-size array dimensions and element types).
 fn elem_types_conflict(want: &str, got: &str) -> bool {
@@ -1232,6 +1258,24 @@ impl<'a> Collector<'a> {
                 self.struct_field_type_name(&bk, name)
             }
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "some" && args.len() == 1 {
+                        if let Some(inner) = self.typed_value_type_name(&args[0].value) {
+                            return Some(format!("option[{}]", inner));
+                        }
+                        if let Some(s) = self.typed_value_scalar(&args[0].value) {
+                            return Some(format!("option[{}]", s));
+                        }
+                    }
+                    if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                        if fd.results.len() == 1 {
+                            return Some(fd.results[0].ty.render());
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -1315,6 +1359,27 @@ impl<'a> Collector<'a> {
     fn sized_array_names_differ(&self, a: Option<&str>, b: Option<&str>) -> bool {
         matches!((a, b), (Some(x), Some(y))
             if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
+    }
+
+    /// #3352 — two KNOWN option type spellings with incompatible payload types
+    /// (differing numeric scalar widths, differing fixed-size array lengths, or conflicting element kinds).
+    fn option_types_differ(&self, a: Option<&str>, b: Option<&str>) -> bool {
+        let (Some(ta), Some(tb)) = (a, b) else { return false };
+        let (Some(pa), Some(pb)) = (option_payload_type_name(ta), option_payload_type_name(tb)) else {
+            return false;
+        };
+        if pa == pb {
+            return false;
+        }
+        if self.sized_array_names_differ(Some(pa), Some(pb)) {
+            return true;
+        }
+        let sa = canonical_numeric_name(pa);
+        let sb = canonical_numeric_name(pb);
+        if sa.is_some() && sb.is_some() && sa != sb {
+            return true;
+        }
+        false
     }
 
     /// #3412 — deep composite-element conflict: the kind model collapses
@@ -2144,6 +2209,11 @@ impl<'a> Collector<'a> {
                     (Some(w), Some(v)) if w != v
                 );
                 // #2771: `var c [4]int = a` where `a` is a `[3]int`.
+                // #3352: option payload type mismatch.
+                let option_differ = self.option_types_differ(
+                    Some(t.render().as_str()),
+                    self.typed_value_type_name(&l.values[0]).as_deref(),
+                );
                 if kinds_conflict(&want, &vk)
                     || int_float_conflict
                     || scalar_mismatch
@@ -2151,15 +2221,22 @@ impl<'a> Collector<'a> {
                         Some(t.render().as_str()),
                         self.typed_value_type_name(&l.values[0]).as_deref(),
                     )
+                    || option_differ
                 {
+                    let val_label = if option_differ {
+                        self.typed_value_type_name(&l.values[0]).unwrap_or_else(|| vk.label().to_string())
+                    } else {
+                        vk.label().to_string()
+                    };
+                    let want_label = if option_differ { t.render() } else { want.label().to_string() };
                     self.emit_e1002(
                         l.span,
                         format!(
                             "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
                             l.names[0],
-                            want.label(),
-                            vk.label(),
-                            want.label()
+                            want_label,
+                            val_label,
+                            want_label
                         ),
                         "the declared type is fixed; write an explicit conversion when a conversion is intended",
                     );
@@ -2176,6 +2253,11 @@ impl<'a> Collector<'a> {
                         (Some(w), Some(g)) if w != g
                     );
                     // #2771: sized-array length must match the declared type.
+                    // #3352: option payload type mismatch.
+                    let option_differ = self.option_types_differ(
+                        Some(t.render().as_str()),
+                        self.typed_value_type_name(v).as_deref(),
+                    );
                     if kinds_conflict(&want, &vk)
                         || int_float_conflict
                         || scalar_mismatch
@@ -2183,15 +2265,22 @@ impl<'a> Collector<'a> {
                             Some(t.render().as_str()),
                             self.typed_value_type_name(v).as_deref(),
                         )
+                        || option_differ
                     {
+                        let val_label = if option_differ {
+                            self.typed_value_type_name(v).unwrap_or_else(|| vk.label().to_string())
+                        } else {
+                            vk.label().to_string()
+                        };
+                        let want_label = if option_differ { t.render() } else { want.label().to_string() };
                         self.emit_e1002(
                             l.span,
                             format!(
                                 "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
                                 name,
-                                want.label(),
-                                vk.label(),
-                                want.label()
+                                want_label,
+                                val_label,
+                                want_label
                             ),
                             "the declared type is fixed; write an explicit conversion when a conversion is intended",
                         );
@@ -5550,6 +5639,10 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
+            let option_differ = self.option_types_differ(
+                Some(p.ty.render().as_str()),
+                self.typed_value_type_name(&a.value).as_deref(),
+            );
             if kinds_conflict(&want, &got)
                 || int_to_float_conflict
                 || scalar_mismatch
@@ -5557,14 +5650,21 @@ impl<'a> Collector<'a> {
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
                 )
+                || option_differ
             {
+                let val_label = if option_differ {
+                    self.typed_value_type_name(&a.value).unwrap_or_else(|| got.label().to_string())
+                } else {
+                    got.label().to_string()
+                };
+                let want_label = if option_differ { p.ty.render() } else { want.label().to_string() };
                 self.emit_e1002(
                     a.value.span(),
                     format!(
                         "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
                         a.value.render(),
-                        got.label(),
-                        want.label(),
+                        val_label,
+                        want_label,
                         name
                     ),
                     "argument types must match declared parameter types",
@@ -5618,6 +5718,10 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
+            let option_differ = self.option_types_differ(
+                Some(p.ty.render().as_str()),
+                self.typed_value_type_name(&a.value).as_deref(),
+            );
             if kinds_conflict(&want, &got)
                 || int_to_float_conflict
                 || scalar_mismatch
@@ -5625,14 +5729,21 @@ impl<'a> Collector<'a> {
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
                 )
+                || option_differ
             {
+                let val_label = if option_differ {
+                    self.typed_value_type_name(&a.value).unwrap_or_else(|| got.label().to_string())
+                } else {
+                    got.label().to_string()
+                };
+                let want_label = if option_differ { p.ty.render() } else { want.label().to_string() };
                 self.emit_e1002(
                     a.value.span(),
                     format!(
                         "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
                         a.value.render(),
-                        got.label(),
-                        want.label(),
+                        val_label,
+                        want_label,
                         sn,
                         name
                     ),
@@ -5704,6 +5815,7 @@ impl<'a> Collector<'a> {
                             if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
                                 let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
                                 self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
+                                self.report_option_return_mismatch(&values[0], i, values[0].span());
                             }
                         }
                         return;
@@ -5716,6 +5828,7 @@ impl<'a> Collector<'a> {
                             if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
                                 let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
                                 self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
+                                self.report_option_return_mismatch(&values[0], i, values[0].span());
                             }
                         }
                         return;
@@ -5768,6 +5881,7 @@ impl<'a> Collector<'a> {
                         let got_s = self.typed_value_scalar(v);
                         self.report_numeric_return_mismatch(got_s, &got, i, v.span());
                         self.report_array_return_mismatch(v, i, v.span());
+                        self.report_option_return_mismatch(v, i, v.span());
                     }
                 }
                 return;
@@ -5801,6 +5915,7 @@ impl<'a> Collector<'a> {
                 let got_s = self.typed_value_scalar(v);
                 self.report_numeric_return_mismatch(got_s, &got, i, v.span());
                 self.report_array_return_mismatch(v, i, v.span());
+                self.report_option_return_mismatch(v, i, v.span());
             }
         }
     }
@@ -5827,7 +5942,30 @@ impl<'a> Collector<'a> {
     /// Go has no implicit numeric conversion for typed values, so the emitted
     /// `return` fails `go build`. Fires only when both exact types are known
     /// and the kind check has not already reported this value.
-    fn report_numeric_return_mismatch(
+    
+    fn report_option_return_mismatch(
+        &mut self,
+        val: &Expr,
+        idx: usize,
+        span: Span,
+    ) {
+        let Some(want_name) = self.fn_result_type_names.get(idx) else {
+            return;
+        };
+        let got_name = self.typed_value_type_name(val);
+        if self.option_types_differ(Some(want_name.as_str()), got_name.as_deref()) {
+            let got_name = got_name.unwrap_or_else(|| "option".to_string());
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot return a value of type `{}` from a function with result type `{}` — Go refuses `cannot use ... as ... value in return statement` (HYB-E1002)",
+                    got_name, want_name
+                ),
+                "the function's result type is fixed; write an explicit conversion when a conversion is intended",
+            );
+        }
+    }
+fn report_numeric_return_mismatch(
         &mut self,
         got: Option<&'static str>,
         got_kind: &OpKind,
@@ -6522,6 +6660,10 @@ impl<'a> Collector<'a> {
                         || (lk == OpKind::Int
                             && rk == OpKind::Float
                             && !self.is_untyped_int_const(lhs));
+                    let option_differ = self.option_types_differ(
+                        self.typed_value_type_name(lhs).as_deref(),
+                        self.typed_value_type_name(rhs).as_deref(),
+                    );
                     if equality_kinds_conflict(&lk, &rk)
                         || int_float_conflict
                         || self.scalar_conflict(lhs, rhs)
@@ -6529,15 +6671,24 @@ impl<'a> Collector<'a> {
                             self.typed_value_type_name(lhs).as_deref(),
                             self.typed_value_type_name(rhs).as_deref(),
                         )
+                        || option_differ
                     {
+                        let (l_label, r_label) = if option_differ {
+                            (
+                                self.typed_value_type_name(lhs).unwrap_or_else(|| lk.label().to_string()),
+                                self.typed_value_type_name(rhs).unwrap_or_else(|| rk.label().to_string()),
+                            )
+                        } else {
+                            (lk.label().to_string(), rk.label().to_string())
+                        };
                         self.emit_e1002(
                             span,
                             format!(
                                 "invalid operation `{}`: operator `{}` requires comparable operands of matching type, found `{}` and `{}` (HYB-E1002)",
                                 span_expr_label(lhs, op_str, rhs),
                                 op_str,
-                                lk.label(),
-                                rk.label()
+                                l_label,
+                                r_label
                             ),
                             "equality operators (`==`, `!=`) require operands of matching type",
                         );
@@ -6753,22 +6904,36 @@ impl<'a> Collector<'a> {
                         (Some(t), Some(v)) if t != v
                     );
                     // #2771: `b = a` between a `[4]int` and a `[3]int`.
+                    // #3352: option payload type mismatch.
+                    let option_differ = self.option_types_differ(
+                        self.place_type_name(target).as_deref(),
+                        self.typed_value_type_name(&values[0]).as_deref(),
+                    );
                     if !is_loan_shape
                         && (conflict
                             || scalar_mismatch
                             || self.sized_array_names_differ(
                                 self.place_type_name(target).as_deref(),
                                 self.typed_value_type_name(&values[0]).as_deref(),
-                            ))
+                            )
+                            || option_differ)
                     {
+                        let (target_label, val_label) = if option_differ {
+                            (
+                                self.place_type_name(target).unwrap_or_else(|| tk.label().to_string()),
+                                self.typed_value_type_name(&values[0]).unwrap_or_else(|| vk.label().to_string()),
+                            )
+                        } else {
+                            (tk.label().to_string(), vk.label().to_string())
+                        };
                         self.emit_e1002(
                             span,
                             format!(
                                 "cannot assign a value of type `{}` to `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
-                                vk.label(),
+                                val_label,
                                 target.render(),
-                                tk.label(),
-                                tk.label()
+                                target_label,
+                                target_label
                             ),
                             "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
                         );
@@ -6811,8 +6976,12 @@ impl<'a> Collector<'a> {
                             self.place_type_name(t).as_deref(),
                             self.typed_value_type_name(v).as_deref(),
                         );
-                        if conflict || scalar_mismatch || array_mismatch {
-                            let (v_label, t_label) = if array_mismatch {
+                        let option_differ = self.option_types_differ(
+                            self.place_type_name(t).as_deref(),
+                            self.typed_value_type_name(v).as_deref(),
+                        );
+                        if conflict || scalar_mismatch || array_mismatch || option_differ {
+                            let (v_label, t_label) = if array_mismatch || option_differ {
                                 (
                                     self.typed_value_type_name(v)
                                         .unwrap_or_else(|| vk.label().to_string()),
