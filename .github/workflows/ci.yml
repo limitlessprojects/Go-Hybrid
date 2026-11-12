@@ -72,6 +72,7 @@ jobs:
           python3 -m unittest discover -s tools -p test_package_version.py -v
           python3 -m unittest discover -s tools -p test_corpus_utf8.py -v
           python3 -m unittest discover -s tools -p test_check_claims_links.py -v
+          python3 -m unittest discover -s tools -p test_triage_bot.py -v
           # Fail closed if any tools/**/test_*.py is matched by no -p pattern
           # above: a suite outside this list would pass CI by never running.
           python3 tools/check_test_registration.py
