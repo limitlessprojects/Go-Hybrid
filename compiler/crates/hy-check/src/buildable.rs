@@ -2961,7 +2961,26 @@ impl<'a> Collector<'a> {
                 let base_expr = place_as_expr(base);
                 self.check_index_kind(&base.render(), base_expr.as_ref(), &bk, index, &ik, p.span);
             }
-            PlaceKind::Field { base, .. } => self.place_read(base),
+            PlaceKind::Field { base, name } => {
+                self.place_read(base);
+                let bk = self.kind_of_place(base);
+                if matches!(bk, OpKind::Pointer(ref inner) if matches!(**inner, OpKind::Pointer(_))) {
+                    if !self.diags.iter().any(|d| d.span == p.span && d.code == "HYB-E1002") {
+                        self.emit_e1002(
+                            p.span,
+                            format!(
+                                "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                                base.render(),
+                                name,
+                                bk.label(),
+                                base.render(),
+                                name
+                            ),
+                            "selectors automatically dereference at most one pointer level; dereference explicitly",
+                        );
+                    }
+                }
+            }
             PlaceKind::AddrOf { base } => self.place_read(base),
         }
     }
@@ -3061,7 +3080,8 @@ impl<'a> Collector<'a> {
             // interface is not a struct — so reject the base explicitly.
             Expr::Field { base, name, span } => {
                 self.check_pointer_method_receiver(base, name, *span);
-                if matches!(self.kind_of_expr(base), OpKind::Interface) {
+                let bk = self.kind_of_expr(base);
+                if matches!(bk, OpKind::Interface) {
                     self.emit_e1002(
                         *span,
                         format!(
@@ -3073,6 +3093,21 @@ impl<'a> Collector<'a> {
                         ),
                         "an `any` value must be asserted to a concrete type before its fields can be read",
                     );
+                } else if matches!(bk, OpKind::Pointer(ref inner) if matches!(**inner, OpKind::Pointer(_))) {
+                    if !self.diags.iter().any(|d| d.span == *span && d.code == "HYB-E1002") {
+                        self.emit_e1002(
+                            *span,
+                            format!(
+                                "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                                base.render(),
+                                name,
+                                bk.label(),
+                                base.render(),
+                                name
+                            ),
+                            "selectors automatically dereference at most one pointer level; dereference explicitly",
+                        );
+                    }
                 }
                 self.check_field_selector(base, name, *span);
                 // #778: a Field BASE is a QUALIFIER position, not a value
@@ -3900,7 +3935,13 @@ impl<'a> Collector<'a> {
     fn struct_name(&self, k: &OpKind) -> Option<String> {
         match k {
             OpKind::Struct(Some(s)) => Some(s.clone()),
-            OpKind::Pointer(inner) => self.struct_name(inner),
+            // Go spec §Selectors: selectors automatically dereference at most
+            // one level of pointer to a struct. Pointer-to-pointer (`**T.f`)
+            // is illegal and Go refuses `undefined (type **T has no field...)`.
+            OpKind::Pointer(inner) => match &**inner {
+                OpKind::Struct(Some(s)) => Some(s.clone()),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -8672,18 +8713,20 @@ impl<'a> Collector<'a> {
                     if is_fully_resolved(&bk) && !is_lowered
                         && !self.diags.iter().any(|d| d.code == "HYB-E1002" && d.message.contains(&needle))
                     {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
-                                base.render(),
-                                name,
-                                bk.label(),
-                                base.render(),
-                                name
-                            ),
-                            "declare the method on that type, or call something that exists",
-                        );
+                        if !self.diags.iter().any(|d| d.span == span && d.code == "HYB-E1002") {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                                    base.render(),
+                                    name,
+                                    bk.label(),
+                                    base.render(),
+                                    name
+                                ),
+                                "declare the method on that type, or call something that exists",
+                            );
+                        }
                     }
                 }
                 if has_method {
