@@ -1514,6 +1514,17 @@ impl<'a> Collector<'a> {
                 .find_map(|a| self.typed_value_scalar(&a.value));
             return Some(vec![res_scalar]);
         }
+        // #3589: complex builtin constructor produces complex64 or complex128
+        if name == "complex" && args.len() == 2 {
+            let res = match (
+                self.typed_value_scalar(&args[0].value),
+                self.typed_value_scalar(&args[1].value),
+            ) {
+                (Some("float32"), _) | (_, Some("float32")) => "complex64",
+                _ => "complex128",
+            };
+            return Some(vec![Some(res)]);
+        }
         if args.len() == 1
             && !self.ck.structs.contains_key(name.as_str())
             && !self.ck.enums.contains_key(name.as_str())
@@ -1646,6 +1657,101 @@ impl<'a> Collector<'a> {
             (Some(x), Some(y)) => x != y,
             _ => false,
         }
+    }
+
+    /// #3589: helper to detect whether an expression evaluates to a complex number.
+    /// In Go and Hybrid, ordered comparisons (`<`, `<=`, `>`, `>=`) are not defined
+    /// on complex types (`complex64`, `complex128`).
+    fn is_complex_expr(&self, e: &Expr) -> bool {
+        if let Some(s) = self.typed_value_scalar(e) {
+            if matches!(s, "complex64" | "complex128" | "c64" | "c128") {
+                return true;
+            }
+        }
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                if let Some(t) = self.lookup_type_name(name) {
+                    if matches!(t.as_str(), "complex64" | "complex128" | "c64" | "c128") {
+                        return true;
+                    }
+                }
+                false
+            }
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    matches!(
+                        name.as_str(),
+                        "complex" | "complex64" | "complex128" | "c64" | "c128"
+                    )
+                } else {
+                    false
+                }
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div
+                ) && (self.is_complex_expr(lhs) || self.is_complex_expr(rhs))
+            }
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.is_complex_expr(operand),
+            _ => false,
+        }
+    }
+
+    /// #3589: resolve the descriptive type name of a complex expression.
+    fn complex_expr_type_name(&self, e: &Expr) -> String {
+        if let Some(s) = self.typed_value_scalar(e) {
+            if matches!(s, "complex64" | "c64") {
+                return "complex64".to_string();
+            }
+            if matches!(s, "complex128" | "c128") {
+                return "complex128".to_string();
+            }
+        }
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                if let Some(t) = self.lookup_type_name(name) {
+                    if matches!(t.as_str(), "complex64" | "c64") {
+                        return "complex64".to_string();
+                    }
+                    if matches!(t.as_str(), "complex128" | "c128") {
+                        return "complex128".to_string();
+                    }
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "complex64" || name == "c64" {
+                        return "complex64".to_string();
+                    }
+                    if name == "complex128" || name == "c128" {
+                        return "complex128".to_string();
+                    }
+                    if name == "complex" {
+                        if let Some(a0) = args.first() {
+                            if self.typed_value_scalar(&a0.value) == Some("float32") {
+                                return "complex64".to_string();
+                            }
+                        }
+                    }
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                if self.is_complex_expr(lhs) {
+                    return self.complex_expr_type_name(lhs);
+                }
+                if self.is_complex_expr(rhs) {
+                    return self.complex_expr_type_name(rhs);
+                }
+            }
+            Expr::Unary { operand, .. } => return self.complex_expr_type_name(operand),
+            _ => {}
+        }
+        "complex128".to_string()
     }
 
     /// #1031 — exact numeric types for the names of a local declaration.
@@ -2235,6 +2341,8 @@ impl<'a> Collector<'a> {
                     self.bind_type_name(name, format!("[]{}", elem));
                 } else if let Some(tp) = self.expr_type_param(val) {
                     self.bind_type_name(name, tp);
+                } else if self.is_complex_expr(val) {
+                    self.bind_type_name(name, self.complex_expr_type_name(val));
                 }
             }
         }
@@ -6672,25 +6780,51 @@ impl<'a> Collector<'a> {
                     BinOp::Gt => ">",
                     _ => ">=",
                 };
-                let l_ok = matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
-                let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
-                let mismatch = lk != OpKind::Unknown
-                    && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
-                let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
-                    || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
-                if !l_ok || !r_ok || mismatch || int_float_conflict || self.scalar_conflict(lhs, rhs) {
+                let l_complex = self.is_complex_expr(lhs);
+                let r_complex = self.is_complex_expr(rhs);
+                if l_complex || r_complex {
+                    let l_label = if l_complex {
+                        self.complex_expr_type_name(lhs)
+                    } else {
+                        lk.label()
+                    };
+                    let r_label = if r_complex {
+                        self.complex_expr_type_name(rhs)
+                    } else {
+                        rk.label()
+                    };
                     self.emit_e1002(
                         span,
                         format!(
                             "operator `{}` not defined on `{}` and `{}` in `{}` (HYB-E1002)",
                             op_str,
-                            lk.label(),
-                            rk.label(),
+                            l_label,
+                            r_label,
                             span_expr_label(lhs, op_str, rhs)
                         ),
-                        "ordered comparisons (`<`, `<=`, `>`, `>=`) require two numeric values or two strings",
+                        "ordered comparisons (`<`, `<=`, `>`, `>=`) are not defined on complex numbers; only `==` and `!=` are supported",
                     );
+                } else {
+                    let l_ok = matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
+                    let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
+                    let mismatch = lk != OpKind::Unknown
+                        && rk != OpKind::Unknown
+                        && lk.is_numeric() != rk.is_numeric();
+                    let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
+                        || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
+                    if !l_ok || !r_ok || mismatch || int_float_conflict || self.scalar_conflict(lhs, rhs) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "operator `{}` not defined on `{}` and `{}` in `{}` (HYB-E1002)",
+                                op_str,
+                                lk.label(),
+                                rk.label(),
+                                span_expr_label(lhs, op_str, rhs)
+                            ),
+                            "ordered comparisons (`<`, `<=`, `>`, `>=`) require two numeric values or two strings",
+                        );
+                    }
                 }
             }
             // B3: `+` accepts numeric+numeric or string+string.
