@@ -1,3 +1,4 @@
+import time
 """Regression tests for lossless source/report pairing in the managed gate."""
 import contextlib
 import importlib.util
@@ -483,3 +484,81 @@ gate.main()
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ConcurrentRebaselineTests(unittest.TestCase):
+    def test_lock_is_released_after_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = Path(directory) / 'baseline.json'
+            with self.assertRaisesRegex(RuntimeError, 'audit failed'):
+                with gate.rebaseline_lock(baseline):
+                    raise RuntimeError('audit failed')
+            with gate.rebaseline_lock(baseline):
+                pass
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_existing_lock_is_not_removed_by_rejected_writer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = Path(directory) / 'baseline.json'
+            with gate.rebaseline_lock(baseline):
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as raised:
+                    with gate.rebaseline_lock(baseline):
+                        self.fail('competing writer acquired lock')
+                self.assertEqual(raised.exception.code, 2)
+                self.assertEqual(len(list(Path(directory).iterdir())), 1)
+
+    def test_competing_subset_update_fails_closed_and_retry_preserves_both(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = root / 'baseline.json'
+            baseline.write_text('{"version": 1, "blocks": {}}\n')
+            first_source = root / 'first.hy'
+            second_source = root / 'second.hy'
+            for source in (first_source, second_source):
+                source.write_text('managed("reviewed", "other") {}\n')
+            ready, release = root / 'ready', root / 'release'
+            checker_py = (
+                'import json, pathlib, sys, time\n'
+                f'if len(sys.argv) > 2 and sys.argv[2] == {str(first_source)!r}:\n'
+                f'    pathlib.Path({str(ready)!r}).touch()\n'
+                '    deadline = time.monotonic() + 10\n'
+                f'    while not pathlib.Path({str(release)!r}).exists():\n'
+                '        if time.monotonic() > deadline: sys.exit(9)\n'
+                '        time.sleep(0.01)\n'
+                'print(json.dumps({"summary": {"managed": {"managed_blocks": 1, '
+                '"blocks": [{"category": "other", "reason": "reviewed"}]}}}))\n'
+            )
+            if os.name == 'nt':
+                py_script = root / 'checker.py'
+                py_script.write_text(checker_py)
+                checker = root / 'checker.bat'
+                checker.write_text(f'@echo off\n"{sys.executable}" "{py_script}" %*\n')
+            else:
+                checker = root / 'checker'
+                checker.write_text('#!' + sys.executable + '\n' + checker_py)
+                checker.chmod(0o755)
+            command = [sys.executable, str(Path(gate.__file__)), '--rebaseline',
+                       str(checker), str(baseline)]
+            first = subprocess.Popen(command + [str(first_source)],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                deadline = time.monotonic() + 10
+                while not ready.exists():
+                    if first.poll() is not None or time.monotonic() > deadline:
+                        self.fail('first audit did not reach synchronization point')
+                    time.sleep(0.01)
+                second = subprocess.run(command + [str(second_source)],
+                                        capture_output=True, text=True, timeout=10)
+            finally:
+                release.touch()
+                stdout, stderr = first.communicate(timeout=10)
+            self.assertEqual(set(json.loads(baseline.read_text())['blocks']),
+                             {f'{first_source}:1'})
+            self.assertEqual(first.returncode, 0, stdout + stderr)
+            self.assertEqual(second.returncode, 2, second.stdout + second.stderr)
+            self.assertIn('rebaseline already in progress', second.stdout + second.stderr)
+            retry = subprocess.run(command + [str(second_source)],
+                                   capture_output=True, text=True, timeout=10)
+            self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
+            self.assertEqual(set(json.loads(baseline.read_text())['blocks']),
+                             {f'{first_source}:1', f'{second_source}:1'})
