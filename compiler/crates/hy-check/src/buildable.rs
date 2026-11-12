@@ -1830,6 +1830,49 @@ impl<'a> Collector<'a> {
         self.mention(name);
     }
 
+    fn check_reserved_binding(&mut self, name: &str, span: Span) -> bool {
+        if name == "_" {
+            return false;
+        }
+        if let Some(spec) = crate::emit_guard::reserved_go_primitive_spec_name(name) {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "`{name}` cannot be used as an identifier — it is a Go primitive type name reserved for compiler lowering (HYB-E1002)"
+                    ),
+                )
+                .with_notes(vec![
+                    format!(
+                        "why: Hybrid lowers `{spec}` to Go `{name}` — declaring an identifier named `{name}` shadows the Go type and causes unbuildable or corrupted emitted Go (issue #728)"
+                    ),
+                    format!(
+                        "fix: choose a different identifier name (e.g. `{name}_val` or `val`)"
+                    ),
+                ]),
+            );
+            return true;
+        }
+        if name == "hy_pop" {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    "`hy_pop` cannot be used as an identifier — it is reserved for the compiler's slice pop runtime helper (HYB-E1002)".to_string(),
+                )
+                .with_notes(vec![
+                    "why: Hybrid lowers `.pop()` on slices to the runtime helper `hy_pop` — declaring `hy_pop` causes emitted Go compilation failure (issue #728)".to_string(),
+                    "fix: choose a different identifier name".to_string(),
+                ]),
+            );
+            return true;
+        }
+        false
+    }
+
     fn check_repeated_bindings(&mut self, names: &[String], span: Span) {
         let mut seen: HashSet<&str> = HashSet::new();
         for name in names {
@@ -1976,6 +2019,7 @@ impl<'a> Collector<'a> {
         let Some(body) = &f.body else { return };
         self.push_scope();
         if let Some(r) = &f.receiver {
+            self.check_reserved_binding(&r.name, f.span);
             self.exempt(&r.name);
             let rk = self.kind_of_ty(&r.ty, 0);
             let rk = if r.is_pointer {
@@ -1986,6 +2030,7 @@ impl<'a> Collector<'a> {
             self.bind_kind(&r.name, rk);
         }
         for p in &f.params {
+            self.check_reserved_binding(&p.name, p.span);
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
             self.bind_kind(&p.name, pk);
@@ -1998,6 +2043,7 @@ impl<'a> Collector<'a> {
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
+                self.check_reserved_binding(rname, r.ty.span());
                 self.exempt(rname);
                 let rk = self.kind_of_ty(&r.ty, 0);
                 self.bind_kind(rname, rk);
@@ -2049,6 +2095,9 @@ impl<'a> Collector<'a> {
     }
 
     fn local(&mut self, l: &LocalDecl) {
+        for name in &l.names {
+            self.check_reserved_binding(name, l.span);
+        }
         // Only the short declaration operator needs freshness checks.
         // Every kind of fn-local declaration emits a Go binding, whose
         // name must be read somewhere in its enclosing function.
@@ -2526,6 +2575,7 @@ impl<'a> Collector<'a> {
                         self.check_bool_condition(cond, "for");
                     }
                     ForKind::Range { var, lo, hi, .. } => {
+                        self.check_reserved_binding(var, lo.span());
                         self.expr(lo);
                         self.expr(hi);
                         // The loop head always reads the counter.
@@ -2533,6 +2583,9 @@ impl<'a> Collector<'a> {
                         self.bind_kind(var, OpKind::Int);
                     }
                     ForKind::Iterate { vars, expr } => {
+                        for v in vars {
+                            self.check_reserved_binding(v, *span);
+                        }
                         self.check_repeated_bindings(vars, *span);
                         self.check_single_value_position(expr, "a for-range expression", false);
                         self.expr(expr);
@@ -2673,6 +2726,7 @@ impl<'a> Collector<'a> {
                                 }
                             }
                             if let Some(b) = binding {
+                                self.check_reserved_binding(b, subject.span());
                                 self.define_elidable(b, subject.span());
                                 // #2915: payload binding `some(v)` inherits the element type of `option[T]`.
                                 let bind_k = if segments.first().map(|s| s.as_str()) == Some("some") {
@@ -2755,6 +2809,9 @@ impl<'a> Collector<'a> {
                             self.check_send_assignability(chan, value);
                         }
                         SelectArmKind::Recv { names, chan } => {
+                            for n in names {
+                                self.check_reserved_binding(n, chan.span());
+                            }
                             self.check_repeated_bindings(names, chan.span());
                             self.expr(chan);
                             let elem = match self.kind_of_expr(chan) {
@@ -3225,6 +3282,7 @@ impl<'a> Collector<'a> {
                 }
                 self.push_scope();
                 for p in params {
+                    self.check_reserved_binding(&p.name, p.span);
                     self.exempt(&p.name);
                     let pk = self.kind_of_ty(&p.ty, 0);
                     self.bind_kind(&p.name, pk);
@@ -3237,6 +3295,7 @@ impl<'a> Collector<'a> {
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
+                        self.check_reserved_binding(rname, r.ty.span());
                         self.exempt(rname);
                         let rk = self.kind_of_ty(&r.ty, 0);
                         self.bind_kind(rname, rk);
@@ -10065,6 +10124,26 @@ impl<'a> Checker<'a> {
         }
         let mut seen = HashSet::new();
         for p in type_params {
+            if let Some(spec) = crate::emit_guard::reserved_go_primitive_spec_name(&p.name) {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        span,
+                        format!(
+                            "type parameter `{}` cannot be used as an identifier — it is a Go primitive type name reserved for compiler lowering (HYB-E1002)",
+                            p.name
+                        ),
+                    )
+                    .with_notes(vec![
+                        format!(
+                            "why: Hybrid lowers `{spec}` to Go `{}` — declaring a type parameter named `{}` shadows the Go type and causes unbuildable or corrupted emitted Go (issue #728)",
+                            p.name, p.name
+                        ),
+                        "fix: give the type parameter a distinct identifier (e.g. `T`)".to_string(),
+                    ]),
+                );
+            }
             if !seen.insert(p.name.as_str()) {
                 self.diags.push(
                     Diagnostic::error(
