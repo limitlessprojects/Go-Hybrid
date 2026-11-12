@@ -8589,6 +8589,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if (pkg == "httptest" || pkg == "net/http/httptest") && self.lookup_kind(pkg).is_none() {
+                        self.check_httptest_call_buildable(name, args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -9996,6 +10000,63 @@ impl<'a> Collector<'a> {
             _ => {}
         }
     }
+
+    fn check_httptest_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "response_recorder" | "server" => {
+                self.emit_e1002(
+                    span,
+                    format!("cannot call non-function package type `httptest.{}` (HYB-E1002)", name),
+                    &format!("use `httptest.{}` as a type or struct field, not a function", name),
+                );
+            }
+            "default_remote_addr" => {
+                self.emit_e1002(
+                    span,
+                    "cannot call non-function package constant `httptest.default_remote_addr` (HYB-E1002)".to_string(),
+                    "write `httptest.default_remote_addr` (package constant, not a function)",
+                );
+            }
+            "new_recorder" => {
+                if !args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        format!("`httptest.new_recorder` takes no arguments, got {} (HYB-E1002)", args.len()),
+                        "write `httptest.new_recorder()`",
+                    );
+                }
+            }
+            "new_server" | "new_tls_server" | "new_unstarted_server" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("`httptest.{}` takes exactly 1 argument `(handler)`, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 1 argument to `httptest.{}`", name),
+                    );
+                }
+            }
+            "get" | "post" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("`httptest.{}` takes exactly 2 arguments, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 2 arguments to `httptest.{}`", name),
+                    );
+                }
+            }
+            "new_request" => {
+                if args.len() != 3 {
+                    self.emit_e1002(
+                        span,
+                        format!("`httptest.new_request` takes exactly 3 arguments `(method, target, body)`, got {} (HYB-E1002)", args.len()),
+                        "pass 3 arguments to `httptest.new_request`",
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
 }
 
 fn span_expr_label(lhs: &Expr, op: &str, rhs: &Expr) -> String {
