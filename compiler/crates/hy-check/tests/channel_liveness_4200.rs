@@ -718,3 +718,155 @@ fn main() {
         res.diagnostics
     );
 }
+
+#[test]
+fn test_param_cap_unclosed_sender_reject() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(42)
+    // tx is never closed or moved before function returns
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task worker(move tx)
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E4004"),
+        "Expected HYB-E4004 for unclosed send capability parameter: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_param_cap_undrained_receiver_reject() {
+    let src = r#"
+fn receiver(rx hy.recv_cap[int]) {
+    v := rx.recv()
+    _ = v
+    // rx is never drained or moved before function returns
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    tx.close()
+    task receiver(move rx)
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E4005"),
+        "Expected HYB-E4005 for undrained receive capability parameter: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_param_cap_double_move_reject() {
+    let src = r#"
+fn sub(tx hy.send_cap[int]) {
+    tx.close()
+}
+
+fn forwarder(tx hy.send_cap[int]) {
+    task sub(move tx)
+    task sub(move tx)
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task forwarder(move tx)
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for double move of parameter capability: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_param_cap_use_after_move_reject() {
+    let src = r#"
+fn sub(tx hy.send_cap[int]) {
+    tx.close()
+}
+
+fn forwarder(tx hy.send_cap[int]) {
+    task sub(move tx)
+    tx.send(10)
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task forwarder(move tx)
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for use-after-move of parameter capability: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_param_cap_unmoved_task_capture_reject() {
+    let src = r#"
+fn sub(tx hy.send_cap[int]) {
+    tx.close()
+}
+
+fn forwarder(tx hy.send_cap[int]) {
+    task sub(tx)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task forwarder(move tx)
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3002"),
+        "Expected HYB-E3002 for unmoved capture of parameter capability across task boundary: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_param_cap_valid_worker_lifecycle_accept() {
+    let src = r#"
+fn proxy(tx hy.send_cap[int], rx hy.recv_cap[int]) {
+    v := rx.recv()
+    tx.send(v)
+    rx.drain()
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task proxy(move tx, move rx)
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(
+        res.verdict,
+        Verdict::Accept,
+        "Valid parameter capabilities lifecycle must accept cleanly: {:?}",
+        res.diagnostics
+    );
+}
