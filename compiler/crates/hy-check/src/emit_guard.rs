@@ -490,7 +490,7 @@ impl<'a> Checker<'a> {
                     self.check_expr_emit_guard(st, hi);
                 }
             }
-            Expr::Call { callee, args, .. } => {
+            Expr::Call { callee, args, span } => {
                 if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if (name == "new" || name == "make") && st.env_lookup(name).is_none()) {
                     if let Some(a0) = args.first() {
                         let tname = match unwrap_parens(&a0.value) {
@@ -499,6 +499,28 @@ impl<'a> Checker<'a> {
                             _ => None,
                         };
                         if let Some(name) = tname { self.check_type_expr_with_state(Some(st), &TypeExpr::Named { name, span: a0.value.span() }); }
+                    }
+                } else if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if st.env_lookup(name).is_none() && !self.fns.contains_key(name.as_str()) {
+                        if let Some(go_tok) = spec_primitive_go_target(name) {
+                            if st.env_lookup(go_tok).is_some() || self.consts.contains_key(go_tok) {
+                                let msg = format!(
+                                    "conversion `{}(...)` lowers to `{go_tok}(...)`, which is shadowed by in-scope `{go_tok}` (HYB-E1002)",
+                                    name
+                                );
+                                self.diags.push(
+                                    Diagnostic::error("HYB-E1002", self.path.clone(), *span, msg)
+                                        .with_notes(vec![
+                                            format!(
+                                                "why: `hy-emit` lowers `{name}(...)` to `{go_tok}(...)`, and Go resolves `{go_tok}` to the in-scope binding (`cannot call non-function {go_tok}`)"
+                                            ),
+                                            format!(
+                                                "fix: rename `{go_tok}` so it does not shadow the Go conversion target"
+                                            ),
+                                        ]),
+                                );
+                            }
+                        }
                     }
                 }
                 self.check_call_const_overflow(st, callee, args);
@@ -1103,26 +1125,55 @@ impl<'a> Checker<'a> {
                 }
             }
             TypeExpr::Named { name, span } => {
-                if let Some(st) = st {
-                    for tok in name.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.') {
-                        if !tok.is_empty() && st.env_lookup(tok).is_some() {
-                            let msg = format!(
-                                "type `{}` is shadowed by local value `{}` in this scope ? Go rejects `{tok} (variable) is not a type` (HYB-E1002)",
-                                name, tok
-                            );
-                            self.diags.push(
-                                Diagnostic::error("HYB-E1002", self.path.clone(), *span, msg)
-                                    .with_notes(vec![
-                                        format!(
-                                            "why: Go resolves `{tok}` to the in-scope local or parameter rather than the type, so the emitted program fails `go build` (GUARANTEES Row 13)"
-                                        ),
-                                        format!(
-                                            "fix: rename the local binding `{tok}` so it does not shadow the type name"
-                                        ),
-                                    ]),
-                            );
-                            break;
+                for tok in name.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.') {
+                    let shadowed_tok = if !tok.is_empty() {
+                        if let Some(st) = st {
+                            if st.env_lookup(tok).is_some() {
+                                Some(tok)
+                            } else if let Some(go_tok) = spec_primitive_go_target(tok) {
+                                if st.env_lookup(go_tok).is_some() || self.consts.contains_key(go_tok) {
+                                    Some(go_tok)
+                                } else {
+                                    None
+                                }
+                            } else if self.consts.contains_key(tok) {
+                                Some(tok)
+                            } else {
+                                None
+                            }
+                        } else {
+                            if let Some(go_tok) = spec_primitive_go_target(tok) {
+                                if self.consts.contains_key(go_tok) {
+                                    Some(go_tok)
+                                } else {
+                                    None
+                                }
+                            } else if self.consts.contains_key(tok) {
+                                Some(tok)
+                            } else {
+                                None
+                            }
                         }
+                    } else {
+                        None
+                    };
+                    if let Some(shadow_name) = shadowed_tok {
+                        let msg = format!(
+                            "type `{}` is shadowed by in-scope `{}` — Go rejects `{shadow_name} (variable) is not a type` (HYB-E1002)",
+                            name, shadow_name
+                        );
+                        self.diags.push(
+                            Diagnostic::error("HYB-E1002", self.path.clone(), *span, msg)
+                                .with_notes(vec![
+                                    format!(
+                                        "why: Go resolves `{shadow_name}` to the in-scope local or parameter rather than the type, so the emitted program fails `go build` (GUARANTEES Row 13)"
+                                    ),
+                                    format!(
+                                        "fix: rename the local binding `{shadow_name}` so it does not shadow the type name"
+                                    ),
+                                ]),
+                        );
+                        break;
                     }
                 }
             }
@@ -3245,4 +3296,27 @@ fn is_primitive_receiver(name: &str) -> bool {
             | "any"
             | "comparable"
     )
+}
+
+/// Go primitive target name that `hy-emit` emits for a Hybrid SPEC primitive spelling
+/// (`u8` -> `uint8`, `f64` -> `float64`, ...).
+fn spec_primitive_go_target(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "i8" => "int8",
+        "i16" => "int16",
+        "i32" => "int32",
+        "i64" => "int64",
+        "u8" => "uint8",
+        "u16" => "uint16",
+        "u32" => "uint32",
+        "u64" => "uint64",
+        "f32" => "float32",
+        "f64" => "float64",
+        "usize" => "uint",
+        "isize" => "int",
+        "char" => "rune",
+        "c64" => "complex64",
+        "c128" => "complex128",
+        _ => return None,
+    })
 }
