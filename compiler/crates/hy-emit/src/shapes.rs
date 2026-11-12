@@ -579,6 +579,7 @@ pub fn import_path_of(root: &str) -> String {
         "url" => "net/url".to_string(),
         "filepath" => "path/filepath".to_string(),
         "hex" => "encoding/hex".to_string(),
+        "md5" => "crypto/md5".to_string(),
         "gzip" => "compress/gzip".to_string(),
         "tar" => "archive/tar".to_string(),
         // 17: the code says `atomic.Int64` — Go's package name for the

@@ -8668,6 +8668,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if (pkg == "md5" || pkg == "crypto/md5") && self.lookup_kind(pkg).is_none() {
+                        self.check_md5_package_call(name.as_str(), args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -10073,6 +10077,43 @@ impl<'a> Collector<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn check_md5_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(member, "size" | "block_size") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `md5.{member}`: package symbol is a constant, not a function (HYB-E1002)"),
+                &format!("refer to `md5.{member}` as a constant rather than calling it"),
+            );
+            return;
+        }
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `md5.{member}` (HYB-E1002)"),
+                &format!("`md5.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new" => Some(0),
+            "sum" => Some(1),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`md5.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `md5.{member}`"),
+                );
+            }
         }
     }
 }
