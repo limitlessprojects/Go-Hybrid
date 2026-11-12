@@ -809,6 +809,9 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "regex"
             | "rust/flate2"
             | "flate2"
+            | "adler32"
+            | "hash/adler32"
+            | "adler32"
     )
 }
 
@@ -913,6 +916,7 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
     let norm = normalize_go_ident_to_snake(member);
     let m = norm.as_str();
     match pkg {
+        "adler32" => matches!(m, "new" | "checksum" | "size" | "New" | "Checksum" | "Size"),
         "fmt" => matches!(
             m,
             "print"
