@@ -59,6 +59,50 @@ class CheckClaimsLinksTest(unittest.TestCase):
         self.assertEqual([i["kind"] for i in report["issues"]], ["missing"])
         self.assertIn("15-good.hy", report["issues"][0]["target"])
 
+    def test_angle_delimited_path_with_spaces_is_checked(self):
+        for target, fragment, title in (("evidence notes.md", "", ""),
+                                        ("evidence (notes).md", "", ' "Evidence title"'),
+                                        ("evidence.md", "#details", "")):
+            with self.subTest(target=target, fragment=fragment, title=title):
+                (self.root / target).write_text("# evidence\n", encoding="utf-8")
+                claims = CLAIMS.replace("[spec](SPEC-LANGUAGE.md)", f"[spec](<{target}{fragment}>{title})")
+                (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+                result = self.run_tool()
+                report = json.loads(result.stdout)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(report["links"], 4)
+
+                (self.root / target).unlink()
+                result = self.run_tool()
+                report = json.loads(result.stdout)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn({"row": 1, "kind": "missing", "target": target}, report["issues"])
+
+    def test_angle_delimited_external_and_fragment_links_are_skipped(self):
+        claims = CLAIMS.replace("(https://example.com/spec)", "(<https://example.com/spec>)")
+        claims = claims.replace("(#row-2)", "(<#row-2>)")
+        claims = claims.replace("; corpus [16]", "; [mail](<mailto:person@example.com>); [empty](<>); corpus [16]")
+        (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["links"], 4)
+
+    def test_angle_delimited_corpus_link_still_checks_verdict(self):
+        target = "tests/checker-corpus/01-bad.hy"
+        claims = CLAIMS.replace(f"]({target})", f'](<{target}> "Reject evidence")')
+        (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["links"], 4)
+
+        (self.root / target).write_text("// EXPECTED-VERDICT: ACCEPT\n", encoding="utf-8")
+        result = self.run_tool()
+        report = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        mismatch = [issue for issue in report["issues"] if issue["kind"] == "verdict-mismatch"]
+        self.assertEqual(len(mismatch), 1)
+        self.assertEqual(mismatch[0]["target"], target)
+
     def test_verdict_mismatch_is_reported(self):
         (self.root / "tests" / "checker-corpus" / "15-good.hy").write_text(
             "// EXPECTED-VERDICT: REJECT A1c\n", encoding="utf-8")
@@ -100,6 +144,19 @@ class CheckClaimsLinksTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         report = json.loads(result.stdout)
         self.assertEqual(report["issues"][0]["kind"], "missing-claims-file")
+
+    def test_empty_or_unrecognized_table_fails_closed(self):
+        for text in ("", "# GUARANTEES\n", CLAIMS.replace(
+                "## The claims table", "## The evidence table"),
+                "## The claims table\n\n| # | Surface | Evidence |\n"):
+            with self.subTest(text=text):
+                (self.root / "GUARANTEES.md").write_text(text, encoding="utf-8")
+                result = self.run_tool()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                report = json.loads(result.stdout)
+                self.assertFalse(report["ok"])
+                self.assertEqual(report["rows"], 0)
+                self.assertIn("no-claims-rows", [i["kind"] for i in report["issues"]])
 
 
 if __name__ == "__main__":

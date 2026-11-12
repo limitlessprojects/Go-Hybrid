@@ -215,6 +215,29 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
         },
     ),
     (
+        // Canonical snake_case spelling blessed by hy-check/src/foreign.rs
+        // (`is_curated_package_member("sync", "rw_mutex")`).
+        "sync.rw_mutex",
+        TypeShape {
+            members: &[
+                ("lock", method("Lock", None)),
+                ("unlock", method("Unlock", None)),
+                ("try_lock", method("TryLock", None)),
+                ("rlock", method("RLock", None)),
+                ("runlock", method("RUnlock", None)),
+                ("try_rlock", method("TryRLock", None)),
+            ],
+        },
+    ),
+    (
+        "sync.wait_group",
+        TypeShape { members: &[("add", method("Add", None)), ("done", method("Done", None)), ("wait", method("Wait", None))] },
+    ),
+    (
+        "sync.once",
+        TypeShape { members: &[("do", method("Do", None))] },
+    ),
+    (
         // Scalar sync/atomic struct types recognized as class-2 sendable by
         // hy-check/src/foreign.rs (SCALAR_ATOMICS).
         "atomic.bool",
@@ -234,13 +257,15 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
                 ("load", method("Load", None)),
                 ("store", method("Store", None)),
                 ("add", method("Add", None)),
+                ("and", method("And", None)),
+                ("or", method("Or", None)),
                 ("swap", method("Swap", None)),
                 ("compare_and_swap", method("CompareAndSwap", None)),
             ],
         },
     ),
     (
-        // 17: atomic.int64 — Go's atomic.Int64 STRUCT (methods Add/Load/
+        // 17: atomic.int64 — Go's atomic.Int64 STRUCT (methods Add/And/Or/Load/
         // Store/Swap/CompareAndSwap with pointer receivers; Go auto-addresses
         // value receivers, so both `var hits atomic.Int64` and `hits *atomic.
         // Int64` call `hits.Add(1)` identically). hy spells the methods
@@ -251,6 +276,8 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
                 ("load", method("Load", None)),
                 ("store", method("Store", None)),
                 ("add", method("Add", None)),
+                ("and", method("And", None)),
+                ("or", method("Or", None)),
                 ("swap", method("Swap", None)),
                 ("compare_and_swap", method("CompareAndSwap", None)),
             ],
@@ -263,6 +290,8 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
                 ("load", method("Load", None)),
                 ("store", method("Store", None)),
                 ("add", method("Add", None)),
+                ("and", method("And", None)),
+                ("or", method("Or", None)),
                 ("swap", method("Swap", None)),
                 ("compare_and_swap", method("CompareAndSwap", None)),
             ],
@@ -275,6 +304,8 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
                 ("load", method("Load", None)),
                 ("store", method("Store", None)),
                 ("add", method("Add", None)),
+                ("and", method("And", None)),
+                ("or", method("Or", None)),
                 ("swap", method("Swap", None)),
                 ("compare_and_swap", method("CompareAndSwap", None)),
             ],
@@ -287,6 +318,8 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
                 ("load", method("Load", None)),
                 ("store", method("Store", None)),
                 ("add", method("Add", None)),
+                ("and", method("And", None)),
+                ("or", method("Or", None)),
                 ("swap", method("Swap", None)),
                 ("compare_and_swap", method("CompareAndSwap", None)),
             ],
@@ -546,13 +579,13 @@ pub fn import_path_of(root: &str) -> String {
         "url" => "net/url".to_string(),
         "filepath" => "path/filepath".to_string(),
         "hex" => "encoding/hex".to_string(),
+        "gzip" => "compress/gzip".to_string(),
+        "tar" => "archive/tar".to_string(),
         // 17: the code says `atomic.Int64` — Go's package name for the
         // path is `atomic`, but the PATH is sync/atomic (the naive last-
         // segment import `"atomic"` is not in std).
         "atomic" => "sync/atomic".to_string(),
-        "filepath" => "path/filepath".to_string(),
         "json" => "encoding/json".to_string(),
-        "url" => "net/url".to_string(),
         "sha3binding" => "hybrid.program/sha3binding".to_string(),
         "jsonbinding" => "hybrid.program/jsonbinding".to_string(),
         "regexbinding" => "hybrid.program/regexbinding".to_string(),
