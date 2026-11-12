@@ -514,6 +514,108 @@ fn main() {
 }
 
 #[test]
+fn test_match_arm_double_move_reject() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(1)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    cmd := 1
+    match cmd {
+        1 => {
+            task worker(move tx)
+            task worker(move tx)
+        }
+    }
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for double move in match arm: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_defer_use_after_move_reject() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(1)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task worker(move tx)
+    defer tx.close()
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for use of moved cap in defer: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_return_receive_moved_cap_reject() {
+    let src = r#"
+fn consumer(rx hy.recv_cap[int]) {
+    rx.drain()
+}
+
+fn test_fn() int {
+    tx, rx := hy.pipe[int]()
+    task consumer(move rx)
+    tx.close()
+    return <-rx
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for return of moved rx: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_managed_block_double_move_reject() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(1)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    managed("test", "concurrency") {
+        task worker(move tx)
+        task worker(move tx)
+    }
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for double move inside managed block: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
 fn test_p21_shadowed_local_after_move_accept() {
     let src = r#"
 fn worker(tx hy.send_cap[int]) {
@@ -642,6 +744,3 @@ fn main() {
         res.diagnostics
     );
 }
-
-
-
