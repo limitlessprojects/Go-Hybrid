@@ -173,6 +173,28 @@ class WorkflowStructureTests(unittest.TestCase):
         })
         self.assertEqual(list(MOD.scan(str(root))), [])
 
+    def test_malformed_document_marker_prefix_is_reported(self):
+        # Malformed document-marker prefixes like '---echo' or '...echo' are not
+        # valid standalone document boundaries and must be caught as column-zero errors.
+        root = self._tree({
+            ".github/workflows/start.yml": (
+                "name: ci\non: push\njobs:\n  smoke:\n    steps:\n      - run: echo ok\n"
+                "---echo outside-run\n"
+            ),
+            ".github/workflows/end.yml": (
+                "name: ci\non: push\njobs:\n  smoke:\n    steps:\n      - run: echo ok\n"
+                "...echo outside-run\n"
+            ),
+        })
+        hits = [h for h in MOD.scan(str(root)) if h[3] == "workflow"]
+        self.assertEqual(len(hits), 2)
+        reported_files = {h[0] for h in hits}
+        self.assertEqual(
+            reported_files,
+            {os.path.join(".github", "workflows", "start.yml"),
+             os.path.join(".github", "workflows", "end.yml")}
+        )
+
     def test_quoted_top_level_keys_are_allowed(self):
         # Quoted keys such as 'on': or "name": are standard in Actions YAML
         # to avoid boolean coercion under YAML 1.1 parsers.
