@@ -371,7 +371,6 @@ pub(crate) fn is_conversion_type_name(name: &str) -> bool {
             | "string"
             | "byte"
             | "rune"
-            | "char"
             | "int"
             | "int8"
             | "int16"
@@ -397,8 +396,6 @@ pub(crate) fn is_conversion_type_name(name: &str) -> bool {
             | "u16"
             | "u32"
             | "u64"
-            | "isize"
-            | "usize"
     )
 }
 
