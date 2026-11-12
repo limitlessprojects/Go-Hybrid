@@ -24,8 +24,9 @@ Block mappings and literal run blocks are supported; unknown cwd expressions
 and unsupported mapping forms cannot establish root execution. Raw command
 snippets retain their repository-root convention. Comments, echoed text,
 step names, interpreter flags, chained later commands, and paths passed as
-arguments to other scripts register nothing. This is not a general
-shell/YAML interpreter.
+arguments to other scripts register nothing, and neither does an
+invocation whose exit status a shell operator can mask (`|`, `&`, `||`,
+`&&`). This is not a general shell/YAML interpreter.
 
 Usage: python3 tools/check_test_registration.py [--workflow PATH] [--root DIR]
 Exit:  0 = every test file is registered; 1 = unregistered file(s); 2 = guard misuse.
@@ -184,12 +185,20 @@ def python_commands(workflow_text):
             # -p flag must never become another unittest discovery pattern.
             end = next((i for i, token in enumerate(tokens)
                         if token and all(c in ";&|<>()" for c in token)), len(tokens))
-            # Issue #2880: an OR-list (`||`), pipeline (`|`), or background
-            # operator (`&`) masks a non-zero exit status under `set -e`
-            # (without `pipefail`), so a failing test suite would not fail CI.
+            # Issue #2880 / #3095: an OR-list (`||`), pipeline (`|`), or
+            # background operator (`&`) masks a non-zero exit status under
+            # `set -e`. An AND-list (`&&`) does too: bash exempts every
+            # command of an `&&`/`||` list except the one following the final
+            # operator from errexit, so in `python3 tests/test_x.py && :` the
+            # failing suite neither stops the step nor fails it — a later
+            # successful line hides the failure even under `-e -o pipefail`.
+            # Deciding which AND-list tails do propagate needs a shell
+            # interpreter, which this guard deliberately is not, so an
+            # AND-list alone is not accepted as registration: the suite needs
+            # its own unmasked invocation.
             if any(
                 token and all(c in ";&|<>()" for c in token)
-                and ("|" in token or "&" in token.replace("&&", ""))
+                and ("|" in token or "&" in token)
                 for token in tokens[end:]
             ):
                 continue
