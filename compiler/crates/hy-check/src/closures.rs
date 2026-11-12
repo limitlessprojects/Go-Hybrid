@@ -703,6 +703,13 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     }
                 }
                 ck.record_local_borrow_aliases(st, l);
+                for (name, value) in l.names.iter().zip(l.values.iter()) {
+                    if crate::model::move_operand_ident(value)
+                        .is_some_and(|src| pre_st.borrow_bindings.contains(&src))
+                    {
+                        st.borrow_bindings.insert(name.clone());
+                    }
+                }
             } else {
                 // multi-name define from one value (`v, ok := m[k]`, `a, b := f()`)
                 let moved_non_owned = l
@@ -866,6 +873,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 if let Some(v) = l.values.first() {
                     ck.link_multi_value_return_aliases(st, v, &l.names);
                 }
+                ck.record_local_borrow_aliases(st, l);
             }
             sync_nested_moves(st, nested);
         }
@@ -1189,6 +1197,15 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     mark_nested_overwritten(st, name, nested);
                     ck.bind_match_arm(st, name, subject, managed);
                     sync_nested_moves(st, nested);
+                    let mut sroots = Vec::new();
+                    crate::model::collect_ref_roots(subject, &mut sroots);
+                    if ck.expr_carries_borrow(st, subject)
+                        || sroots.iter().any(|r| st.borrow_bindings.contains(r))
+                        || crate::model::move_operand_ident(subject)
+                            .is_some_and(|r| st.borrow_bindings.contains(&r))
+                    {
+                        st.borrow_bindings.insert(name.clone());
+                    }
                 }
                 if let Some(g) = &arm.guard {
                     ck.mark_move_in_value(
@@ -1214,6 +1231,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             values,
             ..
         } => {
+            let pre_borrows = st.borrow_bindings.clone();
             for t in targets {
                 ck.mark_move_in_place(st, t);
             }
@@ -1223,6 +1241,17 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             sync_nested_moves(st, nested);
             collect_stmt_direct_fnlits(stmt, st, nested);
             ck.process_closure_assign(st, targets, *op, values);
+            if *op == hy_syntax::AssignOp::Assign && targets.len() == values.len() {
+                for (t, v) in targets.iter().zip(values.iter()) {
+                    if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
+                        if crate::model::move_operand_ident(v)
+                            .is_some_and(|src| pre_borrows.contains(&src))
+                        {
+                            st.borrow_bindings.insert(name.clone());
+                        }
+                    }
+                }
+            }
             sync_nested_moves(st, nested);
             if targets.len() == values.len() {
                 for (t, v) in targets.iter().zip(values.iter()) {
@@ -1296,6 +1325,46 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
     }
 }
 
+fn extend_and_link_closure_slot_value(
+    ck: &Checker<'_>,
+    st: &mut FnState,
+    name: &str,
+    val: &Expr,
+    idx: usize,
+) {
+    use crate::model::LoanTarget;
+    if name == "_" {
+        return;
+    }
+    ck.extend_map_slot_loan_to_alias(st, name, val, idx);
+    ck.record_move_const_and_a3_loans(st, name, val, idx);
+    let mut roots = Vec::new();
+    if let Some(src) = crate::model::move_operand_ident(val) {
+        roots.push(src);
+    }
+    if !ck.call_returns_fresh_copy(st, val) {
+        crate::model::collect_ref_roots(val, &mut roots);
+    }
+    let alias_last = st.last_use.get(name).copied().unwrap_or(idx).max(idx);
+    for src in roots {
+        if src == name {
+            continue;
+        }
+        let resolved_src = crate::freeze::resolve_alias(st, &src);
+        for loan in &mut st.loans {
+            if let LoanTarget::MapSlot { binding, .. } = &loan.target {
+                if (*binding == src || *binding == resolved_src) && loan.created <= idx {
+                    loan.last = loan.last.max(alias_last);
+                }
+            }
+        }
+        st.aliases
+            .entry(name.to_string())
+            .or_insert_with(|| src.clone());
+        st.share_edge(name, &src);
+    }
+}
+
 /// Check A3 (`HYB-E3102`) for map-slot loans opened inside a closure body.
 fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block) {
     use crate::model::{Loan, LoanTarget};
@@ -1308,6 +1377,13 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
     let saved_may_share = st.may_share.clone();
     for (stmt, idx) in &flat.stmts {
         let idx = *idx;
+        if let Some(evs) = flat.events.get(&idx) {
+            for ev in evs {
+                if let walk::ScopeEvent::MatchBind { name, subject } = ev {
+                    extend_and_link_closure_slot_value(ck, st, name, subject, idx);
+                }
+            }
+        }
         if let Stmt::Break { label: Some(_), span, .. }
         | Stmt::Continue { label: Some(_), span, .. } = stmt
         {
@@ -1333,6 +1409,14 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
             ck.process_call(st, &cr, idx, None, &mut dummy_consumes);
         }
         match stmt {
+            Stmt::For {
+                kind: hy_syntax::ForKind::Iterate { vars, expr },
+                ..
+            } => {
+                for v in vars {
+                    extend_and_link_closure_slot_value(ck, st, v, expr, idx);
+                }
+            }
             Stmt::Local(l) => {
                 if l.names.len() == l.values.len() {
                     for (name, val) in l.names.iter().zip(l.values.iter()) {
@@ -1361,11 +1445,7 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                                 desc: format!("`{} := {}`", binding, val.render()),
                             });
                         } else {
-                            ck.extend_map_slot_loan_to_alias(st, name, val, idx);
-                            if let Expr::Ident { name: src, .. } = crate::model::unwrap_parens(val) {
-                                st.aliases.insert(name.clone(), src.clone());
-                                st.share_edge(name, src);
-                            }
+                            extend_and_link_closure_slot_value(ck, st, name, val, idx);
                         }
                     }
                 } else if l.values.len() == 1 && l.names.len() == 2 {
@@ -1403,6 +1483,37 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                 values,
                 ..
             } => {
+                for t in targets {
+                    if let Some((path, key)) = walk::place_field_store_slot(t) {
+                        ck.emit_o8_alias_if_live(
+                            st,
+                            &path,
+                            key.as_deref(),
+                            None,
+                            t.span,
+                            idx,
+                            "a field store",
+                        );
+                    } else if matches!(t.kind, hy_syntax::PlaceKind::Index { .. }) {
+                        if let Some(path) = walk::place_path(t) {
+                            ck.emit_a3_if_live_pub(st, &path, t.span, idx, "insert");
+                        }
+                    } else if *op == hy_syntax::AssignOp::Assign {
+                        let rebind_path = match &t.kind {
+                            hy_syntax::PlaceKind::Ident(name) => Some(name.clone()),
+                            _ => walk::place_path(t),
+                        };
+                        if let Some(rp) = rebind_path {
+                            let rebinds_loaned_base = st.loans.iter().any(|l| {
+                                matches!(&l.target, LoanTarget::MapSlot { path: p, .. }
+                                    if p == &rp || p.split('.').next() == Some(rp.as_str()))
+                            });
+                            if rebinds_loaned_base {
+                                ck.emit_a3_if_live_pub(st, &rp, t.span, idx, "rebind");
+                            }
+                        }
+                    }
+                }
                 if *op == hy_syntax::AssignOp::Assign && targets.len() == values.len() {
                     for (t, v) in targets.iter().zip(values.iter()) {
                         if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
@@ -1432,11 +1543,7 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                                     desc: format!("`{} = {}`", binding, v.render()),
                                 });
                             } else {
-                                ck.extend_map_slot_loan_to_alias(st, name, v, idx);
-                                if let Expr::Ident { name: src, .. } = crate::model::unwrap_parens(v) {
-                                    st.aliases.insert(name.clone(), src.clone());
-                                    st.share_edge(name, src);
-                                }
+                                extend_and_link_closure_slot_value(ck, st, name, v, idx);
                             }
                         }
                     }
@@ -1470,29 +1577,6 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                                 span: v.span(),
                                 desc: format!("`{} = {}`", binding, v.render()),
                             });
-                        }
-                    }
-                }
-                for t in targets {
-                    if let Some((path, key)) = walk::place_field_store_slot(t) {
-                        ck.emit_o8_alias_if_live(
-                            st,
-                            &path,
-                            key.as_deref(),
-                            None,
-                            t.span,
-                            idx,
-                            "a field store",
-                        );
-                    } else if matches!(t.kind, hy_syntax::PlaceKind::Index { .. }) {
-                        if let Some(path) = walk::place_path(t) {
-                            ck.emit_a3_if_live_pub(st, &path, t.span, idx, "insert");
-                        }
-                    } else if *op == hy_syntax::AssignOp::Assign {
-                        if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
-                            ck.emit_a3_if_live_pub(st, name, t.span, idx, "rebind");
-                        } else if let Some(path) = walk::place_path(t) {
-                            ck.emit_a3_if_live_pub(st, &path, t.span, idx, "rebind");
                         }
                     }
                 }
