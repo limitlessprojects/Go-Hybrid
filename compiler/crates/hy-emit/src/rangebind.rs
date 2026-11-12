@@ -216,7 +216,30 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
                         // so it counts regardless. Conservative direction:
                         // treat the name as read; a missing `_` merely leaves
                         // the old emission.
-                        if *inclusive || crate::Emitter::expr_has_call_or_recv(hi) {
+                        // #4028: `emit_for` also hoists `hyHi0 := hi` when
+                        // `hi` mentions the shadowed name, so the hoist reads
+                        // the OUTER binding. A bare `v` bound still builds
+                        // (`for v := 0; v < v; v++` — the condition sees the new
+                        // `v`), which is why that case stays blanked and is
+                        // pinned by
+                        // rangebind_blanked_outer_var_does_not_hoist_undefined_same_name_hi.
+                        // But a PROJECTION (`a.n`, `a[0]`, `a[1:2]`) does not
+                        // build once the outer name is blanked: `hyHi0 := a.n`
+                        // resolves against the new int `a` and Go says
+                        // "a.n undefined (type int has no field or method n)".
+                        // Count the projection as a read so the outer stays.
+                        // A bare ident bound (`v`) still builds; a projection
+                        // (`a.n`, `a[0]`, `a[l:h]`, `*a`, `a.m()`) does not.
+                        let bare_ident = match hi {
+                            Expr::Ident { name, .. } => name.as_str() == var.as_str(),
+                            _ => false,
+                        };
+                        let projects =
+                            crate::Emitter::expr_mentions_ident(hi, &var) && !bare_ident;
+                        if *inclusive
+                            || crate::Emitter::expr_has_call_or_recv(hi)
+                            || projects
+                        {
                             if expr_reads(hi, target) {
                                 return true;
                             }
