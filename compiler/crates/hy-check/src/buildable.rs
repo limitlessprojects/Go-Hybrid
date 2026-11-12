@@ -4955,6 +4955,17 @@ impl<'a> Collector<'a> {
         if matches!(k, OpKind::Unknown) {
             return;
         }
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in conversion to `{}` — Go refuses `invalid use of ... in conversion to {}` (HYB-E1002)",
+                    name, name
+                ),
+                "`...` (variadic spread) cannot be used in a type conversion",
+            );
+            return;
+        }
         if args.len() != 1 {
             self.emit_e1002(
                 span,
@@ -7964,6 +7975,17 @@ impl<'a> Collector<'a> {
             } if items.is_empty() => {
                 if let Some((_, _, arr_ty)) = bare.as_array_lit() {
                     let target_str = arr_ty.render();
+                    if args.iter().any(|a| a.spread) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot use `...` in conversion to `{}` — Go refuses `invalid use of ... in conversion to {}` (HYB-E1002)",
+                                target_str, target_str
+                            ),
+                            "`...` (variadic spread) cannot be used in a type conversion",
+                        );
+                        return;
+                    }
                     if args.len() != 1 {
                         self.emit_e1002(
                             span,
@@ -7996,6 +8018,17 @@ impl<'a> Collector<'a> {
                 }
                 let elem_str = elem_ty.render();
                 let target_str = format!("[]{}", elem_str);
+                if args.iter().any(|a| a.spread) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "cannot use `...` in conversion to `{}` — Go refuses `invalid use of ... in conversion to {}` (HYB-E1002)",
+                            target_str, target_str
+                        ),
+                        "`...` (variadic spread) cannot be used in a type conversion",
+                    );
+                    return;
+                }
                 if args.len() != 1 {
                     self.emit_e1002(
                         span,
