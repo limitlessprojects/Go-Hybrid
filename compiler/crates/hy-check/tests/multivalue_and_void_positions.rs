@@ -193,4 +193,51 @@ fn single_value_calls_stay_accepted() {
     assert_ok(
         "fn one() int {\n    return 1\n}\n\nfn g(a int) {\n    fmt.println(\"{a}\")\n}\n\nfn main() {\n    g(one())\n}\n",
     );
+    assert_ok(
+        "fn one() int {\n    return 1\n}\n\nfn main() {\n    s := []int{ one(), 2 }\n    fmt.println(\"{s}\")\n}\n",
+    );
+    assert_ok(
+        "fn one() int {\n    return 1\n}\n\nfn main() {\n    m := map[string]int{ \"k\": one() }\n    fmt.println(\"{m}\")\n}\n",
+    );
 }
+
+#[test]
+fn multi_value_call_in_composite_literals_is_rejected() {
+    assert_operand_rejected(
+        &format!("{TWO}fn main() {{\n    s := []int{{ two() }}\n    fmt.println(\"{{s}}\")\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_operand_rejected(
+        &format!("{TWO}fn main() {{\n    a := [2]int{{ two(), 3 }}\n    fmt.println(\"{{a}}\")\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_operand_rejected(
+        &format!("{TWO}fn main() {{\n    m := map[string]int{{ \"k\": two() }}\n    fmt.println(\"{{m}}\")\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_operand_rejected(
+        &format!("{TWO}fn main() {{\n    m := map[int]string{{ two(): \"v\" }}\n    fmt.println(\"{{m}}\")\n}}\n"),
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn no_result_call_in_composite_literals_is_rejected() {
+    assert_code(
+        "fn v() {\n    fmt.println(\"x\")\n}\n\nfn main() {\n    s := []int{ v() }\n    fmt.println(\"{s}\")\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn v() {\n    fmt.println(\"x\")\n}\n\nfn main() {\n    a := [1]int{ v() }\n    fmt.println(\"{a}\")\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn v() {\n    fmt.println(\"x\")\n}\n\nfn main() {\n    m := map[string]int{ \"k\": v() }\n    fmt.println(\"{m}\")\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn v() {\n    fmt.println(\"x\")\n}\n\nfn main() {\n    m := map[int]string{ v(): \"v\" }\n    fmt.println(\"{m}\")\n}\n",
+        "HYB-E1002",
+    );
+}
+
