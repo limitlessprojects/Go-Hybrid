@@ -223,10 +223,11 @@ impl<'a> Checker<'a> {
 
     /// A value that is a general Go pointer (or `nil`), not another loan.
     fn is_general_pointer_value(&self, st: &FnState, v: &hy_syntax::Expr) -> bool {
+        let v = unwrap_parens_and_move(v);
         if Checker::is_nil_literal(v) {
             return true;
         }
-        if let hy_syntax::Expr::Ident { name, .. } = unwrap_parens_and_move(v) {
+        if let hy_syntax::Expr::Ident { name, .. } = v {
             if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan) {
                 return false;
             }
@@ -466,6 +467,21 @@ impl<'a> Checker<'a> {
     /// `walk_addr_of_loan_projections` with `allow_slot_loan_root = true`:
     /// those are the positions where the emitter lowers an `&m[k]` to the O8
     /// slot loan, so the root of the expression is exempt there.
+    fn loan_projection_root_ident(expr: &hy_syntax::Expr) -> Option<&str> {
+        let mut cur = unwrap_parens_and_move(expr);
+        loop {
+            match cur {
+                hy_syntax::Expr::Ident { name, .. } => return Some(name.as_str()),
+                hy_syntax::Expr::Field { base, .. }
+                | hy_syntax::Expr::Index { base, .. }
+                | hy_syntax::Expr::Slice { base, .. } => {
+                    cur = unwrap_parens_and_move(base);
+                }
+                _ => return None,
+            }
+        }
+    }
+
     pub(crate) fn check_expr_addr_of_loan_projections(
         &mut self,
         st: &FnState,
@@ -502,14 +518,14 @@ impl<'a> Checker<'a> {
             span,
         } = expr
         {
-            match unwrap_parens(operand) {
+            match unwrap_parens_and_move(operand) {
                 Expr::Ident { name, span: id_span } if include_direct_ident => {
                     if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan) {
                         self.emit_addr_of_loan_diag(name, *id_span);
                     }
                 }
                 Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
-                    if let Some(root) = operand.root_ident() {
+                    if let Some(root) = Self::loan_projection_root_ident(operand) {
                         if self.lookup_binding(st, root).is_some_and(|b| b.slot_loan) {
                             self.emit_addr_of_loan_diag(root, *span);
                         }
@@ -519,14 +535,14 @@ impl<'a> Checker<'a> {
             }
         }
         if let Expr::Move { operand, span } = expr {
-            match unwrap_parens(operand) {
+            match unwrap_parens_and_move(operand) {
                 Expr::Ident { name, .. } if include_direct_ident => {
                     if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan) {
                         self.emit_addr_of_loan_diag(name, *span);
                     }
                 }
                 Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
-                    if let Some(root) = operand.root_ident() {
+                    if let Some(root) = Self::loan_projection_root_ident(operand) {
                         if self.lookup_binding(st, root).is_some_and(|b| b.slot_loan) {
                             self.emit_addr_of_loan_diag(root, *span);
                         }
