@@ -146,5 +146,69 @@ class BoardTarget(unittest.TestCase):
         self.assertEqual(gh.writes, [])
 
 
+class ChunkedForegroundScanTests(unittest.TestCase):
+    def make_pr(self, number, sha="abcdef1234567890"):
+        return {
+            "number": number,
+            "title": "PR #%d" % number,
+            "user": {"login": "dev"},
+            "created_at": "2026-11-09T00:00:00Z",
+            "updated_at": "2026-11-09T01:00:00Z",
+            "draft": False,
+            "labels": [],
+            "head": {"sha": sha},
+        }
+
+    def test_limit_and_since_pr_bound_scan_and_resume_reuses_cached_head(self):
+        import json
+        import tempfile
+
+        prs = [self.make_pr(4230, "1111111111110000"), self.make_pr(4220, "2222222222220000"), self.make_pr(4100, "3333333333330000")]
+        detail_calls = []
+
+        class ScanFakeGh:
+            repo = "fixture/repo"
+            calls = 0
+            remaining = 999
+
+            def paginate(self, path, max_pages=20, key=None, stop_when=None):
+                if "/pulls?state=open" in path:
+                    if stop_when:
+                        stop_when(prs, prs)
+                    return list(prs)
+                if "/files" in path:
+                    return [{"filename": "compiler/crates/hy-check/tests/t.rs", "additions": 10, "deletions": 0}]
+                return []
+
+            def get(self, path):
+                if path.endswith("/commits/main"):
+                    return {"sha": "mainsha1234567890"}
+                if "/pulls/" in path:
+                    detail_calls.append(path)
+                    return {"mergeable": True, "mergeable_state": "clean"}
+                if "/compare/" in path:
+                    return {"behind_by": 0, "merge_base_commit": {"sha": "mainsha1234567890"}}
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gh = ScanFakeGh()
+            args1 = SimpleNamespace(limit=2, since_pr=4200, resume=False, out=tmp, jobs=1)
+            with contextlib.redirect_stdout(io.StringIO()):
+                items1, main_sha = TRIAGE.collect({}, gh, args1)
+            self.assertEqual([it["number"] for it in items1], [4230, 4220])
+            self.assertEqual(len(detail_calls), 2)
+
+            # Write TRIAGE.json and verify --resume skips per-PR detail calls when head_sha matches
+            (Path(tmp) / "TRIAGE.json").write_text(
+                json.dumps({"main": main_sha, "items": items1})
+            )
+            detail_calls.clear()
+            args2 = SimpleNamespace(limit=2, since_pr=4200, resume=True, out=tmp, jobs=1)
+            with contextlib.redirect_stdout(io.StringIO()):
+                items2, _ = TRIAGE.collect({}, gh, args2)
+            self.assertEqual([it["number"] for it in items2], [4230, 4220])
+            self.assertEqual(detail_calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
