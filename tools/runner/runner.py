@@ -39,6 +39,7 @@ import json
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -49,24 +50,48 @@ UTC = lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H
 def run_cmd(cmd, timeout, cwd=None, env=None):
     """Run one command; return (exit_code, duration_s, tail_of_output). Never raises."""
     start = time.monotonic()
-    out_tail = ""
+    args = cmd if isinstance(cmd, list) else ["/bin/sh", "-c", cmd]
+    kwargs = {}
+    if os.name != "nt":
+        kwargs["start_new_session"] = True
     try:
-        p = subprocess.run(
-            cmd if isinstance(cmd, list) else ["/bin/sh", "-c", cmd],
+        p = subprocess.Popen(
+            args,
             cwd=cwd, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=timeout,
+            **kwargs
         )
-        code, out = p.returncode, p.stdout.decode("utf-8", "replace")
-    except subprocess.TimeoutExpired as exc:
-        # communicate() has already collected output before the deadline. Keep it
-        # so a slow build/test does not lose its last useful diagnostic.
-        partial = exc.output or b""
-        if isinstance(partial, bytes):
-            partial = partial.decode("utf-8", "replace")
-        code = 124
-        out = partial + ("" if not partial or partial.endswith("\n") else "\n")
-        out += "<<TIMEOUT after {}s>>".format(timeout)
+        try:
+            stdout, _ = p.communicate(timeout=timeout)
+            code = p.returncode
+            out = stdout.decode("utf-8", "replace")
+        except subprocess.TimeoutExpired as exc:
+            if os.name != "nt":
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except Exception:
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True)
+                except Exception:
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+            try:
+                stdout, _ = p.communicate()
+            except Exception:
+                stdout = b""
+            partial = exc.output or stdout or b""
+            if isinstance(partial, bytes):
+                partial = partial.decode("utf-8", "replace")
+            code = 124
+            out = partial + ("" if not partial or partial.endswith("\n") else "\n")
+            out += "<<TIMEOUT after {}s>>".format(timeout)
     except Exception as e:  # noqa: BLE001 — runner must never die
         code, out = 125, "<<runner error: {}>>".format(e)
     out_tail = out[-4000:]
