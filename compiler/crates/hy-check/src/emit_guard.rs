@@ -211,11 +211,18 @@ impl<'a> Checker<'a> {
                         self.check_expr_emit_guard(st, lo);
                         self.check_expr_emit_guard(st, hi);
                         if deep {
+                            let range_ty = self
+                                .typed_int_bound(st, lo)
+                                .or_else(|| self.typed_int_bound(st, hi))
+                                .map(|name| TypeExpr::Named {
+                                    name,
+                                    span: lo.span(),
+                                });
                             self.define_binding(
                                 st,
                                 var,
                                 TypeShape::Primitive,
-                                None,
+                                range_ty,
                                 false,
                                 false,
                                 false,
@@ -226,8 +233,9 @@ impl<'a> Checker<'a> {
                         self.check_expr_emit_guard(st, expr);
                         if deep {
                             let shapes = self.iterate_var_shapes(st, expr, vars.len());
-                            for (name, shape) in vars.iter().zip(shapes) {
-                                self.define_binding(st, name, shape, None, false, false, false);
+                            let var_tys = self.iterate_var_tys(st, expr, vars.len());
+                            for ((name, shape), var_ty) in vars.iter().zip(shapes).zip(var_tys) {
+                                self.define_binding(st, name, shape, var_ty, false, false, false);
                             }
                         }
                     }
@@ -1303,6 +1311,26 @@ impl<'a> Checker<'a> {
         // fields, aliases, local annotations, literals and conversions.
         let empty_st = crate::model::FnState::default();
         self.check_expr_builtin_args(st.unwrap_or(&empty_st), len);
+        let is_wrapped_ident_int_conv = matches!(
+            unwrap_parens(len),
+            Expr::Call { callee, args, .. }
+                if args.len() == 1
+                    && !args[0].spread
+                    && matches!(unwrap_parens(&args[0].value), Expr::Ident { .. })
+                    && matches!(
+                        unwrap_parens(callee),
+                        Expr::Ident { name, .. }
+                            if matches!(
+                                name.as_str(),
+                                "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "rune"
+                                    | "u8" | "uint8" | "byte" | "u16" | "uint16" | "u32" | "uint32"
+                            )
+                    )
+                    && self.const_int_value_at(&args[0].value, span.start, 0).is_some()
+        );
+        if !is_wrapped_ident_int_conv {
+            self.check_expr_type_conversions(len);
+        }
         // 1) A constant integer expression: must be non-negative.
         let direct_or_folded = const_int_value(len).or_else(|| {
             if matches!(unwrap_parens(len), Expr::Ident { .. }) {
