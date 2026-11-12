@@ -1313,19 +1313,33 @@ impl Emitter {
         }
     }
 
-    fn binding_kind_of(&self, e: &Expr) -> BindingKind {
+    pub(crate) fn binding_kind_of(&self, e: &Expr) -> BindingKind {
         let e = Self::peel_parens(e);
         if let Expr::Move { operand, .. } | Expr::AddrOf { operand, .. } | Expr::Unary { op: UnOp::Addr, operand, .. } = e { return self.binding_kind_of(operand); }
         if let Expr::Ident { name, .. } = e {
             return self.bindings.get(name).copied().unwrap_or(BindingKind::Plain);
         }
         if let Expr::Field { base, name, .. } = e {
-            return self
-                .user_struct_name_of(base)
-                .and_then(|sn| self.n5_structs.get(sn))
-                .and_then(|fs| fs.iter().find(|f| &f.name == name))
-                .and_then(|f| self.binding_kind_of_ty(&f.ty))
-                .unwrap_or(BindingKind::Plain);
+            if let Some(sn) = self.user_struct_name_of(base) {
+                let fields = self
+                    .n5_structs
+                    .get(sn)
+                    .or_else(|| self.n5_generic_structs.get(sn).map(|(_, fs)| fs));
+                return fields
+                    .and_then(|fs| fs.iter().find(|f| &f.name == name))
+                    .and_then(|f| self.binding_kind_of_ty(&f.ty))
+                    .unwrap_or(BindingKind::Plain);
+            }
+            if let Some(t) = self.type_of_expr(e) {
+                return BindingKind::ForeignTy(t);
+            }
+            if matches!(
+                self.binding_kind_of(base),
+                BindingKind::Foreign | BindingKind::ForeignTy(_)
+            ) {
+                return BindingKind::Foreign;
+            }
+            return BindingKind::Plain;
         }
         if matches!(e, Expr::MapLit { .. }) {
             return BindingKind::Map;
@@ -1338,13 +1352,13 @@ impl Emitter {
         let (call, args) = match e {
             Expr::Try { operand, .. } => match Self::peel_parens(operand) {
                 Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
-                _ => return BindingKind::Plain,
+                other => return self.binding_kind_of(other),
             },
             Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
             _ => return BindingKind::Plain,
         };
-        if let Expr::Field { base, name, .. } = call {
-            if let Expr::Ident { name: pkg, .. } = base.as_ref() {
+        if let Expr::Field { base, name, .. } = Self::peel_parens(call) {
+            if let Expr::Ident { name: pkg, .. } = Self::peel_parens(base.as_ref()) {
                 if self.is_unshadowed_pkg_root(pkg) {
                     if pkg == "io" && name == "read_all" {
                         return BindingKind::Bytes;
@@ -1366,6 +1380,15 @@ impl Emitter {
                     }
                     return BindingKind::Foreign;
                 }
+            }
+            if let Some(t) = self.type_of_expr(e) {
+                return BindingKind::ForeignTy(t);
+            }
+            if matches!(
+                self.binding_kind_of(base),
+                BindingKind::Foreign | BindingKind::ForeignTy(_)
+            ) {
+                return BindingKind::Foreign;
             }
         }
         // A user fn whose declared result type is a known handle type: the
@@ -1735,6 +1758,34 @@ impl Emitter {
     /// inside user structs `ctx.req.host = ...` -> `ctx.req.Host = ...`)
     /// resolve first; foreign package roots and Foreign bindings normalize;
     /// our own struct members stay verbatim.
+    fn is_foreign_place(&self, p: &Place) -> bool {
+        match &p.kind {
+            PlaceKind::Ident(name) => matches!(
+                self.bindings.get(name),
+                Some(BindingKind::Foreign) | Some(BindingKind::ForeignTy(_))
+            ),
+            PlaceKind::Field { base, name } => {
+                if self.is_foreign_place(base) {
+                    return true;
+                }
+                let Some(sn) = self.user_struct_name_of_place(base) else {
+                    return false;
+                };
+                let fields = self
+                    .n5_structs
+                    .get(sn)
+                    .or_else(|| self.n5_generic_structs.get(sn).map(|(_, fs)| fs));
+                fields
+                    .and_then(|fs| fs.iter().find(|f| &f.name == name))
+                    .and_then(|f| self.binding_kind_of_ty(&f.ty))
+                    .is_some_and(|k| matches!(k, BindingKind::Foreign | BindingKind::ForeignTy(_)))
+            }
+            PlaceKind::AddrOf { base } | PlaceKind::Index { base, .. } => {
+                self.is_foreign_place(base)
+            }
+        }
+    }
+
     pub fn place_member_name(&self, base: &Place, name: &str) -> String {
         if let Some(t) = self.type_of_place(base) {
             if let Some(m) = super::shapes::lookup_member(t, name) {
@@ -1748,12 +1799,7 @@ impl Emitter {
             return super::to_go_name(name);
         }
         let root = base.root();
-        if self.is_unshadowed_pkg_root(root)
-            || matches!(
-                self.bindings.get(root),
-                Some(BindingKind::Foreign) | Some(BindingKind::ForeignTy(_))
-            )
-        {
+        if self.is_unshadowed_pkg_root(root) || self.is_foreign_place(base) {
             return super::to_go_name(name);
         }
         name.to_string()
@@ -1768,12 +1814,12 @@ impl Emitter {
             if self.is_unshadowed_pkg_root(root) {
                 return to_go_name(name);
             }
-            if matches!(
-                self.bindings.get(root),
-                Some(BindingKind::Foreign) | Some(BindingKind::ForeignTy(_))
-            ) {
-                return to_go_name(name);
-            }
+        }
+        if matches!(
+            self.binding_kind_of(base),
+            BindingKind::Foreign | BindingKind::ForeignTy(_)
+        ) {
+            return to_go_name(name);
         }
         name.to_string()
     }
