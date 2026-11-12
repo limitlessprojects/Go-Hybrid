@@ -717,6 +717,15 @@ pub(crate) struct Checker<'a> {
     /// share one namespace in Go — a second declaration of the same name is
     /// `X redeclared in this block`. Keyed by name, value = declaring kind.
     pub pkg_names: HashMap<String, &'static str>,
+    /// Issue #4222: package-scope names already declared by SIBLING
+    /// same-package files in the target's directory (sibling `.hy` files and
+    /// hand-written, non-test `.go` files). Keyed by name, value = the
+    /// declaring sibling file. `hyb check` seeds this before checking;
+    /// standalone `check_file` leaves it empty, so single-file behavior —
+    /// the corpus harness — is unchanged. A same-named top-level
+    /// declaration here emits Go that fails `go build` with `X redeclared
+    /// in this block`, exactly like an intra-file duplicate.
+    pub sibling_pkg_names: HashMap<String, String>,
     /// Declared methods (issue #201-C): (receiver base type, method name) —
     /// methods live in the receiver's method set, not package scope, so
     /// `box.get` twice is an error while `fn get` + `box.get` is legal.
@@ -767,6 +776,7 @@ impl<'a> Checker<'a> {
             const_values: HashMap::new(),
             packages: HashSet::new(),
             pkg_names: HashMap::new(),
+            sibling_pkg_names: HashMap::new(),
             methods: HashSet::new(),
             diags: Vec::new(),
             managed_blocks: 0,

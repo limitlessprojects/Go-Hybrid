@@ -931,6 +931,33 @@ impl<'a> Checker<'a> {
             );
             return;
         }
+        // Issue #4222: the package block spans every sibling file of the
+        // package directory, not just the checked file. `hyb check` seeds
+        // `sibling_pkg_names` from sibling `.hy` files and hand-written,
+        // non-test `.go` files; recording the same name again here emits Go
+        // that fails `go build` with `X redeclared in this block`. The
+        // record is still inserted so downstream checks (buildable lookups,
+        // struct kinds) keep their view of the declaration.
+        if let Some(sib) = self.sibling_pkg_names.get(name) {
+            let msg = format!(
+                "`{name}` redeclared in this block — sibling file `{sib}` already declares the same package-scope name (HYB-E1003)",
+                name = name,
+                sib = sib
+            );
+            self.diags.push(
+                Diagnostic::error("HYB-E1003", self.path.clone(), span, msg).with_notes(vec![
+                    format!(
+                        "why: Go keeps ONE package block for the whole package directory — `{name}` declared in `{sib}` and again here accepts `hyb check` yet fails `go build` with `{name} redeclared in this block` (issue #4222)",
+                        name = name,
+                        sib = sib
+                    ),
+                    format!(
+                        "fix: rename one of the two `{name}` declarations — a method may keep the name (it lives in the receiver's method set, not package scope)",
+                        name = name
+                    ),
+                ]),
+            );
+        }
         self.pkg_names.insert(name.to_string(), kind);
     }
 

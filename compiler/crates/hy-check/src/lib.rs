@@ -107,7 +107,30 @@ impl Verdict {
 /// into source order before returning: the corpus harness reads the FIRST
 /// error's `tier0_rule` as the join key against VERDICTS.md.
 pub fn check_file(file: &File) -> CheckResult {
+    check_file_inner(file, std::collections::HashMap::new())
+}
+
+/// Issue #4222: check one file that lives in a package directory whose
+/// sibling files already declare top-level names. `hyb check` collects the
+/// package-scope names of the sibling `.hy` files and hand-written, non-test
+/// `.go` files of the same directory (name → declaring sibling file) and
+/// passes them here; a same-named top-level declaration in the checked file
+/// is then rejected as `X redeclared in this block` (HYB-E1003) instead of
+/// failing `go build` after acceptance. The single-file contract
+/// (`check_file`) is unchanged: an empty sibling map is fail-open for it.
+pub fn check_file_with_siblings(
+    file: &File,
+    sibling_pkg_names: std::collections::HashMap<String, String>,
+) -> CheckResult {
+    check_file_inner(file, sibling_pkg_names)
+}
+
+fn check_file_inner(
+    file: &File,
+    sibling_pkg_names: std::collections::HashMap<String, String>,
+) -> CheckResult {
     let mut ck = Checker::new(file);
+    ck.sibling_pkg_names = sibling_pkg_names;
 
     build_tables(&mut ck);
     ck.check_struct_decls(); // A6: borrow-handle / pointer struct fields

@@ -5,6 +5,8 @@
 //!   explain — offline reference page for a HYB-Exxxx code
 //!   build   — the walking skeleton: parse → check → emit Go → go build
 
+use std::collections::HashMap;
+use std::path::Path;
 use std::process::{Command, ExitCode};
 
 use hy_diag::{Diagnostic, Pos, Span};
@@ -167,8 +169,15 @@ fn cmd_check(args: &[String]) -> ExitCode {
         }
     };
 
+    // Issue #4222: `hyb check` sees one file at a time, but Go keeps ONE
+    // package block across every sibling file of the directory. Seed the
+    // checker with the top-level names sibling `.hy` files and hand-written,
+    // non-test `.go` files already declare so a hidden package-scope
+    // redeclaration is `X redeclared in this block` (HYB-E1003) at check
+    // time instead of a `go build` failure after acceptance.
+    let sibling_names = collect_sibling_pkg_names(&file);
     // check
-    let result = hy_check::check_file(&ast);
+    let result = hy_check::check_file_with_siblings(&ast, sibling_names);
     let errors = result
         .diagnostics
         .iter()
@@ -264,6 +273,322 @@ fn cmd_check(args: &[String]) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Issue #4222: collect the package-scope names declared by the sibling
+/// files of the target's directory, keyed by name with the declaring file
+/// as the value, so a same-named top-level declaration in the checked file
+/// is `X redeclared in this block` (HYB-E1003) at check time. Two sources:
+///   * sibling `*.hy` — parsed with `hy_syntax::parse_file`; top-level fns
+///     (no receiver), consts, structs, enums, and type aliases register;
+///     associated `Type.name` fns also register under their emitted Go
+///     identifier `Type_name` (mirroring the checker's own table build). A
+///     sibling that fails to parse is skipped (fail-open);
+///   * sibling `*.go` except `*_test.go` and generated `*.hy.go` — a
+///     comment/string-scrubbed, brace-depth-aware lexical scan (no
+///     go/parser inside the Rust checker): top-level non-method `func`,
+///     `type`, `const`, and `var` declarations register, including
+///     comma-separated `var a, b T` lists. Handled-fail-open shapes stay
+///     invisible (`const (...)` / `var (...)` / `type (...)` blocks) —
+///     the scan never invents a declaration, so it cannot falsely reject.
+/// Files whose package clause differs from the target's are skipped: a
+/// mixed-package directory already fails `go build` on its own and naming
+/// it a redeclaration would be wrong.
+///
+/// Gate: the scan runs only where the checked directory is a Go module
+/// unit (`go.mod` right there) — the environment `go build ./...` applies
+/// to, i.e. where sibling `.hy` files become sibling `.hy.go` files of ONE
+/// package and hand-written `.go` files join the same block. A flat
+/// directory without a module is a pile of unrelated single-file programs
+/// (the 135-program checker corpus under `tests/checker-corpus/` is
+/// exactly that), so without the gate the scan would reject every corpus
+/// program for neighbors' `fn main`. No module → fail open: any hidden
+/// redeclare resurfaces at `hyb generate` / `go build`.
+fn collect_sibling_pkg_names(target: &str) -> HashMap<String, String> {
+    let mut names: HashMap<String, String> = HashMap::new();
+    let dir = match Path::new(target).parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(d) => d.to_path_buf(),
+        None => Path::new(".").to_path_buf(),
+    };
+    if !dir.join("go.mod").is_file() {
+        return names;
+    }
+    let target_pkg = std::fs::read_to_string(target)
+        .ok()
+        .and_then(|src| package_clause(&src));
+    let target_name = Path::new(target)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return names;
+    };
+    for entry in entries.flatten() {
+        let sib_name = entry.file_name().to_string_lossy().into_owned();
+        if sib_name == target_name {
+            continue;
+        }
+        let sib_path = entry.path();
+        if !sib_path.is_file() {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(&sib_path) else {
+            continue;
+        };
+        if sib_name.ends_with(".hy") {
+            match (target_pkg.as_deref(), package_clause(&src)) {
+                (Some(a), Some(b)) if a != b => continue,
+                (Some(_), None) => continue,
+                _ => {}
+            }
+            let sib_display = sib_path.to_string_lossy().into_owned();
+            let Ok(sib_ast) = hy_syntax::parse_file(&sib_display, &src) else {
+                continue;
+            };
+            for decl in &sib_ast.decls {
+                let (name, emitted) = match decl {
+                    hy_syntax::Decl::Const(c) => (c.name.as_str(), None),
+                    hy_syntax::Decl::Struct(s) => (s.name.as_str(), None),
+                    hy_syntax::Decl::Enum(e) => (e.name.as_str(), None),
+                    hy_syntax::Decl::TypeAlias(t) => (t.name.as_str(), None),
+                    // Methods live in the receiver's method set, not
+                    // package scope — only receiver-less fns collide.
+                    hy_syntax::Decl::Fn(f) if f.receiver.is_none() => {
+                        let emitted = if f.name.contains('.') {
+                            // hy-emit lowers an associated `Type.name` to
+                            // the package-level Go identifier `Type_name`.
+                            Some(f.name.replace('.', "_"))
+                        } else {
+                            None
+                        };
+                        (f.name.as_str(), emitted)
+                    }
+                    _ => continue,
+                };
+                names.entry(name.to_string()).or_insert(sib_name.clone());
+                if let Some(e) = emitted {
+                    names.entry(e).or_insert(sib_name.clone());
+                }
+            }
+        } else if sib_name.ends_with(".go")
+            && !sib_name.ends_with("_test.go")
+            && !sib_name.ends_with(".hy.go")
+        {
+            // Generated `*.hy.go` artifacts repeat the sibling `.hy`
+            // source's names — the issue contract scans hand-written Go,
+            // and a stale artifact must not collide with a fresh check
+            // (the issuing source is counted on its own `.hy` entry).
+            match (target_pkg.as_deref(), package_clause(&src)) {
+                (Some(a), Some(b)) if a != b => continue,
+                (Some(_), None) => continue,
+                _ => {}
+            }
+            for name in go_top_level_decl_names(&src) {
+                names.entry(name).or_insert(sib_name.clone());
+            }
+        }
+    }
+    names
+}
+
+/// The `package X` clause of a Go or Hybrid source file: the first
+/// non-comment, non-empty line, when it spells `package <name>`. Any
+/// other first code line means the file has no clause (`None`).
+fn package_clause(src: &str) -> Option<String> {
+    for line in src.lines().take(32) {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("//") {
+            continue;
+        }
+        let rest = t.strip_prefix("package ")?;
+        let name = rest.trim();
+        if !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Some(name.to_string());
+        }
+        return None;
+    }
+    None
+}
+
+/// Best-effort scan for top-level package-scope names in a `.go` source.
+/// Comments (`//` and `/* */`), string literals (interpreted and raw), and
+/// rune literals are scrubbed so keywords inside them cannot match, and the
+/// match is confined to brace depth 0 — declaration lines, not function
+/// bodies or struct contents. Methods (`func (r Recv) name`) are skipped:
+/// they live in the receiver's method set, not package scope.
+fn go_top_level_decl_names(src: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for (text, depth) in go_scrubbed_lines(src) {
+        if depth != 0 {
+            continue;
+        }
+        let t = text.trim_start();
+        let (kw, rest) = if let Some(r) = t.strip_prefix("func ") {
+            ("func", r)
+        } else if let Some(r) = t.strip_prefix("type ") {
+            ("type", r)
+        } else if let Some(r) = t.strip_prefix("const ") {
+            ("const", r)
+        } else if let Some(r) = t.strip_prefix("var ") {
+            ("var", r)
+        } else {
+            continue;
+        };
+        if rest.trim_start().starts_with('(') {
+            // A method (`func (r Recv) name`) or a `const (` / `var (` /
+            // `type (` block: not scanned — fail-open, never a false hit.
+            continue;
+        }
+        match kw {
+            "func" | "type" => {
+                if let Some(name) = first_identifier(rest) {
+                    names.push(name);
+                }
+            }
+            _ => {
+                // `const x, y = 1, 2` / `var a, b []int`: every identifier of
+                // the comma list left of `=` declares a package-scope name.
+                let lhs = rest.split('=').next().unwrap_or("");
+                for piece in lhs.split(',') {
+                    if let Some(name) = first_identifier(piece) {
+                        names.push(name);
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Split a Go source into comment- and literal-scrubbed lines, each carrying
+/// the brace depth at the line's start (top-level decl lines are depth 0).
+/// Interiors of comments, string literals (interpreted and raw), and rune
+/// literals are replaced with spacing that keeps everything outside them in
+/// place; braces inside those interiors never touch the depth.
+fn go_scrubbed_lines(src: &str) -> Vec<(String, usize)> {
+    #[derive(PartialEq)]
+    enum S {
+        Code,
+        LineComment,
+        BlockComment,
+        Str,
+        RawStr,
+        Rune,
+    }
+    let mut lines: Vec<(String, usize)> = Vec::new();
+    let mut line = String::new();
+    let mut depth_at_start = 0usize;
+    let mut depth = 0usize;
+    let mut state = S::Code;
+    let mut escape = false;
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\n' {
+            lines.push((std::mem::take(&mut line), depth_at_start));
+            depth_at_start = depth;
+            if state == S::LineComment {
+                state = S::Code;
+            }
+            continue;
+        }
+        match state {
+            S::Code => match c {
+                '/' => match chars.peek() {
+                    Some('/') => {
+                        state = S::LineComment;
+                        chars.next();
+                    }
+                    Some('*') => {
+                        state = S::BlockComment;
+                        chars.next();
+                    }
+                    _ => line.push(c),
+                },
+                '"' => {
+                    state = S::Str;
+                    line.push(' ');
+                }
+                '`' => {
+                    state = S::RawStr;
+                    line.push(' ');
+                }
+                '\'' => {
+                    state = S::Rune;
+                    line.push(' ');
+                }
+                '{' => {
+                    depth += 1;
+                    line.push(c);
+                }
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    line.push(c);
+                }
+                _ => line.push(c),
+            },
+            S::LineComment => line.push(' '),
+            S::BlockComment => {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    state = S::Code;
+                    chars.next();
+                }
+                line.push(' ');
+            }
+            // String and rune interiors: scrub to spaces, honoring escapes;
+            // Go raw strings have no escapes.
+            S::Str | S::Rune | S::RawStr => {
+                let closing = match state {
+                    S::Str => '"',
+                    S::Rune => '\'',
+                    _ => '`',
+                };
+                if closing != '`' {
+                    if escape {
+                        escape = false;
+                    } else if c == '\\' {
+                        escape = true;
+                    }
+                }
+                if c == closing {
+                    state = S::Code;
+                }
+                line.push(' ');
+            }
+        }
+    }
+    lines.push((line, depth_at_start));
+    lines
+}
+
+/// The first `[A-Za-z_][A-Za-z0-9_]*` of `s`: the declaration name of
+/// `func name(...)`, `type X ...`, or one comma-separated `var`/`const`
+/// item. Non-identifier leaders (generics `[t any]`) yield `None`.
+fn first_identifier(s: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut started = false;
+    for c in s.chars() {
+        if c.is_ascii_alphabetic() || c == '_' {
+            started = true;
+            out.push(c);
+        } else if started && (c.is_ascii_alphanumeric() || c == '_') {
+            out.push(c);
+        } else if started {
+            break;
+        } else if c.is_whitespace() {
+            continue;
+        } else {
+            break;
+        }
+    }
+    if started {
+        Some(out)
+    } else {
+        None
     }
 }
 
