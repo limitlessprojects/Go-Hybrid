@@ -69,6 +69,7 @@ mod shape;
 mod try_context;
 mod tuple;
 mod walk;
+mod sibling_collision;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
@@ -127,6 +128,10 @@ pub fn check_file(file: &File) -> CheckResult {
     // Row 13: a declaration named `default` (the one unreserved Go keyword)
     // cannot be spelled in the emitted Go.
     ck.check_go_keyword_names();
+
+    // Issue #4222: a .hy file that collides with a sibling .go/.hy top-level
+    // declaration breaks package build after hyb generate (HYB-E1002, Row 13).
+    ck.check_sibling_collisions();
 
     // E4 (HYB-E2011): `?` lands only in an error-result fn/closure, `main`,
     // or an E11 handler closure — lexical, like `return`.
