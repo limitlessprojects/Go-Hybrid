@@ -8589,6 +8589,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if (pkg == "atomic" || pkg == "sync/atomic") && self.lookup_kind(pkg).is_none() {
+                        self.check_atomic_call_buildable(name, args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -9996,6 +10000,50 @@ impl<'a> Collector<'a> {
             _ => {}
         }
     }
+
+    fn check_atomic_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "bool" | "int32" | "int64" | "uint32" | "uint64" | "uintptr" | "pointer" | "value" => {
+                self.emit_e1002(
+                    span,
+                    format!("cannot call non-function type `atomic.{}` (HYB-E1002)", name),
+                    &format!("use `atomic.{}` as a type declaration or struct field, not a function", name),
+                );
+            }
+            "load_int32" | "load_int64" | "load_uint32" | "load_uint64" | "load_uintptr" | "load_pointer" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("`atomic.{}` takes exactly 1 argument `(addr)`, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 1 argument to `atomic.{}`", name),
+                    );
+                }
+            }
+            "store_int32" | "store_int64" | "store_uint32" | "store_uint64" | "store_uintptr" | "store_pointer"
+            | "add_int32" | "add_int64" | "add_uint32" | "add_uint64" | "add_uintptr"
+            | "swap_int32" | "swap_int64" | "swap_uint32" | "swap_uint64" | "swap_uintptr" | "swap_pointer" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("`atomic.{}` takes exactly 2 arguments `(addr, val)`, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 2 arguments to `atomic.{}`", name),
+                    );
+                }
+            }
+            "compare_and_swap_int32" | "compare_and_swap_int64" | "compare_and_swap_uint32" | "compare_and_swap_uint64"
+            | "compare_and_swap_uintptr" | "compare_and_swap_pointer" => {
+                if args.len() != 3 {
+                    self.emit_e1002(
+                        span,
+                        format!("`atomic.{}` takes exactly 3 arguments `(addr, old, new)`, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 3 arguments to `atomic.{}`", name),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
 }
 
 fn span_expr_label(lhs: &Expr, op: &str, rhs: &Expr) -> String {
