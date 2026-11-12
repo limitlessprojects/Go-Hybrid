@@ -8589,6 +8589,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if pkg == "sort" && self.lookup_kind(pkg).is_none() {
+                        self.check_sort_call_buildable(name, args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -9996,6 +10000,33 @@ impl<'a> Collector<'a> {
             _ => {}
         }
     }
+
+    fn check_sort_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "ints" | "ints_are_sorted" | "float64s" | "float64s_are_sorted" | "strings"
+            | "strings_are_sorted" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!("`sort.{}` takes exactly 1 argument `(x)`, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 1 argument to `sort.{}`", name),
+                    );
+                }
+            }
+            "search" | "search_ints" | "search_float64s" | "search_strings" | "slice"
+            | "slice_stable" | "slice_is_sorted" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!("`sort.{}` takes exactly 2 arguments, got {} (HYB-E1002)", name, args.len()),
+                        &format!("pass 2 arguments to `sort.{}`", name),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
 }
 
 fn span_expr_label(lhs: &Expr, op: &str, rhs: &Expr) -> String {
