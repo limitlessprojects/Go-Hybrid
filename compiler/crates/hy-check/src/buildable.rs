@@ -4495,6 +4495,80 @@ impl<'a> Collector<'a> {
         }
     }
 
+    // Full `compress/gzip` (`gzip`) call surface — every member blessed in
+    // `foreign.rs` (#4212), checked against Go 1.26 `compress/gzip` signatures:
+    //   - Non-callable constants/variables/types: `no_compression`, `best_speed`,
+    //     `best_compression`, `default_compression`, `huffman_only`,
+    //     `err_checksum`, `err_header`, `reader`, `writer`, `header`.
+    //   - 1-arg functions: `new_reader(r)`, `new_writer(w)`.
+    //   - 2-arg function: `new_writer_level(w, level)`.
+    fn check_gzip_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "no_compression"
+                | "best_speed"
+                | "best_compression"
+                | "default_compression"
+                | "huffman_only"
+                | "err_checksum"
+                | "err_header"
+                | "reader"
+                | "writer"
+                | "header"
+        ) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`gzip.{member}` is not a function — it is a package-level constant/variable/type and cannot be called (HYB-E1002)"
+                ),
+                &format!("reference `gzip.{member}` directly, do not call it"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_reader" | "new_writer" => Some(1),
+            "new_writer_level" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `gzip.{member}` (HYB-E1002)"),
+                    &format!("`gzip.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let go_name = {
+                    let mut out = String::new();
+                    for part in member.split('_') {
+                        if part.is_empty() {
+                            continue;
+                        }
+                        let mut cs = part.chars();
+                        if let Some(c) = cs.next() {
+                            out.extend(c.to_uppercase());
+                        }
+                        out.push_str(cs.as_str());
+                    }
+                    out
+                };
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`gzip.{member}` takes exactly {expected} {noun}, got {} (HYB-E1002)",
+                        args.len()
+                    ),
+                    &format!(
+                        "match the arity of the Go function this lowers to (`gzip.{go_name}`)"
+                    ),
+                );
+            }
+        }
+    }
+
     // Full `strconv` call surface — every member the member table in
     // foreign.rs blesses, with the arity of the Go name it lowers to
     // (`to_go_name`: snake case -> CamelCase, e.g. `parse_int` -> ParseInt,
@@ -8325,6 +8399,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "url" && self.lookup_kind(pkg).is_none() {
                         self.check_url_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "gzip" && self.lookup_kind(pkg).is_none() {
+                        self.check_gzip_package_call(name.as_str(), args, span);
                     }
                     if pkg == "sort" && self.lookup_kind(pkg).is_none() {
                         self.check_sort_package_call(name.as_str(), args, span);
