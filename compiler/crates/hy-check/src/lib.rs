@@ -777,7 +777,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         }
                     }
                 }
-                ForKind::Range { var, lo, hi, .. } => {
+                ForKind::Range { var, lo, hi, inclusive } => {
                     ck.mark_move_in_value(
                         &mut st,
                         lo,
@@ -788,9 +788,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         hi,
                         format!("the range bound `{}`", hi.render()),
                     );
+                    let mat_hi = *inclusive || crate::range_iter::expr_reads_range_var(hi, var);
                     let range_ty = ck
-                        .typed_int_bound(&st, lo)
-                        .or_else(|| ck.typed_int_bound(&st, hi))
+                        .typed_int_bound(&st, lo, mat_hi)
+                        .or_else(|| ck.typed_int_bound(&st, hi, mat_hi))
                         .map(|name| TypeExpr::Named {
                             name,
                             span: lo.span(),

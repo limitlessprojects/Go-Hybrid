@@ -1090,7 +1090,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     }
                     sync_nested_moves(st, nested);
                 }
-                Range { var, lo, hi, .. } => {
+                Range { var, lo, hi, inclusive } => {
                     ck.mark_move_in_value(
                         st,
                         lo,
@@ -1104,9 +1104,10 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     sync_nested_moves(st, nested);
                     collect_expr_direct_fnlits(lo, st, nested);
                     collect_expr_direct_fnlits(hi, st, nested);
+                    let mat_hi = *inclusive || crate::range_iter::expr_reads_range_var(hi, var);
                     let range_ty = ck
-                        .typed_int_bound(st, lo)
-                        .or_else(|| ck.typed_int_bound(st, hi))
+                        .typed_int_bound(st, lo, mat_hi)
+                        .or_else(|| ck.typed_int_bound(st, hi, mat_hi))
                         .map(|name| hy_syntax::TypeExpr::Named {
                             name,
                             span: lo.span(),
