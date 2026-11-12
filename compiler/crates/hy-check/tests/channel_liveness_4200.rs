@@ -718,3 +718,176 @@ fn main() {
         res.diagnostics
     );
 }
+
+#[test]
+fn test_send_on_recv_cap_stmt_reject() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    rx <- 42
+    tx.close()
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"
+            && d.message
+                .contains("cannot send on linear receive capability")),
+        "Expected HYB-E3001 for send on rx: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_receive_from_send_cap_expr_reject() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    v := <-tx
+    _ = v
+    tx.close()
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"
+            && d.message
+                .contains("cannot receive from linear send capability")),
+        "Expected HYB-E3001 for receive from tx: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_call_send_on_recv_cap_reject() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    rx.send(42)
+    tx.close()
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"
+            && d.message
+                .contains("cannot call method 'send' on linear receive capability")),
+        "Expected HYB-E3001 for rx.send: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_call_recv_on_send_cap_reject() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    v := tx.recv()
+    _ = v
+    tx.close()
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"
+            && d.message
+                .contains("cannot call method 'recv' on linear send capability")),
+        "Expected HYB-E3001 for tx.recv: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_close_recv_cap_reject() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    rx.close()
+    tx.close()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"
+            && d.message.contains("cannot close linear receive capability")),
+        "Expected HYB-E3001 for rx.close: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_drain_send_cap_reject() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    tx.drain()
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3001"
+                && d.message.contains("cannot drain linear send capability")),
+        "Expected HYB-E3001 for tx.drain: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_select_send_on_recv_cap_reject() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    select {
+        rx <- 10 => {}
+        default => {}
+    }
+    tx.close()
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"
+            && d.message
+                .contains("cannot send on linear receive capability")),
+        "Expected HYB-E3001 for select send on rx: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_for_in_send_cap_reject() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    for v in tx {
+        _ = v
+    }
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"
+            && d.message
+                .contains("cannot iterate over linear send capability")),
+        "Expected HYB-E3001 for for-in tx: {:?}",
+        res.diagnostics
+    );
+}
+
