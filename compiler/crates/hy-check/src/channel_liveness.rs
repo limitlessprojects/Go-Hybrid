@@ -393,13 +393,7 @@ impl ChannelLivenessChecker {
             Expr::Try { operand, .. } => {
                 self.check_expr(operand);
             }
-            Expr::FnLit { body, .. } => {
-                self.push_scope();
-                for s in &body.stmts {
-                    self.check_stmt(s);
-                }
-                self.pop_scope();
-            }
+
             Expr::Call { callee, args, span } => {
                 if let Expr::Field { base, name, .. } = callee.as_ref() {
                     if let Some(cap) = self.get_cap_name(base) {
@@ -489,12 +483,7 @@ impl ChannelLivenessChecker {
             Expr::AddrOf { operand, .. } => {
                 self.check_expr(operand);
             }
-            Expr::Move { operand, .. } => {
-                self.check_expr(operand);
-            }
-            Expr::Try { operand, .. } => {
-                self.check_expr(operand);
-            }
+
             Expr::Slice { base, lo, hi, .. } => {
                 self.check_expr(base);
                 if let Some(lo) = lo {
