@@ -239,7 +239,8 @@ impl<'a> Checker<'a> {
                 let Some(ty_name) = conversion_callee_name(callee) else {
                     return false;
                 };
-                self.is_const_string_conversion_target(ty_name, st)
+                !self.consts.contains_key(ty_name)
+                    && self.is_const_string_conversion_target(ty_name, st)
                     && args.len() == 1
                     && !args[0].spread
                     && self.expr_is_constant_inner(&args[0].value, st, &mut Vec::new(), ref_depth)
