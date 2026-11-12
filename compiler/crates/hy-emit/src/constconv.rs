@@ -252,15 +252,49 @@ impl WideInt {
     }
 }
 
-fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
+/// Resolve a `const` name to its initializer expression, or `None` when the
+/// name is not a constant. Supplied by the emitter, which is the only part
+/// of the pipeline holding both the file-level and the function-local
+/// declarations.
+pub type ConstLookup<'a> = dyn Fn(&str) -> Option<hy_syntax::Expr> + 'a;
+
+/// Maximum const-to-const hops before the fold gives up. A cycle
+/// (`const a = b; const b = a`) is not foldable, and without a bound it would
+/// recurse until the stack died — the same class of defect issue #1587 §3
+/// reports for the checker's `is_const_string_expr`.
+const MAX_CONST_DEPTH: usize = 32;
+
+fn const_int_expr(
+    expr: &hy_syntax::Expr,
+    resolve: &ConstLookup<'_>,
+    depth: usize,
+) -> Option<WideInt> {
     use hy_syntax::{BinOp, Expr, UnOp};
+    if depth > MAX_CONST_DEPTH {
+        return None;
+    }
     match expr {
-        Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => const_int_expr(inner),
+        Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => {
+            const_int_expr(inner, resolve, depth + 1)
+        }
         Expr::Unary {
             op: UnOp::Neg,
             operand,
             ..
-        } => const_int_expr(operand)?.checked_neg(),
+        } => const_int_expr(operand, resolve, depth + 1)?.checked_neg(),
+        // A NAMED constant (`const big = 300` … `u8(big)`). The operand is an
+        // identifier, not a literal, so without this arm the fold returns
+        // `None`, the emitter prints the operand verbatim, and Go then rejects
+        // the program — `constant 300 overflows uint8` — even though the
+        // literal spelling of the very same conversion (`u8(300)`) folds and
+        // builds. Issue #1726.
+        //
+        // Depth is threaded through every recursive call so a self-referential
+        // const terminates instead of blowing the stack.
+        Expr::Ident { name, .. } => {
+            let init = resolve(name)?;
+            const_int_expr(&init, resolve, depth + 1)
+        }
         Expr::Call { callee, args, .. } => {
             let mut c = callee.as_ref();
             while let Expr::Paren { inner, .. } = c {
@@ -269,7 +303,7 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
             let Expr::Ident { name, .. } = c else { return None };
             if let Some((bits, signed)) = width_of(name) {
                 if args.len() == 1 && !args[0].spread {
-                    let v = const_int_expr(&args[0].value)?;
+                    let v = const_int_expr(&args[0].value, resolve, depth + 1)?;
                     return Some(WideInt::from_i128(v.truncate_to_width(bits, signed)));
                 }
             } else if name == "len" && args.len() == 1 && !args[0].spread {
@@ -281,9 +315,9 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
                     return Some(WideInt::from_i128(st.len() as i128));
                 }
             } else if (name == "min" || name == "max") && !args.is_empty() && args.iter().all(|a| !a.spread) {
-                let mut acc = const_int_expr(&args[0].value)?;
+                let mut acc = const_int_expr(&args[0].value, resolve, depth + 1)?;
                 for a in &args[1..] {
-                    let v = const_int_expr(&a.value)?;
+                    let v = const_int_expr(&a.value, resolve, depth + 1)?;
                     let lt = v.checked_sub(acc)?.is_neg();
                     if (name == "min" && lt) || (name == "max" && !lt) {
                         acc = v;
@@ -302,8 +336,8 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
             ..
         } => Some(WideInt::from_i128(*c as u32 as i128)),
         Expr::Binary { op, lhs, rhs, .. } => {
-            let l = const_int_expr(lhs)?;
-            let r = const_int_expr(rhs)?;
+            let l = const_int_expr(lhs, resolve, depth + 1)?;
+            let r = const_int_expr(rhs, resolve, depth + 1)?;
             match op {
                 BinOp::Add => l.checked_add(r),
                 BinOp::Sub => l.checked_sub(r),
@@ -322,9 +356,14 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
     }
 }
 
-fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool) -> bool {
+fn has_out_of_range_subexpr(
+    expr: &hy_syntax::Expr,
+    bits: u32,
+    signed: bool,
+    resolve: &ConstLookup<'_>,
+) -> bool {
     use hy_syntax::Expr;
-    let Some(v) = const_int_expr(expr) else {
+    let Some(v) = const_int_expr(expr, resolve, 0) else {
         return false;
     };
     let folded = v.truncate_to_width(bits, signed);
@@ -335,12 +374,19 @@ fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool) -> 
         Expr::Paren { inner, .. }
         | Expr::Move { operand: inner, .. }
         | Expr::Unary { operand: inner, .. } => {
-            has_out_of_range_subexpr(inner, bits, signed)
+            has_out_of_range_subexpr(inner, bits, signed, resolve)
+        }
+        // A named const is only "out of range" if what it NAMES is. The fold
+        // itself resolves it; asking here too would rewrite a conversion whose
+        // operand already fits (issue #1726).
+        Expr::Ident { .. } => {
+            let folded_here = v.truncate_to_width(bits, signed);
+            v.to_i128() != Some(folded_here)
         }
         Expr::Call { .. } => true,
         Expr::Binary { lhs, rhs, .. } => {
-            has_out_of_range_subexpr(lhs, bits, signed)
-                || has_out_of_range_subexpr(rhs, bits, signed)
+            has_out_of_range_subexpr(lhs, bits, signed, resolve)
+                || has_out_of_range_subexpr(rhs, bits, signed, resolve)
         }
         _ => false,
     }
@@ -350,17 +396,21 @@ fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool) -> 
 ///
 /// Returns `None` when nothing should change: not an integer constant, an
 /// unknown width, or a value (and all subexpressions) that already fits.
-pub fn fold_constant(operand: &hy_syntax::Expr, spec_name: &str) -> Option<i128> {
+pub fn fold_constant(
+    operand: &hy_syntax::Expr,
+    spec_name: &str,
+    resolve: &ConstLookup<'_>,
+) -> Option<i128> {
     let (bits, signed) = width_of(spec_name)?;
     if bits > 64 {
         return None;
     }
-    let v = const_int_expr(operand)?;
+    let v = const_int_expr(operand, resolve, 0)?;
     let folded = v.truncate_to_width(bits, signed);
 
     // Only rewrite what Go would refuse; a fitting value whose sub-operands
     // also fit in the target width stays verbatim.
-    if v.to_i128() == Some(folded) && !has_out_of_range_subexpr(operand, bits, signed) {
+    if v.to_i128() == Some(folded) && !has_out_of_range_subexpr(operand, bits, signed, resolve) {
         None
     } else {
         Some(folded)
@@ -370,6 +420,37 @@ pub fn fold_constant(operand: &hy_syntax::Expr, spec_name: &str) -> Option<i128>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A resolver that knows no constants — the pre-#1726 behaviour, and the
+    /// right answer for the tests below, which all use literal operands.
+    fn no_consts(_name: &str) -> Option<hy_syntax::Expr> {
+        None
+    }
+
+    /// Build a resolver from a list of `(name, initializer source)` pairs by
+    /// parsing the initializer as an expression.
+    fn consts_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<hy_syntax::Expr> + 'a {
+        let table: Vec<(String, hy_syntax::Expr)> = pairs
+            .iter()
+            .map(|(n, src)| {
+                let e = hy_syntax::parse_file("t.hy", &format!("fn main() {{ x := {src} }}"))
+                    .expect("parse");
+                let f = e.fns().next().unwrap();
+                let stmt = &f.body.as_ref().unwrap().stmts[0];
+                let val = match stmt {
+                    hy_syntax::Stmt::Local(l) => l.values[0].clone(),
+                    _ => panic!("expected a local"),
+                };
+                ((*n).to_string(), val)
+            })
+            .collect();
+        move |name: &str| {
+            table
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+        }
+    }
 
     /// The first argument of a one-argument call expression - the shape the
     /// emitter hands to `fold_constant` (`u8(300)` -> the `300` literal).
@@ -394,13 +475,13 @@ mod tests {
     fn spec_example_folds_to_44() {
         // The SPEC's own claim: `b := u8(300)  // expect: 44`.
         let operand = operand_of("fn main() { b := u8(300) }");
-        assert_eq!(fold_constant(&operand, "u8"), Some(44));
+        assert_eq!(fold_constant(&operand, "u8", &no_consts), Some(44));
     }
 
     #[test]
     fn fitting_value_is_untouched() {
         let operand = operand_of("fn main() { b := u8(7) }");
-        assert_eq!(fold_constant(&operand, "u8"), None, "7 fits, must not fold");
+        assert_eq!(fold_constant(&operand, "u8", &no_consts), None, "7 fits, must not fold");
     }
 
     #[test]
@@ -415,7 +496,7 @@ mod tests {
     fn signed_target_truncates_twos_complement() {
         // 200 does not fit i8; two's complement in 8 bits is -56.
         let operand = operand_of("fn main() { b := i8(200) }");
-        assert_eq!(fold_constant(&operand, "i8"), Some(-56));
+        assert_eq!(fold_constant(&operand, "i8", &no_consts), Some(-56));
     }
 
     #[test]
@@ -431,11 +512,60 @@ mod tests {
         // the same SPEC X4 fold instead of emitting `int8(300)` verbatim
         // (go: `constant 300 overflows int8`).
         let operand = operand_of("fn main() { b := int8(300) }");
-        assert_eq!(fold_constant(&operand, "int8"), Some(44));
+        assert_eq!(fold_constant(&operand, "int8", &no_consts), Some(44));
         let operand = operand_of("fn main() { b := byte(300) }");
-        assert_eq!(fold_constant(&operand, "byte"), Some(44));
+        assert_eq!(fold_constant(&operand, "byte", &no_consts), Some(44));
         let operand = operand_of("fn main() { b := rune(99999999999) }");
-        assert_eq!(fold_constant(&operand, "rune"), Some(1215752191));
+        assert_eq!(fold_constant(&operand, "rune", &no_consts), Some(1215752191));
+    }
+
+    #[test]
+    fn named_file_const_operand_folds() {
+        // Issue #1726: `u8(300)` folds to 44, but the identical conversion
+        // through a NAMED const emitted `uint8(big)` verbatim and died in Go
+        // with `constant 300 overflows uint8`.
+        let resolver = consts_of(&[("big", "300")]);
+        let operand = operand_of("fn main() { b := u8(big) }");
+        assert_eq!(fold_constant(&operand, "u8", &resolver), Some(44));
+    }
+
+    #[test]
+    fn named_const_chain_folds() {
+        // `const a = 300; const b = a` — the fold has to follow the chain.
+        let resolver = consts_of(&[("a", "300"), ("b", "a")]);
+        let operand = operand_of("fn main() { b := u8(b) }");
+        assert_eq!(fold_constant(&operand, "u8", &resolver), Some(44));
+    }
+
+    #[test]
+    fn named_const_in_range_is_untouched() {
+        // A named const that already fits must keep the "emit verbatim"
+        // contract: no currently-working program changes shape.
+        let resolver = consts_of(&[("small", "44")]);
+        let operand = operand_of("fn main() { b := u8(small) }");
+        assert_eq!(
+            fold_constant(&operand, "u8", &resolver),
+            None,
+            "44 fits u8 — a named const must not be rewritten either"
+        );
+    }
+
+    #[test]
+    fn cyclic_consts_terminate() {
+        // `const a = b; const b = a` cannot be folded; it must RETURN rather
+        // than recurse until the stack dies (issue #1587 §3's class of bug).
+        let cyclic = |name: &str| -> Option<hy_syntax::Expr> {
+            let src = if name == "a" { "b" } else { "a" };
+            let e = hy_syntax::parse_file("t.hy", &format!("fn main() {{ x := {src} }}")).ok()?;
+            let f = e.fns().next()?;
+            let stmt = &f.body.as_ref()?.stmts[0];
+            match stmt {
+                hy_syntax::Stmt::Local(l) => Some(l.values[0].clone()),
+                _ => None,
+            }
+        };
+        let operand = operand_of("fn main() { b := u8(a) }");
+        assert_eq!(fold_constant(&operand, "u8", &cyclic), None);
     }
 
     #[test]
@@ -443,10 +573,10 @@ mod tests {
         // issue #228 C3: Go rejects `uint8(-1)` exactly like `uint8(300)`,
         // so the sign has to reach the fold — `-1` truncates to 255.
         let operand = operand_of("fn main() { b := uint8(-1) }");
-        assert_eq!(fold_constant(&operand, "uint8"), Some(255));
+        assert_eq!(fold_constant(&operand, "uint8", &no_consts), Some(255));
         let operand = operand_of("fn main() { b := i8(-300) }");
-        assert_eq!(fold_constant(&operand, "i8"), Some(-44));
+        assert_eq!(fold_constant(&operand, "i8", &no_consts), Some(-44));
         let operand = operand_of("fn main() { b := int8((300)) }");
-        assert_eq!(fold_constant(&operand, "int8"), Some(44));
+        assert_eq!(fold_constant(&operand, "int8", &no_consts), Some(44));
     }
 }
