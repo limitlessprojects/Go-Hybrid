@@ -353,6 +353,13 @@ def render(tpl: str) -> str:
     return out
 
 
+def _matches_expected(path: pathlib.Path, content: str) -> bool:
+    try:
+        return path.read_bytes() == content.encode("utf-8")
+    except OSError:
+        return False
+
+
 RUST_TOML = """[package]
 name = "workloads"
 version = "0.1.0"

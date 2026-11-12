@@ -1,15 +1,22 @@
 """Offline CLI regressions for the workload generator's read-only check mode."""
 from pathlib import Path
 import hashlib
+import importlib.util
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SHAPE_SPEC = importlib.util.spec_from_file_location(
+    "workload_shape", ROOT / "benchmarks/workloads/shape.py",
+)
+SHAPE = importlib.util.module_from_spec(SHAPE_SPEC)
+SHAPE_SPEC.loader.exec_module(SHAPE)
 GENERATED = (
     "go/main.go",
     "rust/src/main.rs",
@@ -99,6 +106,22 @@ class WorkloadShapeTests(unittest.TestCase):
         result = self.assert_check_preserves_tree(1)
         self.assertIn("hy/load.hy", result.stdout)
 
+    def test_crlf_drift_fails_without_rewriting_the_file(self):
+        target = self.workloads / "go/main.go"
+        target.write_bytes(target.read_bytes().replace(b"\n", b"\r\n"))
+        result = self.assert_check_preserves_tree(1)
+        self.assertIn("go/main.go", result.stdout)
+
+    def test_invalid_utf8_fails_without_traceback(self):
+        target = self.workloads / "go/main.go"
+        target.write_bytes(target.read_bytes() + b"\xff")
+        result = self.assert_check_preserves_tree(1)
+        self.assertIn("go/main.go", result.stdout)
+
+    def test_read_error_is_reported_as_drift(self):
+        with mock.patch.object(Path, "read_bytes", side_effect=OSError("unreadable")):
+            self.assertFalse(SHAPE._matches_expected(Path("generated"), "content"))
+
     def assert_args_preserve_tree(self, args, expected_code):
         # A drifted file distinguishes validation from accidental regeneration.
         (self.workloads / "go/main.go").write_text("// keep this drifted file\n")
@@ -129,8 +152,8 @@ class WorkloadShapeTests(unittest.TestCase):
 
     def test_generation_restores_all_five_outputs(self):
         expected = {name: (self.workloads / name).read_bytes() for name in GENERATED}
-        for name in GENERATED:
-            (self.workloads / name).unlink()
+        for directory in ("go", "rust", "hy"):
+            shutil.rmtree(self.workloads / directory)
         result = self.run_shape()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
