@@ -442,6 +442,32 @@ fn elem_types_conflict(want: &str, got: &str) -> bool {
     false
 }
 
+/// #3266 — extract the payload type name from an option type string `option[T]`.
+fn option_payload_type_name(s: &str) -> Option<&str> {
+    let t = s.trim();
+    if !t.starts_with("option[") {
+        return None;
+    }
+    let rest = &t[7..];
+    let mut depth = 1;
+    for (i, c) in rest.char_indices() {
+        if c == '[' {
+            depth += 1;
+        } else if c == ']' {
+            depth -= 1;
+            if depth == 0 {
+                if rest[i + 1..].trim().is_empty() {
+                    let inner = rest[..i].trim();
+                    return if inner.is_empty() { None } else { Some(inner) };
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -1300,6 +1326,56 @@ impl<'a> Collector<'a> {
                                     }
                                     break;
                                 }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// #3266 — extract the payload type name of an option-typed subject in a match statement.
+    fn option_subject_payload_type(&self, subject: &Expr) -> Option<String> {
+        let bare = unwrap_parens(subject);
+        if let Some(tname) = self.typed_value_type_name(bare) {
+            if let Some(payload) = option_payload_type_name(&tname) {
+                return Some(payload.to_string());
+            }
+        }
+        match bare {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "some" {
+                        if let Some(first) = args.first() {
+                            if let Some(tname) = self.typed_value_type_name(&first.value) {
+                                return Some(tname);
+                            }
+                            if let Some(s) = self.typed_value_scalar(&first.value) {
+                                return Some(s.to_string());
+                            }
+                        }
+                    }
+                    if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                        if fd.results.len() == 1 {
+                            let rty = fd.results[0].ty.render();
+                            if let Some(payload) = option_payload_type_name(&rty) {
+                                return Some(payload.to_string());
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                if let Some(sn) = self.struct_base_name(&bk) {
+                    if let Some(fields) = self.ck.structs.get(&sn) {
+                        if let Some((_, fty)) = fields.iter().find(|(n, _)| n == name) {
+                            let fty_str = fty.render();
+                            if let Some(payload) = option_payload_type_name(&fty_str) {
+                                return Some(payload.to_string());
                             }
                         }
                     }
@@ -2685,6 +2761,15 @@ impl<'a> Collector<'a> {
                                     OpKind::Unknown
                                 };
                                 self.bind_kind(b, bind_k);
+                                // #3266: payload binding `some(v)` inherits the exact scalar width and array length.
+                                if segments.first().map(|s| s.as_str()) == Some("some") {
+                                    if let Some(payload_ty) = self.option_subject_payload_type(subject) {
+                                        if let Some(s) = canonical_numeric_name(&payload_ty) {
+                                            self.set_scalar(b, Some(s));
+                                        }
+                                        self.bind_type_name(b, payload_ty);
+                                    }
+                                }
                             }
                         }
                         MatchPattern::Lit(lit) => {
