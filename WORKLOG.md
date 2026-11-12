@@ -987,3 +987,17 @@
 **Band structural verdict (S177 dual-table rule)**: none of sha1/md5/crc32/xml/csv are on either curated surface in main (verified both tables) → these are NEW curated packages → both sides required. **SADIQ2M band: all 5 PRs carry foreign.rs + hy-emit/lib.rs + shapes.rs (dual-table complete). dextermos band: #4303/#4302/#4301/#4300/#4294 lack hy-emit/lib.rs (emit-side is_package_root missing = #4318 failure mode); only #4319 has it.** → Land SADIQ2M series first (start #4296); dextermos PRs become superseded/incomplete on overlap.
 
 **State**: main `17dbe9f9` == origin (asserted). Tests 3289, suites 507, corpus 139/139, differential FULL. Reply drafts staged: notes/reply-4281.md (post on reset). Next tick: post 4281 reply → approve CI → SADIQ2M #4296 four-gate verification → band dominoes.
+
+## Session 186 — 2026-11-12 14:10 (+08; 06:10 UTC; after ~28h gap: S185-cont completed #4290 landing mid-window per maintainer)
+
+**Token restored** (new key from maintainer, identity `limitlessprojects`). REST core pool was pre-burned 5000/0 on arrival (resets 07:32 UTC) — **GraphQL pool separate (4998/5000): all API work this tick went via GraphQL**; anonymous IP pool also burned (shared egress 8.212.10.159). Git protocol unaffected: push/ls-remote work.
+
+**State**: main `17dbe9f9` == origin (asserted). #4290 FULLY CLOSED: pushed, merged (efe19789), reply posted by maintainer 2026-11-11 ~06:15 UTC (verbatim my S185 draft).
+
+**Reviewed, no landing: #4281** (seenorht-family, 54234260) — merge gate FAIL vs main: conflict in `channel_liveness_4200.rs` (both branches restructured same test file; #4290 landed its restructure). Supersession: 3 of 4 checker hunks line-identical to landed #4290 (register_pipe / Assign-path / else-scope); UNIQUE remainder = close/drain decoupling (`close(tx)` no longer auto-marks rx drained; stricter, flip-risk needs full gates). **Evidence reply posted** via GraphQL `IC_kwDOVFB-j88AAAABlkkNfg`: author asked to rebase, drop superseded hunks, keep decoupling + tests.
+
+**Screened**: fresh wave top-40 via GraphQL (newest #4387; queue fully rotated past old SADIQ2M/dextermos bands). All 7 checked heads stale at 7cf29833 (one merge behind, digestible). Merge gates: #4350 CLEAN; #4331/#4347/#4364 (seenorht family) all conflict on the same test file (family serialized behind author rebase).
+
+**#4350 (wminno, generic user-fn call arity, fixes #1961) — NEXT TICK LEAD**: merge-clean BUT branch forked pre-#4290-landing and bundles liveness-family content: channel_liveness.rs net-delta 141 lines vs main (needs read; likely #4281-style), test file net-delta 1341, and WORKLOG.md delta would silently delete Session-185 entries on auto-merge → landing REQUIRES in-merge WORKLOG restore + liveness-delta adjudication. Zero corruption markers (screen clean). Gates not yet run.
+
+**Scouted next**: #4350 full verification (in-merge fixups ready); #4378 matrixneoaiagent examples-restore (#4236 tree) — dedupe against #4311/#4335; #4380 BP202302 tools (differential reports decode); #4336 cryptowebbuild tools (check_claims_links); #4333 knk97874 test battery; #4337 rrios13 test guard. seenorht #4364/#4347/#4331 await author rebase (test-file lineage). Pending authors unchanged: #4199, #4206, #4097, #4217, #4219, #743.
