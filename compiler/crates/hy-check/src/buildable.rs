@@ -1635,6 +1635,24 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// E1002 messages: name an operand by its exact numeric spelling
+    /// (`int32`, `float32`) when it is known, so a width mismatch does not read
+    /// as "found `int` and `int`". Falls back to the coarse kind label.
+    fn operand_label(&self, e: &Expr, k: &OpKind) -> String {
+        match self.typed_value_scalar(e) {
+            Some(s) => s.to_string(),
+            None => k.label(),
+        }
+    }
+
+    /// Same as `operand_label` for a compound-assignment target.
+    fn place_label(&self, p: &Place, k: &OpKind) -> String {
+        match self.place_scalar(p) {
+            Some(s) => s.to_string(),
+            None => k.label(),
+        }
+    }
+
     /// #2770: two TYPED values of different canonical numeric types (e.g.
     /// `float32` vs `float64`, `int` vs `int64`) are distinct Go types and
     /// cannot combine, compare, or assign directly. `typed_value_scalar` is
@@ -4852,15 +4870,16 @@ impl<'a> Collector<'a> {
                         .chain(self.diags.iter())
                         .any(|d| d.code == "HYB-E3012" && d.span == f.value.span());
                     if conflict && !already_diagnosed_e3012 {
+                        let got_label = self.operand_label(&f.value, &got);
+                        let want_label = match self.scalar_of_ty(fty) {
+                            Some(s) => s.to_string(),
+                            None => want.label(),
+                        };
                         self.emit_e1002(
                             f.value.span(),
                             format!(
                                 "cannot use a value of type `{}` for field `{}` of `{}` (declared `{}`) — Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
-                                got.label(),
-                                f.name,
-                                full_name,
-                                want.label(),
-                                want.label()
+                                got_label, f.name, full_name, want_label, want_label
                             ),
                             "the field's declared type is fixed; write an explicit conversion when a conversion is intended",
                         );
@@ -6536,8 +6555,8 @@ impl<'a> Collector<'a> {
                                 "invalid operation `{}`: operator `{}` requires comparable operands of matching type, found `{}` and `{}` (HYB-E1002)",
                                 span_expr_label(lhs, op_str, rhs),
                                 op_str,
-                                lk.label(),
-                                rk.label()
+                                self.operand_label(lhs, &lk),
+                                self.operand_label(rhs, &rk)
                             ),
                             "equality operators (`==`, `!=`) require operands of matching type",
                         );
@@ -6549,7 +6568,7 @@ impl<'a> Collector<'a> {
                             "invalid operation `{}`: operator `{}` not defined between untyped nil and `{}` (HYB-E1002)",
                             span_expr_label(lhs, op_str, rhs),
                             op_str,
-                            rk.label()
+                            self.operand_label(rhs, &rk)
                         ),
                         "operator `==` and `!=` cannot compare untyped nil to non-nilable types (SPEC §3.1 N1)",
                     );
@@ -6560,7 +6579,7 @@ impl<'a> Collector<'a> {
                             "invalid operation `{}`: operator `{}` not defined between `{}` and untyped nil (HYB-E1002)",
                             span_expr_label(lhs, op_str, rhs),
                             op_str,
-                            lk.label()
+                            self.operand_label(lhs, &lk)
                         ),
                         "operator `==` and `!=` cannot compare untyped nil to non-nilable types (SPEC §3.1 N1)",
                     );
@@ -6578,8 +6597,8 @@ impl<'a> Collector<'a> {
                             "invalid operation `{}`: operator `{}` requires `bool` operands, found `{}` and `{}` (HYB-E1002)",
                             span_expr_label(lhs, op_str, rhs),
                             op_str,
-                            lk.label(),
-                            rk.label()
+                            self.operand_label(lhs, &lk),
+                            self.operand_label(rhs, &rk)
                         ),
                         "both sides of `&&` and `||` must evaluate to `bool`",
                     );
@@ -6606,8 +6625,8 @@ impl<'a> Collector<'a> {
                         format!(
                             "operator `{}` not defined on `{}` and `{}` in `{}` (HYB-E1002)",
                             op_str,
-                            lk.label(),
-                            rk.label(),
+                            self.operand_label(lhs, &lk),
+                            self.operand_label(rhs, &rk),
                             span_expr_label(lhs, op_str, rhs)
                         ),
                         "ordered comparisons (`<`, `<=`, `>`, `>=`) require two numeric values or two strings",
@@ -6629,8 +6648,8 @@ impl<'a> Collector<'a> {
                         format!(
                             "invalid operation `{}` (mismatched or non-addable types `{}` and `{}`) (HYB-E1002)",
                             span_expr_label(lhs, "+", rhs),
-                            lk.label(),
-                            rk.label()
+                            self.operand_label(lhs, &lk),
+                            self.operand_label(rhs, &rk)
                         ),
                         "`+` requires two numeric operands or two strings; use string interpolation `\"{x}{s}\"` to format mixed values",
                     );
@@ -6656,8 +6675,8 @@ impl<'a> Collector<'a> {
                             "invalid operation `{}`: operator `{}` not defined on `{}` and `{}` (HYB-E1002)",
                             span_expr_label(lhs, op_str, rhs),
                             op_str,
-                            lk.label(),
-                            rk.label()
+                            self.operand_label(lhs, &lk),
+                            self.operand_label(rhs, &rk)
                         ),
                         "arithmetic `-`, `*`, `/` require numeric operands",
                     );
@@ -6689,8 +6708,8 @@ impl<'a> Collector<'a> {
                             "invalid operation `{}`: operator `{}` requires integer operands, found `{}` and `{}` (HYB-E1002)",
                             span_expr_label(lhs, op_str, rhs),
                             op_str,
-                            lk.label(),
-                            rk.label()
+                            self.operand_label(lhs, &lk),
+                            self.operand_label(rhs, &rk)
                         ),
                         "modulo, bitwise, and shift operators require integer operands",
                     );
@@ -6765,10 +6784,10 @@ impl<'a> Collector<'a> {
                             span,
                             format!(
                                 "cannot assign a value of type `{}` to `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
-                                vk.label(),
+                                self.operand_label(&values[0], &vk),
                                 target.render(),
-                                tk.label(),
-                                tk.label()
+                                self.place_label(target, &tk),
+                                self.place_label(target, &tk)
                             ),
                             "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
                         );
@@ -6881,7 +6900,7 @@ impl<'a> Collector<'a> {
                             "invalid operation `{}{}` (non-numeric type `{}`) (HYB-E1002)",
                             target.render(),
                             op_str,
-                            tk.label()
+                            self.place_label(target, &tk)
                         ),
                         "`++` and `--` require a numeric variable or place",
                     );
@@ -6929,8 +6948,8 @@ impl<'a> Collector<'a> {
                             "invalid operation `{} += {}` (mismatched or non-addable types `{}` and `{}`) (HYB-E1002)",
                             target.render(),
                             val.render(),
-                            tk.label(),
-                            vk.label()
+                            self.place_label(target, &tk),
+                            self.operand_label(val, &vk)
                         ),
                         "`+=` requires two numeric values or two strings of matching types",
                     );
@@ -6982,8 +7001,8 @@ impl<'a> Collector<'a> {
                             target.render(),
                             op_sym,
                             val.render(),
-                            tk.label(),
-                            vk.label()
+                            self.place_label(target, &tk),
+                            self.operand_label(val, &vk)
                         ),
                         "`-=`, `*=`, `/=` require numeric operands of matching types",
                     );
@@ -7031,9 +7050,9 @@ impl<'a> Collector<'a> {
                         format!(
                             "invalid integer compound assignment on `{}` (type `{}`) and `{}` (type `{}`) (HYB-E1002)",
                             target.render(),
-                            tk.label(),
+                            self.place_label(target, &tk),
                             val.render(),
-                            vk.label()
+                            self.operand_label(val, &vk)
                         ),
                         "integer compound assignment operators require integer operands",
                     );
