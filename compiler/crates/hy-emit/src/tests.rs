@@ -1304,6 +1304,99 @@ fn set_insert_uses_prelude() {
     assert!(go.contains("return seen.insert(3)"), ":\n{}", go);
 }
 
+// #777: a user declaration that would collide with the injected Hybrid
+// prelude (option / set / hy_pop / hy_n5_make / their `some`) makes the
+// program accepted by `hyb check` and unbuildable by Go. Fail loudly at emit
+// time so the user gets a precise message instead of a `redeclared in this
+// block` from the Go compiler.
+
+#[test]
+fn user_fn_some_rejected_when_option_prelude_injected() {
+    let msg = emit_err(
+        "fn some(x int) int {\n    return x + 1\n}\n\nfn has(o option[int]) bool {\n    return o.is_some()\n}\n\nfn main() {\n    n := some(1)\n    fmt.println(\"{n}\")\n}\n",
+    );
+    assert!(
+        msg.contains("user declaration of `some`") && msg.contains("#777"),
+        "expected clash on `some` (#777), got: {}",
+        msg
+    );
+}
+
+#[test]
+fn user_type_option_rejected_when_option_prelude_injected() {
+    let msg = emit_err(
+        "struct option { n int }\n\nfn has(o option[int]) bool {\n    return o.is_some()\n}\n\nfn main() {\n    v := option{n: 1}\n    fmt.println(\"{v.n}\")\n}\n",
+    );
+    assert!(
+        msg.contains("user declaration of `option`") && msg.contains("#777"),
+        "expected clash on `option` (#777), got: {}",
+        msg
+    );
+}
+
+#[test]
+fn user_fn_some_rejected_when_calling_user_some_even_without_option_type() {
+    // The option prelude is injected not only when the program references
+    // `option[T]`, but also when it contains a bare `some(` call (the existing
+    // `needs_option` predicate). A program with its own `fn some` that *calls*
+    // it still gets the prelude and still collides. The guard fires on
+    // `needs_option` exactly because the prelude is about to be emitted.
+    let msg = emit_err(
+        "fn some(x int) int {\n    return x + 1\n}\n\nfn main() {\n    n := some(1)\n    fmt.println(\"{n}\")\n}\n",
+    );
+    assert!(
+        msg.contains("user declaration of `some`") && msg.contains("#777"),
+        "expected clash on `some` even without `option[T]` (#777), got: {}",
+        msg
+    );
+}
+
+#[test]
+fn user_fn_set_rejected_when_set_prelude_injected() {
+    let msg = emit_err(
+        "fn set(x int) int {\n    return x\n}\n\nfn main() {\n    seen := set[int]{}\n    _ = seen\n}\n",
+    );
+    assert!(
+        msg.contains("user declaration of `set`") && msg.contains("#777"),
+        "expected clash on `set` (#777), got: {}",
+        msg
+    );
+}
+
+#[test]
+fn user_fn_hy_pop_rejected_when_pop_prelude_injected() {
+    let msg = emit_err(
+        "fn hy_pop(x int) int {\n    return x\n}\n\nfn main() {\n    v := make([]int, 1)\n    _ = hy_pop(&v)\n}\n",
+    );
+    assert!(
+        msg.contains("user declaration of `hy_pop`") && msg.contains("#777"),
+        "expected clash on `hy_pop` (#777), got: {}",
+        msg
+    );
+}
+
+#[test]
+fn user_fn_hy_n5_make_rejected_when_n5_make_prelude_injected() {
+    let msg = emit_err(
+        "fn hy_n5_make(n int) int {\n    return n\n}\n\nfn main() {\n    s := make([]int, 1)\n    _ = s\n}\n",
+    );
+    assert!(
+        msg.contains("user declaration of `hy_n5_make`") && msg.contains("#777"),
+        "expected clash on `hy_n5_make` (#777), got: {}",
+        msg
+    );
+}
+
+#[test]
+fn prelude_names_ok_when_no_user_collision() {
+    // Sanity: a program that uses the prelude without redeclaring any of its
+    // names must still emit cleanly.
+    let go = emit(
+        "fn has(o option[int]) bool {\n    return o.is_some()\n}\n\nfn main() {\n    v := option{n: 1}\n    _ = v\n    _ = has(v)\n}\n",
+    );
+    assert!(go.contains("type option[v any] struct"), "option prelude:\n{}", go);
+}
+
 #[test]
 fn slice_pop_uses_prelude_helper() {
     let go =
