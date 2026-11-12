@@ -74,6 +74,14 @@ fn main() {
 }
 "#;
     assert_has_code(src_call, "HYB-E2005");
+
+    let src_none = r#"
+fn main() {
+    p := new(none)
+    _ = p
+}
+"#;
+    assert_has_code(src_none, "HYB-E2005");
 }
 
 #[test]
