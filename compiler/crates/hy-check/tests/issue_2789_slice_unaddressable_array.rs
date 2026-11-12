@@ -52,6 +52,30 @@ fn slicing_map_element_array_rejected() {
 }
 
 #[test]
+fn slicing_struct_literal_array_field_rejected() {
+    assert_unaddressable(
+        "struct box {\n    a [3]int\n}\nfn main() {\n    s := box{a: [3]int{1, 2, 3}}.a[0:2]\n    fmt.println(s)\n}\n",
+    );
+}
+
+#[test]
+fn slicing_channel_receive_array_and_struct_field_rejected() {
+    assert_unaddressable(
+        "fn main() {\n    ch := make(chan [3]int, 1)\n    ch <- [3]int{1, 2, 3}\n    s := (<-ch)[0:2]\n    fmt.println(s)\n}\n",
+    );
+    assert_unaddressable(
+        "struct box {\n    a [3]int\n}\nfn main() {\n    ch := make(chan box, 1)\n    ch <- box{a: [3]int{1, 2, 3}}\n    s := (<-ch).a[0:2]\n    fmt.println(s)\n}\n",
+    );
+}
+
+#[test]
+fn slicing_move_wrapped_unaddressable_array_rejected() {
+    assert_unaddressable(
+        "fn arr() [3]int {\n    return [3]int{1, 2, 3}\n}\nfn main() {\n    s := (move arr())[1:]\n    fmt.println(s)\n}\n",
+    );
+}
+
+#[test]
 fn slicing_addressable_arrays_slices_and_strings_accepted() {
     let src = "struct box {\n    a [3]int\n}\nfn sl() []int {\n    return []int{1, 2, 3}\n}\nfn main() {\n    a := [3]int{1, 2, 3}\n    b := box{a: [3]int{4, 5, 6}}\n    p := &a\n    m := map[string][]int{\"k\": []int{1, 2}}\n    fmt.println(a[0:2], b.a[1:], p[:1], sl()[1:], m[\"k\"][:1], []int{1, 2}[1:], \"abc\"[1:])\n}\n";
     let diags = check(src);
