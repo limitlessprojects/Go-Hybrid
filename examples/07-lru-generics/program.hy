@@ -29,7 +29,16 @@ fn (c *lru_cache[k, v]) put(key k, value v) {
     c.touch(key)
 }
 
-fn (c *lru_cache[k, v]) touch(key k) { /* move key to back of order */ }
+fn (c *lru_cache[k, v]) touch(key k) {
+    // move key to back of order (most recently used)
+    for i, e in c.order {
+        if e == key {
+            c.order = append(c.order[:i], c.order[i+1:]...)
+            break
+        }
+    }
+    c.order = append(c.order, key)
+}
 
 fn main() {
     c := lru_cache.new[string, int](2)             // instantiates for (string, int)

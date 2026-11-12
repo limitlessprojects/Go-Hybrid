@@ -8588,6 +8588,9 @@ impl<'a> Collector<'a> {
                     if pkg == "io" && self.lookup_kind(pkg).is_none() {
                         self.check_io_call_buildable(name, args, span);
                     }
+                    if (pkg == "json" || pkg == "encoding/json") && self.lookup_kind(pkg).is_none() {
+                        self.check_json_package_call(name.as_str(), args, span);
+                    }
 
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
@@ -9846,6 +9849,144 @@ impl<'a> Collector<'a> {
                     )]),
                 );
             }
+        }
+    }
+
+    fn check_json_package_call(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "decoder"
+            | "encoder"
+            | "raw_message"
+            | "delim"
+            | "token"
+            | "number"
+            | "syntax_error"
+            | "marshaler"
+            | "unmarshaler"
+            | "unsupported_type_error"
+            | "unsupported_value_error"
+            | "invalid_unmarshal_error"
+            | "invalid_utf8_error"
+            | "unmarshal_field_error"
+            | "unmarshal_type_error" => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot call json.{}: package symbol is a variable, constant, or type, not a function (HYB-E1002)",
+                        name
+                    ),
+                    &format!("refer to json.{} as a value or type rather than calling it", name),
+                );
+            }
+            "marshal" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "json.marshal takes exactly 1 argument (v), got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write json.marshal(v)",
+                    );
+                }
+            }
+            "marshal_indent" => {
+                if args.len() != 3 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "json.marshal_indent takes exactly 3 arguments (v, prefix, indent), got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write json.marshal_indent(v, prefix, indent)",
+                    );
+                }
+            }
+            "unmarshal" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "json.unmarshal takes exactly 2 arguments (data, v), got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write json.unmarshal(data, v)",
+                    );
+                }
+            }
+            "valid" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "json.valid takes exactly 1 argument (data), got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write json.valid(data)",
+                    );
+                }
+            }
+            "compact" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "json.compact takes exactly 2 arguments (dst, src), got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write json.compact(dst, src)",
+                    );
+                }
+            }
+            "html_escape" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "json.html_escape takes exactly 2 arguments (dst, src), got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write json.html_escape(dst, src)",
+                    );
+                }
+            }
+            "indent" => {
+                if args.len() != 4 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "json.indent takes exactly 4 arguments (dst, src, prefix, indent), got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write json.indent(dst, src, prefix, indent)",
+                    );
+                }
+            }
+            "new_decoder" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "json.new_decoder takes exactly 1 argument (r), got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write json.new_decoder(r)",
+                    );
+                }
+            }
+            "new_encoder" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "json.new_encoder takes exactly 1 argument (w), got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write json.new_encoder(w)",
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
