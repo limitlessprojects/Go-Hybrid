@@ -4495,6 +4495,99 @@ impl<'a> Collector<'a> {
         }
     }
 
+    // Full `strconv` call surface — every member the member table in
+    // foreign.rs blesses, with the arity of the Go name it lowers to
+    // (`to_go_name`: snake case -> CamelCase, e.g. `parse_int` -> ParseInt,
+    // `quote_rune_to_ascii` -> QuoteRuneToASCII). Arities are the Go
+    // std signatures on the pinned toolchain (go1.26.9). Before this, any
+    // strconv call passed `hyb check` with any arity and non-callable
+    // members (constants `int_size`, package error vars `err_range` /
+    // `err_syntax`, struct type `num_error`) could be called as functions —
+    // both blow up at `go build` instead (Row 13 BUILDABLE: reject
+    // fail-closed, HYB-E1002). Never over-reject: only members the table
+    // blesses are listed, and every accepted call matches its Go signature.
+    fn check_strconv_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        // Package-level values and types are not callable.
+        if matches!(member, "int_size" | "err_range" | "err_syntax" | "num_error") {
+            self.emit_e1002(
+                span,
+                format!("`strconv.{member}` is not a function — it is a package-level value/type and cannot be called (HYB-E1002)"),
+                &format!("reference `strconv.{member}` directly, do not call it"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            // 1 arg: Atoi(s), Itoa(i), ParseBool(str), FormatBool(b),
+            // CanBackquote(s), IsGraphic(r), IsPrint(r), Quote(s),
+            // QuoteRune(r), QuoteRuneToASCII(r), QuoteRuneToGraphic(r),
+            // QuoteToASCII(s), QuoteToGraphic(s), QuotedPrefix(s),
+            // Unquote(s)
+            "atoi" | "itoa" | "parse_bool" | "format_bool" | "can_backquote"
+            | "is_graphic" | "is_print" | "quote" | "quote_rune"
+            | "quote_rune_to_ascii" | "quote_rune_to_graphic" | "quote_to_ascii"
+            | "quote_to_graphic" | "quoted_prefix" | "unquote" => Some(1),
+            // 2 args: ParseComplex(s, bitSize), ParseFloat(s, bitSize),
+            // FormatInt(i, base), FormatUint(u, base), AppendBool(dst, b),
+            // AppendQuote(dst, s), AppendQuoteRune(dst, r),
+            // AppendQuoteRuneToASCII(dst, r), AppendQuoteRuneToGraphic(dst, r),
+            // AppendQuoteToASCII(dst, s), AppendQuoteToGraphic(dst, s),
+            // UnquoteChar(s, quote)
+            "parse_complex" | "parse_float" | "format_int" | "format_uint"
+            | "append_bool" | "append_quote" | "append_quote_rune"
+            | "append_quote_rune_to_ascii" | "append_quote_rune_to_graphic"
+            | "append_quote_to_ascii" | "append_quote_to_graphic"
+            | "unquote_char" => Some(2),
+            // 3 args: ParseInt(s, base, bitSize), ParseUint(s, base, bitSize),
+            // AppendInt(dst, i, base), AppendUint(dst, u, base)
+            "parse_int" | "parse_uint" | "append_int" | "append_uint" => Some(3),
+            // 4 args: FormatComplex(c, fmt, prec, bitSize),
+            // FormatFloat(f, fmt, prec, bitSize)
+            "format_complex" | "format_float" => Some(4),
+            // 5 args: AppendFloat(dst, f, fmt, prec, bitSize)
+            "append_float" => Some(5),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `strconv.{member}` (HYB-E1002)"),
+                    &format!("`strconv.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let go_name = {
+                    // mirror hy-emit's to_go_name without a cross-crate dep
+                    // (hy-check must not depend on hy-emit).
+                    let mut out = String::new();
+                    for part in member.split('_') {
+                        if part.is_empty() {
+                            continue;
+                        }
+                        let mut cs = part.chars();
+                        if let Some(c) = cs.next() {
+                            out.extend(c.to_uppercase());
+                        }
+                        out.push_str(cs.as_str());
+                    }
+                    out
+                };
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`strconv.{member}` takes exactly {expected} argument{}, got {} (HYB-E1002)",
+                        if expected == 1 { "" } else { "s" },
+                        args.len()
+                    ),
+                    &format!(
+                        "match the arity of the Go function this lowers to (`strconv.{go_name}`)"
+                    ),
+                );
+            }
+        }
+    }
+
     fn check_sort_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(member, "interface" | "int_slice" | "float64_slice" | "string_slice") {
             self.emit_e1002(
@@ -5163,6 +5256,74 @@ impl<'a> Collector<'a> {
     /// A name bound to a local (including a fn-typed variable or closure) is
     /// skipped by the caller — the local's arity is not tracked here — and a
     /// builtin never reaches this point because builtins are not in `fns`.
+    /// #1961 — generic calls failed open end to end: `check_user_fn_arity`
+    /// bailed on `!f.type_params.is_empty()` and `check_user_fn_arg_types`
+    /// did the same, so `id[int](10, 20, 30)` (explicit instantiation) and
+    /// `id(10, 20, 30)` (inferred) passed `hyb check` with zero diagnostics
+    /// and failed `go build`. The type arguments themselves stay
+    /// uninferrable; this check owns only the argument count and the
+    /// explicit-instantiation type-argument count (Go refuses a wrong one
+    /// with `got N type arguments but want M`).
+    fn check_generic_call_arity(
+        &mut self,
+        name: &str,
+        f: &FnDecl,
+        args: &[CallArg],
+        span: Span,
+    ) {
+        if name.contains('[') && name.ends_with(']') {
+            // Explicit instantiation `id[int, string](...)`: Go refuses a
+            // wrong type-argument count before it looks at the arguments.
+            let open = name.find('[').unwrap();
+            let got = split_top_level_type_args(&name[open + 1..name.len() - 1]).len();
+            let want = f.type_params.len();
+            if got != want {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "got {} type argument{} but want {} for `{}` — Go refuses `got {} type arguments but want {}` (HYB-E1002)",
+                        got,
+                        if got == 1 { "" } else { "s" },
+                        want,
+                        name,
+                        got,
+                        want
+                    ),
+                    "supply one type argument per declared type parameter",
+                );
+                return;
+            }
+        }
+        // A lone multi-value call IS the whole argument list and expands to
+        // one argument per result — #682 U7 owns that comparison (see
+        // `check_user_fn_arity`), so leave it alone here.
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        let (want, got) = (f.params.len(), args.len());
+        if want == got {
+            return;
+        }
+        let go = if got < want {
+            "not enough arguments in call to"
+        } else {
+            "too many arguments in call to"
+        };
+        self.emit_e1002(
+            span,
+            format!(
+                "`{}` takes {} argument{} but is called with {} — Go refuses `{} {}` (HYB-E1002)",
+                name,
+                want,
+                if want == 1 { "" } else { "s" },
+                got,
+                go,
+                name
+            ),
+            "a call must pass one argument per declared parameter; the emitted Go call is rejected at build time",
+        );
+    }
+
     fn check_user_fn_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let head = Checker::base_named_type_str(name);
         let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
@@ -5184,8 +5345,14 @@ impl<'a> Collector<'a> {
             return;
         }
         // Generic instantiations (`id[int](x)`) carry type arguments the
-        // parameter list does not describe; leave them to the type checker.
+        // parameter list does not describe; leave those to the type
+        // checker. #1961: the argument *count* is still checkable — the
+        // emitted Go call fails `go build` verbatim today
+        // (`too many arguments in call to id[int]` / `... to id`) — so a
+        // wrong-count explicit instantiation or inferred generic call is
+        // diagnosed here instead of failing open.
         if !f.type_params.is_empty() {
+            self.check_generic_call_arity(name, f, args, span);
             self.check_uninferable_type_params(name, f, span);
             return;
         }
@@ -5377,6 +5544,11 @@ impl<'a> Collector<'a> {
         let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
             return;
         };
+        // #1961: the argument count of an inferred generic call (`id(10,
+        // 20)`) is now checked by `check_generic_call_arity` via
+        // `check_user_fn_arity`; the type arguments themselves stay
+        // uninferrable, so the per-argument type walk below keeps failing
+        // open.
         if !f.type_params.is_empty() {
             return;
         }
@@ -8235,6 +8407,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sort" && self.lookup_kind(pkg).is_none() {
                         self.check_sort_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "strconv" && self.lookup_kind(pkg).is_none() {
+                        self.check_strconv_package_call(name.as_str(), args, span);
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
