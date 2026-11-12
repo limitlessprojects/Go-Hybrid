@@ -252,24 +252,29 @@ impl WideInt {
     }
 }
 
-fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
+fn const_int_expr<F: Fn(&str) -> bool>(expr: &hy_syntax::Expr, is_unshadowed: &F) -> Option<WideInt> {
     use hy_syntax::{BinOp, Expr, UnOp};
     match expr {
-        Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => const_int_expr(inner),
+        Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => {
+            const_int_expr(inner, is_unshadowed)
+        }
         Expr::Unary {
             op: UnOp::Neg,
             operand,
             ..
-        } => const_int_expr(operand)?.checked_neg(),
+        } => const_int_expr(operand, is_unshadowed)?.checked_neg(),
         Expr::Call { callee, args, .. } => {
             let mut c = callee.as_ref();
             while let Expr::Paren { inner, .. } = c {
                 c = inner;
             }
             let Expr::Ident { name, .. } = c else { return None };
+            if !is_unshadowed(name) {
+                return None;
+            }
             if let Some((bits, signed)) = width_of(name) {
                 if args.len() == 1 && !args[0].spread {
-                    let v = const_int_expr(&args[0].value)?;
+                    let v = const_int_expr(&args[0].value, is_unshadowed)?;
                     return Some(WideInt::from_i128(v.truncate_to_width(bits, signed)));
                 }
             } else if name == "len" && args.len() == 1 && !args[0].spread {
@@ -281,9 +286,9 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
                     return Some(WideInt::from_i128(st.len() as i128));
                 }
             } else if (name == "min" || name == "max") && !args.is_empty() && args.iter().all(|a| !a.spread) {
-                let mut acc = const_int_expr(&args[0].value)?;
+                let mut acc = const_int_expr(&args[0].value, is_unshadowed)?;
                 for a in &args[1..] {
-                    let v = const_int_expr(&a.value)?;
+                    let v = const_int_expr(&a.value, is_unshadowed)?;
                     let lt = v.checked_sub(acc)?.is_neg();
                     if (name == "min" && lt) || (name == "max" && !lt) {
                         acc = v;
@@ -302,8 +307,8 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
             ..
         } => Some(WideInt::from_i128(*c as u32 as i128)),
         Expr::Binary { op, lhs, rhs, .. } => {
-            let l = const_int_expr(lhs)?;
-            let r = const_int_expr(rhs)?;
+            let l = const_int_expr(lhs, is_unshadowed)?;
+            let r = const_int_expr(rhs, is_unshadowed)?;
             match op {
                 BinOp::Add => l.checked_add(r),
                 BinOp::Sub => l.checked_sub(r),
@@ -322,9 +327,14 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
     }
 }
 
-fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool) -> bool {
+fn has_out_of_range_subexpr<F: Fn(&str) -> bool>(
+    expr: &hy_syntax::Expr,
+    bits: u32,
+    signed: bool,
+    is_unshadowed: &F,
+) -> bool {
     use hy_syntax::Expr;
-    let Some(v) = const_int_expr(expr) else {
+    let Some(v) = const_int_expr(expr, is_unshadowed) else {
         return false;
     };
     let folded = v.truncate_to_width(bits, signed);
@@ -335,12 +345,12 @@ fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool) -> 
         Expr::Paren { inner, .. }
         | Expr::Move { operand: inner, .. }
         | Expr::Unary { operand: inner, .. } => {
-            has_out_of_range_subexpr(inner, bits, signed)
+            has_out_of_range_subexpr(inner, bits, signed, is_unshadowed)
         }
         Expr::Call { .. } => true,
         Expr::Binary { lhs, rhs, .. } => {
-            has_out_of_range_subexpr(lhs, bits, signed)
-                || has_out_of_range_subexpr(rhs, bits, signed)
+            has_out_of_range_subexpr(lhs, bits, signed, is_unshadowed)
+                || has_out_of_range_subexpr(rhs, bits, signed, is_unshadowed)
         }
         _ => false,
     }
@@ -350,17 +360,26 @@ fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool) -> 
 ///
 /// Returns `None` when nothing should change: not an integer constant, an
 /// unknown width, or a value (and all subexpressions) that already fits.
+#[cfg(test)]
 pub fn fold_constant(operand: &hy_syntax::Expr, spec_name: &str) -> Option<i128> {
+    fold_constant_with(operand, spec_name, &|_| true)
+}
+
+pub fn fold_constant_with<F: Fn(&str) -> bool>(
+    operand: &hy_syntax::Expr,
+    spec_name: &str,
+    is_unshadowed: &F,
+) -> Option<i128> {
     let (bits, signed) = width_of(spec_name)?;
     if bits > 64 {
         return None;
     }
-    let v = const_int_expr(operand)?;
+    let v = const_int_expr(operand, is_unshadowed)?;
     let folded = v.truncate_to_width(bits, signed);
 
     // Only rewrite what Go would refuse; a fitting value whose sub-operands
     // also fit in the target width stays verbatim.
-    if v.to_i128() == Some(folded) && !has_out_of_range_subexpr(operand, bits, signed) {
+    if v.to_i128() == Some(folded) && !has_out_of_range_subexpr(operand, bits, signed, is_unshadowed) {
         None
     } else {
         Some(folded)
