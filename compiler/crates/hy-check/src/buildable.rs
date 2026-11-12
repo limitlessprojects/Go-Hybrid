@@ -4624,6 +4624,73 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_tar_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "header"
+                | "reader"
+                | "writer"
+                | "format"
+                | "file_info_names"
+                | "err_header"
+                | "err_write_too_long"
+                | "err_field_too_long"
+                | "err_write_after_close"
+                | "err_insecure_path"
+                | "format_unknown"
+                | "format_ustar"
+                | "format_pax"
+                | "format_gnu"
+                | "type_reg"
+                | "type_reg_a"
+                | "type_link"
+                | "type_symlink"
+                | "type_char"
+                | "type_block"
+                | "type_dir"
+                | "type_fifo"
+                | "type_cont"
+                | "type_x_header"
+                | "type_x_global_header"
+                | "type_gnu_long_name"
+                | "type_gnu_long_link"
+                | "type_gnu_sparse"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `tar.{member}`: `tar.{member}` is a variable, constant, or type, not a function (HYB-E1002)"),
+                &format!("refer to `tar.{member}` as a value or type rather than calling it"),
+            );
+            return;
+        }
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `tar.{member}` (HYB-E1002)"),
+                &format!("`tar.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_reader" | "new_writer" => Some(1),
+            "file_info_header" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`tar.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `tar.{member}`"),
+                );
+            }
+        }
+    }
+
     fn check_sync_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(
             member,
@@ -8334,6 +8401,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if (pkg == "tar" || pkg == "archive/tar") && self.lookup_kind(pkg).is_none() {
+                        self.check_tar_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
