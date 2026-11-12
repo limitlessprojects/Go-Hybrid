@@ -96,3 +96,53 @@ fn addr_of_plain_local_is_not_affected() {
         r.diagnostics
     );
 }
+
+#[test]
+fn loop_carried_o8_slot_alias_a2_handle_loan_and_move_alias_reject() {
+    // 1. O8 slot loan created before a loop and used before a second slot loan / field store inside the loop body.
+    let r_o8_loop = check(
+        "struct node { v int }\n\
+         fn main() {\n\
+             m := map[string]node{\"k\": node{v: 1}}\n\
+             p := &m[\"k\"]\n\
+             for i in 0..2 {\n\
+                 _ = i\n\
+                 p.v = 2\n\
+                 q := &m[\"k\"]\n\
+                 q.v = 3\n\
+             }\n\
+         }\n",
+    );
+    assert_eq!(r_o8_loop.verdict, Verdict::Reject, "got {:?}", r_o8_loop.diagnostics);
+    assert!(codes(&r_o8_loop).iter().any(|c| c == "HYB-E3102"));
+
+    // 2. A2 handle borrow loan created before a loop and read before a mutating handle call inside the loop body.
+    let r_a2_loop = check(
+        "import \"rust/serde_json\"\n\
+         fn main() {\n\
+             doc := serde_json.parse(`{}`)?\n\
+             items := doc.array(\"items\")?\n\
+             for i in 0..2 {\n\
+                 _ = i\n\
+                 fmt.println(items.len())\n\
+                 doc.set(\"k\", 1)?\n\
+             }\n\
+         }\n",
+    );
+    assert_eq!(r_a2_loop.verdict, Verdict::Reject, "got {:?}", r_a2_loop.diagnostics);
+    assert!(codes(&r_a2_loop).iter().any(|c| c == "HYB-E3101"));
+
+    // 3. `q := move p` extends `p`'s slot-loan window to `q`'s last use so an intervening map insert is rejected.
+    let r_move_alias = check(
+        "struct node { v int }\n\
+         fn main() {\n\
+             m := map[string]node{\"k\": node{v: 1}}\n\
+             p := &m[\"k\"]\n\
+             q := move p\n\
+             m[\"x\"] = node{v: 2}\n\
+             q.v = 3\n\
+         }\n",
+    );
+    assert_eq!(r_move_alias.verdict, Verdict::Reject, "got {:?}", r_move_alias.diagnostics);
+    assert!(codes(&r_move_alias).iter().any(|c| c == "HYB-E3102"));
+}
