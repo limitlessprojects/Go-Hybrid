@@ -66,6 +66,7 @@ mod recv;
 mod resolve;
 mod sendability;
 mod shape;
+mod task_scope;
 mod try_context;
 mod tuple;
 mod walk;
@@ -962,6 +963,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     while !st.scopes.is_empty() {
         st.scope_pop();
     }
+    task_scope::check_fn_task_scopes(ck, body, &flat);
 
     // #123: closure bodies sit outside Pass B (A5), so process_assign and
     // process_call never see their writes — scan every FnLit for assign
