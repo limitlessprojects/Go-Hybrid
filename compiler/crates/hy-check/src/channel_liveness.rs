@@ -483,6 +483,54 @@ impl ChannelLivenessChecker {
                 self.check_expr(base);
                 self.check_expr(index);
             }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.check_expr(&f.value);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for item in items {
+                    self.check_expr(item);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.check_expr(k);
+                    self.check_expr(v);
+                }
+            }
+            Expr::Field { base, .. } => {
+                self.check_expr(base);
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.check_expr(base);
+                if let Some(l) = lo {
+                    self.check_expr(l);
+                }
+                if let Some(h) = hi {
+                    self.check_expr(h);
+                }
+            }
+            Expr::Interp { parts, .. } => {
+                for p in parts {
+                    if let InterpPart::Expr(e) = p {
+                        self.check_expr(e);
+                    }
+                }
+            }
+            Expr::AddrOf { operand, span } => {
+                if let Some(cap) = self.get_cap_name(operand) {
+                    if self.is_moved(&cap) {
+                        self.diags.push(Diagnostic::error(
+                            "HYB-E3001",
+                            &self.file_path,
+                            *span,
+                            format!("use of moved linear capability '{}'", cap),
+                        ));
+                    }
+                }
+                self.check_expr(operand);
+            }
             _ => {}
         }
     }
