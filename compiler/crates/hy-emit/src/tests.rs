@@ -859,6 +859,24 @@ fn generic_fn_and_struct_type_params() {
 }
 
 #[test]
+fn test_issue_722_generic_struct_without_explicit_constraint() {
+    let go = emit(
+        "struct box[t] {\n    v t\n}\n\nfn main() {\n    var b box[int] = box[int]{ v: 3 }\n    fmt.println(b.v)\n}\n",
+    );
+    assert!(go.contains("type box[t any] struct {"), ":\n{}", go);
+    assert!(go.contains("var b box[int] = box[int]{v: 3}"), ":\n{}", go);
+}
+
+#[test]
+fn test_issue_722_generic_struct_multi_params() {
+    let go = emit(
+        "struct pair[a, b] {\n    first a\n    second b\n}\n\nfn main() {\n    p := pair[int, string]{ first: 1, second: \"ok\" }\n    fmt.println(p.first)\n}\n",
+    );
+    assert!(go.contains("type pair[a any, b any] struct {"), ":\n{}", go);
+    assert!(go.contains("pair[int, string]{first: 1, second: \"ok\"}"), ":\n{}", go);
+}
+
+#[test]
 fn assoc_fn_call_mangles_dotted_name() {
     let go = emit(
         "struct box[t any] {\n    v t\n}\n\nfn box.new[t any](v t) box[t] {\n    return box[t]{v: v}\n}\n\nfn main() {\n    b := box.new[int](3)\n}\n",
