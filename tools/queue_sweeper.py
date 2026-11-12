@@ -26,10 +26,12 @@ Env:
 """
 import argparse, json, os, sys, time, urllib.request, urllib.error
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 REPO = os.environ.get("GITHUB_REPOSITORY", "limitlessprojects/Go-Hybrid")
 TOK = os.environ.get("GITHUB_TOKEN", "")
 MIN_AGE = int(os.environ.get("SWEEPER_MIN_AGE_DAYS", "5"))
+CONFIG_PATH = Path(__file__).resolve().parent / "triage_config.json"
 PROTECTED_LABELS = {"triage:wildcard-hold", "triage:pareto", "triage:keep"}
 # Cap on issue-event pagination consulted for a stale PR whose updated_at
 # looks recent (#1525). Ten pages of 100 is generous for any real thread;
@@ -75,13 +77,19 @@ def api(path, method="GET", body=None):
             time.sleep(4)
     return 0, None
 
-def config_protected_numbers():
+def config_protected_numbers(config_path=None):
     nums = set()
+    target = Path(config_path) if config_path is not None else CONFIG_PATH
     try:
-        with open("tools/triage_config.json") as f:
+        with open(target, encoding="utf-8") as f:
             cfg = json.load(f)
-        nums |= set(cfg.get("wildcard_holds", []))
-        nums |= set(cfg.get("drafts_parked", []))
+        if not isinstance(cfg, dict):
+            raise ValueError("triage_config.json must be a JSON object")
+        for key in ("wildcard_holds", "drafts_parked"):
+            vals = cfg.get(key, [])
+            if not isinstance(vals, list) or any(type(v) is not int for v in vals):
+                raise ValueError(f"{key} must be a list of integers")
+            nums |= set(vals)
     except Exception as e:
         print(f"  (triage_config.json unreadable: {e} — label protection only)")
     return nums
@@ -141,6 +149,12 @@ def main():
     ap.add_argument("--max", type=int, default=200)
     ap.add_argument("--min-age", type=int, default=MIN_AGE)
     args = ap.parse_args()
+    if args.min_age < 1:
+        print("--min-age must be a positive integer (>= 1)", file=sys.stderr)
+        sys.exit(2)
+    if args.max < 0:
+        print("--max must be a non-negative integer (>= 0)", file=sys.stderr)
+        sys.exit(2)
     if not TOK:
         print("GITHUB_TOKEN not set"); sys.exit(1)
 
@@ -188,11 +202,11 @@ def main():
     for p in due:
         st, _ = api(f"/repos/{REPO}/pulls/{p['number']}", "PATCH",
                     {"state": "closed", "state_reason": "not_planned"})
-        ok = st in (200, 422)
+        ok = st == 200
         if ok:
             cs, _ = api(f"/repos/{REPO}/issues/{p['number']}/comments", "POST",
                         {"body": COMMENT.format(window=args.min_age)})
-            ok = cs in (201, 403, 422)
+            ok = cs == 201
         if ok: n += 1
         else: fails += 1; print(f"  FAIL #{p['number']} st={st}", flush=True)
         if (n + fails) % 25 == 0:
