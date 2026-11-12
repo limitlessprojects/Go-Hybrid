@@ -128,6 +128,7 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
         ("serde_json", "parse" | "new_object" | "new_array")
         | ("flate2", "new_writer")
         | ("json" | "encoding/json", "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder")
+        | ("xml" | "encoding/xml", "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder")
         | (
             "httptest" | "net/http/httptest",
             "new_server"
@@ -202,6 +203,12 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         }
         ("json" | "encoding/json", "new_encoder" | "NewEncoder") => {
             TypeShape::ForeignOpaque("json.encoder".into())
+        }
+        ("xml" | "encoding/xml", "new_decoder" | "NewDecoder") => {
+            TypeShape::ForeignOpaque("xml.decoder".into())
+        }
+        ("xml" | "encoding/xml", "new_encoder" | "NewEncoder") => {
+            TypeShape::ForeignOpaque("xml.encoder".into())
         }
         (
             "httptest" | "net/http/httptest",
@@ -791,6 +798,8 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "url"
             | "encoding/json"
             | "json"
+            | "encoding/xml"
+            | "xml"
             | "encoding/hex"
             | "hex"
             | "path"
@@ -834,7 +843,6 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
             | "binary"
             | "base64"
             | "csv"
-            | "xml"
             | "html"
             | "sql"
             | "exec"
@@ -874,6 +882,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "log"
             | "gzip"
             | "tar"
+            | "xml"
             | "serde_json"
             | "sha3"
             | "regex"
@@ -1745,6 +1754,33 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "view"
         ),
         "sha3" => matches!(m, "digest256" | "stream_checksum"),
+        "xml" | "encoding/xml" => matches!(
+            m,
+            "new_decoder"
+                | "new_encoder"
+                | "marshal"
+                | "marshal_indent"
+                | "unmarshal"
+                | "escape_text"
+                | "escape"
+                | "copy_token"
+                | "header"
+                | "html_auto_close"
+                | "html_entity"
+                | "decoder"
+                | "encoder"
+                | "name"
+                | "attr"
+                | "start_element"
+                | "end_element"
+                | "char_data"
+                | "comment"
+                | "proc_inst"
+                | "directive"
+                | "syntax_error"
+                | "unsupported_type_error"
+                | "tag_path_error"
+        ),
         "regex" => matches!(m, "is_match" | "is_valid" | "compile" | "match_string"),
         "flate2" => matches!(m, "new_writer" | "write" | "finish" | "writer"),
         "hy" => matches!(m, "pipe" | "new_pipe" | "send_cap" | "recv_cap" | "channel"),

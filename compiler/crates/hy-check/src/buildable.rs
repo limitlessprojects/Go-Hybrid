@@ -8668,6 +8668,10 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
+                    if (pkg == "xml" || pkg == "encoding/xml") && self.lookup_kind(pkg).is_none() {
+                        self.check_xml_package_call(name.as_str(), args, span);
+                    }
+
                     if self.lookup_kind(pkg).is_none() {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
@@ -10073,6 +10077,62 @@ impl<'a> Collector<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn check_xml_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "header"
+                | "html_auto_close"
+                | "html_entity"
+                | "decoder"
+                | "encoder"
+                | "name"
+                | "attr"
+                | "start_element"
+                | "end_element"
+                | "char_data"
+                | "comment"
+                | "proc_inst"
+                | "directive"
+                | "syntax_error"
+                | "unsupported_type_error"
+                | "tag_path_error"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `xml.{member}`: package symbol is a variable, constant, or type, not a function (HYB-E1002)"),
+                &format!("refer to `xml.{member}` as a value or type rather than calling it"),
+            );
+            return;
+        }
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `xml.{member}` (HYB-E1002)"),
+                &format!("`xml.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_decoder" | "new_encoder" | "marshal" | "copy_token" => Some(1),
+            "unmarshal" | "escape_text" | "escape" => Some(2),
+            "marshal_indent" => Some(3),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`xml.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `xml.{member}`"),
+                );
+            }
         }
     }
 }
