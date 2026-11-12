@@ -125,13 +125,17 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
         },
     ),
     (
-        // http.Header — the result of w.header(); get/set/add.
+        // http.Header — the result of w.header(); get/set/add/del/values/clone/write.
         "http.header",
         TypeShape {
             members: &[
                 ("get", method("Get", None)),
                 ("set", method("Set", None)),
                 ("add", method("Add", None)),
+                ("del", method("Del", None)),
+                ("values", method("Values", None)),
+                ("clone", method("Clone", Some("http.header"))),
+                ("write", method("Write", None)),
             ],
         },
     ),
@@ -337,6 +341,108 @@ pub static METHOD_RESULTS: &[(&str, &str, (u8, bool))] = &[
     ("serde_json.value", "string", (1, true)),
     ("serde_json.value", "set", (0, true)),
     ("serde_json.value", "push_string", (0, true)),
+    // url.values
+    ("url.values", "get", (1, false)),
+    ("url.values", "set", (0, false)),
+    ("url.values", "add", (0, false)),
+    ("url.values", "del", (0, false)),
+    ("url.values", "has", (1, false)),
+    ("url.values", "encode", (1, false)),
+    // http.response_writer
+    ("http.response_writer", "header", (1, false)),
+    ("http.response_writer", "write", (1, true)),
+    ("http.response_writer", "write_header", (0, false)),
+    // http.header
+    ("http.header", "get", (1, false)),
+    ("http.header", "set", (0, false)),
+    ("http.header", "add", (0, false)),
+    ("http.header", "del", (0, false)),
+    ("http.header", "values", (1, false)),
+    ("http.header", "clone", (1, false)),
+    ("http.header", "write", (0, true)),
+    // http.handler & http.serve_mux
+    ("http.handler", "serve_http", (0, false)),
+    ("http.serve_mux", "handle", (0, false)),
+    ("http.serve_mux", "handle_func", (0, false)),
+    ("http.serve_mux", "serve_http", (0, false)),
+    ("http.serve_mux", "handler", (2, false)),
+    // time.duration
+    ("time.duration", "seconds", (1, false)),
+    ("time.duration", "milliseconds", (1, false)),
+    ("time.duration", "microseconds", (1, false)),
+    ("time.duration", "nanoseconds", (1, false)),
+    ("time.duration", "minutes", (1, false)),
+    ("time.duration", "hours", (1, false)),
+    ("time.duration", "string", (1, false)),
+    ("time.duration", "truncate", (1, false)),
+    ("time.duration", "round", (1, false)),
+    ("time.duration", "abs", (1, false)),
+    // sync primitives
+    ("sync.mutex", "lock", (0, false)),
+    ("sync.mutex", "unlock", (0, false)),
+    ("sync.mutex", "try_lock", (1, false)),
+    ("sync.rwmutex", "lock", (0, false)),
+    ("sync.rwmutex", "unlock", (0, false)),
+    ("sync.rwmutex", "rlock", (0, false)),
+    ("sync.rwmutex", "runlock", (0, false)),
+    ("sync.rwmutex", "try_lock", (1, false)),
+    ("sync.rwmutex", "try_rlock", (1, false)),
+    ("sync.rwmutex", "rlocker", (1, false)),
+    ("sync.rw_mutex", "lock", (0, false)),
+    ("sync.rw_mutex", "unlock", (0, false)),
+    ("sync.rw_mutex", "rlock", (0, false)),
+    ("sync.rw_mutex", "runlock", (0, false)),
+    ("sync.rw_mutex", "try_lock", (1, false)),
+    ("sync.rw_mutex", "try_rlock", (1, false)),
+    ("sync.rw_mutex", "rlocker", (1, false)),
+    ("sync.wait_group", "add", (0, false)),
+    ("sync.wait_group", "done", (0, false)),
+    ("sync.wait_group", "wait", (0, false)),
+    ("sync.once", "do", (0, false)),
+    // sync/atomic typed wrappers
+    ("atomic.bool", "load", (1, false)),
+    ("atomic.bool", "store", (0, false)),
+    ("atomic.bool", "swap", (1, false)),
+    ("atomic.bool", "compare_and_swap", (1, false)),
+    ("atomic.int32", "load", (1, false)),
+    ("atomic.int32", "store", (0, false)),
+    ("atomic.int32", "add", (1, false)),
+    ("atomic.int32", "and", (1, false)),
+    ("atomic.int32", "or", (1, false)),
+    ("atomic.int32", "swap", (1, false)),
+    ("atomic.int32", "compare_and_swap", (1, false)),
+    ("atomic.int64", "load", (1, false)),
+    ("atomic.int64", "store", (0, false)),
+    ("atomic.int64", "add", (1, false)),
+    ("atomic.int64", "and", (1, false)),
+    ("atomic.int64", "or", (1, false)),
+    ("atomic.int64", "swap", (1, false)),
+    ("atomic.int64", "compare_and_swap", (1, false)),
+    ("atomic.uint32", "load", (1, false)),
+    ("atomic.uint32", "store", (0, false)),
+    ("atomic.uint32", "add", (1, false)),
+    ("atomic.uint32", "and", (1, false)),
+    ("atomic.uint32", "or", (1, false)),
+    ("atomic.uint32", "swap", (1, false)),
+    ("atomic.uint32", "compare_and_swap", (1, false)),
+    ("atomic.uint64", "load", (1, false)),
+    ("atomic.uint64", "store", (0, false)),
+    ("atomic.uint64", "add", (1, false)),
+    ("atomic.uint64", "and", (1, false)),
+    ("atomic.uint64", "or", (1, false)),
+    ("atomic.uint64", "swap", (1, false)),
+    ("atomic.uint64", "compare_and_swap", (1, false)),
+    ("atomic.uintptr", "load", (1, false)),
+    ("atomic.uintptr", "store", (0, false)),
+    ("atomic.uintptr", "add", (1, false)),
+    ("atomic.uintptr", "and", (1, false)),
+    ("atomic.uintptr", "or", (1, false)),
+    ("atomic.uintptr", "swap", (1, false)),
+    ("atomic.uintptr", "compare_and_swap", (1, false)),
+    ("atomic.value", "load", (1, false)),
+    ("atomic.value", "store", (0, false)),
+    ("atomic.value", "swap", (1, false)),
+    ("atomic.value", "compare_and_swap", (1, false)),
 ];
 
 pub fn lookup_method_results(ty: &str, name: &str) -> Option<(u8, bool)> {
@@ -641,6 +747,22 @@ mod tests {
         assert_eq!(import_path_of("filepath"), "path/filepath");
         assert_eq!(import_path_of("fmt"), "fmt");
         assert_eq!(import_path_of("strconv"), "strconv");
+    }
+
+    #[test]
+    fn every_shape_method_has_explicit_method_results_entry() {
+        for (ty, shape) in SHAPES {
+            for (member_name, member) in shape.members {
+                if member.kind == MemberKind::Method {
+                    assert!(
+                        lookup_method_results(ty, member_name).is_some(),
+                        "SHAPES method ({}, {}) is missing from METHOD_RESULTS",
+                        ty,
+                        member_name
+                    );
+                }
+            }
+        }
     }
 }
 
