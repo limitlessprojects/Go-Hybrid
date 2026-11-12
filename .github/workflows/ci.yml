@@ -42,6 +42,7 @@ jobs:
           python3 -m unittest discover -s tools -p test_queue_sweeper.py -v
           python3 -m unittest discover -s tools -p test_check_corpus_census.py -v
           python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz.py'
+          python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz_race.py'
           python3 -m unittest discover -s tools/runner -p test_runner.py -v
           python3 -m unittest discover -s tools -p test_job_cli.py -v
           python3 -m unittest discover -s tools -p test_job_shell_args.py -v
