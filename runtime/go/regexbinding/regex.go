@@ -15,15 +15,18 @@ var (
 	ErrABI   = errors.New("regexbinding: hyrt ABI handshake mismatch (rebuild the runtime)")
 )
 
-// pinString: the copy-small pinned borrow for one string argument.
-func pinString(s string) (uintptr, uintptr, *runtime.Pinner, []byte) {
-	b := []byte(s)
-	var p runtime.Pinner
-	if len(b) > 0 {
-		p.Pin(&b[0])
-		return uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), &p, b
+// crossString: the zero-copy view of a string argument for one crossing.
+// Returns the string's own backing pointer + len — no []byte copy, no
+// runtime.Pinner (spike7-zerocopy-string). Same soundness conditions as
+// jsonbinding.crossString: strings are immutable, the callee contract is
+// the SPEC §9 O3 view loan (read-only, never retained), the caller keeps
+// the string alive with runtime.KeepAlive until the crossing returns,
+// and Go's heap is non-moving. Empty string crosses as (0, 0).
+func crossString(s string) (uintptr, uintptr) {
+	if len(s) == 0 {
+		return 0, 0
 	}
-	return 0, 0, &p, b
+	return uintptr(unsafe.Pointer(unsafe.StringData(s))), uintptr(len(s))
 }
 
 // IsMatch reports whether text matches pattern (compile per call — the
@@ -38,15 +41,11 @@ func IsMatch(pattern, text string) (bool, error) {
 	if !utf8.ValidString(pattern) || !utf8.ValidString(text) {
 		return false, ErrRegex
 	}
-	pptr, plen, pp, pb := pinString(pattern)
-	tptr, tlen, tp, tb := pinString(text)
+	pptr, plen := crossString(pattern)
+	tptr, tlen := crossString(text)
 	v := int64(hybridge.CrossDeep4(FnIsMatch, pptr, plen, tptr, tlen))
-	pp.Unpin()
-	tp.Unpin()
-	runtime.KeepAlive(pp)
-	runtime.KeepAlive(pb)
-	runtime.KeepAlive(tp)
-	runtime.KeepAlive(tb)
+	runtime.KeepAlive(pattern)
+	runtime.KeepAlive(text)
 	switch v {
 	case 0:
 		return false, nil
@@ -66,10 +65,8 @@ func IsValid(pattern string) bool {
 	if !utf8.ValidString(pattern) {
 		return false
 	}
-	pptr, plen, pp, pb := pinString(pattern)
+	pptr, plen := crossString(pattern)
 	v := hybridge.CrossDeep2(FnIsValid, pptr, plen)
-	pp.Unpin()
-	runtime.KeepAlive(pp)
-	runtime.KeepAlive(pb)
+	runtime.KeepAlive(pattern)
 	return v == 1
 }

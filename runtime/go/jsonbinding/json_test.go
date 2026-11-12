@@ -68,7 +68,7 @@ func TestScalarBoxingThroughSet(t *testing.T) {
 }
 
 func TestEmptyKeyEdge(t *testing.T) {
-	// pinCrossKey's (0, 0) empty-borrow path — documented, never tested.
+	// crossString's (0, 0) empty-view path — documented, never tested.
 	doc := NewObject()
 	if err := doc.Set("", true); err != nil {
 		t.Fatalf("Set(\"\", true): %v", err)
