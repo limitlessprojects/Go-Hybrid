@@ -159,5 +159,29 @@ class CheckClaimsLinksTest(unittest.TestCase):
                 self.assertIn("no-claims-rows", [i["kind"] for i in report["issues"]])
 
 
+    def test_reference_style_links_are_verified(self):
+        ref_claims = (
+            "# GUARANTEES\n\n"
+            "## The claims table\n\n"
+            "| # | Surface | What the checker does | The claim | Evidence |\n"
+            "|---|---------|----------------------|-----------|----------|\n"
+            "| 1 | spawn | test ref | **Guaranteed** | [ref-target][spec-ref] |\n\n"
+            "[spec-ref]: SPEC-LANGUAGE.md\n"
+        )
+        (self.root / "GUARANTEES.md").write_text(ref_claims, encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["links"], 1)
+
+        # Now test that missing reference-style target is reported
+        (self.root / "SPEC-LANGUAGE.md").unlink()
+        result2 = self.run_tool()
+        self.assertEqual(result2.returncode, 1)
+        report2 = json.loads(result2.stdout)
+        self.assertEqual([i["kind"] for i in report2["issues"]], ["missing"])
+
+
 if __name__ == "__main__":
     unittest.main()
