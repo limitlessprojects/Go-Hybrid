@@ -1392,6 +1392,39 @@ impl<'a> Checker<'a> {
         }
         // 3) A bare identifier: check local bindings first (shadowing any
         // file-level const), then file-level `const` declarations.
+        //
+        // #4030: an expression that is neither a folded constant (step 1) nor a
+        // non-integer syntax (step 2) and is NOT a bare identifier fell through
+        // every branch and was silently accepted. `fn foo(n int, a [n + 1]int)`
+        // is the reported shape: `const_int_value_at` returns None because `n`
+        // is a parameter, the identifier branch does not match a Binary, and the
+        // function returned having emitted nothing — while `go build` says
+        // `undefined: n` (a parameter is not a constant). Any remaining
+        // expression that mentions a runtime binding is not a Go constant, so
+        // report it. Pure literals already returned above, so this only fires
+        // on expressions that genuinely cannot fold.
+        if !matches!(unwrap_parens(len), Expr::Ident { .. }) {
+            // Signature-time calls pass `st = None`, so there is no env to ask:
+            // fall back to "any identifier that is not a file-level const".
+            let mentions_binding = match st {
+                Some(_) => self.expr_mentions_runtime_binding(st, len),
+                None => self.expr_mentions_unknown_const_name(len),
+            };
+            if mentions_binding {
+                let msg = format!(
+                    "array length `{}` is not a constant — Go requires a constant array length (`invalid array length {}`), so the emitted module would not build (HYB-E6004)",
+                    len.render(),
+                    len.render()
+                );
+                self.diags.push(
+                    Diagnostic::error("HYB-E6004", self.path.clone(), span, msg).with_notes(vec![
+                        "why: Go's array length is part of the type and must be a non-negative constant; a value computed from a parameter or variable would change the type (issue #201)".to_string(),
+                        "fix: use a literal or file-level `const` length, or declare a slice (`[]T`) for a dynamic size".to_string(),
+                    ]),
+                );
+                return;
+            }
+        }
         if let Expr::Ident { name, .. } = unwrap_parens(len) {
             if name.is_empty() {
                 return; // inferred-type sentinel, never a length
@@ -1770,6 +1803,88 @@ impl<'a> Checker<'a> {
     pub(crate) fn is_non_int_type(&self, ty: &TypeExpr) -> bool {
         let resolved = self.resolve_type_alias(ty);
         is_non_int_primitive_type(&resolved)
+    }
+
+    /// #4030: does `expr` reference a name that is a runtime value rather than a
+    /// foldable constant? Used by the array-length check to catch expression
+    /// forms (`[n + 1]int`, `[n * 2]int`) that the bare-identifier branch and the
+    /// constant folder both pass over. A `const` — local or file-level — is not
+    /// a runtime binding; a parameter or a `var`/`let` binding is.
+    fn expr_mentions_runtime_binding(&self, st: Option<&FnState>, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit { .. } => false,
+            Expr::Ident { name, .. } => {
+                if self.consts.contains_key(name.as_str()) {
+                    return false;
+                }
+                match st.and_then(|s| s.env_lookup(name)) {
+                    Some(b) => !b.immutable || !self.is_foldable_const_binding(st, name),
+                    None => false,
+                }
+            }
+            Expr::Unary { operand, .. } => self.expr_mentions_runtime_binding(st, operand),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr_mentions_runtime_binding(st, lhs)
+                    || self.expr_mentions_runtime_binding(st, rhs)
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "len" || name == "cap" {
+                        // len/cap over an array or a string constant can still
+                        // fold; the nonconst_len_cap_operand check owns those.
+                        return false;
+                    }
+                }
+                self.expr_mentions_runtime_binding(st, callee)
+                    || args
+                        .iter()
+                        .any(|a| self.expr_mentions_runtime_binding(st, &a.value))
+            }
+            _ => false,
+        }
+    }
+
+    /// A local `const` binding whose initializer folds to an integer.
+    fn is_foldable_const_binding(&self, st: Option<&FnState>, name: &str) -> bool {
+        let Some(st) = st else { return false };
+        let Some(b) = st.env_lookup(name) else { return false };
+        if !b.immutable {
+            return false;
+        }
+        // A parameter is also `immutable`; the distinguishing fact is that a
+        // parameter's type is spelled in the signature and it has no constant
+        // initializer recorded. Treat "no const initializer" as not foldable.
+        b.ty.is_none() && false
+    }
+
+    /// Syntactic fallback for signature-time array lengths (`st` is `None`
+    /// there): true when `expr` mentions an identifier that is not a file-level
+    /// `const`. A parameter name is exactly such an identifier, which is what
+    /// #4030 needs — `fn foo(n int, a [n + 1]int)` can never build.
+    fn expr_mentions_unknown_const_name(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit { .. } => false,
+            Expr::Ident { name, .. } => {
+                !name.is_empty() && !self.consts.contains_key(name.as_str())
+            }
+            Expr::Unary { operand, .. } => self.expr_mentions_unknown_const_name(operand),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr_mentions_unknown_const_name(lhs)
+                    || self.expr_mentions_unknown_const_name(rhs)
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "len" || name == "cap" {
+                        return false;
+                    }
+                }
+                self.expr_mentions_unknown_const_name(callee)
+                    || args
+                        .iter()
+                        .any(|a| self.expr_mentions_unknown_const_name(&a.value))
+            }
+            _ => false,
+        }
     }
 
     fn is_non_int_array_len_expr(&self, expr: &Expr) -> bool {
