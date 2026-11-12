@@ -8,7 +8,9 @@ resolve, or that a cited corpus program still carries the verdict the row
 claims it for. This tool closes that gap:
 
   * every relative markdown link in the claims table must resolve to a file
-    (http(s) links and pure anchors are skipped),
+    (http(s) links and pure anchors are skipped), in inline form
+    `[text](target)` as well as reference form `[text][label]`, `[text][]`
+    and shortcut `[label]` (resolved against link definitions),
   * a corpus link followed by `(reject)`, `(accept)` or `(managed)` must point
     at a file whose `EXPECTED-VERDICT` header agrees with the marker,
   * a cited corpus program with no verdict header at all is an error.
@@ -24,7 +26,20 @@ from pathlib import Path
 
 TABLE_HEADING = "## The claims table"
 ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|")
-LINK_RE = re.compile(r"\[([^\]]*)\]\((<[^<>\r\n]*>|[^)\s]+)(?:\s+\"[^\"]*\")?\)")
+# One link per match: inline `[text](dest "title")`, full/collapsed reference
+# `[text][label]` / `[text][]`, or a bare shortcut `[label]` (only resolved
+# when the label has a definition; otherwise it is literal text).
+LINK_RE = re.compile(
+    r"\[([^\]]*)\]"
+    r"(?:"
+    r"\((<[^<>\r\n]*>|[^)\s]+)(?:\s+\"[^\"]*\")?\)"
+    r"|\[([^\]]*)\]"
+    r")?"
+)
+REF_DEF_RE = re.compile(
+    r"^\s{0,3}\[([^\]]+)\]:\s*(<[^<>\r\n]*>|[^\s]+)(?:\s+[\"'(].*)?\s*$",
+    re.MULTILINE,
+)
 INLINE_CORPUS_RE = re.compile(r"`(\d{2}-[a-z0-9][a-z0-9-]*(?:\.hy)?)`")
 CORPUS_NUM_RE = re.compile(r"\bcorpus\s+(\d{1,3})\b")
 MARKER_RE = re.compile(r"^\s*\((reject|accept|managed)\)", re.IGNORECASE)
@@ -84,6 +99,25 @@ def marker_matches(marker, verdict):
     return True
 
 
+def strip_angle(dest):
+    # Angle-delimited Markdown destinations may contain spaces or parentheses.
+    if dest.startswith("<") and dest.endswith(">"):
+        return dest[1:-1]
+    return dest
+
+
+def normalize_label(label):
+    # CommonMark label equality: case-insensitive, runs of whitespace collapse.
+    return " ".join(label.split()).casefold()
+
+
+def reference_defs(text):
+    defs = {}
+    for match in REF_DEF_RE.finditer(text):
+        defs.setdefault(normalize_label(match.group(1)), strip_angle(match.group(2)))
+    return defs
+
+
 def check(root):
     claims_file = root / "GUARANTEES.md"
     issues = []
@@ -94,13 +128,24 @@ def check(root):
         return {"ok": False, "rows": 0, "links": 0,
                 "issues": [{"row": 0, "kind": "missing-claims-file", "target": str(claims_file)}]}
     text = claims_file.read_text(encoding="utf-8", errors="replace")
+    defs = reference_defs(text)
     for row_number, evidence in table_rows(text):
         rows += 1
         for index, match in enumerate(LINK_RE.finditer(evidence)):
-            target = match.group(2)
-            # Angle-delimited Markdown destinations may contain spaces or parentheses.
-            if target.startswith("<") and target.endswith(">"):
-                target = target[1:-1]
+            inline_dest, ref_label = match.group(2), match.group(3)
+            if inline_dest is not None:
+                target = strip_angle(inline_dest)
+            else:
+                # Full/collapsed reference use the bracketed label (or the
+                # link text for collapsed); a shortcut only resolves when the
+                # text matches a definition, else it is literal text.
+                if ref_label is not None:
+                    label = normalize_label(ref_label) if ref_label.strip() else normalize_label(match.group(1))
+                else:
+                    label = normalize_label(match.group(1))
+                target = defs.get(label)
+                if target is None:
+                    continue
             if not is_checkable(target):
                 continue
             links += 1
