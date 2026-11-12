@@ -90,6 +90,7 @@ impl Emitter {
                 reason,
                 category,
                 tickets,
+                contract,
                 body,
                 ..
             } => {
@@ -103,6 +104,15 @@ impl Emitter {
                 );
                 if !tickets.is_empty() {
                     marker.push_str(&format!(" tickets: {}", tickets.join(", ")));
+                }
+                if let Some(c) = contract {
+                    if let Some((g, _)) = &c.guard {
+                        marker.push_str(&format!(" guard: {}", g));
+                    }
+                    if !c.protects.is_empty() {
+                        let p: Vec<&str> = c.protects.iter().map(|(s, _)| s.as_str()).collect();
+                        marker.push_str(&format!(" protects: {}", p.join(", ")));
+                    }
                 }
                 self.push(&marker);
                 self.emit_block_body(&body.stmts)?;

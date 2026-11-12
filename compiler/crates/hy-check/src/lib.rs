@@ -60,6 +60,7 @@ mod foreign;
 mod freeze;
 mod go_keyword_names;
 mod loans;
+mod managed_contract;
 mod model;
 mod range_iter;
 mod recv;
@@ -100,6 +101,14 @@ impl Verdict {
     }
 }
 
+/// Checker configuration options (#4297).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CheckOptions {
+    /// Reject any `managed` block in `"mutex"`, `"atomic"`, `"actor"`, or `"other"`
+    /// that does not carry a machine-checked synchronization contract (`HYB-E0005`).
+    pub require_managed_contracts: bool,
+}
+
 /// Check one parsed file against the Tier-0 rules (O2/O4/O5/O6/O7/O8/O12...).
 ///
 /// Verdict = reject iff any severity-error diagnostic survives (warnings —
@@ -107,7 +116,12 @@ impl Verdict {
 /// into source order before returning: the corpus harness reads the FIRST
 /// error's `tier0_rule` as the join key against VERDICTS.md.
 pub fn check_file(file: &File) -> CheckResult {
+    check_file_with_options(file, &CheckOptions::default())
+}
+
+pub fn check_file_with_options(file: &File, opts: &CheckOptions) -> CheckResult {
     let mut ck = Checker::new(file);
+    ck.require_managed_contracts = opts.require_managed_contracts;
 
     build_tables(&mut ck);
     ck.check_struct_decls(); // A6: borrow-handle / pointer struct fields
@@ -166,6 +180,12 @@ pub fn check_file(file: &File) -> CheckResult {
     } else {
         Verdict::Accept
     };
+    let verified_blocks = ck
+        .managed_audit
+        .iter()
+        .filter(|b| b.contract.as_ref().is_some_and(|c| c.verified))
+        .count();
+    let unverified_blocks = ck.managed_audit.len().saturating_sub(verified_blocks);
     CheckResult {
         diagnostics: diags,
         verdict,
@@ -173,6 +193,8 @@ pub fn check_file(file: &File) -> CheckResult {
             managed_blocks: ck.managed_blocks,
             sites_via_managed: ck.sites_via_managed,
             total_sites: ck.total_sites,
+            verified_blocks,
+            unverified_blocks,
             categories: {
                 let mut m = std::collections::BTreeMap::new();
                 for b in &ck.managed_audit {
@@ -526,11 +548,21 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             reason,
             category,
             tickets,
+            contract,
+            body: mbody,
             span,
-            ..
         } = stmt
         {
-            ck.audit_managed_block(reason, category, tickets, *span);
+            ck.audit_managed_block_with_contract(
+                &st,
+                reason,
+                category,
+                tickets,
+                contract.as_ref(),
+                mbody,
+                Some(body),
+                *span,
+            );
         }
 
         // LX14: `break loop` / `continue loop` bind to the nearest enclosing
@@ -977,13 +1009,19 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
 }
 
 impl<'a> Checker<'a> {
-    /// Row 14 (discussion #4): audit a `managed` block's reason/category/tickets
-    /// and record it in `managed_audit` (shared between Pass B and closures.rs).
-    pub(crate) fn audit_managed_block(
+    /// Row 14 (discussion #4) + #4297: audit a `managed` block's reason/category/tickets,
+    /// mechanically check any attached synchronization contract, and record it in
+    /// `managed_audit` (shared between Pass B and closures.rs).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn audit_managed_block_with_contract(
         &mut self,
+        st: &FnState,
         reason: &str,
         category: &str,
         tickets: &[String],
+        contract: Option<&hy_syntax::ManagedContract>,
+        body: &hy_syntax::Block,
+        enclosing_fn_body: Option<&hy_syntax::Block>,
         span: hy_diag::Span,
     ) {
         self.managed_blocks += 1; // O6.3: one per `managed` statement
@@ -1068,10 +1106,20 @@ impl<'a> Checker<'a> {
                 ]),
             );
         }
+        let contract_audit = self.check_managed_contract(
+            st,
+            reason,
+            category,
+            contract,
+            body,
+            enclosing_fn_body,
+            span,
+        );
         self.managed_audit.push(ManagedBlockAudit {
             reason: reason.to_string(),
             category: category.to_string(),
             tickets: tickets.to_vec(),
+            contract: contract_audit,
         });
     }
 }
