@@ -597,6 +597,12 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "system_time",
         "user_time",
     ];
+    /// `os.FileInfo` (`io/fs.FileInfo`) — standard library file metadata interface.
+    const OS_FILE_INFO: &[&str] = &["is_dir", "mod_time", "mode", "name", "size", "sys"];
+    /// `os.DirEntry` (`io/fs.DirEntry`) — standard library directory entry interface.
+    /// Note: Go's `Type() FileMode` lowers to `type`, which is a language keyword in
+    /// Hybrid (`Tok::Kw("type")`) and cannot follow `.` in `.hy` source (`HYB-E0100`).
+    const OS_DIR_ENTRY: &[&str] = &["info", "is_dir", "name", "type"];
     const STRINGS_READER: &[&str] = &[
         "len",
         "read",
@@ -680,6 +686,8 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         | "httptest.ResponseRecorder" => Some(HTTPTEST_RESPONSE_RECORDER),
         "os.process" | "os.Process" => Some(OS_PROCESS),
         "os.process_state" | "os.processstate" | "os.ProcessState" => Some(OS_PROCESS_STATE),
+        "os.file_info" | "os.fileinfo" | "os.FileInfo" => Some(OS_FILE_INFO),
+        "os.dir_entry" | "os.direntry" | "os.DirEntry" => Some(OS_DIR_ENTRY),
         "strings.reader" | "strings.Reader" => Some(STRINGS_READER),
         "net.ip" | "net.IP" => Some(NET_IP),
         "net.ip_net" | "net.ipnet" | "net.IPNet" => Some(NET_IP_NET),
@@ -748,6 +756,26 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("net.addr" | "net.Addr", "network" | "string") => TypeShape::Str,
         ("net.error" | "net.Error", "error") => TypeShape::Str,
         ("net.error" | "net.Error", "temporary" | "timeout") => TypeShape::Primitive,
+        (
+            "os.file_info" | "os.fileinfo" | "os.FileInfo"
+            | "os.dir_entry" | "os.direntry" | "os.DirEntry",
+            "name",
+        ) => TypeShape::Str,
+        (
+            "os.file_info" | "os.fileinfo" | "os.FileInfo",
+            "size" | "is_dir",
+        )
+        | ("os.dir_entry" | "os.direntry" | "os.DirEntry", "is_dir") => TypeShape::Primitive,
+        ("os.file_info" | "os.fileinfo" | "os.FileInfo", "mod_time") => {
+            TypeShape::ForeignOpaque("time.time".into())
+        }
+        ("os.file_info" | "os.fileinfo" | "os.FileInfo", "mode")
+        | ("os.dir_entry" | "os.direntry" | "os.DirEntry", "type") => {
+            TypeShape::ForeignOpaque("os.file_mode".into())
+        }
+        ("os.dir_entry" | "os.direntry" | "os.DirEntry", "info") => {
+            TypeShape::ForeignOpaque("os.file_info".into())
+        }
         ("strings.reader" | "strings.Reader", "len" | "size") => TypeShape::Primitive,
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
