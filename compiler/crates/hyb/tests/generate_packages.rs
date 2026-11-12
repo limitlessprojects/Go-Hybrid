@@ -102,3 +102,89 @@ fn conflicting_non_test_packages_still_reject() {
     assert!(stderr.contains("disagree on the package"), "{}", stderr);
     assert!(!m.0.join("calc.hy.go").exists());
 }
+
+// The Go command ignores source basenames beginning with '.' or '_'. They
+// can contain a different package (e.g. a saved example) without changing
+// the production package selected by `go list` or `go test`.
+fn assert_ignored_sibling(tag: &str, filename: &str) {
+    let m = Module::new(tag);
+    m.write("app.go", "package demo\n");
+    m.write(filename, "package discarded\n");
+
+    let listed = Command::new("go")
+        .args(["list", "-f", "{{.Name}}", "."])
+        .current_dir(&m.0)
+        .output()
+        .expect("run Go's independent package-selection oracle");
+    assert_success(&listed);
+    assert_eq!(String::from_utf8_lossy(&listed.stdout).trim(), "demo");
+
+    assert_success(&m.hyb(&["generate", "calc.hy"]));
+    let generated = fs::read_to_string(m.0.join("calc.hy.go")).unwrap();
+    assert!(generated.lines().any(|line| line == "package demo"));
+    assert_success(&m.hyb(&["generate", "--check", "."]));
+    assert_eq!(
+        fs::read_to_string(m.0.join("calc.hy.go")).unwrap(),
+        generated
+    );
+
+    let out = Command::new("go")
+        .args(["test", "./..."])
+        .current_dir(&m.0)
+        .output()
+        .expect("compile the generated package with the ignored sibling present");
+    assert_success(&out);
+}
+
+#[test]
+fn underscore_prefixed_go_files_do_not_affect_package_inference() {
+    assert_ignored_sibling("underscore-sibling", "_scratch.go");
+}
+
+#[test]
+fn dot_prefixed_go_files_do_not_affect_package_inference() {
+    assert_ignored_sibling("dot-sibling", ".scratch.go");
+}
+
+fn assert_ignored_only(tag: &str, filename: &str) {
+    let m = Module::new(tag);
+    m.write(filename, "package discarded\n");
+    for args in [vec!["generate", "."], vec!["generate", "--check", "."]] {
+        let out = m.hyb(&args);
+        assert!(
+            !out.status.success(),
+            "ignored files cannot select a production package"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("HYB-E9002"), "{}", stderr);
+        assert!(!m.0.join("calc.hy.go").exists());
+    }
+}
+
+#[test]
+fn underscore_only_siblings_do_not_select_a_production_package() {
+    assert_ignored_only("underscore-only", "_scratch.go");
+}
+
+#[test]
+fn dot_only_siblings_do_not_select_a_production_package() {
+    assert_ignored_only("dot-only", ".scratch.go");
+}
+
+#[test]
+fn nonleading_dots_and_underscores_remain_package_authorities() {
+    for (tag, filename) in [
+        ("interior-underscore", "app_extra.go"),
+        ("interior-dot", "app.extra.go"),
+    ] {
+        let m = Module::new(tag);
+        m.write(filename, "package demo\n");
+        assert_success(&m.hyb(&["generate", "."]));
+        assert_success(&m.hyb(&["generate", "--check", "."]));
+        m.write("conflict.go", "package other\n");
+        let out = m.hyb(&["generate", "--check", "."]);
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("disagree on the package"), "{}", stderr);
+    }
+}
