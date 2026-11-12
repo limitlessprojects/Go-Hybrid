@@ -5288,6 +5288,74 @@ impl<'a> Collector<'a> {
     /// A name bound to a local (including a fn-typed variable or closure) is
     /// skipped by the caller — the local's arity is not tracked here — and a
     /// builtin never reaches this point because builtins are not in `fns`.
+    /// #1961 — generic calls failed open end to end: `check_user_fn_arity`
+    /// bailed on `!f.type_params.is_empty()` and `check_user_fn_arg_types`
+    /// did the same, so `id[int](10, 20, 30)` (explicit instantiation) and
+    /// `id(10, 20, 30)` (inferred) passed `hyb check` with zero diagnostics
+    /// and failed `go build`. The type arguments themselves stay
+    /// uninferrable; this check owns only the argument count and the
+    /// explicit-instantiation type-argument count (Go refuses a wrong one
+    /// with `got N type arguments but want M`).
+    fn check_generic_call_arity(
+        &mut self,
+        name: &str,
+        f: &FnDecl,
+        args: &[CallArg],
+        span: Span,
+    ) {
+        if name.contains('[') && name.ends_with(']') {
+            // Explicit instantiation `id[int, string](...)`: Go refuses a
+            // wrong type-argument count before it looks at the arguments.
+            let open = name.find('[').unwrap();
+            let got = split_top_level_type_args(&name[open + 1..name.len() - 1]).len();
+            let want = f.type_params.len();
+            if got != want {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "got {} type argument{} but want {} for `{}` — Go refuses `got {} type arguments but want {}` (HYB-E1002)",
+                        got,
+                        if got == 1 { "" } else { "s" },
+                        want,
+                        name,
+                        got,
+                        want
+                    ),
+                    "supply one type argument per declared type parameter",
+                );
+                return;
+            }
+        }
+        // A lone multi-value call IS the whole argument list and expands to
+        // one argument per result — #682 U7 owns that comparison (see
+        // `check_user_fn_arity`), so leave it alone here.
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        let (want, got) = (f.params.len(), args.len());
+        if want == got {
+            return;
+        }
+        let go = if got < want {
+            "not enough arguments in call to"
+        } else {
+            "too many arguments in call to"
+        };
+        self.emit_e1002(
+            span,
+            format!(
+                "`{}` takes {} argument{} but is called with {} — Go refuses `{} {}` (HYB-E1002)",
+                name,
+                want,
+                if want == 1 { "" } else { "s" },
+                got,
+                go,
+                name
+            ),
+            "a call must pass one argument per declared parameter; the emitted Go call is rejected at build time",
+        );
+    }
+
     fn check_user_fn_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let head = Checker::base_named_type_str(name);
         let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
@@ -5309,8 +5377,14 @@ impl<'a> Collector<'a> {
             return;
         }
         // Generic instantiations (`id[int](x)`) carry type arguments the
-        // parameter list does not describe; leave them to the type checker.
+        // parameter list does not describe; leave those to the type
+        // checker. #1961: the argument *count* is still checkable — the
+        // emitted Go call fails `go build` verbatim today
+        // (`too many arguments in call to id[int]` / `... to id`) — so a
+        // wrong-count explicit instantiation or inferred generic call is
+        // diagnosed here instead of failing open.
         if !f.type_params.is_empty() {
+            self.check_generic_call_arity(name, f, args, span);
             self.check_uninferable_type_params(name, f, span);
             return;
         }
@@ -5502,6 +5576,11 @@ impl<'a> Collector<'a> {
         let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
             return;
         };
+        // #1961: the argument count of an inferred generic call (`id(10,
+        // 20)`) is now checked by `check_generic_call_arity` via
+        // `check_user_fn_arity`; the type arguments themselves stay
+        // uninferrable, so the per-argument type walk below keeps failing
+        // open.
         if !f.type_params.is_empty() {
             return;
         }
