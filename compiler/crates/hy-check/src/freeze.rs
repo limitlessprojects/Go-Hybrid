@@ -326,6 +326,18 @@ impl<'a> Checker<'a> {
                 shadow_targets.extend(links.iter().cloned());
             }
         }
+        let mut idx = 0;
+        while idx < shadow_targets.len() {
+            let cur = shadow_targets[idx].clone();
+            idx += 1;
+            for (a, b) in &st.shadowed_shares {
+                if a == &cur && !shadow_targets.contains(b) {
+                    shadow_targets.push(b.clone());
+                } else if b == &cur && !shadow_targets.contains(a) {
+                    shadow_targets.push(a.clone());
+                }
+            }
+        }
         for (m, orig) in members.iter().zip(origins) {
             if let Some(b) = st.env_lookup_mut(m) {
                 if b.non_owned_origin.is_none() {
