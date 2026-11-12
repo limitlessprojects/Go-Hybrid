@@ -560,4 +560,20 @@ mod tests {
         let s = Span::new(Pos::new(5, 1), Pos::new(5, 8)).to(Span::new(Pos::new(2, 4), Pos::new(2, 10)));
         assert_eq!((s.start, s.end), (Pos::new(2, 4), Pos::new(5, 8)));
     }
+
+    #[test]
+    fn e8001_example_uses_required_managed_arguments() {
+        let reg = Registry::global();
+        let entry = reg.lookup("HYB-E8001").expect("HYB-E8001 registered");
+        assert!(
+            entry.example.contains("managed(\"") && entry.example.contains("\", \""),
+            "HYB-E8001 example must include managed(reason, category) arguments so it does not fail with HYB-E0003: {}",
+            entry.example
+        );
+        assert!(
+            !entry.example.contains("managed {"),
+            "HYB-E8001 example must not teach bare `managed {{ ... }}`: {}",
+            entry.example
+        );
+    }
 }
