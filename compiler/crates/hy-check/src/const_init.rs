@@ -145,6 +145,15 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn is_shadowed_const_ty_name(&self, name: &str, st: Option<&FnState>) -> bool {
+        st.is_some_and(|s| s.env_lookup(name).is_some() || s.type_params.contains(name))
+            || self.fns.contains_key(name)
+            || self.structs.contains_key(name)
+            || self.struct_type_params.contains_key(name)
+            || self.enums.contains_key(name)
+            || self.consts.contains_key(name)
+    }
+
     fn is_const_conversion_target(&self, name: &str, st: Option<&FnState>) -> bool {
         if st.is_some_and(|s| s.type_params.contains(name)) {
             return false;
@@ -153,9 +162,7 @@ impl<'a> Checker<'a> {
             let resolved = self.resolve_type_alias(ty);
             if let hy_syntax::TypeExpr::Named { name: target, .. } = resolved {
                 return !st.is_some_and(|s| s.type_params.contains(target.as_str()))
-                    && !self.structs.contains_key(target.as_str())
-                    && !self.struct_type_params.contains_key(target.as_str())
-                    && !self.enums.contains_key(target.as_str())
+                    && !self.is_shadowed_const_ty_name(target.as_str(), None)
                     && is_conversion_type_name(&target);
             }
             return false;
@@ -180,7 +187,7 @@ impl<'a> Checker<'a> {
                 hy_syntax::TypeExpr::Named { name: target, .. }
                     if target == "string"
                         && !st.is_some_and(|s| s.type_params.contains(target.as_str()))
-                        && !self.structs.contains_key("string")
+                        && !self.fns.contains_key("string") && !self.structs.contains_key("string")
                         && !self.struct_type_params.contains_key("string")
                         && !self.enums.contains_key("string")
                         && !self.consts.contains_key("string")
@@ -257,13 +264,7 @@ impl<'a> Checker<'a> {
 
     fn is_const_allowed_ty(&self, ty: &hy_syntax::TypeExpr, st: Option<&FnState>) -> bool {
         if let hy_syntax::TypeExpr::Named { ref name, .. } = ty {
-            if st.is_some_and(|s| s.type_params.contains(name.as_str())) {
-                return false;
-            }
-            if self.structs.contains_key(name.as_str())
-                || self.struct_type_params.contains_key(name.as_str())
-                || self.enums.contains_key(name.as_str())
-            {
+            if self.is_shadowed_const_ty_name(name.as_str(), st) {
                 return false;
             }
         }
@@ -272,12 +273,8 @@ impl<'a> Checker<'a> {
             return false;
         }
         if let hy_syntax::TypeExpr::Named { ref name, .. } = resolved {
-            if st.is_some_and(|s| s.type_params.contains(name.as_str())) {
-                return false;
-            }
-            if self.structs.contains_key(name.as_str())
-                || self.struct_type_params.contains_key(name.as_str())
-                || self.enums.contains_key(name.as_str())
+            if st.is_some_and(|s| s.type_params.contains(name.as_str()))
+                || self.is_shadowed_const_ty_name(name.as_str(), None)
             {
                 return false;
             }
