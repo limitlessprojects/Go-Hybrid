@@ -4624,6 +4624,57 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_bytes_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "buffer" | "reader" | "min_read" | "err_too_large"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `bytes.{member}`: package symbol is a variable, constant, or type, not a function (HYB-E1002)"),
+                &format!("refer to `bytes.{member}` as a value or type rather than calling it"),
+            );
+            return;
+        }
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `bytes.{member}` (HYB-E1002)"),
+                &format!("`bytes.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_buffer" | "new_buffer_string" | "new_reader" | "clone"
+            | "to_lower" | "to_upper" | "to_title" | "title" | "trim_space" => Some(1),
+            "compare" | "contains" | "contains_any" | "contains_rune" | "count"
+            | "cut" | "cut_prefix" | "cut_suffix" | "equal" | "equal_fold"
+            | "has_prefix" | "has_suffix" | "index" | "index_any" | "index_byte"
+            | "index_func" | "index_rune" | "join" | "last_index" | "last_index_any"
+            | "last_index_byte" | "last_index_func" | "map" | "repeat"
+            | "split" | "split_after" | "to_lower_special" | "to_title_special"
+            | "to_upper_special" | "to_valid_utf8" | "trim" | "trim_func"
+            | "trim_left" | "trim_left_func" | "trim_prefix" | "trim_right"
+            | "trim_right_func" | "trim_suffix" => Some(2),
+            "replace_all" | "split_n" | "split_after_n" => Some(3),
+            "replace" => Some(4),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`bytes.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `bytes.{member}`"),
+                );
+            }
+        }
+    }
+
     fn check_sync_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(
             member,
@@ -8408,8 +8459,14 @@ impl<'a> Collector<'a> {
                     if pkg == "sort" && self.lookup_kind(pkg).is_none() {
                         self.check_sort_package_call(name.as_str(), args, span);
                     }
+                    if pkg == "sort" && self.lookup_kind(pkg).is_none() {
+                        self.check_sort_package_call(name.as_str(), args, span);
+                    }
                     if pkg == "strconv" && self.lookup_kind(pkg).is_none() {
                         self.check_strconv_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "bytes" && self.lookup_kind(pkg).is_none() {
+                        self.check_bytes_package_call(name.as_str(), args, span);
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
