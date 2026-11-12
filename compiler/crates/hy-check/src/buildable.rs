@@ -9549,66 +9549,69 @@ impl<'a> Collector<'a> {
                 }
             }
 
-            "real" | "imag" => {
-                if args.len() != 1 {
-                    return; // arity handled by builtins.rs
-                }
-                let op = &args[0].value;
-                let ak = self.kind_of_expr(op);
-                if matches!(
-                    ak,
-                    OpKind::Str
-                        | OpKind::Bool
-                        | OpKind::Slice(_)
-                        | OpKind::Array(_)
-                        | OpKind::Map(_, _)
-                        | OpKind::Chan(_)
-                        | OpKind::Struct(_)
-                        | OpKind::Pointer(_)
-                        | OpKind::Fn(..)
-                        | OpKind::Interface
-                ) {
-                    self.emit_e1002(
-                        op.span(),
-                        format!(
-                            "invalid argument `{}` (type `{}`) for built-in `{name}` — Go refuses `invalid argument: {} (must be complex)` (HYB-E1002)",
-                            op.render(),
-                            ak.label(),
-                            op.render()
-                        ),
-                        "argument to `real` or `imag` must be a complex number (`complex64` or `complex128`)",
-                    );
-                }
-            }
-            "complex" => {
-                if args.len() != 2 {
+            "real" | "imag" | "complex" => {
+                let want_complex = name != "complex";
+                if (want_complex && args.len() != 1) || (!want_complex && args.len() != 2) {
                     return; // arity handled by builtins.rs
                 }
                 for arg in args {
-                    let ak = self.kind_of_expr(&arg.value);
+                    let op = &arg.value;
                     if matches!(
-                        ak,
-                        OpKind::Str
-                            | OpKind::Bool
-                            | OpKind::Slice(_)
-                            | OpKind::Array(_)
-                            | OpKind::Map(_, _)
-                            | OpKind::Chan(_)
-                            | OpKind::Struct(_)
-                            | OpKind::Pointer(_)
-                            | OpKind::Fn(..)
-                            | OpKind::Interface
+                        unwrap_parens(op),
+                        Expr::Lit {
+                            kind: LitKind::Int(_) | LitKind::Float(_),
+                            ..
+                        }
                     ) {
-                        self.emit_e1002(
-                            arg.value.span(),
-                            format!(
-                                "invalid argument `{}` (type `{}`) in `complex` — Go refuses `invalid argument: {} (must be float)` (HYB-E1002)",
-                                arg.value.render(),
-                                ak.label(),
-                                arg.value.render()
-                            ),
-                            "arguments to `complex` must be floating-point numbers (`float32` or `float64`)",
+                        continue;
+                    }
+                    let ak = self.kind_of_expr(op);
+                    let sc = self.typed_value_scalar(op);
+                    let float_complex_mismatch = matches!(ak, OpKind::Float)
+                        && if want_complex {
+                            matches!(sc, Some("float32" | "float64"))
+                        } else {
+                            matches!(sc, Some("complex64" | "complex128"))
+                        };
+                    let invalid = float_complex_mismatch
+                        || matches!(
+                            ak,
+                            OpKind::Str
+                                | OpKind::Bool
+                                | OpKind::Slice(_)
+                                | OpKind::Array(_)
+                                | OpKind::Map(_, _)
+                                | OpKind::Chan(_)
+                                | OpKind::Struct(_)
+                                | OpKind::Pointer(_)
+                                | OpKind::Fn(..)
+                                | OpKind::Interface
+                                | OpKind::Int
                         );
+                    if invalid {
+                        if want_complex {
+                            self.emit_e1002(
+                                op.span(),
+                                format!(
+                                    "invalid argument `{}` (type `{}`) for built-in `{name}` — Go refuses `invalid argument: {} (must be complex)` (HYB-E1002)",
+                                    op.render(),
+                                    ak.label(),
+                                    op.render()
+                                ),
+                                "argument to `real` or `imag` must be a complex number (`complex64` or `complex128`)",
+                            );
+                        } else {
+                            self.emit_e1002(
+                                op.span(),
+                                format!(
+                                    "invalid argument `{}` (type `{}`) in `complex` — Go refuses `invalid argument: {} (must be float)` (HYB-E1002)",
+                                    op.render(),
+                                    ak.label(),
+                                    op.render()
+                                ),
+                                "arguments to `complex` must be floating-point numbers (`float32` or `float64`)",
+                            );
+                        }
                     }
                 }
             }
