@@ -763,7 +763,7 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
 }
 
 /// Human-readable M5 curated package allowlist string for HYB-E1001 diagnostics (#658).
-pub(crate) const CURATED_ALLOWLIST_DISPLAY: &str = "fmt, os, io, time, sort, strings, strconv, errors, sync, sync/atomic, bufio, net, net/http, net/http/httptest, net/url, encoding/json, encoding/hex, path, path/filepath, log, compress/gzip, archive/tar, rust/serde_json, rust/sha3, rust/regex";
+pub(crate) const CURATED_ALLOWLIST_DISPLAY: &str = "fmt, os, io, time, sort, strings, strconv, errors, sync, sync/atomic, bufio, net, net/http, net/http/httptest, net/url, encoding/json, encoding/hex, encoding/base64, path, path/filepath, log, compress/gzip, archive/tar, rust/serde_json, rust/sha3, rust/regex";
 
 /// Is `path` in SPEC M5's curated Go allowlist or M6's pinned Rust crate set (#658)?
 pub(crate) fn is_curated_import(path: &str) -> bool {
@@ -793,6 +793,8 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "json"
             | "encoding/hex"
             | "hex"
+            | "encoding/base64"
+            | "base64"
             | "path"
             | "path/filepath"
             | "filepath"
@@ -832,7 +834,6 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
             | "sha512"
             | "rand"
             | "binary"
-            | "base64"
             | "csv"
             | "xml"
             | "html"
@@ -869,6 +870,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "url"
             | "json"
             | "hex"
+            | "base64"
             | "path"
             | "filepath"
             | "log"

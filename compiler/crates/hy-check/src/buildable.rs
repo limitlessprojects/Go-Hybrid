@@ -4671,6 +4671,46 @@ impl<'a> Collector<'a> {
             }
         }
     }
+
+    fn check_base64_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "std_encoding"
+                | "url_encoding"
+                | "raw_std_encoding"
+                | "raw_url_encoding"
+                | "std_padding"
+                | "no_padding"
+                | "encoding"
+                | "corrupt_input_error"
+        ) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot call `base64.{member}`: package symbol is a variable, constant, or type, not a function (HYB-E1002)"
+                ),
+                &format!("refer to `base64.{member}` as a value or type rather than calling it"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_encoding" => Some(1),
+            "new_decoder" | "new_encoder" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`base64.{member}` takes exactly {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `base64.{member}`"),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -8334,6 +8374,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if (pkg == "base64" || pkg == "encoding/base64") && self.lookup_kind(pkg).is_none() {
+                        self.check_base64_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
