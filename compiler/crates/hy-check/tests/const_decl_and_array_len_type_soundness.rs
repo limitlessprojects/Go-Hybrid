@@ -127,3 +127,19 @@ fn main() {
         r.diagnostics
     );
 }
+
+#[test]
+fn inferred_top_level_const_rejects_mismatched_scalar_and_array_len_e1002() {
+    let cases = [
+        "const a = int32(1)\nconst b int64 = a\nfn main() {\n    _ = b\n}\n",
+        "const a int32 = 1\nconst b = a\nconst c int64 = b\nfn main() {\n    _ = c\n}\n",
+        "const a = int(1)\nconst f float64 = a\nfn main() {\n    _ = f\n}\n",
+        "const a = len(\"abc\")\nconst f float64 = a\nfn main() {\n    _ = f\n}\n",
+        "const a = [3]int{1, 2, 3}\nconst b [4]int = a\nfn main() {\n    _ = b\n}\n",
+    ];
+    for src in cases {
+        let r = check(src);
+        assert_eq!(r.verdict, Verdict::Reject, "expected Reject for:\n{src}");
+        assert!(codes(&r).iter().any(|c| c == "HYB-E1002"), "got: {:?}", r.diagnostics);
+    }
+}
