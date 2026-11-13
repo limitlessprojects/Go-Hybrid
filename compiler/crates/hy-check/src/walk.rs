@@ -452,7 +452,8 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                 via_addr: false,
             }),
             Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
-                if let Some(root) = crate::model::unwrap_parens(operand).root_ident() {
+                let unwrap_op = crate::model::unwrap_parens(operand);
+                if let Some(root) = unwrap_op.root_ident() {
                     out.push(Use {
                         name: root.to_string(),
                         span: *span,
@@ -460,6 +461,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                         via_move: true,
                         via_addr: false,
                     });
+                    collect_chain_subexpr_uses(unwrap_op, out);
                 } else {
                     expr_uses(operand, out);
                 }
@@ -513,6 +515,27 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
         // closures.rs pass (O4.9).
         Expr::FnLit { .. } => {}
         Expr::Paren { inner, .. } => expr_uses(inner, out),
+    }
+}
+
+/// Recursively collect all index, lo, and hi subexpression uses along a place chain.
+fn collect_chain_subexpr_uses(expr: &Expr, out: &mut Vec<Use>) {
+    match crate::model::unwrap_parens(expr) {
+        Expr::Field { base, .. } => collect_chain_subexpr_uses(base, out),
+        Expr::Index { base, index, .. } => {
+            collect_chain_subexpr_uses(base, out);
+            expr_uses(index, out);
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            collect_chain_subexpr_uses(base, out);
+            if let Some(lo) = lo {
+                expr_uses(lo, out);
+            }
+            if let Some(hi) = hi {
+                expr_uses(hi, out);
+            }
+        }
+        _ => {}
     }
 }
 
