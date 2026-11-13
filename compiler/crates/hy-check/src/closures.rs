@@ -599,6 +599,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                                 st.borrow_bindings.remove(&src);
                             }
                         }
+                        if ck.expr_carries_borrow(st, value) || field_borrow_kind(&shape).is_some() {
+                            st.borrow_bindings.insert(name.clone());
+                        }
                         continue;
                     }
                     let reads_self = !is_fresh_copy && ck.value_reads_storage_of(&pre_st, value, name);
@@ -699,6 +702,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     // and cannot bypass O5.1 / O5.4 move restrictions.
                     ck.record_storage_from_snapshot(st, &pre_st, name, value, &overwritten, true, false);
                     ck.record_move_const_and_a3_loans(st, name, value, 0);
+                    if ck.expr_carries_borrow(st, value) || field_borrow_kind(&shape).is_some() {
+                        st.borrow_bindings.insert(name.clone());
+                    }
 
                     ck.record_closure_mutations(st, name, value);
                     if let Some(origin) = shadowed_origin.or(moved_non_owned) {
