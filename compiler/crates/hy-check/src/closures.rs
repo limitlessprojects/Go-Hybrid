@@ -1792,10 +1792,16 @@ fn check_deferred_uses(ck: &mut Checker<'_>, st: &FnState, body: &Block) {
                     let shape = ck
                         .lookup_binding(st, &u.name)
                         .map(|b| b.shape.clone())
-                        .unwrap_or(TypeShape::Map(
-                            Box::new(TypeShape::Str),
-                            Box::new(TypeShape::Primitive),
-                        ));
+                        .unwrap_or_else(|| {
+                            if mv.kind == crate::model::MoveKind::Consumed {
+                                crate::model::TypeShape::OwnHandle("flate2.writer".into())
+                            } else {
+                                crate::model::TypeShape::Map(
+                                    Box::new(crate::model::TypeShape::Str),
+                                    Box::new(crate::model::TypeShape::Primitive),
+                                )
+                            }
+                        });
                     tmp_st.env.insert(
                         u.name.clone(),
                         Binding {
@@ -1852,15 +1858,111 @@ fn inspect_later_defer_fate(
         }
     }
 
+    let mut cur_depth: usize = 0;
+    let mut defer_depth: usize = 0;
+    for (_, idx) in &flat.stmts {
+        if let Some(evs) = flat.events.get(idx) {
+            for ev in evs {
+                match ev {
+                    crate::walk::ScopeEvent::Push => cur_depth += 1,
+                    crate::walk::ScopeEvent::Pop => cur_depth = cur_depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+        }
+        if *idx == defer_idx {
+            defer_depth = cur_depth;
+            break;
+        }
+    }
+
+    let mut shadowed_at_depth: std::collections::HashMap<usize, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    let mut inner_watch_at_depth: std::collections::HashMap<usize, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
     let mut rebound_self = false;
+
     for (stmt, idx) in &flat.stmts {
-        if *idx <= defer_idx || flat.in_managed(*idx) {
+        if *idx <= defer_idx {
             continue;
         }
-        if let Some(mv) = stmt_moves_watched_binding(stmt, &watch) {
+        if let Some(evs) = flat.events.get(idx) {
+            for ev in evs {
+                match ev {
+                    crate::walk::ScopeEvent::Push => {
+                        cur_depth += 1;
+                    }
+                    crate::walk::ScopeEvent::Pop => {
+                        shadowed_at_depth.remove(&cur_depth);
+                        inner_watch_at_depth.remove(&cur_depth);
+                        cur_depth = cur_depth.saturating_sub(1);
+                    }
+                    crate::walk::ScopeEvent::SelectRecv { names, .. } => {
+                        if cur_depth > defer_depth {
+                            let set = shadowed_at_depth.entry(cur_depth).or_default();
+                            for n in *names {
+                                set.insert(n.clone());
+                            }
+                        }
+                    }
+                    crate::walk::ScopeEvent::MatchBind { name: mb_name, .. } => {
+                        if cur_depth > defer_depth {
+                            shadowed_at_depth
+                                .entry(cur_depth)
+                                .or_default()
+                                .insert(mb_name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        if flat.in_managed(*idx) {
+            continue;
+        }
+
+        let mut active_watch: std::collections::HashSet<String> = watch.clone();
+        for d in (defer_depth + 1)..=cur_depth {
+            if let Some(sh) = shadowed_at_depth.get(&d) {
+                for s in sh {
+                    active_watch.remove(s);
+                }
+            }
+            if let Some(iw) = inner_watch_at_depth.get(&d) {
+                for w in iw {
+                    active_watch.insert(w.clone());
+                }
+            }
+        }
+
+        if let Some(mv) = stmt_moves_watched_binding(stmt, &active_watch) {
             return LaterDeferFate::Moved(mv);
         }
-        update_post_defer_watch(ck, st, stmt, name, &mut watch, &mut rebound_self);
+
+        if cur_depth <= defer_depth {
+            update_post_defer_watch(ck, st, stmt, name, &mut watch, &mut rebound_self);
+        } else if let Stmt::Local(l) = stmt {
+            let sh = shadowed_at_depth.entry(cur_depth).or_default();
+            for target in &l.names {
+                if target != "_" {
+                    sh.insert(target.clone());
+                }
+            }
+            for (i, target) in l.names.iter().enumerate() {
+                if target == "_" {
+                    continue;
+                }
+                let val = l.values.get(i).or_else(|| l.values.first());
+                if let Some(v) = val {
+                    if active_watch.iter().any(|w| ck.value_reads_storage_of(st, v, w)) {
+                        inner_watch_at_depth
+                            .entry(cur_depth)
+                            .or_default()
+                            .insert(target.clone());
+                    }
+                }
+            }
+        }
     }
     if rebound_self {
         LaterDeferFate::ReboundBeforeMove
@@ -2137,10 +2239,110 @@ fn update_post_defer_watch(
     }
 }
 
+fn call_consumes_watched_binding(
+    cr: &crate::walk::CallRef<'_>,
+    watch: &std::collections::HashSet<String>,
+) -> Option<crate::model::MoveInfo> {
+    match cr.callee {
+        Expr::Field { base, name, .. } => {
+            if let Expr::Ident { name: pkg, .. } = &**base {
+                if (pkg == "flate2" && name == "finish")
+                    || (crate::foreign::package_mode(pkg, name)
+                        == crate::foreign::CallMode::Consume)
+                {
+                    if let Some(arg) = cr.args.first() {
+                        if let Some(root) = arg.value.root_ident() {
+                            if watch.contains(root) {
+                                return Some(crate::model::MoveInfo {
+                                    span: cr.span,
+                                    kind: crate::model::MoveKind::Consumed,
+                                    desc: format!("the consuming call `{}`", cr.callee.render()),
+                                    moved_name: root.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                if pkg == "serde_json" && name == "set" {
+                    if let Some(arg) = cr.args.get(2) {
+                        if let Some(root) = arg.value.root_ident() {
+                            if watch.contains(root) {
+                                return Some(crate::model::MoveInfo {
+                                    span: cr.span,
+                                    kind: crate::model::MoveKind::Consumed,
+                                    desc: format!("the consuming call `{}`", cr.callee.render()),
+                                    moved_name: root.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(root) = base.root_ident() {
+                if watch.contains(root) {
+                    if name == "finish"
+                        || crate::foreign::method_mode("flate2.writer", name)
+                            == crate::foreign::CallMode::Consume
+                    {
+                        return Some(crate::model::MoveInfo {
+                            span: cr.span,
+                            kind: crate::model::MoveKind::Consumed,
+                            desc: format!("the consuming call `{}`", cr.callee.render()),
+                            moved_name: root.to_string(),
+                        });
+                    }
+                }
+            }
+
+            if name == "set" {
+                if let Some(arg) = cr.args.get(1) {
+                    if let Some(root) = arg.value.root_ident() {
+                        if watch.contains(root) {
+                            return Some(crate::model::MoveInfo {
+                                span: cr.span,
+                                kind: crate::model::MoveKind::Consumed,
+                                desc: format!("the consuming call `{}`", cr.callee.render()),
+                                moved_name: root.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Expr::Ident { name, .. } => {
+            if name == "finish" {
+                if let Some(arg) = cr.args.first() {
+                    if let Some(root) = arg.value.root_ident() {
+                        if watch.contains(root) {
+                            return Some(crate::model::MoveInfo {
+                                span: cr.span,
+                                kind: crate::model::MoveKind::Consumed,
+                                desc: format!("the consuming call `{}`", cr.callee.render()),
+                                moved_name: root.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
 fn stmt_moves_watched_binding(
     stmt: &Stmt,
     watch: &std::collections::HashSet<String>,
 ) -> Option<crate::model::MoveInfo> {
+    let mut calls = Vec::new();
+    crate::walk::own_calls(stmt, &mut calls);
+    for cr in &calls {
+        if let Some(mv) = call_consumes_watched_binding(cr, watch) {
+            return Some(mv);
+        }
+    }
+
     let check_expr = |e: &Expr, desc: String| -> Option<crate::model::MoveInfo> {
         let mut ops = Vec::new();
         crate::model::collect_move_operands(e, &mut ops);

@@ -438,13 +438,6 @@ impl ChannelLivenessChecker {
                     self.check_expr(&a.value);
                 }
             }
-            Expr::FnLit { body, .. } => {
-                self.push_scope();
-                for s in &body.stmts {
-                    self.check_stmt(s);
-                }
-                self.pop_scope();
-            }
             Expr::Receive { chan, span } => {
                 if let Some(cap) = self.get_cap_name(chan) {
                     if self.is_moved(&cap) {
