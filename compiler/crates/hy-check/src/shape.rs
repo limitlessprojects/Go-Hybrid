@@ -92,6 +92,9 @@ impl<'a> Checker<'a> {
         if let Some(target) = self.type_aliases.get(base) {
             return self.shape_of_type_depth(target, depth + 1);
         }
+        if self.enums.contains_key(base) {
+            return TypeShape::Primitive;
+        }
         // #884: the T9 prelude's `set[T]` lowers to a struct wrapping a Go
         // map (`type set[t comparable] struct { m map[t]struct{} }`), so a
         // shallow copy shares that map exactly like any other map-carrying
@@ -190,14 +193,31 @@ impl<'a> Checker<'a> {
                 self.shape_carries_handle_at(k, depth + 1)
                     || self.shape_carries_handle_at(v, depth + 1)
             }
-            TypeShape::Struct(Some(name)) => self
-                .struct_fields_for_sname(name)
-                .map(|fields| {
-                    fields.iter().any(|(_, ty)| {
-                        self.shape_carries_handle_at(&self.shape_of_type(ty), depth + 1)
+            TypeShape::Struct(Some(name))
+                if Self::base_named_type_str(name) == "set"
+                    && !self.structs.contains_key("set") =>
+            {
+                Self::parse_generic_type_args(name)
+                    .and_then(|(_, mut args)| args.pop())
+                    .map(|elem_ty| {
+                        let elem_shape = self.shape_of_type(&elem_ty);
+                        matches!(elem_shape, TypeShape::Unknown)
+                            || self.shape_carries_handle_at(&elem_shape, depth + 1)
                     })
-                })
-                .unwrap_or(false),
+                    .unwrap_or(true)
+            }
+            TypeShape::Struct(Some(name)) => {
+                if self.struct_has_unresolved_type_param(name) {
+                    return true;
+                }
+                self.struct_fields_for_sname(name)
+                    .map(|fields| {
+                        fields.iter().any(|(_, ty)| {
+                            self.shape_carries_handle_at(&self.shape_of_type(ty), depth + 1)
+                        })
+                    })
+                    .unwrap_or(false)
+            }
             _ => false,
         }
     }
@@ -350,6 +370,9 @@ impl<'a> Checker<'a> {
                 .map(|r| self.shape_of_type(&r.ty))
                 .unwrap_or(TypeShape::Unknown),
             Expr::Ident { name, .. } => {
+                if st.type_params.contains(name.as_str()) {
+                    return TypeShape::Unknown;
+                }
                 // Local bindings shadow top-level functions and builtins.
                 if let Some(b) = self.lookup_binding(st, name) {
                     if let Some(TypeExpr::Fn { results, .. }) = &b.ty {
@@ -438,13 +461,23 @@ impl<'a> Checker<'a> {
             Expr::Field { base, name, .. } => {
                 // package call (`serde_json.parse`) vs method call (`doc.array`)
                 if let Expr::Ident { name: b, .. } = &**base {
-                    if self.lookup_binding(st, b).is_none() && self.known_package(b) {
+                    if self.lookup_binding(st, b).is_none()
+                        && !st.type_params.contains(b.as_str())
+                        && !self.structs.contains_key(b.as_str())
+                        && !self.enums.contains_key(b.as_str())
+                        && !self.type_aliases.contains_key(b.as_str())
+                        && !self.consts.contains_key(b.as_str())
+                        && self.known_package(b)
+                    {
                         return foreign::package_result(b, name);
                     }
                 }
                 let head = Self::base_named_type_str(name);
                 if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
-                    if self.lookup_binding(st, root).is_none() {
+                    if self.lookup_binding(st, root).is_none()
+                        && !st.type_params.contains(root.as_str())
+                        && !self.consts.contains_key(root.as_str())
+                    {
                         let full = format!("{}.{}", root, head);
                         if let Some(f) = self.fns.get(full.as_str()) {
                             let subst = self.fn_call_shape_subst(st, f, name, None, args);
@@ -652,6 +685,47 @@ impl<'a> Checker<'a> {
                 vec![elem_shape]
             }
             _ => vec![TypeShape::Unknown; n_vars.max(1)],
+        }
+    }
+
+    pub(crate) fn iterate_var_tys(
+        &self,
+        st: &FnState,
+        expr: &Expr,
+        n_vars: usize,
+    ) -> Vec<Option<TypeExpr>> {
+        let iter_ty = self.ty_of_expr(st, expr).map(|t| match self.resolve_type_alias(&t) {
+            TypeExpr::Pointer { to, .. }
+                if matches!(self.resolve_type_alias(&to), TypeExpr::Array { .. }) =>
+            {
+                self.resolve_type_alias(&to)
+            }
+            other => other,
+        });
+        let int_ty = || {
+            Some(TypeExpr::Named {
+                name: "int".to_string(),
+                span: expr.span(),
+            })
+        };
+        match &iter_ty {
+            Some(TypeExpr::Slice { elem, .. }) | Some(TypeExpr::Array { elem, .. }) => {
+                if n_vars >= 2 {
+                    vec![int_ty(), Some((**elem).clone())]
+                } else {
+                    vec![Some((**elem).clone())]
+                }
+            }
+            Some(TypeExpr::Map { key, value, .. }) => {
+                if n_vars >= 2 {
+                    vec![Some((**key).clone()), Some((**value).clone())]
+                } else {
+                    vec![Some((**key).clone())]
+                }
+            }
+            Some(TypeExpr::Chan { elem, .. }) => vec![Some((**elem).clone())],
+            Some(ty) if self.set_elem_type(ty).is_some() => vec![self.set_elem_type(ty)],
+            _ => vec![None; n_vars.max(1)],
         }
     }
 
@@ -1470,6 +1544,35 @@ impl<'a> Checker<'a> {
     ) -> Vec<TypeShape> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
+            let unwrap_pipe = |call_e: &Expr| -> bool {
+                if let Expr::Call { callee, .. } = call_e {
+                    let mut base = callee.as_ref();
+                    while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
+                        base = inner.as_ref();
+                    }
+                    if let Expr::Field { base: pkg, name, .. } = base {
+                        if let Expr::Ident { name: pkg_name, .. } = pkg.as_ref() {
+                            let head = name.split('[').next().unwrap_or(name.as_str());
+                            if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") {
+                                return true;
+                            }
+                        }
+                    }
+                    if let Expr::Ident { name, .. } = base {
+                        let head = name.split('[').next().unwrap_or(name.as_str());
+                        if head == "pipe" || head == "new_pipe" {
+                            return true;
+                        }
+                    }
+                }
+                false
+            };
+            if unwrap_pipe(v) {
+                return vec![
+                    TypeShape::OwnHandle("hy.send_cap".into()),
+                    TypeShape::OwnHandle("hy.recv_cap".into()),
+                ];
+            }
             if let Expr::Index { base, .. } = v {
                 if let TypeShape::Map(_, val) = self.shape_of_expr(st, base) {
                     return vec![*val, TypeShape::Primitive]; // v, ok := m[k]
@@ -1514,6 +1617,41 @@ impl<'a> Checker<'a> {
     ) -> Vec<Option<TypeExpr>> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
+            let unwrap_pipe = |call_e: &Expr| -> bool {
+                if let Expr::Call { callee, .. } = call_e {
+                    let mut base = callee.as_ref();
+                    while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
+                        base = inner.as_ref();
+                    }
+                    if let Expr::Field { base: pkg, name, .. } = base {
+                        if let Expr::Ident { name: pkg_name, .. } = pkg.as_ref() {
+                            let head = name.split('[').next().unwrap_or(name.as_str());
+                            if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") {
+                                return true;
+                            }
+                        }
+                    }
+                    if let Expr::Ident { name, .. } = base {
+                        let head = name.split('[').next().unwrap_or(name.as_str());
+                        if head == "pipe" || head == "new_pipe" {
+                            return true;
+                        }
+                    }
+                }
+                false
+            };
+            if unwrap_pipe(v) {
+                return vec![
+                    Some(TypeExpr::Named {
+                        name: "hy.send_cap".into(),
+                        span: v.span(),
+                    }),
+                    Some(TypeExpr::Named {
+                        name: "hy.recv_cap".into(),
+                        span: v.span(),
+                    }),
+                ];
+            }
             if let Expr::Index { base, .. } = v {
                 if let Some(TypeExpr::Map { value: val_ty, .. }) = self.ty_of_expr(st, base).map(|t| self.peel_pointer_and_alias(&t)) {
                     return vec![Some(*val_ty), None];
