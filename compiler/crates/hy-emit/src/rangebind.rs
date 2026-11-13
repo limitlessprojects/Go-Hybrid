@@ -49,7 +49,7 @@ fn block_reads(b: &Block, target: &str) -> bool {
 
 fn ty_reads(t: &TypeExpr, target: &str) -> bool {
     match t {
-        TypeExpr::Named { .. } => false,
+        TypeExpr::Named { name, .. } => folded_brackets_read(name, target),
         TypeExpr::Pointer { to, .. } => ty_reads(to, target),
         TypeExpr::Slice { elem, .. }
         | TypeExpr::Chan { elem, .. }
@@ -69,7 +69,7 @@ fn ty_reads(t: &TypeExpr, target: &str) -> bool {
 
 pub(crate) fn expr_reads(e: &Expr, target: &str) -> bool {
     match e {
-        Expr::Ident { name, .. } => name == target,
+        Expr::Ident { name, .. } => ident_or_folded_reads(name, target),
         Expr::Lit { .. } => false,
         Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
             InterpPart::Expr(x) => expr_reads(x, target),
@@ -87,7 +87,9 @@ pub(crate) fn expr_reads(e: &Expr, target: &str) -> bool {
                 || lo.as_ref().is_some_and(|x| expr_reads(x, target))
                 || hi.as_ref().is_some_and(|x| expr_reads(x, target))
         }
-        Expr::Field { base, .. } => expr_reads(base, target),
+        Expr::Field { base, name, .. } => {
+            expr_reads(base, target) || folded_brackets_read(name, target)
+        }
         Expr::Call { callee, args, .. } => {
             expr_reads(callee, target) || args.iter().any(|a| expr_reads(&a.value, target))
         }
@@ -385,4 +387,51 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
             false
         }
     }
+}
+
+fn ident_or_folded_reads(name: &str, target: &str) -> bool {
+    match name.split_once('[') {
+        Some((head, _)) => head == target || folded_brackets_read(name, target),
+        None => name == target,
+    }
+}
+
+fn folded_brackets_read(s: &str, target: &str) -> bool {
+    if target == "_" || !s.contains('[') {
+        return false;
+    }
+    let (bytes, len) = (s.as_bytes(), s.len());
+    let (mut i, mut depth) = (0usize, 0usize);
+    while i < len {
+        let b = bytes[i];
+        if b == b'[' {
+            depth += 1;
+        } else if b == b']' {
+            depth = depth.saturating_sub(1);
+        } else if depth > 0 {
+            if b == b'"' || b == b'`' || b == b'\'' {
+                i += 1;
+                while i < len && bytes[i] != b {
+                    if b != b'`' && bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            } else if b.is_ascii_alphabetic() || b == b'_' {
+                let start = i;
+                while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                if &s[start..i] == target && target != "true" && target != "false" && target != "nil" {
+                    let before = s[..start].trim_end();
+                    if !(before.ends_with('.') && !before.ends_with("..")) {
+                        return true;
+                    }
+                }
+                continue;
+            }
+        }
+        i += 1;
+    }
+    false
 }
