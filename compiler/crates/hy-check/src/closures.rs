@@ -27,7 +27,7 @@
 //!     (A5, QUESTIONS.md Q1/OQ1: pre-registered ACCEPT, contested openly).
 
 use crate::loans::{a3_paths_conflict, field_borrow_kind};
-use crate::model::{collect_ref_roots, Binding, Checker, FnState, Loan, LoanTarget, TypeShape};
+use crate::model::{collect_ref_roots, Binding, Checker, FnState, TypeShape};
 use hy_syntax::ForKind::*;
 use hy_syntax::{Block, Expr, LocalKind, SelectArmKind, Stmt};
 

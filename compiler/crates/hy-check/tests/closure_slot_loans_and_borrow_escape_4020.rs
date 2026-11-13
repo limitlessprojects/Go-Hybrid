@@ -21,7 +21,7 @@ fn has_code(src: &str, code: &str) -> (Verdict, bool) {
 fn rejects_closure_slot_loan_map_move_mutation() {
     let src = r#"
 fn main() {
-    f := fn() -> int {
+    f := fn() int {
         var m map[string]int
         slot := &m["a"]
         m2 := move m
@@ -39,7 +39,7 @@ fn main() {
 fn rejects_closure_slot_loan_map_move_assign_mutation() {
     let src = r#"
 fn main() {
-    f := fn() -> int {
+    f := fn() int {
         var m map[string]int
         var m2 map[string]int
         slot := &m["a"]
@@ -61,7 +61,7 @@ struct holder {
     m map[string]int
 }
 fn main() {
-    f := fn() -> int {
+    f := fn() int {
         var m map[string]int
         slot := &m["a"]
         h := holder{m: m}
@@ -79,7 +79,7 @@ fn main() {
 fn rejects_closure_slot_loan_iterate_mutation() {
     let src = r#"
 fn main() {
-    f := fn() -> int {
+    f := fn() int {
         var m map[string]int
         slot := &m["a"]
         ms := []map[string]int{m}
@@ -99,7 +99,7 @@ fn main() {
 fn rejects_closure_borrow_escape_after_move() {
     let src = r#"
 fn main() {
-    f := fn() -> *int {
+    f := fn() *int {
         x := 42
         p := &x
         p2 := move p
@@ -116,7 +116,7 @@ fn main() {
 fn rejects_closure_borrow_escape_after_move_assign() {
     let src = r#"
 fn main() {
-    f := fn() -> *int {
+    f := fn() *int {
         x := 42
         p := &x
         var p2 *int
@@ -134,7 +134,7 @@ fn main() {
 fn rejects_closure_borrow_escape_match_arm() {
     let src = r#"
 fn main() {
-    f := fn() -> *int {
+    f := fn() *int {
         x := 42
         opt := some(&x)
         match opt {
@@ -153,7 +153,7 @@ fn main() {
 fn accepts_valid_closure_borrows_and_after_loan_mutations() {
     let src = r#"
 fn main() {
-    f := fn() -> int {
+    f := fn() int {
         var m map[string]int
         m["a"] = 1
         slot := &m["a"]
