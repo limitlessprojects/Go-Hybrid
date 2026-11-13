@@ -7,14 +7,14 @@ use hy_check::{check_file, Verdict};
 use hy_diag::Severity;
 use hy_syntax::parse_file;
 
-fn has_code(src: &str, code: &str) -> (Verdict, bool) {
+fn has_code(src: &str, code: &str) -> (Verdict, bool, Vec<hy_diag::Diagnostic>) {
     let ast = parse_file("inline.hy", src).expect("must parse");
     let r = check_file(&ast);
     let hit = r
         .diagnostics
         .iter()
         .any(|d| d.severity == Severity::Error && d.code == code);
-    (r.verdict, hit)
+    (r.verdict, hit, r.diagnostics)
 }
 
 #[test]
@@ -34,8 +34,8 @@ fn main() {
     f()
 }
 "#;
-    let (v, hit) = has_code(src, "HYB-E3102");
-    assert!(v == Verdict::Reject && hit, "expected HYB-E3102 for move map mutation inside closure");
+    let (v, hit, diags) = has_code(src, "HYB-E3102");
+    assert!(v == Verdict::Reject && hit, "expected HYB-E3102 for move map mutation inside closure, got {:?}: {:?}", v, diags);
 }
 
 #[test]
@@ -56,8 +56,8 @@ fn main() {
     f()
 }
 "#;
-    let (v, hit) = has_code(src, "HYB-E3102");
-    assert!(v == Verdict::Reject && hit, "expected HYB-E3102 for move-assign map mutation inside closure");
+    let (v, hit, diags) = has_code(src, "HYB-E3102");
+    assert!(v == Verdict::Reject && hit, "expected HYB-E3102 for move-assign map mutation inside closure, got {:?}: {:?}", v, diags);
 }
 
 #[test]
@@ -80,8 +80,8 @@ fn main() {
     f()
 }
 "#;
-    let (v, hit) = has_code(src, "HYB-E3102");
-    assert!(v == Verdict::Reject && hit, "expected HYB-E3102 for wrapped map mutation inside closure");
+    let (v, hit, diags) = has_code(src, "HYB-E3102");
+    assert!(v == Verdict::Reject && hit, "expected HYB-E3102 for wrapped map mutation inside closure, got {:?}: {:?}", v, diags);
 }
 
 #[test]
@@ -103,8 +103,8 @@ fn main() {
     f()
 }
 "#;
-    let (v, hit) = has_code(src, "HYB-E3102");
-    assert!(v == Verdict::Reject && hit, "expected HYB-E3102 for iterate map mutation inside closure");
+    let (v, hit, diags) = has_code(src, "HYB-E3102");
+    assert!(v == Verdict::Reject && hit, "expected HYB-E3102 for iterate map mutation inside closure, got {:?}: {:?}", v, diags);
 }
 
 #[test]
@@ -120,8 +120,8 @@ fn main() {
     _ = f()
 }
 "#;
-    let (v, hit) = has_code(src, "HYB-E3104");
-    assert!(v == Verdict::Reject && hit, "expected HYB-E3104 for moved borrow escape from closure, got verdict: {:?}, diags: {:?}", v, r.diagnostics);
+    let (v, hit, diags) = has_code(src, "HYB-E3104");
+    assert!(v == Verdict::Reject && hit, "expected HYB-E3104 for moved borrow escape from closure, got verdict: {:?}, diags: {:?}", v, diags);
 }
 
 #[test]
@@ -138,8 +138,8 @@ fn main() {
     _ = f()
 }
 "#;
-    let (v, hit) = has_code(src, "HYB-E3104");
-    assert!(v == Verdict::Reject && hit, "expected HYB-E3104 for move-assigned borrow escape from closure");
+    let (v, hit, diags) = has_code(src, "HYB-E3104");
+    assert!(v == Verdict::Reject && hit, "expected HYB-E3104 for move-assigned borrow escape from closure, got {:?}: {:?}", v, diags);
 }
 
 #[test]
@@ -159,8 +159,8 @@ fn main() {
     _ = f()
 }
 "#;
-    let (v, hit) = has_code(src, "HYB-E3104");
-    assert!(v == Verdict::Reject && hit, "expected HYB-E3104 for match-arm borrow escape from closure");
+    let (v, hit, diags) = has_code(src, "HYB-E3104");
+    assert!(v == Verdict::Reject && hit, "expected HYB-E3104 for match-arm borrow escape from closure, got {:?}: {:?}", v, diags);
 }
 
 #[test]
