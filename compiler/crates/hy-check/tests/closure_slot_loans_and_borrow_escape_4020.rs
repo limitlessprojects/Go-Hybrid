@@ -20,15 +20,18 @@ fn has_code(src: &str, code: &str) -> (Verdict, bool) {
 #[test]
 fn rejects_closure_slot_loan_map_move_mutation() {
     let src = r#"
+struct item {
+    n int
+}
 fn main() {
-    f := fn() int {
-        var m map[string]int
+    f := fn() {
+        m := map[string]item{"a": item{n: 1}}
         slot := &m["a"]
         m2 := move m
-        m2["b"] = 1
-        return *slot
+        m2["b"] = item{n: 2}
+        _ = slot.n
     }
-    _ = f()
+    f()
 }
 "#;
     let (v, hit) = has_code(src, "HYB-E3102");
@@ -38,16 +41,19 @@ fn main() {
 #[test]
 fn rejects_closure_slot_loan_map_move_assign_mutation() {
     let src = r#"
+struct item {
+    n int
+}
 fn main() {
-    f := fn() int {
-        var m map[string]int
-        var m2 map[string]int
+    f := fn() {
+        m := map[string]item{"a": item{n: 1}}
+        var m2 map[string]item
         slot := &m["a"]
         m2 = move m
-        m2["b"] = 1
-        return *slot
+        m2["b"] = item{n: 2}
+        _ = slot.n
     }
-    _ = f()
+    f()
 }
 "#;
     let (v, hit) = has_code(src, "HYB-E3102");
@@ -57,18 +63,21 @@ fn main() {
 #[test]
 fn rejects_closure_slot_loan_projection_and_wrap_mutation() {
     let src = r#"
+struct item {
+    n int
+}
 struct holder {
-    m map[string]int
+    m map[string]item
 }
 fn main() {
-    f := fn() int {
-        var m map[string]int
+    f := fn() {
+        m := map[string]item{"a": item{n: 1}}
         slot := &m["a"]
         h := holder{m: m}
-        h.m["b"] = 1
-        return *slot
+        h.m["b"] = item{n: 2}
+        _ = slot.n
     }
-    _ = f()
+    f()
 }
 "#;
     let (v, hit) = has_code(src, "HYB-E3102");
@@ -78,17 +87,20 @@ fn main() {
 #[test]
 fn rejects_closure_slot_loan_iterate_mutation() {
     let src = r#"
+struct item {
+    n int
+}
 fn main() {
-    f := fn() int {
-        var m map[string]int
+    f := fn() {
+        m := map[string]item{"a": item{n: 1}}
         slot := &m["a"]
-        ms := []map[string]int{m}
+        ms := []map[string]item{m}
         for _, m2 in ms {
-            m2["b"] = 1
+            m2["b"] = item{n: 2}
         }
-        return *slot
+        _ = slot.n
     }
-    _ = f()
+    f()
 }
 "#;
     let (v, hit) = has_code(src, "HYB-E3102");
@@ -138,8 +150,10 @@ fn main() {
         x := 42
         opt := some(&x)
         match opt {
-            some(p) => return p,
-            none => return new(int),
+            some(p):
+                return p
+            none:
+                return new(int)
         }
     }
     _ = f()
@@ -152,13 +166,15 @@ fn main() {
 #[test]
 fn accepts_valid_closure_borrows_and_after_loan_mutations() {
     let src = r#"
+struct item {
+    n int
+}
 fn main() {
     f := fn() int {
-        var m map[string]int
-        m["a"] = 1
+        m := map[string]item{"a": item{n: 1}}
         slot := &m["a"]
-        v := *slot
-        m["b"] = 2
+        v := slot.n
+        m["b"] = item{n: 2}
         return v
     }
     _ = f()
