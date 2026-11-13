@@ -1485,6 +1485,8 @@ impl<'a> Checker<'a> {
                             }
                             moves.push((root.to_string(), v.span()));
                         }
+                    } else {
+                        self.check_o54_non_ident_move(st, op, v.span());
                     }
                 } else {
                     self.check_o54_non_ident_move(st, op, v.span());
@@ -1543,6 +1545,8 @@ impl<'a> Checker<'a> {
                             }
                             moves.push((root.to_string(), mspan));
                         }
+                    } else {
+                        self.check_o54_non_ident_move(st, op, mspan);
                     }
                 } else {
                     self.check_o54_non_ident_move(st, op, mspan);
