@@ -34,6 +34,7 @@ mod constconv;
 mod rangebind;
 mod shapes;
 mod zeroinit;
+pub mod witness;
 use shapes::{
     import_path_of, lookup_conversion, lookup_rust_crate, lookup_unbound_crate, Conversion,
 };
@@ -169,6 +170,18 @@ impl EmitError {
 pub fn emit_go(file: &File) -> Result<String, EmitError> {
     let mut em = Emitter::new();
     em.emit_file(file)
+}
+
+/// Emit Go source plus the issue #3930 witness proof: returns the same Go
+/// source as `emit_go` together with a proof.json body recording every
+/// `task`/`send` concurrency site (source span + printed sub-AST hash).
+/// The verifier in `hyb build --emit-proof` recomputes these from a fresh
+/// parse and fails closed on any mismatch.
+pub fn emit_go_with_proof(file: &File) -> Result<(String, String), EmitError> {
+    let mut em = Emitter::new();
+    let go = em.emit_file(file)?;
+    let proof = crate::witness::build_proof(std::mem::take(&mut em.witnesses));
+    Ok((go, crate::witness::proof_json(&proof)))
 }
 
 /// Emit as an importable PACKAGE (example 09's adoption story):
@@ -366,6 +379,15 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "ipv6" => "IPv6",
         "json" => "JSON",
         "lhs" => "LHS",
+        // log flag constants are single snake tokens in M4 spelling but Go
+        // spells them with internal caps (`log.lstdflags` → `LstdFlags`,
+        // `log.lutc` → `LUTC`); naive camel-casing yields Lstdflags/Lutc,
+        // which do not exist in Go (#4229 review fixups).
+        "lstdflags" => "LstdFlags",
+        "lutc" => "LUTC",
+        // General Go initialism the naive mapping misses (`time.utc` →
+        // `time.UTC`, `log.l_utc` → `LUTC`); Go rejects `Utc` spellings.
+        "utc" => "UTC",
         "ok" => "OK",
         "qps" => "QPS",
         "ram" => "RAM",
@@ -487,6 +509,9 @@ pub(crate) fn is_package_root(name: &str) -> bool {
             | "filepath"
             | "path"
             | "hex"
+            | "log"
+            | "gzip"
+            | "tar"
             | "sha3"
             | "serde_json"
             | "regex"
@@ -668,6 +693,9 @@ pub struct Emitter {
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
     n5_generic_structs: BTreeMap<String, (Vec<TypeParam>, Vec<FieldDecl>)>,
     n5_aliases: BTreeMap<String, TypeExpr>,
+    /// IR witness table (issue #3930): concurrency-site witnesses in
+    /// emission order; drained by `emit_go_with_proof`.
+    pub(crate) witnesses: Vec<crate::witness::Witness>,
 }
 
 pub(crate) struct ScopeSnapshot {
@@ -720,6 +748,7 @@ impl Emitter {
             n5_structs: BTreeMap::new(),
             n5_generic_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
+            witnesses: Vec::new(),
         }
     }
 
