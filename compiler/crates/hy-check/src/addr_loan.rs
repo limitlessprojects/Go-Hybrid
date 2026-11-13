@@ -17,12 +17,14 @@
 //! the A3 loan). The flag lives on the `Binding`, so a shadowing
 //! redefinition in an inner block starts clean (no false rejects).
 
-use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
+use crate::model::{
+    as_addr_of, unwrap_parens, unwrap_parens_and_move, Checker, FnState, LoanTarget, TypeShape,
+};
 use crate::walk::{self, Use};
 use hy_diag::{Diagnostic, FixIt, Span};
 use hy_syntax::{
-    AssignOp, Expr, ForKind, InterpPart, LocalDecl, LocalKind, Place, PlaceKind, SelectArmKind,
-    Stmt,
+    AssignOp, Block, Expr, ForKind, InterpPart, LocalDecl, LocalKind, Place, PlaceKind,
+    SelectArmKind, Stmt,
 };
 
 fn is_slot_loan_expr(ck: &Checker<'_>, st: &FnState, e: &Expr) -> bool {
@@ -43,14 +45,11 @@ fn is_slot_loan_or_alias_expr(
     if allow_addr_root && is_slot_loan_expr(ck, st, e) {
         return true;
     }
-    match unwrap_parens(e) {
-        Expr::Ident { name, .. } => ck.lookup_binding(st, name).is_some_and(|b| b.slot_loan),
-        Expr::Move { operand, .. } => match unwrap_parens(operand) {
-            Expr::Ident { name, .. } => ck.lookup_binding(st, name).is_some_and(|b| b.slot_loan),
-            _ => false,
-        },
-        _ => false,
+    let mut cur = e;
+    while let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = cur {
+        cur = inner;
     }
+    matches!(cur, Expr::Ident { name, .. } if ck.lookup_binding(st, name).is_some_and(|b| b.slot_loan))
 }
 
 impl<'a> Checker<'a> {
@@ -82,8 +81,8 @@ impl<'a> Checker<'a> {
     /// After `process_assign`: `x = &m[k]` or `x = slot` makes `x` a slot loan;
     /// a whole-value update (`x = T{...}`) to an already-active slot loan preserves
     /// `slot_loan` because the emitter keeps the O8 store-back active for `x` until
-    /// its last use or a shadowing declaration. Loan marking only applies when all
-    /// assignment targets are identifiers matching values.
+    /// its last use or a shadowing declaration. Direct `&m[k]` roots require all
+    /// targets to be identifiers; slot-loan aliases propagate to any identifier target.
     pub(crate) fn mark_slot_loans_assign(
         &self,
         st: &mut FnState,
@@ -91,15 +90,13 @@ impl<'a> Checker<'a> {
         op: AssignOp,
         values: &[hy_syntax::Expr],
     ) {
-        if op != AssignOp::Assign
-            || targets.len() != values.len()
-            || !targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)))
-        {
+        if op != AssignOp::Assign || targets.len() != values.len() {
             return;
         }
+        let allow_addr_root = targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)));
         let flags: Vec<bool> = values
             .iter()
-            .map(|v| is_slot_loan_or_alias_expr(self, st, v, true))
+            .map(|v| is_slot_loan_or_alias_expr(self, st, v, allow_addr_root))
             .collect();
         for (t, is_loan) in targets.iter().zip(flags) {
             if let PlaceKind::Ident(name) = &t.kind {
@@ -127,6 +124,8 @@ impl<'a> Checker<'a> {
                 ..
             } => {
                 if targets.len() == values.len() {
+                    let allow_addr_root =
+                        targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)));
                     for (t, v) in targets.iter().zip(values.iter()) {
                         let PlaceKind::Ident(name) = &t.kind else {
                             continue;
@@ -135,7 +134,7 @@ impl<'a> Checker<'a> {
                             continue;
                         };
                         if !b.slot_loan
-                            || walk::addr_of_index_base_path(v).is_some()
+                            || (allow_addr_root && walk::addr_of_index_base_path(v).is_some())
                             || !self.is_general_pointer_value(st, v)
                         {
                             continue;
@@ -227,7 +226,7 @@ impl<'a> Checker<'a> {
         if Checker::is_nil_literal(v) {
             return true;
         }
-        if let hy_syntax::Expr::Ident { name, .. } = unwrap_parens(v) {
+        if let hy_syntax::Expr::Ident { name, .. } = unwrap_parens_and_move(v) {
             if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan) {
                 return false;
             }
@@ -260,12 +259,16 @@ impl<'a> Checker<'a> {
     ) {
         match stmt {
             Stmt::Local(l) => {
+                if let Some(ty) = &l.ty {
+                    self.check_type_addr_of_loan_projections(st, ty, include_direct_ident);
+                }
                 let allow_slot_loan = matches!(l.kind, LocalKind::Define | LocalKind::Let)
                     && l.ty.is_none()
                     && l.names.len() == l.values.len();
                 for v in &l.values {
-                    // `x := &m[k]` is the O8 slot-loan initializer: legal.
-                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, allow_slot_loan);
+                    // `x := &m[k]` is the O8 slot-loan initializer: legal when rooted at a place path.
+                    let allow_root = allow_slot_loan && walk::addr_of_index_base_path(v).is_some();
+                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, allow_root);
                 }
             }
             Stmt::Assign {
@@ -281,8 +284,9 @@ impl<'a> Checker<'a> {
                     && targets.len() == values.len()
                     && targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)));
                 for v in values {
-                    // `x = &m[k]` is the slot-loan re-binding: legal.
-                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, allow_slot_loan);
+                    // `x = &m[k]` is the slot-loan re-binding: legal when rooted at a place path.
+                    let allow_root = allow_slot_loan && walk::addr_of_index_base_path(v).is_some();
+                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, allow_root);
                 }
             }
             Stmt::Expr { expr, .. } => {
@@ -309,27 +313,47 @@ impl<'a> Checker<'a> {
             Stmt::If { cond, .. } => {
                 self.check_expr_addr_of_loan_projections(st, cond, include_direct_ident);
             }
-            Stmt::For { kind, .. } => match kind {
-                ForKind::While { cond } => {
-                    self.check_expr_addr_of_loan_projections(st, cond, include_direct_ident);
+            Stmt::For { kind, body, .. } => {
+                match kind {
+                    ForKind::While { cond } => {
+                        self.check_expr_addr_of_loan_projections(st, cond, include_direct_ident);
+                    }
+                    ForKind::Range { lo, hi, .. } => {
+                        self.check_expr_addr_of_loan_projections(st, lo, include_direct_ident);
+                        self.check_expr_addr_of_loan_projections(st, hi, include_direct_ident);
+                    }
+                    ForKind::Iterate { expr, .. } => {
+                        self.check_expr_addr_of_loan_projections(st, expr, include_direct_ident);
+                    }
+                    ForKind::Infinite => {}
                 }
-                ForKind::Range { lo, hi, .. } => {
-                    self.check_expr_addr_of_loan_projections(st, lo, include_direct_ident);
-                    self.check_expr_addr_of_loan_projections(st, hi, include_direct_ident);
+                let mut carry_st = st.clone();
+                self.walk_for_loop_carried(&mut carry_st, kind, body, false);
+                if let ForKind::While { cond } = kind {
+                    self.check_expr_addr_of_loan_projections(&carry_st, cond, true);
                 }
-                ForKind::Iterate { expr, .. } => {
-                    self.check_expr_addr_of_loan_projections(st, expr, include_direct_ident);
+                if include_direct_ident {
+                    self.walk_for_loop_carried(&mut carry_st, kind, body, true);
                 }
-                ForKind::Infinite => {}
-            },
+            }
             Stmt::Return { values, .. } => {
                 for v in values {
+                    if let Expr::Ident { name, .. } = unwrap_parens_and_move(v) {
+                        if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan)
+                            && !st.borrow_bindings.contains(name)
+                            && !st.loans.iter().any(|l| {
+                                matches!(&l.target, LoanTarget::MapSlot { binding, .. } if binding == name)
+                            })
+                        {
+                            self.emit_addr_of_loan_diag(name, v.span());
+                        }
+                    }
                     // LOAN-ESCAPE (O2, also HYB-E3104) already owns a
                     // returned `&m[k]`; recurse for nested borrows only.
-                    if self.map_slot_borrow_span(st, v).is_some() {
-                        continue;
-                    }
-                    self.check_expr_addr_of_loan_projections(st, v, include_direct_ident);
+                    let e = as_addr_of(unwrap_parens(v))
+                        .filter(|_| self.map_slot_borrow_span(st, v).is_some())
+                        .unwrap_or(v);
+                    self.check_expr_addr_of_loan_projections(st, e, include_direct_ident);
                 }
             }
             Stmt::Task { callee, args, .. } => {
@@ -420,7 +444,18 @@ impl<'a> Checker<'a> {
                 self.check_place_addr_of_loan_projections(st, base, include_direct_ident);
                 self.check_expr_addr_of_loan_projections(st, index, include_direct_ident);
             }
-            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+            PlaceKind::Field { base, .. } => {
+                self.check_place_addr_of_loan_projections(st, base, include_direct_ident);
+            }
+            PlaceKind::AddrOf { base } => {
+                if self.place_is_map_element_or_value_projection(st, base) {
+                    self.emit_map_slot_borrow_diag(place.span);
+                } else {
+                    let root = base.root();
+                    if self.lookup_binding(st, root).is_some_and(|b| b.slot_loan) {
+                        self.emit_addr_of_loan_diag(root, place.span);
+                    }
+                }
                 self.check_place_addr_of_loan_projections(st, base, include_direct_ident);
             }
         }
@@ -539,17 +574,25 @@ impl<'a> Checker<'a> {
                     self.check_expr_addr_of_loan_projections(st, &a.value, include_direct_ident);
                 }
             }
-            Expr::StructLit { fields, .. } => {
+            Expr::StructLit { ty, fields, .. } => {
+                if let Some(t) = ty {
+                    self.check_type_addr_of_loan_projections(st, t, include_direct_ident);
+                }
                 for f in fields {
                     self.check_expr_addr_of_loan_projections(st, &f.value, include_direct_ident);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some(t) = elem {
+                    self.check_type_addr_of_loan_projections(st, t, include_direct_ident);
+                }
                 for i in items {
                     self.check_expr_addr_of_loan_projections(st, i, include_direct_ident);
                 }
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit { key, value, entries, .. } => {
+                self.check_type_addr_of_loan_projections(st, key, include_direct_ident);
+                self.check_type_addr_of_loan_projections(st, value, include_direct_ident);
                 for (k, v) in entries {
                     self.check_expr_addr_of_loan_projections(st, k, include_direct_ident);
                     self.check_expr_addr_of_loan_projections(st, v, include_direct_ident);
@@ -564,7 +607,39 @@ impl<'a> Checker<'a> {
             }
             // Closure bodies are entered by emit_guard.rs with their own
             // scoped FnState and `include_direct_ident = true`.
-            Expr::FnLit { .. } | Expr::Ident { .. } | Expr::Lit { .. } => {}
+            Expr::FnLit { params, results, .. } => {
+                for t in params.iter().map(|p| &p.ty).chain(results.iter().map(|r| &r.ty)) {
+                    self.check_type_addr_of_loan_projections(st, t, include_direct_ident);
+                }
+            }
+            Expr::Ident { .. } | Expr::Lit { .. } => {}
+        }
+    }
+
+    fn check_type_addr_of_loan_projections(&mut self, st: &FnState, ty: &hy_syntax::TypeExpr, include_direct_ident: bool) {
+        match ty {
+            hy_syntax::TypeExpr::Array { len, elem, .. } => {
+                if let Some(len_expr) = len {
+                    self.check_expr_addr_of_loan_projections(st, len_expr, include_direct_ident);
+                }
+                self.check_type_addr_of_loan_projections(st, elem, include_direct_ident);
+            }
+            hy_syntax::TypeExpr::Pointer { to: inner, .. }
+            | hy_syntax::TypeExpr::Slice { elem: inner, .. }
+            | hy_syntax::TypeExpr::Chan { elem: inner, .. }
+            | hy_syntax::TypeExpr::Option { elem: inner, .. } => {
+                self.check_type_addr_of_loan_projections(st, inner, include_direct_ident);
+            }
+            hy_syntax::TypeExpr::Map { key, value, .. } => {
+                self.check_type_addr_of_loan_projections(st, key, include_direct_ident);
+                self.check_type_addr_of_loan_projections(st, value, include_direct_ident);
+            }
+            hy_syntax::TypeExpr::Fn { params, results, .. } => {
+                for t in params.iter().map(|p| &p.ty).chain(results.iter()) {
+                    self.check_type_addr_of_loan_projections(st, t, include_direct_ident);
+                }
+            }
+            hy_syntax::TypeExpr::Named { .. } => {}
         }
     }
 
@@ -598,9 +673,11 @@ impl<'a> Checker<'a> {
         self.diags.push(d);
     }
 
-    /// The `&m[k]` shape whose base resolves to a map: the address-of a map
-    /// index expression, which Go refuses (`cannot take address of m[k]`).
-    /// Only map bases qualify — slice/array elements are addressable.
+    /// The `&m[k]` shape (including struct-field and fixed-array projections
+    /// `&m[k].f`, `&m[k][i]`, `&m[k].arr[i]`) whose base resolves to a map:
+    /// the address-of a map index expression or a value-projected sub-place,
+    /// which Go refuses (`cannot take address of m[k]`). Only map bases and
+    /// value-typed hops qualify — slice/pointer hops are addressable in Go.
     fn map_slot_borrow_span(&self, st: &FnState, e: &Expr) -> Option<Span> {
         let (operand, span) = match unwrap_parens(e) {
             Expr::AddrOf { operand, span } => (operand.as_ref(), *span),
@@ -611,11 +688,155 @@ impl<'a> Checker<'a> {
             } => (operand.as_ref(), *span),
             _ => return None,
         };
-        match unwrap_parens(operand) {
-            Expr::Index { base, .. } if matches!(self.shape_of_expr(st, base), TypeShape::Map(..)) => {
-                Some(span)
+        if self.is_map_element_or_value_projection(st, operand) {
+            Some(span)
+        } else {
+            None
+        }
+    }
+
+    fn is_map_element_or_value_projection(&self, st: &FnState, e: &Expr) -> bool {
+        match unwrap_parens_and_move(e) {
+            Expr::Index { base, .. } => match self.shape_of_expr(st, base) {
+                TypeShape::Map(..) => true,
+                TypeShape::Array(_) => self.is_map_element_or_value_projection(st, base),
+                _ => false,
+            },
+            Expr::Field { base, .. } => match self.shape_of_expr(st, base) {
+                TypeShape::Struct(_) => self.is_map_element_or_value_projection(st, base),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn place_is_map_element_or_value_projection(&self, st: &FnState, p: &Place) -> bool {
+        match &p.kind {
+            PlaceKind::Index { base, .. } => match self.shape_of_place(st, base) {
+                TypeShape::Map(..) => true,
+                TypeShape::Array(_) => self.place_is_map_element_or_value_projection(st, base),
+                _ => false,
+            },
+            PlaceKind::Field { base, .. } => match self.shape_of_place(st, base) {
+                TypeShape::Struct(_) => self.place_is_map_element_or_value_projection(st, base),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn shape_of_place(&self, st: &FnState, p: &Place) -> TypeShape {
+        match &p.kind {
+            PlaceKind::Ident(name) => self.lookup_binding(st, name).map(|b| b.shape.clone()).unwrap_or(TypeShape::Unknown),
+            PlaceKind::Index { base, .. } => match self.shape_of_place(st, base) {
+                TypeShape::Map(_, v) | TypeShape::Slice(v) | TypeShape::Array(v) => *v,
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Map(_, v) | TypeShape::Slice(v) | TypeShape::Array(v) => *v,
+                    _ => TypeShape::Unknown,
+                },
+                _ => TypeShape::Unknown,
+            },
+            PlaceKind::Field { base, name } => self.field_shape(&self.shape_of_place(st, base), name),
+            PlaceKind::AddrOf { base } => TypeShape::Pointer(Box::new(self.shape_of_place(st, base))),
+        }
+    }
+
+    fn bind_shadow_locals_only(&self, st: &mut FnState, l: &LocalDecl) {
+        if !matches!(l.kind, LocalKind::Define | LocalKind::Let | LocalKind::Var) {
+            return;
+        }
+        for name in &l.names {
+            if Self::current_scope_binding(st, name).is_none() {
+                self.define_binding(st, name, TypeShape::Unknown, None, false, false, false);
             }
-            _ => None,
+        }
+    }
+
+    fn walk_for_loop_carried(&mut self, st: &mut FnState, kind: &ForKind, body: &Block, emit: bool) {
+        st.scope_push();
+        match kind {
+            ForKind::While { cond } if emit => self.check_expr_addr_of_loan_projections(st, cond, true),
+            ForKind::Range { var, lo, hi, .. } => {
+                if emit {
+                    self.check_expr_addr_of_loan_projections(st, lo, true);
+                    self.check_expr_addr_of_loan_projections(st, hi, true);
+                }
+                self.define_binding(st, var, TypeShape::Primitive, None, false, false, false);
+            }
+            ForKind::Iterate { vars, expr } => {
+                if emit {
+                    self.check_expr_addr_of_loan_projections(st, expr, true);
+                }
+                for v in vars {
+                    self.define_binding(st, v, TypeShape::Unknown, None, false, false, false);
+                }
+            }
+            _ => {}
+        }
+        self.walk_loop_carried_block(st, body, emit);
+        st.scope_pop();
+    }
+
+    fn walk_loop_carried_block(&mut self, st: &mut FnState, b: &Block, emit: bool) {
+        st.scope_push();
+        for s in &b.stmts {
+            self.walk_loop_carried_stmt(st, s, emit);
+        }
+        st.scope_pop();
+    }
+
+    fn walk_loop_carried_stmt(&mut self, st: &mut FnState, s: &Stmt, emit: bool) {
+        if emit {
+            self.check_slot_loan_rebind(st, s);
+            if !matches!(s, Stmt::For { .. } | Stmt::If { .. }) {
+                self.check_stmt_addr_of_loan_projections(st, s, true);
+            }
+        }
+        match s {
+            Stmt::Local(l) => {
+                self.bind_shadow_locals_only(st, l);
+                self.mark_slot_loans_local(st, l);
+            }
+            Stmt::Assign { targets, op, values, .. } => self.mark_slot_loans_assign(st, targets, *op, values),
+            Stmt::If { init, cond, then, otherwise, .. } => {
+                st.scope_push();
+                if let Some(i) = init {
+                    self.walk_loop_carried_stmt(st, i, emit);
+                }
+                if emit {
+                    self.check_expr_addr_of_loan_projections(st, cond, true);
+                }
+                self.walk_loop_carried_block(st, then, emit);
+                if let Some(other) = otherwise {
+                    self.walk_loop_carried_stmt(st, other, emit);
+                }
+                st.scope_pop();
+            }
+            Stmt::For { kind, body, .. } => self.walk_for_loop_carried(st, kind, body, emit),
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => self.walk_loop_carried_block(st, body, emit),
+            Stmt::Match { subject, arms, .. } => {
+                for arm in arms {
+                    st.scope_push();
+                    if let hy_syntax::MatchPattern::Path { binding: Some(bname), .. } = &arm.pattern {
+                        self.bind_match_arm(st, bname, subject, false);
+                    }
+                    self.walk_loop_carried_block(st, &arm.body, emit);
+                    st.scope_pop();
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    st.scope_push();
+                    if let SelectArmKind::Recv { names, .. } = &arm.kind {
+                        for n in names {
+                            self.define_binding(st, n, TypeShape::Unknown, None, false, false, false);
+                        }
+                    }
+                    self.walk_loop_carried_block(st, &arm.body, emit);
+                    st.scope_pop();
+                }
+            }
+            _ => {}
         }
     }
 
