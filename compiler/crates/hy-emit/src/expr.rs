@@ -167,11 +167,12 @@ impl Emitter {
                     ));
                 }
                 let (head, type_args) = split_type_args(name);
+                let head = if self.export_pub && !self.local_vars.contains(head) && !self.bindings.contains_key(head) && self.exported_pub_fns.contains(head) { to_go_name(head) } else { head.to_string() };
                 if let Some(ta) = type_args {
                     let translated = self.translate_type_args_suffix(ta);
                     return Ok(format!("{}{}", head, translated));
                 }
-                Ok(name.clone())
+                Ok(head)
             }
 
             Expr::Lit { kind, .. } => Ok(self.lit_text(kind)),
