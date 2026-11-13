@@ -332,9 +332,27 @@ impl Emitter {
                             wrap = Self::case_body_redefines_binding(&arm.body.stmts, &bound);
                         }
                         SelectArmKind::Send { chan, value, .. } => {
-                            let c = self.emit_expr(chan, 0)?;
-                            let v = self.emit_expr(value, 0)?;
+                            let c = match self.emit_expr(chan, 0) {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    self.restore_scope(saved_scope);
+                                    return Err(e);
+                                }
+                            };
+                            let v = match self.emit_expr(value, 0) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    self.restore_scope(saved_scope);
+                                    return Err(e);
+                                }
+                            };
                             self.push(&format!("case {} <- {}:", c, v));
+                            let send_span = hy_diag::Span {
+                                start: chan.span().start,
+                                end: value.span().end,
+                            };
+                            self.witnesses
+                                .push(crate::witness::witness_send(chan, value, send_span));
                         }
                         SelectArmKind::Default => self.push("default:"),
                     }
