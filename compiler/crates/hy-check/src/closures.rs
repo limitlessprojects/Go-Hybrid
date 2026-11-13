@@ -586,7 +586,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         || matches!(crate::model::unwrap_parens(value), Expr::Move { .. })
                     {
                         mark_nested_overwritten(st, name, nested);
-                        ck.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                        ck.define_binding(st, name, shape.clone(), ty, immutable, managed, is_let);
                         if let Some(origin) = moved_non_owned {
                             if let Some(b) = st.env_lookup_mut(name) {
                                 b.non_owned_origin = Some(origin);
@@ -662,7 +662,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     } else {
                         None
                     };
-                    ck.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                    ck.define_binding(st, name, shape.clone(), ty, immutable, managed, is_let);
                     if let Some(origin) = &moved_non_owned {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if b.non_owned_origin.is_none() {
