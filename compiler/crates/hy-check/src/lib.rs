@@ -466,9 +466,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         usize,
         usize,
         &hy_syntax::Block,
-        std::collections::HashSet<String>,
+        freeze::MoveSet,
     )> = Vec::new();
-    let mut reported_backedge: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut reported_backedge = freeze::MoveSet::new();
 
     // Pass B: statements in source order.
     for (stmt, idx) in &flat.stmts {
@@ -513,13 +513,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         }
         if let Stmt::For { body: lbody, .. } = stmt {
             let outer_depth = st.scopes.len().saturating_sub(1);
-            let pre_moved = st
-                .env
-                .iter()
-                .chain(st.scopes.iter().flat_map(|s| s.iter()))
-                .filter(|(_, b)| b.moved.is_some())
-                .map(|(k, _)| k.clone())
-                .collect();
+            let pre_moved = freeze::pre_moved_set(&st);
             active_loops.push((idx, flat.loop_end_of(idx), outer_depth, lbody, pre_moved));
         }
         if let Stmt::Managed {
