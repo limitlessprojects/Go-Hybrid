@@ -1,5 +1,11 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — Actions artifact digests (#4241, 2026-11-13)
+
+- `actions_fetch` validates an advertised `sha256:` digest before downloading and verifies the response before creating or replacing the archive. Missing/null digests retain legacy behavior. Four new tests cover matching/malformed/mismatching/legacy cases, including prior-file preservation.
+- Refreshed from `b1627e83`; its unmodified `job.py` and `test_job_download.py` blobs match original report base `810888a8` exactly. The code/test patch is unchanged from the original issue, not a separate bounty contribution.
+- Fresh local `test_job*.py` run on original candidate `afb050d1`: 99 passed, no skips. Original negative reproduction is recorded in #4241. Compiler, corpus, differential, live Actions downloads and hosted CI were not run by this contributor; draft PR remains pending those gates and maintainer review. No award or payment claimed.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.
