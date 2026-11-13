@@ -4968,6 +4968,17 @@ impl<'a> Collector<'a> {
             );
             return;
         }
+        if args[0].spread {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in conversion to `{}` — Go refuses `cannot use ... in type conversion to {}` (HYB-E1002)",
+                    name, name
+                ),
+                "`...` (variadic spread) cannot be used in a type conversion `T(x)`",
+            );
+            return;
+        }
         let arg = &args[0].value;
         self.check_single_value_position(arg, "a type conversion", /*binding_position=*/ false);
 
