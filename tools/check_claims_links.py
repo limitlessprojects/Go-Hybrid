@@ -24,7 +24,8 @@ from pathlib import Path
 
 TABLE_HEADING = "## The claims table"
 ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|")
-LINK_RE = re.compile(r"\[([^\]]*)\]\((<[^<>\r\n]*>|[^)\s]+)(?:\s+\"[^\"]*\")?\)")
+LINK_START_RE = re.compile(r"\[([^\]]*)\]\(")
+LINK_END_RE = re.compile(r'(?:[ \t]+"(?:\\.|[^"\\\r\n])*")?[ \t]*\)')
 INLINE_CORPUS_RE = re.compile(r"`(\d{2}-[a-z0-9][a-z0-9-]*(?:\.hy)?)`")
 CORPUS_NUM_RE = re.compile(r"\bcorpus\s+(\d{1,3})\b")
 MARKER_RE = re.compile(r"^\s*\((reject|accept|managed)\)", re.IGNORECASE)
@@ -32,6 +33,54 @@ VERDICT_RE = re.compile(r"EXPECTED-VERDICT:\s*([A-Za-z-]+)")
 CHECKED_SUFFIXES = {
     ".md", ".py", ".rs", ".go", ".hy", ".yml", ".yaml", ".json", ".txt", ".toml",
 }
+
+
+def inline_links(text):
+    """Yield (destination, end offset), retaining balanced bare parentheses.
+
+    A bare destination ends at the OUTER closing parenthesis, not the first
+    one in a filename. Escaped parentheses are literal filename characters.
+    Keep the end of the whole link so a following verdict marker still binds
+    to the correct corpus citation. Reference-style links are not handled here.
+    """
+    consumed = 0
+    for match in LINK_START_RE.finditer(text):
+        if match.start() < consumed:
+            continue
+        start = pos = match.end()
+        if pos < len(text) and text[pos] == "<":
+            pos += 1
+            start = pos
+            while pos < len(text) and text[pos] not in "<>\r\n":
+                pos += 1
+            if pos == len(text) or text[pos] != ">":
+                continue
+            target = text[start:pos]
+            pos += 1
+        else:
+            depth = 0
+            while pos < len(text):
+                char = text[pos]
+                if char == "\\" and pos + 1 < len(text) and text[pos + 1] in "()\\":
+                    pos += 2
+                    continue
+                if char.isspace():
+                    break
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                pos += 1
+            if depth:
+                continue
+            target = text[start:pos]
+        ending = LINK_END_RE.match(text, pos)
+        if ending is None:
+            continue
+        consumed = ending.end()
+        yield re.sub(r"\\([()\\])", r"\1", target), consumed
 
 
 def table_rows(text):
@@ -96,11 +145,7 @@ def check(root):
     text = claims_file.read_text(encoding="utf-8", errors="replace")
     for row_number, evidence in table_rows(text):
         rows += 1
-        for index, match in enumerate(LINK_RE.finditer(evidence)):
-            target = match.group(2)
-            # Angle-delimited Markdown destinations may contain spaces or parentheses.
-            if target.startswith("<") and target.endswith(">"):
-                target = target[1:-1]
+        for target, end in inline_links(evidence):
             if not is_checkable(target):
                 continue
             links += 1
@@ -111,7 +156,7 @@ def check(root):
                 continue
             if resolved.suffix.lower() != ".hy":
                 continue
-            follow = evidence[match.end():]
+            follow = evidence[end:]
             marker_match = MARKER_RE.match(follow)
             if not marker_match:
                 continue
