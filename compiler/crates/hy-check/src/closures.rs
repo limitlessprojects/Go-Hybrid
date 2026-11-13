@@ -1043,13 +1043,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
         }
         Stmt::For { kind, body, .. } => {
             let outer_depth = st.scopes.len();
-            let pre_moved: std::collections::HashSet<String> = st
-                .env
-                .iter()
-                .chain(st.scopes.iter().flat_map(|s| s.iter()))
-                .filter(|(_, b)| b.moved.is_some())
-                .map(|(k, _)| k.clone())
-                .collect();
+            let pre_moved = crate::freeze::pre_moved_set(st);
             st.scope_push(); // the loop vars' scope
             match kind {
                 Iterate { vars, expr } => {
