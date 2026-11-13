@@ -1,0 +1,9 @@
+[warrant]
+code = "HYB-E3002"
+tier0_rule = "O2"
+summary = "use of variable after ownership move"
+provenance = "Issue #4408 Warrant Synthesis"
+
+[expectations]
+reject_first_error = "HYB-E3002"
+near_miss_verdict = "ACCEPT"
