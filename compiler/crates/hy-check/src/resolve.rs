@@ -99,20 +99,9 @@ impl<'a> Scan<'a> {
         // single-ident index expressions before `(`) into `Expr::Ident`
         // (`id[int](42)` -> `Ident("id[int]")`, `m[k](42)` -> `Ident("m[k]")`).
         if let Some((head, rest)) = name.split_once('[') {
-            let head_ok = self.allowed.contains(head);
-            if head_ok {
-                if !self.file_decls.contains(head) {
-                    if let Some(inside) = rest.strip_suffix(']') {
-                        let trimmed = inside.trim();
-                        if !trimmed.is_empty()
-                            && trimmed
-                                .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                            && !trimmed.chars().next().unwrap().is_ascii_digit()
-                        {
-                            self.ident(trimmed, span);
-                        }
-                    }
+            if self.allowed.contains(head) {
+                if let Some(inside) = rest.strip_suffix(']') {
+                    self.run_bracketed_type_args(inside, span, true);
                 }
                 return;
             }
@@ -249,13 +238,23 @@ impl<'a> Scan<'a> {
                     let saved_allowed = self.allowed.clone();
                     let saved_locals = self.local_decls.clone();
                     if let MatchPattern::Path { segments, binding } = &arm.pattern {
+                        let arm_span = arm
+                            .guard
+                            .as_ref()
+                            .map(|g| g.span())
+                            .unwrap_or(arm.body.span);
                         if segments.len() == 1 {
-                            let arm_span = arm
-                                .guard
-                                .as_ref()
-                                .map(|g| g.span())
-                                .unwrap_or(arm.body.span);
                             self.ident(&segments[0], arm_span);
+                        } else if segments.len() >= 2 {
+                            // `pkg.member` / `enum.variant` / `pkg.enum.variant`:
+                            // resolve the qualifier head via `check_type_name`
+                            // (fail-open on members, mirroring value-position
+                            // `Expr::Field`): an undeclared enum qualifier
+                            // fires HYB-E1001 here, while imported packages,
+                            // builtin packages (`option`) and locally declared
+                            // enums pass (issue #4068 — 2-segment patterns
+                            // were skipped entirely).
+                            self.check_type_name(&segments.join("."), arm_span);
                         }
                         if let Some(b) = binding {
                             self.define(b);
@@ -339,15 +338,19 @@ impl<'a> Scan<'a> {
                                         msg,
                                     ),
                                 );
+                            } else {
+                                self.run_opt_bracket_suffix(name, p.span);
                             }
                             return;
                         } else if self.packages.contains(base_name)
                             || crate::foreign::BUILTIN_PACKAGES.contains(&base_name.as_str())
                         {
+                            self.run_opt_bracket_suffix(name, p.span);
                             return;
                         }
                     }
                 }
+                self.run_opt_bracket_suffix(name, p.span);
                 self.run_place(base);
             }
             PlaceKind::AddrOf { base } => self.run_place(base),
@@ -433,15 +436,19 @@ impl<'a> Scan<'a> {
                                         ),
                                     ]),
                                 );
+                            } else {
+                                self.run_opt_bracket_suffix(name, *span);
                             }
                             return;
                         } else if self.packages.contains(root)
                             || crate::foreign::BUILTIN_PACKAGES.contains(&root.as_str())
                         {
+                            self.run_opt_bracket_suffix(name, *span);
                             return;
                         }
                     }
                 }
+                self.run_opt_bracket_suffix(name, *span);
                 self.run_expr(base);
             }
             Expr::Call { callee, args, .. } => {
@@ -453,12 +460,8 @@ impl<'a> Scan<'a> {
                 );
                 for (i, a) in args.iter().enumerate() {
                     if type_first_arg && i == 0 {
-                        if let Expr::Ident { name, .. } = crate::model::unwrap_parens(&a.value) {
-                            let head = name.split_once('[').map(|(h, _)| h).unwrap_or(name.as_str());
-                            if self.type_params.contains(head) && !self.local_decls.contains(head) {
-                                continue;
-                            }
-                        }
+                        self.run_type_arg_expr(&a.value);
+                        continue;
                     }
                     self.run_expr(&a.value);
                 }
@@ -536,9 +539,152 @@ impl<'a> Scan<'a> {
     /// a type: the `[N]T` array length, which is a real value-position use
     /// (`[undefined_const]int` fails `go build` exactly like any other
     /// undefined name).
+    fn run_opt_bracket_suffix(&mut self, name: &str, span: Span) {
+        if let Some((_, rest)) = name.split_once('[') {
+            if let Some(inside) = rest.strip_suffix(']') {
+                self.run_bracketed_type_args(inside, span, true);
+            }
+        }
+    }
+
+    fn check_type_name(&mut self, name: &str, span: Span) {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if let Some((pkg, _)) = trimmed.split_once('.') {
+            if !self.local_decls.contains(pkg)
+                && (pkg == "option"
+                    || pkg == "set"
+                    || self.packages.contains(pkg)
+                    || crate::foreign::BUILTIN_PACKAGES.contains(&pkg)
+                    || crate::foreign::is_curated_package_root(pkg))
+            {
+                return;
+            }
+            self.ident(pkg, span);
+            return;
+        }
+        if (trimmed == "set" || trimmed == "option" || self.type_params.contains(trimmed))
+            && !self.local_decls.contains(trimmed)
+        {
+            return;
+        }
+        self.ident(trimmed, span);
+    }
+
+    fn run_bracketed_type_args(&mut self, inside: &str, span: Span, check_named_types: bool) {
+        let (mut depth, mut start) = (0usize, 0usize);
+        for (i, ch) in inside.char_indices() {
+            match ch {
+                '[' | '(' | '{' => depth += 1,
+                ']' | ')' | '}' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    self.run_single_type_arg_str(&inside[start..i], span, check_named_types);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        self.run_single_type_arg_str(&inside[start..], span, check_named_types);
+    }
+
+    fn run_single_type_arg_str(&mut self, raw: &str, span: Span, check_named_types: bool) {
+        let s = raw.trim();
+        if s.is_empty() {
+            return;
+        }
+        if let Ok(parsed) = hy_syntax::parse_file(self.path, &format!("type _hy_ty_arg = {}\n", s)) {
+            if let Some(Decl::TypeAlias(a)) = parsed.decls.first() {
+                self.run_parsed_type(&a.ty, span, check_named_types);
+                return;
+            }
+        }
+        // Unparseable type argument: fail open (no false HYB-E1001 on exotic
+        // syntax like `fn(c chan<- int)` that the alias grammar rejects);
+        // the plain-ident fallback previously fired on the raw string and
+        // flagged valid nested types (issue #4068 over-fire).
+        let _ = check_named_types;
+    }
+
+    fn run_parsed_type(&mut self, t: &TypeExpr, span: Span, check_named_types: bool) {
+        match t {
+            TypeExpr::Named { name, .. } => {
+                if let Some((head, rest)) = name.split_once('[') {
+                    if check_named_types {
+                        self.check_type_name(head, span);
+                    }
+                    if let Some(inside) = rest.strip_suffix(']') {
+                        self.run_bracketed_type_args(inside, span, check_named_types);
+                    }
+                } else if check_named_types {
+                    self.check_type_name(name, span);
+                }
+            }
+            TypeExpr::Pointer { to, .. }
+            | TypeExpr::Slice { elem: to, .. }
+            | TypeExpr::Chan { elem: to, .. }
+            | TypeExpr::Option { elem: to, .. } => self.run_parsed_type(to, span, check_named_types),
+            TypeExpr::Array { len, elem, .. } => {
+                if let Some(l) = len {
+                    let before = self.diags.len();
+                    self.run_expr(l);
+                    for d in &mut self.diags[before..] {
+                        d.span = span;
+                    }
+                }
+                self.run_parsed_type(elem, span, check_named_types);
+            }
+            TypeExpr::Map { key, value, .. } => {
+                self.run_parsed_type(key, span, check_named_types);
+                self.run_parsed_type(value, span, check_named_types);
+            }
+            TypeExpr::Fn { params, results, .. } => {
+                for p in params {
+                    self.run_parsed_type(&p.ty, span, check_named_types);
+                }
+                for r in results {
+                    self.run_parsed_type(r, span, check_named_types);
+                }
+            }
+        }
+    }
+
+    fn run_type_arg_expr(&mut self, e: &Expr) {
+        match crate::model::unwrap_parens(e) {
+            Expr::Ident { name, span } => {
+                if let Some((head, rest)) = name.split_once('[') {
+                    self.check_type_name(head, *span);
+                    if let Some(inside) = rest.strip_suffix(']') {
+                        self.run_bracketed_type_args(inside, *span, true);
+                    }
+                    return;
+                }
+                self.check_type_name(name, *span);
+            }
+            Expr::Index { base, index, .. } => {
+                self.run_type_arg_expr(base);
+                self.run_type_arg_expr(index);
+            }
+            _ => self.run_expr(e),
+        }
+    }
+
     fn run_type(&mut self, t: &TypeExpr) {
         match t {
-            TypeExpr::Named { .. } => {}
+            TypeExpr::Named { name, span } => {
+                if let Some((_, rest)) = name.split_once('[') {
+                    if let Some(inside) = rest.strip_suffix(']') {
+                        // Composite literals (`set[undef_ty]{}`), `var` type
+                        // annotations, struct fields and enum variant payloads
+                        // all resolve their type annotations through `run_type`:
+                        // names inside `[...]` must be checked exactly like
+                        // value-position bracket args (issue #4068 — the old
+                        // `false` let `set[undef_ty]{}` bypass HYB-E1001).
+                        self.run_bracketed_type_args(inside, *span, true);
+                    }
+                }
+            }
             TypeExpr::Pointer { to, .. } => self.run_type(to),
             TypeExpr::Slice { elem, .. } => self.run_type(elem),
             TypeExpr::Array { len, elem, .. } => {

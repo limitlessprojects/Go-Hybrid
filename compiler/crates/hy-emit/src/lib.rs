@@ -34,6 +34,7 @@ mod constconv;
 mod rangebind;
 mod shapes;
 mod zeroinit;
+pub mod witness;
 use shapes::{
     import_path_of, lookup_conversion, lookup_rust_crate, lookup_unbound_crate, Conversion,
 };
@@ -169,6 +170,18 @@ impl EmitError {
 pub fn emit_go(file: &File) -> Result<String, EmitError> {
     let mut em = Emitter::new();
     em.emit_file(file)
+}
+
+/// Emit Go source plus the issue #3930 witness proof: returns the same Go
+/// source as `emit_go` together with a proof.json body recording every
+/// `task`/`send` concurrency site (source span + printed sub-AST hash).
+/// The verifier in `hyb build --emit-proof` recomputes these from a fresh
+/// parse and fails closed on any mismatch.
+pub fn emit_go_with_proof(file: &File) -> Result<(String, String), EmitError> {
+    let mut em = Emitter::new();
+    let go = em.emit_file(file)?;
+    let proof = crate::witness::build_proof(std::mem::take(&mut em.witnesses));
+    Ok((go, crate::witness::proof_json(&proof)))
 }
 
 /// Emit as an importable PACKAGE (example 09's adoption story):
@@ -366,6 +379,15 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "ipv6" => "IPv6",
         "json" => "JSON",
         "lhs" => "LHS",
+        // log flag constants are single snake tokens in M4 spelling but Go
+        // spells them with internal caps (`log.lstdflags` → `LstdFlags`,
+        // `log.lutc` → `LUTC`); naive camel-casing yields Lstdflags/Lutc,
+        // which do not exist in Go (#4229 review fixups).
+        "lstdflags" => "LstdFlags",
+        "lutc" => "LUTC",
+        // General Go initialism the naive mapping misses (`time.utc` →
+        // `time.UTC`, `log.l_utc` → `LUTC`); Go rejects `Utc` spellings.
+        "utc" => "UTC",
         "ok" => "OK",
         "qps" => "QPS",
         "ram" => "RAM",
@@ -402,6 +424,7 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "utf32" => "UTF32",
         "uuid" => "UUID",
         "vm" => "VM",
+        "waitgroup" => "WaitGroup",
         "xml" => "XML",
         "xmpp" => "XMPP",
         "xsrf" => "XSRF",
@@ -447,7 +470,13 @@ pub(crate) fn result_shape(results: &[FnResult]) -> (usize, bool) {
 
 pub(crate) fn base_ty_name(t: &TypeExpr) -> Option<String> {
     match t {
-        TypeExpr::Named { name, .. } => Some(name.clone()),
+        TypeExpr::Named { name, .. } => Some(match name.as_str() {
+            "sync.waitgroup" | "sync.WaitGroup" => "sync.wait_group".into(),
+            "sync.Mutex" => "sync.mutex".into(),
+            "sync.RWMutex" => "sync.rwmutex".into(),
+            "sync.Once" => "sync.once".into(),
+            _ => name.clone(),
+        }),
         TypeExpr::Pointer { to, .. } => base_ty_name(to),
         _ => None,
     }
@@ -471,13 +500,18 @@ pub(crate) fn is_package_root(name: &str) -> bool {
             | "errors"
             | "sync"
             | "bufio"
+            | "net"
             | "http"
             | "httptest"
+            | "url"
             | "json"
             | "atomic"
             | "filepath"
             | "path"
             | "hex"
+            | "log"
+            | "gzip"
+            | "tar"
             | "sha3"
             | "serde_json"
             | "regex"
@@ -547,7 +581,6 @@ pub struct Emitter {
     /// Inside a main-wrapper closure? (bare `return` legality, `?` shape)
     in_main_closure: bool,
     /// Inside a function literal (closure) — `?` binds to ITS results.
-    fnlit_depth: usize,
     /// Enclosing `for`/`loop` depth in the CURRENT function/closure frame.
     /// A labeled `break loop`/`continue loop` at depth 0 has no Go label
     /// target (labels do not cross func boundaries) — emit refuses instead
@@ -618,6 +651,9 @@ pub struct Emitter {
     /// a call can run such a closure inside an O8 slot-loan window, so any
     /// slot loan keyed by one of these names snapshots its key into `hyKeyN`.
     closure_written: BTreeSet<String>,
+    /// True when the current fn declares any named result item (so Go's
+    /// result signature is fully named and bare `return` returns live slots).
+    cur_fn_has_named_results: bool,
     /// Per-fn result shapes, collected eagerly (Batch I): name →
     /// (n_results, ends_in_error, first_result's binding kind, per-param
     /// pointer-base types). Drives the `?` hoist arity (13:
@@ -647,10 +683,19 @@ pub struct Emitter {
     local_vars: BTreeSet<String>,
     /// Functions whose first result is a pointer type.
     ptr_returning_fns: BTreeSet<String>,
+    /// Functions, associated functions, and user methods whose first value
+    /// result resolves to a user struct (`make_stats` / `box.make_stats` /
+    /// `box.get_stats` → `"pool_stats"`).
+    pub(crate) fn_ret_struct: BTreeMap<String, String>,
     /// N5 (zeroinit.rs): non-generic user struct → its declared fields,
-    /// and user type alias → its target, for zero values that allocate.
+    /// generic user struct → (type_params, declared fields) for expected-type
+    /// propagation into nested fields, and user type alias → its target.
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
+    n5_generic_structs: BTreeMap<String, (Vec<TypeParam>, Vec<FieldDecl>)>,
     n5_aliases: BTreeMap<String, TypeExpr>,
+    /// IR witness table (issue #3930): concurrency-site witnesses in
+    /// emission order; drained by `emit_go_with_proof`.
+    pub(crate) witnesses: Vec<crate::witness::Witness>,
 }
 
 pub(crate) struct ScopeSnapshot {
@@ -671,7 +716,6 @@ impl Emitter {
             bindings: BTreeMap::new(),
             temp_n: 0,
             in_main_closure: false,
-            fnlit_depth: 0,
             for_depth: 0,
             assoc_fns: BTreeSet::new(),
             cur_option_result: None,
@@ -689,6 +733,7 @@ impl Emitter {
             export_pub: false,
             cur_fn_error_returns: None,
             closure_written: BTreeSet::new(),
+            cur_fn_has_named_results: false,
             fn_shapes: BTreeMap::new(),
             closure_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
@@ -698,9 +743,12 @@ impl Emitter {
             loan_aliases: BTreeMap::new(),
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
+            fn_ret_struct: BTreeMap::new(),
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
+            n5_generic_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
+            witnesses: Vec::new(),
         }
     }
 
@@ -822,8 +870,18 @@ impl Emitter {
             .decls
             .iter()
             .filter_map(|d| match d {
-                Decl::Struct(s) if s.type_params.is_empty() => {
+                Decl::Struct(s) => {
                     Some((s.name.clone(), s.fields.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        self.n5_generic_structs = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Struct(s) if !s.type_params.is_empty() => {
+                    Some((s.name.clone(), (s.type_params.clone(), s.fields.clone())))
                 }
                 _ => None,
             })
@@ -840,6 +898,29 @@ impl Emitter {
             .fns()
             .filter(|f| f.results.first().is_some_and(|r| self.is_pointer_ty(&r.ty)))
             .map(|f| f.name.clone())
+            .collect();
+        self.fn_ret_struct = file
+            .fns()
+            .filter_map(|f| {
+                if result_shape(&f.results).0 == 0 {
+                    return None;
+                }
+                let ret_sn = f
+                    .results
+                    .first()
+                    .and_then(|r| base_ty_name(&r.ty))
+                    .and_then(|n| self.resolve_to_struct_name(&n))
+                    .map(str::to_string)?;
+                let key = match &f.receiver {
+                    None => f.name.clone(),
+                    Some(recv) => {
+                        let recv_sn = base_ty_name(&recv.ty)
+                            .and_then(|n| self.resolve_to_struct_name(&n))?;
+                        format!("{recv_sn}.{}", f.name)
+                    }
+                };
+                Some((key, ret_sn))
+            })
             .collect();
         self.fn_shapes = file
             .fns()
@@ -868,7 +949,14 @@ impl Emitter {
                 // made the ? hoister emit `hyT0, hyErr1 := step()` against a
                 // `func ... error` (assignment mismatch, accepted-then-fails-go-build).
                 let value_count = if err { f.results.len() - 1 } else { f.results.len() };
-                (f.name.clone(), (value_count, err, kind, ptr_params))
+                let key = match &f.receiver {
+                    Some(recv) => base_ty_name(&recv.ty)
+                        .and_then(|n| self.resolve_to_struct_name(&n))
+                        .map(|sn| format!("{sn}.{}", f.name))
+                        .unwrap_or_else(|| f.name.clone()),
+                    None => f.name.clone(),
+                };
+                (key, (value_count, err, kind, ptr_params))
             })
             .collect();
 
@@ -914,7 +1002,8 @@ impl Emitter {
                     // import set ("net/http" → root "http"; the body says
                     // `http.X`, and import_path_of maps the line back).
                     let root = path.split('/').next_back().unwrap_or(path);
-                    self.explicit_imports.insert(root.to_string(), path.clone());
+                    let resolved = import_path_of(path);
+                    self.explicit_imports.insert(root.to_string(), resolved);
                     self.imports.insert(root.to_string());
                 }
                 Decl::Const(c) => self.emit_file_const(c)?,
@@ -959,7 +1048,7 @@ impl Emitter {
             // root spelling — Go's package name for those imports.
             for root in active_imports {
                 let path = if let Some(p) = self.explicit_imports.get(root) {
-                    p.clone()
+                    import_path_of(p)
                 } else if shapes::RUST_CRATES
                     .iter()
                     .any(|c| c.binding_root == root.as_str())
@@ -1104,21 +1193,12 @@ impl Emitter {
     ) {
         match ty {
             TypeExpr::Map { key, value, .. } => {
-                if let TypeExpr::Named { name, .. } = key.as_ref() {
-                    if param_names.contains(name) {
-                        out.insert(name.clone());
-                    }
-                }
+                Self::collect_key_params_in_ty(key, param_names, out);
                 Self::collect_comparable_in_ty(key, param_names, out);
                 Self::collect_comparable_in_ty(value, param_names, out);
             }
             TypeExpr::Named { name, .. } => {
-                if let Some(inner) = name.strip_prefix("set[").and_then(|s| s.strip_suffix(']')) {
-                    let elem = inner.trim();
-                    if param_names.contains(elem) {
-                        out.insert(elem.to_string());
-                    }
-                }
+                Self::collect_comparable_in_folded_name(name, param_names, out);
             }
             TypeExpr::Pointer { to, .. } => Self::collect_comparable_in_ty(to, param_names, out),
             TypeExpr::Array { len, elem, .. } => {
@@ -1284,11 +1364,7 @@ impl Emitter {
     ) {
         match e {
             Expr::MapLit { key, value, entries, .. } => {
-                if let TypeExpr::Named { name, .. } = key.as_ref() {
-                    if param_names.contains(name) {
-                        out.insert(name.clone());
-                    }
-                }
+                Self::collect_key_params_in_ty(key, param_names, out);
                 Self::collect_comparable_in_ty(key, param_names, out);
                 Self::collect_comparable_in_ty(value, param_names, out);
                 for (k, v) in entries {
@@ -1434,6 +1510,7 @@ impl Emitter {
         if let Some(body) = &f.body {
             Self::collect_closure_writes_block(body, false, &mut self.closure_written);
         }
+        self.cur_fn_has_named_results = f.results.iter().any(|r| r.name.is_some());
         if !is_main && !f.results.is_empty() && !main_needs_wrapper {
             let last_is_err = matches!(
                 &f.results.last().unwrap().ty,
@@ -1733,17 +1810,18 @@ impl Emitter {
     /// table knows gives ForeignTy(key) — members resolve field-vs-method;
     /// any other dotted type stays generic Foreign.
     fn binding_kind_of_ty(&self, t: &TypeExpr) -> Option<BindingKind> {
+        let t = match self.resolve_type_alias(t) {
+            TypeExpr::Pointer { to, .. } => self.resolve_type_alias(to),
+            other => other,
+        };
         if matches!(t, TypeExpr::Chan { .. }) {
             return Some(BindingKind::Chan);
         }
         if matches!(t, TypeExpr::Map { .. }) {
             return Some(BindingKind::Map);
         }
-        let name = match t {
-            TypeExpr::Named { name, .. } => name.as_str(),
-            TypeExpr::Pointer { to, .. } => return self.binding_kind_of_ty(to),
-            _ => return None,
-        };
+        let Some(base) = base_ty_name(t) else { return None };
+        let name = base.as_str();
         if name.starts_with("set[") || name == "set" {
             return Some(BindingKind::Set);
         }
@@ -1936,8 +2014,10 @@ impl Emitter {
                     .join(", ");
                 if rs.is_empty() {
                     format!("func({})", ps)
-                } else {
+                } else if results.len() == 1 {
                     format!("func({}) {}", ps, rs)
+                } else {
+                    format!("func({}) ({})", ps, rs)
                 }
             }
         }
@@ -1958,6 +2038,33 @@ impl Emitter {
         }
         if let Some(rest) = name.strip_prefix("[...]") {
             return format!("[...]{}", self.go_type_name(rest));
+        }
+        if let Some(rest) = name.strip_prefix('[') {
+            if let Some((len_s, elem_s)) = Self::split_bracket_prefix(rest) {
+                return format!("[{}]{}", len_s.trim(), self.go_type_name(elem_s));
+            }
+        }
+        if let Some(rest) = name.strip_prefix("fn(") {
+            if let Some((params_s, tail_s)) = Self::split_paren_prefix(rest) {
+                let go_params = Self::split_top_level_type_args(params_s)
+                    .into_iter()
+                    .map(|p| self.go_type_name(p))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let tail = tail_s.trim();
+                if tail.is_empty() {
+                    return format!("func({})", go_params);
+                }
+                if let Some(inner) = tail.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+                    let go_res = Self::split_top_level_type_args(inner)
+                        .into_iter()
+                        .map(|r| self.go_type_name(r))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return format!("func({}) ({})", go_params, go_res);
+                }
+                return format!("func({}) {}", go_params, self.go_type_name(tail));
+            }
         }
         if let Some(rest) = name.strip_prefix("<-chan ") {
             return format!("<-chan {}", self.go_type_name(rest));
@@ -2026,6 +2133,135 @@ impl Emitter {
         } else {
             suffix.to_string()
         }
+    }
+
+    fn collect_key_params_in_ty(
+        ty: &TypeExpr,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                Self::collect_key_params_in_name(name, param_names, out);
+            }
+            TypeExpr::Array { elem, .. } | TypeExpr::Option { elem, .. } => {
+                Self::collect_key_params_in_ty(elem, param_names, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_key_params_in_name(
+        name: &str,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        let name = name.trim();
+        if name.starts_with('*')
+            || name.starts_with("[]")
+            || name.starts_with("map[")
+            || name.starts_with("fn(")
+            || name.starts_with("chan ")
+            || name.starts_with("<-chan ")
+            || name.starts_with("chan<- ")
+        {
+            return;
+        }
+        if let Some(rest) = name.strip_prefix("[...]") {
+            Self::collect_key_params_in_name(rest, param_names, out);
+            return;
+        }
+        if let Some(rest) = name.strip_prefix('[') {
+            if let Some((_, elem_s)) = Self::split_bracket_prefix(rest) {
+                Self::collect_key_params_in_name(elem_s, param_names, out);
+            }
+            return;
+        }
+        if let Some(open) = name.find('[') {
+            if open > 0 && name.ends_with(']') {
+                let inner = &name[open + 1..name.len() - 1];
+                for arg in Self::split_top_level_type_args(inner) {
+                    Self::collect_key_params_in_name(arg, param_names, out);
+                }
+                return;
+            }
+        }
+        if param_names.contains(name) {
+            out.insert(name.to_string());
+        }
+    }
+
+    fn collect_comparable_in_folded_name(
+        name: &str,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        let name = name.trim();
+        for prefix in ["*", "[]", "[...]", "<-chan ", "chan<- ", "chan "] {
+            if let Some(rest) = name.strip_prefix(prefix) {
+                Self::collect_comparable_in_folded_name(rest, param_names, out);
+                return;
+            }
+        }
+        if let Some(rest) = name.strip_prefix("map[") {
+            if let Some((k_s, v_s)) = Self::split_bracket_prefix(rest) {
+                Self::collect_key_params_in_name(k_s, param_names, out);
+                Self::collect_comparable_in_folded_name(k_s, param_names, out);
+                Self::collect_comparable_in_folded_name(v_s, param_names, out);
+            }
+            return;
+        }
+        if let Some(rest) = name.strip_prefix('[') {
+            if let Some((_, elem_s)) = Self::split_bracket_prefix(rest) {
+                Self::collect_comparable_in_folded_name(elem_s, param_names, out);
+            }
+            return;
+        }
+        if let Some(rest) = name.strip_prefix("fn(") {
+            if let Some((params_s, tail_s)) = Self::split_paren_prefix(rest) {
+                for p in Self::split_top_level_type_args(params_s) {
+                    Self::collect_comparable_in_folded_name(p, param_names, out);
+                }
+                let tail = tail_s.trim();
+                if let Some(inner) = tail.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+                    for r in Self::split_top_level_type_args(inner) {
+                        Self::collect_comparable_in_folded_name(r, param_names, out);
+                    }
+                } else if !tail.is_empty() {
+                    Self::collect_comparable_in_folded_name(tail, param_names, out);
+                }
+            }
+            return;
+        }
+        if let Some(open) = name.find('[') {
+            if open > 0 && name.ends_with(']') {
+                let head = name[..open].trim();
+                let inner = &name[open + 1..name.len() - 1];
+                if head == "set" {
+                    Self::collect_key_params_in_name(inner, param_names, out);
+                }
+                for arg in Self::split_top_level_type_args(inner) {
+                    Self::collect_comparable_in_folded_name(arg, param_names, out);
+                }
+            }
+        }
+    }
+
+    fn split_paren_prefix(s: &str) -> Option<(&str, &str)> {
+        let mut depth = 1usize;
+        for (i, ch) in s.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((&s[..i], &s[i + 1..]));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     fn split_bracket_prefix(s: &str) -> Option<(&str, &str)> {
