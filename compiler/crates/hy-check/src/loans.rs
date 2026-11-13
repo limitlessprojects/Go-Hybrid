@@ -824,6 +824,16 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
+        let mut cmuts = HashSet::new();
+        self.collect_expr_closure_mutations(st, cr.callee, &mut cmuts);
+        if !cmuts.is_empty() {
+            for p in &live {
+                if cmuts.iter().any(|r| a3_paths_conflict(st, p, r)) {
+                    self.emit_a3_if_live(st, p, cr.span, idx, &verb);
+                    return;
+                }
+            }
+        }
         for p in &live {
             if a3_paths_conflict(st, p, root) || a3_paths_conflict(st, p, &callee_path) {
                 self.emit_a3_if_live(st, p, cr.span, idx, &verb);
@@ -864,33 +874,100 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn collect_expr_closure_mutations(&self, st: &FnState, expr: &Expr, out: &mut HashSet<String>) {
+        match unwrap_parens(expr) {
+            Expr::FnLit { params, results, body, .. } => {
+                let mut bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+                bound.extend(results.iter().filter_map(|r| r.name.clone()));
+                out.extend(self.collect_mutation_roots(st, body, &bound));
+            }
+            Expr::Ident { name, .. } => {
+                let resolved = crate::freeze::resolve_alias(st, name);
+                if let Some(roots) = st.closure_mutates.get(name).or_else(|| st.closure_mutates.get(&resolved)) {
+                    out.extend(roots.iter().cloned());
+                }
+            }
+            Expr::Field { base, name, .. } => {
+                self.collect_expr_closure_mutations(st, base, out);
+                let base_shape = self.shape_of_expr(st, base);
+                if matches!(self.field_shape(&base_shape, name), TypeShape::Unknown) {
+                    if let Some((decl, _)) = self.resolve_bound_method_decl(st, base, &base_shape, name) {
+                        if decl.receiver.as_ref().is_some_and(|r| self.fn_mutates_param(decl, &r.name, 0)) {
+                            let mut recv_roots = Vec::new();
+                            collect_ref_roots(base, &mut recv_roots);
+                            self.collect_borrowed_roots(st, base, &mut recv_roots);
+                            for root in recv_roots {
+                                out.extend(self.storage_peers(st, &root));
+                                out.insert(root);
+                            }
+                        }
+                    }
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                self.collect_expr_closure_mutations(st, callee, out);
+                match unwrap_parens(callee) {
+                    Expr::Ident { name, .. } if name == "some" && self.lookup_binding(st, name).is_none() => {
+                        if let Some(a) = args.first() {
+                            self.collect_expr_closure_mutations(st, &a.value, out);
+                        }
+                    }
+                    Expr::Ident { name, .. } if self.lookup_binding(st, name).is_none() => {
+                        if matches!(self.shape_of_expr(st, expr), TypeShape::Closure) {
+                            if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(Self::base_named_type_str(name))) {
+                                for (i, a) in args.iter().enumerate() {
+                                    if decl.params.get(i).map_or(true, |p| self.fn_mutates_param(decl, &p.name, 0)) {
+                                        let mut r = Vec::new();
+                                        collect_ref_roots(&a.value, &mut r);
+                                        self.collect_borrowed_roots(st, &a.value, &mut r);
+                                        for root in r {
+                                            out.extend(self.storage_peers(st, &root));
+                                            out.insert(root);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Expr::Field { base, name, .. } if matches!(name.as_str(), "unwrap" | "or" | "pop") => {
+                        self.collect_expr_closure_mutations(st, base, out);
+                        if name == "or" {
+                            if let Some(a) = args.first() {
+                                self.collect_expr_closure_mutations(st, &a.value, out);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Expr::SliceLit { items, .. } => items.iter().for_each(|it| self.collect_expr_closure_mutations(st, it, out)),
+            Expr::StructLit { fields, .. } => fields.iter().for_each(|f| self.collect_expr_closure_mutations(st, &f.value, out)),
+            Expr::MapLit { entries, .. } => entries.iter().for_each(|(_, v)| self.collect_expr_closure_mutations(st, v, out)),
+            Expr::Index { base, .. } | Expr::Slice { base, .. } | Expr::Move { operand: base, .. } | Expr::Try { operand: base, .. } => {
+                self.collect_expr_closure_mutations(st, base, out);
+            }
+            _ => {}
+        }
+    }
+
     /// A3 check for inline closure calls (`(fn() { m["b"] = ... })()`) or
     /// other non-identifier call expressions.
     fn check_a3_inline_or_unknown_call(&mut self, st: &FnState, cr: &CallRef, idx: usize) {
-        if let Expr::FnLit {
-            params,
-            results,
-            body,
-            ..
-        } = unwrap_parens(cr.callee)
-        {
-            let mut bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-            bound.extend(results.iter().filter_map(|r| r.name.clone()));
-            let roots = self.collect_mutation_roots(st, body, &bound);
-            if !roots.is_empty() {
-                let verb = format!("mutation via `{}`", cr.callee.render());
-                for l in &st.loans {
-                    let LoanTarget::MapSlot { path, .. } = &l.target else {
-                        continue;
-                    };
-                    let eff_last = self.effective_loan_last(st, l);
-                    if !(l.created <= idx && idx <= eff_last) {
-                        continue;
-                    }
-                    if roots.iter().any(|r| a3_paths_conflict(st, path, r)) {
-                        self.emit_a3_if_live(st, path, cr.span, idx, &verb);
-                        return;
-                    }
+        let mut roots = HashSet::new();
+        self.collect_expr_closure_mutations(st, cr.callee, &mut roots);
+        if !roots.is_empty() {
+            let verb = format!("mutation via `{}`", cr.callee.render());
+            for l in &st.loans {
+                let LoanTarget::MapSlot { path, .. } = &l.target else {
+                    continue;
+                };
+                let eff_last = self.effective_loan_last(st, l);
+                if !(l.created <= idx && idx <= eff_last) {
+                    continue;
+                }
+                if roots.iter().any(|r| a3_paths_conflict(st, path, r)) {
+                    self.emit_a3_if_live(st, path, cr.span, idx, &verb);
+                    return;
                 }
             }
         }
@@ -1220,6 +1297,18 @@ impl<'a> Checker<'a> {
                 }
             }
             _ => {}
+        }
+        if self.lookup_binding(st, name).is_some_and(|b| b.ty.is_none()) {
+            if let Some(fn_ty) = self.bound_method_fn_type(st, value) {
+                if let Some(b) = st.env_lookup_mut(name) {
+                    b.ty = Some(fn_ty);
+                }
+            }
+        }
+        let mut extra_muts = HashSet::new();
+        self.collect_expr_closure_mutations(st, value, &mut extra_muts);
+        if !extra_muts.is_empty() {
+            st.closure_mutates.entry(name.to_string()).or_default().extend(extra_muts);
         }
     }
 
@@ -2387,9 +2476,22 @@ impl<'a> Checker<'a> {
             Expr::Try { operand, .. } | Expr::Move { operand, .. } => {
                 self.collect_borrowed_roots(st, operand, out);
             }
-            Expr::Slice { base, .. }
-            | Expr::Field { base, .. }
-            | Expr::Index { base, .. } => {
+            Expr::Field { base, .. } => {
+                if !matches!(self.shape_of_expr(st, base), TypeShape::Pointer(_))
+                    && self.call_receiver_is_pointer(st, inner)
+                {
+                    if let Some(root) = base.root_ident() {
+                        if self.binding_can_be_borrowed(st, root) {
+                            out.push(root.to_string());
+                        }
+                    }
+                }
+                let proj_shape = self.shape_of_expr(st, inner);
+                if self.shape_may_share(&proj_shape) || matches!(proj_shape, TypeShape::Unknown) {
+                    self.collect_borrowed_roots(st, base, out);
+                }
+            }
+            Expr::Slice { base, .. } | Expr::Index { base, .. } => {
                 let proj_shape = self.shape_of_expr(st, inner);
                 if self.shape_may_share(&proj_shape) || matches!(proj_shape, TypeShape::Unknown) {
                     self.collect_borrowed_roots(st, base, out);
@@ -2441,6 +2543,8 @@ impl<'a> Checker<'a> {
                             }
                         }
                         self.collect_borrowed_roots(st, base, out);
+                    } else {
+                        self.collect_borrowed_roots(st, callee, out);
                     }
                 }
             }
@@ -3146,20 +3250,27 @@ impl<'a> Checker<'a> {
         }
         let Some((slots, body)) = self.resolve_callee_slots_and_body(st, cr) else {
             if self.is_opaque_interproc_call(st, cr.callee) {
-                let mut roots = Vec::new();
-                if let Expr::Field { base, .. } = crate::model::unwrap_parens(cr.callee) {
-                    collect_ref_roots(base, &mut roots);
-                    collect_addr_of_roots(base, &mut roots);
+                let (mut callee_roots, mut roots, mut addr_roots) = (Vec::new(), Vec::new(), Vec::new());
+                collect_ref_roots(cr.callee, &mut callee_roots);
+                self.collect_borrowed_roots(st, cr.callee, &mut callee_roots);
+                for r in callee_roots {
+                    roots.extend(self.storage_peers(st, &r));
+                    roots.push(r);
                 }
                 for a in cr.args {
                     collect_ref_roots(&a.value, &mut roots);
-                    collect_addr_of_roots(&a.value, &mut roots);
+                    self.collect_borrowed_roots(st, &a.value, &mut addr_roots);
                 }
                 let origin = cr.args.iter().find_map(|a| self.moved_non_owned_origin_in_expr(st, &a.value));
                 for d in &roots {
                     if self.binding_may_share(st, d) {
                         for s in &roots {
                             if d != s && self.binding_may_share(st, s) {
+                                st.share_edge(d, s);
+                            }
+                        }
+                        for s in &addr_roots {
+                            if d != s && self.lookup_binding(st, s).is_some() {
                                 st.share_edge(d, s);
                             }
                         }
@@ -4171,9 +4282,7 @@ impl<'a> Checker<'a> {
         let Some((sub_slots, sub_body)) = (depth < 4).then(|| self.resolve_callee_slots_and_body(cst, cr)).flatten() else {
             if depth >= 4 || self.is_opaque_interproc_call(cst, cr.callee) {
                 let mut s_all: Vec<usize> = cr.args.iter().flat_map(|a| self.expr_slot_origins(cst, &a.value, aliases)).collect();
-                if let Expr::Field { base, .. } = crate::model::unwrap_parens(cr.callee) {
-                    s_all.extend(self.expr_slot_origins(cst, base, aliases));
-                }
+                s_all.extend(self.expr_slot_origins(cst, cr.callee, aliases));
                 for &d in &s_all { for &s in &s_all { if d != s { out.insert((d, s)); } } }
             }
             return;

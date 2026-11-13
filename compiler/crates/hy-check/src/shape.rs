@@ -308,7 +308,14 @@ impl<'a> Checker<'a> {
             },
             Expr::Field { base, name, .. } => {
                 let base_shape = self.shape_of_expr(st, base);
-                self.field_shape(&base_shape, name)
+                let shape = self.field_shape(&base_shape, name);
+                if matches!(shape, TypeShape::Unknown)
+                    && self.is_bound_method_value(st, base, &base_shape, name)
+                {
+                    TypeShape::Closure
+                } else {
+                    shape
+                }
             }
             Expr::Call { callee, args, .. } => self.call_shape(st, callee, args),
             // A struct literal written through a type alias
@@ -361,6 +368,133 @@ impl<'a> Checker<'a> {
             TypeShape::Pointer(inner) => self.field_shape(inner, field),
             _ => TypeShape::Unknown,
         }
+    }
+
+    pub(crate) fn resolve_bound_method_decl(
+        &self,
+        st: &FnState,
+        base: &Expr,
+        base_shape: &TypeShape,
+        field: &str,
+    ) -> Option<(&'a hy_syntax::FnDecl, Option<String>)> {
+        let base_inner = crate::model::unwrap_parens(base);
+        if let Expr::Ident { name: root, .. } = base_inner {
+            if self.lookup_binding(st, root).is_none() && !self.consts.contains_key(root.as_str()) {
+                return None;
+            }
+        }
+        let head = Self::base_named_type_str(field);
+        let base_target = crate::model::as_addr_of(base_inner).unwrap_or(base_inner);
+        let inst_name = self
+            .ty_of_expr(st, base)
+            .or_else(|| self.ty_of_expr(st, base_target))
+            .map(|t| self.peel_pointer_and_alias(&t))
+            .and_then(|t| match t {
+                TypeExpr::Named { name, .. } => Some(name),
+                _ => None,
+            })
+            .or_else(|| match base_shape {
+                TypeShape::Struct(Some(s)) => Some(s.clone()),
+                TypeShape::Pointer(inner) => match &**inner {
+                    TypeShape::Struct(Some(s)) => Some(s.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })?;
+        let rb = Self::base_named_type_str(&inst_name).to_string();
+        Some((self.method_decls.get(&(rb, head.to_string())).copied()?, Some(inst_name)))
+    }
+
+    pub(crate) fn is_bound_method_value(
+        &self,
+        st: &FnState,
+        base: &Expr,
+        base_shape: &TypeShape,
+        field: &str,
+    ) -> bool {
+        let base_inner = crate::model::unwrap_parens(base);
+        if let Expr::Ident { name: root, .. } = base_inner {
+            if self.lookup_binding(st, root).is_none() && !self.consts.contains_key(root.as_str()) {
+                return false;
+            }
+        }
+        (field == "pop" && matches!(base_shape, TypeShape::Slice(_)))
+            || (self.is_prelude_set_receiver(base_shape)
+                && matches!(field, "insert" | "contains" | "remove" | "len"))
+            || (self.ty_of_expr(st, base).and_then(|t| self.peel_option_receiver_ty(&t)).is_some()
+                && matches!(field, "unwrap" | "or" | "is_some" | "is_none"))
+            || receiver_type_name(base_shape)
+                .is_some_and(|t| !matches!(foreign::method_result(&t, field), TypeShape::Unknown))
+            || self.resolve_bound_method_decl(st, base, base_shape, field).is_some()
+    }
+
+    fn subst_ident_tokens(src: &str, subst: &std::collections::HashMap<String, String>) -> String {
+        let bytes = src.as_bytes();
+        let (mut out, mut i) = (String::with_capacity(src.len()), 0);
+        while i < bytes.len() {
+            if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+                let prev_dot = i > 0 && bytes[i - 1] == b'.';
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let tok = &src[start..i];
+                if !prev_dot && (i >= bytes.len() || bytes[i] != b'.') {
+                    if let Some(repl) = subst.get(tok) {
+                        out.push_str(repl);
+                        continue;
+                    }
+                }
+                out.push_str(tok);
+            } else {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    pub(crate) fn bound_method_fn_type(&self, st: &FnState, expr: &Expr) -> Option<TypeExpr> {
+        let Expr::Field { base, name, span } = crate::model::unwrap_parens(expr) else {
+            return None;
+        };
+        let base_shape = self.shape_of_expr(st, base);
+        if !matches!(self.field_shape(&base_shape, name), TypeShape::Unknown) {
+            return None;
+        }
+        if name == "pop" {
+            if let Some(TypeExpr::Slice { elem, .. }) =
+                self.ty_of_expr(st, base).map(|t| self.peel_pointer_and_alias(&t))
+            {
+                return Some(TypeExpr::Fn { params: Vec::new(), results: vec![*elem], span: *span });
+            }
+        }
+        let (decl, inst_opt) = self.resolve_bound_method_decl(st, base, &base_shape, name)?;
+        let raw_fn_ty = TypeExpr::Fn {
+            params: decl.params.clone(),
+            results: decl.results.iter().map(|r| r.ty.clone()).collect(),
+            span: *span,
+        };
+        if let (Some(recv), Some(inst_name)) = (&decl.receiver, inst_opt) {
+            if let TypeExpr::Named { name: rname, .. } = Self::unwrap_pointer_ty(&recv.ty) {
+                if let (Some((rbase, rparams)), Some((ibase, iargs))) = (
+                    Self::split_generic_type_args(rname),
+                    Self::split_generic_type_args(&inst_name),
+                ) {
+                    if rbase == ibase && !rparams.is_empty() {
+                        let subst: std::collections::HashMap<String, String> =
+                            rparams.into_iter().zip(iargs).collect();
+                        let rendered = Self::subst_ident_tokens(&raw_fn_ty.render(), &subst);
+                        if let Ok(f) = hy_syntax::parse_file("", &format!("type _t = {rendered}\n")) {
+                            if let Some(hy_syntax::Decl::TypeAlias(ta)) = f.decls.into_iter().next() {
+                                return Some(ta.ty);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Some(raw_fn_ty)
     }
 
     fn call_shape(&self, st: &FnState, callee: &Expr, args: &[CallArg]) -> TypeShape {
