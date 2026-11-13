@@ -16,6 +16,7 @@ Kaggle kernel slug: from worker/kernel-metadata.json (id field).
 Exit codes: 0 = success, 1 = the fetch retrieved nothing (failed download,
 no artifacts, or no summary.json), 2 = usage error.
 """
+import hashlib
 import json
 import math
 import os
@@ -365,6 +366,11 @@ def actions_fetch(run_id, jobdir):
         if not isinstance(name, str) or not name or "/" in name or "\\" in name or name in (".", ".."):
             print("actions fetch: refusing unsafe artifact name {!r}".format(name), file=sys.stderr)
             return 1
+        digest = a.get("digest")
+        if digest is not None and (not isinstance(digest, str) or
+                                   re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest) is None):
+            print("actions fetch: unsupported artifact digest for {!r}".format(name), file=sys.stderr)
+            return 1
         url = a["archive_download_url"]
         dest = os.path.abspath(os.path.join(result_dir, name + ".zip"))
         if os.path.dirname(dest) != result_dir:
@@ -378,6 +384,9 @@ def actions_fetch(run_id, jobdir):
         # via a sibling temporary file so write/replace failures preserve it too.
         with urllib.request.urlopen(req, timeout=120) as r:
             data = r.read()
+        if digest is not None and hashlib.sha256(data).hexdigest() != digest[7:].lower():
+            print("actions fetch: digest mismatch for artifact {!r}".format(name), file=sys.stderr)
+            return 1
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(dir=os.path.dirname(dest),
