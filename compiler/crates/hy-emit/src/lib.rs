@@ -590,6 +590,7 @@ pub struct Emitter {
     /// Dotted associated-fn names declared in this file
     /// (`lru_cache.new`) — call sites mangle to `lru_cache_new[...]`.
     assoc_fns: BTreeSet<String>,
+    pub(crate) exported_pub_fns: BTreeSet<String>,
     /// The enclosing fn's single result type IF it is an option (`option[v]`)
     /// — `return none` lowers to that type's zero value.
     cur_option_result: Option<String>,
@@ -718,6 +719,7 @@ impl Emitter {
             in_main_closure: false,
             for_depth: 0,
             assoc_fns: BTreeSet::new(),
+            exported_pub_fns: BTreeSet::new(),
             cur_option_result: None,
             loop_labels: Vec::new(),
             loop_label_n: 0,
@@ -899,6 +901,14 @@ impl Emitter {
             .filter(|f| f.results.first().is_some_and(|r| self.is_pointer_ty(&r.ty)))
             .map(|f| f.name.clone())
             .collect();
+        self.exported_pub_fns = if self.export_pub {
+            file.fns()
+                .filter(|f| f.is_pub && f.receiver.is_none() && !f.name.contains('.'))
+                .map(|f| f.name.clone())
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
         self.fn_ret_struct = file
             .fns()
             .filter_map(|f| {
