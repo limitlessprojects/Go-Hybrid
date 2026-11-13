@@ -480,7 +480,7 @@ words (B1, B2).
 **T7 — Slices `[]T`.** Reference to a backing array with Go semantics:
 `make([]T, n)`, `append` (with `items...` variadic spread, Go), `s[a:b]`,
 `len`, `cap`, `copy`, and the corpus-pinned `.pop()` (removes and returns
-the last element; panics on empty — example 08). Zero value is the
+the last element; panics with `HY-PANIC/pop-empty` on empty — example 08). Zero value is the
 **empty slice** — observationally identical to Go's nil slice (`len` 0,
 `append` works, `for` iterates zero times); the nil/empty distinction is not
 observable in Hybrid (N4). Slices are GC values; reads of elements are
@@ -1270,8 +1270,15 @@ sendability check-sites exactly like statement sends (C5).
 
 `default` is contextual at a select arm head (`default:`), including after
 an unbraced preceding arm. It is not an additional LX3 reserved word:
-ordinary identifier uses, such as a channel named `default`, remain legal.
+ordinary identifier uses, such as a channel named `default`, still parse.
 Corpus 24 pins the nonblocking fallback; parser tests pin this distinction.
+It is still a Go keyword, though, and the emitter spells names verbatim, so
+the checker rejects every DECLARATION named `default` with `HYB-E1002`. That
+covers locals, params, named results, receivers, type params, fn, method,
+struct, alias, and const names, struct fields, loop variables, select-receive
+names, match bindings, and closure params. Without the rule each of these
+fails gofmt / `go build` (`expected '}', found 'default'`; GUARANTEES
+Row 13). An undeclared use is already `HYB-E1001`.
 
 ### 8.4 Sendability check-sites — the complete list
 

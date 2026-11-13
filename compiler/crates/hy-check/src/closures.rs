@@ -40,7 +40,12 @@ pub(crate) fn check_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, body:
         let st_ref = if let Some((s_env, s_aliases, s_share)) = st.closure_scoped_envs.get(&pos) {
             scoped_st = st.clone();
             for (k, v) in s_env {
-                scoped_st.env.insert(k.clone(), v.clone());
+                let mut b = v.clone();
+                if let Some(cur) = scoped_st.env.get(k) {
+                    b.moved = b.moved.or_else(|| cur.moved.clone());
+                    b.non_owned_origin = b.non_owned_origin.or_else(|| cur.non_owned_origin.clone());
+                }
+                scoped_st.env.insert(k.clone(), b);
             }
             for (k, v) in s_aliases {
                 scoped_st.aliases.insert(k.clone(), v.clone());
@@ -51,6 +56,16 @@ pub(crate) fn check_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, body:
                     .entry(k.clone())
                     .or_default()
                     .extend(vs.iter().cloned());
+            }
+            for k in s_env.keys() {
+                let peer_mv = scoped_st
+                    .share_group(k)
+                    .into_iter()
+                    .chain(std::iter::once(crate::freeze::resolve_alias(&scoped_st, k)))
+                    .find_map(|p| scoped_st.env.get(&p).and_then(|b| b.moved.clone()));
+                if let Some((mv, Some(b))) = peer_mv.map(|mv| (mv, scoped_st.env.get_mut(k))) {
+                    b.moved = b.moved.take().or(Some(mv));
+                }
             }
             &scoped_st
         } else {
@@ -229,6 +244,9 @@ fn check_one_closure(
         env,
         aliases: st.aliases.clone(),
         may_share: st.may_share.clone(),
+        type_params: st.type_params.clone(),
+        closure_defs: st.closure_defs.clone(),
+        closure_fnlits: st.closure_fnlits.clone(),
         ..FnState::default()
     };
     for (k, b) in cst.env.iter_mut() {
@@ -294,6 +312,7 @@ fn check_one_closure(
         // uses for the enclosing closure's result names).
         snap.named_results = Vec::new();
         snap.result_shapes = Vec::new();
+        snap.deferred_calls = Vec::new();
         for (k, v) in nc.saved_aliases {
             snap.aliases.insert(k, v);
         }
@@ -777,13 +796,47 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 {
                     overwritten.push(name.clone());
                     let carries = ck.shape_may_share(&shape);
-                    mark_nested_overwritten(st, &name, nested);
+                    if !reads_self {
+                        mark_nested_overwritten(st, &name, nested);
+                    }
+                    let prior_children: Vec<String> = st
+                        .aliases
+                        .iter()
+                        .filter_map(|(k, v)| (reads_self && v == &name && k != &name).then(|| k.clone()))
+                        .collect();
+                    let cur_shares: Vec<String> = st
+                        .may_share
+                        .get(&name)
+                        .filter(|_| reads_self)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    let prior_shadow_links = pre_st
+                        .shadow_links
+                        .get(&name)
+                        .filter(|_| reads_self)
+                        .cloned()
+                        .unwrap_or_default();
+                    let outer_depth = pre_st
+                        .scopes
+                        .last()
+                        .is_some_and(|top| !top.contains_key(&name))
+                        .then(|| pre_st.lookup_depth(&name))
+                        .flatten();
                     ck.define_binding(st, &name, shape.clone(), ty, immutable, managed, is_let);
                     if reads_self {
-                        if let Some(pa) = prior_alias {
+                        if !prior_shadow_links.is_empty() {
+                            st.shadow_links.entry(name.clone()).or_default().extend(prior_shadow_links);
+                        }
+                        if let Some(depth) = outer_depth {
+                            st.shadow_links.entry(name.clone()).or_default().insert((name.clone(), depth));
+                        }
+                        if let Some(pa) = prior_alias.filter(|pa| pa != &name) {
                             st.aliases.insert(name.clone(), pa);
                         }
-                        for peer in prior_shares {
+                        for child in prior_children {
+                            st.aliases.insert(child, name.clone());
+                        }
+                        for peer in prior_shares.into_iter().chain(cur_shares) {
                             st.share_edge(&name, &peer);
                         }
                     }
@@ -923,14 +976,21 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                             TypeShape::Chan(e) => *e,
                             _ => TypeShape::Unknown,
                         };
+                        let elem_ty = ck.chan_elem_ty(st, chan);
                         for (i, n) in names.iter().enumerate() {
-                            let shape = if i == 0 {
-                                elem.clone()
+                            let (shape, ty) = if i == 0 {
+                                (elem.clone(), elem_ty.clone())
                             } else {
-                                TypeShape::Primitive
+                                (
+                                    TypeShape::Primitive,
+                                    Some(hy_syntax::TypeExpr::Named {
+                                        name: "bool".to_string(),
+                                        span: chan.span(),
+                                    }),
+                                )
                             };
                             mark_nested_overwritten(st, n, nested);
-                            ck.define_binding(st, n, shape, None, false, managed, false);
+                            ck.define_binding(st, n, shape, ty, false, managed, false);
                         }
                         sync_nested_moves(st, nested);
                     }
@@ -1002,11 +1062,12 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     collect_expr_direct_fnlits(expr, st, nested);
                     let is_chan = matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(st, expr, vars.len());
-                    for (name, shape) in vars.iter().zip(shapes) {
+                    let var_tys = ck.iterate_var_tys(st, expr, vars.len());
+                    for ((name, shape), var_ty) in vars.iter().zip(shapes).zip(var_tys) {
                         let is_ref = shape.is_reference_alias();
                         let may_share = ck.shape_may_share(&shape);
                         mark_nested_overwritten(st, name, nested);
-                        ck.define_binding(st, name, shape, None, false, managed, false);
+                        ck.define_binding(st, name, shape, var_ty, false, managed, false);
                         if !is_chan {
                             if may_share {
                                 ck.record_may_share(st, name, expr);
@@ -1043,8 +1104,15 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     sync_nested_moves(st, nested);
                     collect_expr_direct_fnlits(lo, st, nested);
                     collect_expr_direct_fnlits(hi, st, nested);
+                    let range_ty = ck
+                        .typed_int_bound(st, lo)
+                        .or_else(|| ck.typed_int_bound(st, hi))
+                        .map(|name| hy_syntax::TypeExpr::Named {
+                            name,
+                            span: lo.span(),
+                        });
                     mark_nested_overwritten(st, var, nested);
-                    ck.define_binding(st, var, TypeShape::Primitive, None, false, managed, false);
+                    ck.define_binding(st, var, TypeShape::Primitive, range_ty, false, managed, false);
                     sync_nested_moves(st, nested);
                 }
                 While { cond } => {
@@ -1118,7 +1186,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     ..
                 } = &arm.pattern
                 {
+                    mark_nested_overwritten(st, name, nested);
                     ck.bind_match_arm(st, name, subject, managed);
+                    sync_nested_moves(st, nested);
                 }
                 if let Some(g) = &arm.guard {
                     ck.mark_move_in_value(
@@ -1211,6 +1281,14 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 call,
                 format!("the deferred call `defer {}`", call.render()),
             );
+            let arg_borrows = match crate::model::unwrap_parens(call) {
+                Expr::Call { args, .. } => args
+                    .iter()
+                    .map(|a| ck.expr_is_return_borrow(st, &a.value))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            st.deferred_calls.push((call.clone(), arg_borrows));
             sync_nested_moves(st, nested);
             collect_stmt_direct_fnlits(stmt, st, nested);
         }
@@ -1226,8 +1304,28 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
     let saved_last_use = std::mem::replace(&mut st.last_use, flat.last_use.clone());
     let saved_loop_end = std::mem::replace(&mut st.loop_end, flat.loop_end.clone());
     let saved_loans = std::mem::take(&mut st.loans);
+    let saved_aliases = st.aliases.clone();
+    let saved_may_share = st.may_share.clone();
     for (stmt, idx) in &flat.stmts {
         let idx = *idx;
+        if let Stmt::Break { label: Some(_), span, .. }
+        | Stmt::Continue { label: Some(_), span, .. } = stmt
+        {
+            if !flat.in_infinite_loop(idx) {
+                ck.diags.push(
+                    hy_diag::Diagnostic::error(
+                        "HYB-E3010",
+                        ck.path.clone(),
+                        *span,
+                        "`break loop` / `continue loop` with no enclosing loop — the label has no target here (HYB-E3010)",
+                    )
+                    .with_notes(vec![
+                        "the `loop` label binds to the nearest enclosing `loop` statement (LX14); labels do not cross function or closure boundaries".to_string(),
+                        "remove the `loop` label (plain `break`/`continue` targets the innermost loop), or move this statement inside a loop".to_string(),
+                    ]),
+                );
+            }
+        }
         let mut calls = Vec::new();
         walk::own_calls(stmt, &mut calls);
         for cr in calls {
@@ -1264,6 +1362,10 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             });
                         } else {
                             ck.extend_map_slot_loan_to_alias(st, name, val, idx);
+                            if let Expr::Ident { name: src, .. } = crate::model::unwrap_parens(val) {
+                                st.aliases.insert(name.clone(), src.clone());
+                                st.share_edge(name, src);
+                            }
                         }
                     }
                 } else if l.values.len() == 1 && l.names.len() == 2 {
@@ -1331,6 +1433,10 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                                 });
                             } else {
                                 ck.extend_map_slot_loan_to_alias(st, name, v, idx);
+                                if let Expr::Ident { name: src, .. } = crate::model::unwrap_parens(v) {
+                                    st.aliases.insert(name.clone(), src.clone());
+                                    st.share_edge(name, src);
+                                }
                             }
                         }
                     }
@@ -1394,6 +1500,8 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
             _ => {}
         }
     }
+    st.may_share = saved_may_share;
+    st.aliases = saved_aliases;
     st.loans = saved_loans;
     st.loop_end = saved_loop_end;
     st.last_use = saved_last_use;
@@ -1893,6 +2001,67 @@ fn update_pre_defer_peers(
                 }
             }
         }
+        Stmt::For {
+            kind: Iterate { vars, expr },
+            ..
+        } => {
+            if !matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_)) {
+                let shapes = ck.iterate_var_shapes(st, expr, vars.len());
+                let mut refs = Vec::new();
+                expr_referenced_bindings(expr, &mut refs);
+                for (target, shape) in vars.iter().zip(shapes) {
+                    if target == "_" {
+                        continue;
+                    }
+                    let self_read = ck.value_reads_storage_of(st, expr, target);
+                    if !self_read {
+                        sever_peer_node(peers, target);
+                    }
+                    if ck.shape_may_share(&shape) {
+                        for r in &refs {
+                            let may_share = ck
+                                .lookup_binding(st, r)
+                                .map(|b| ck.shape_may_share(&b.shape))
+                                .unwrap_or(true);
+                            if may_share {
+                                link_peer_nodes(peers, target, r);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Stmt::Match { subject, arms, .. } => {
+            let mut refs = Vec::new();
+            expr_referenced_bindings(subject, &mut refs);
+            for arm in arms {
+                if let hy_syntax::MatchPattern::Path {
+                    binding: Some(target),
+                    ..
+                } = &arm.pattern
+                {
+                    if target == "_" {
+                        continue;
+                    }
+                    let self_read = ck.value_reads_storage_of(st, subject, target);
+                    if !self_read {
+                        sever_peer_node(peers, target);
+                    }
+                    for r in &refs {
+                        let may_share = ck
+                            .lookup_binding(st, r)
+                            .map(|b| {
+                                ck.shape_may_share(&b.shape)
+                                    || matches!(b.shape, TypeShape::Unknown)
+                            })
+                            .unwrap_or(true);
+                        if may_share {
+                            link_peer_nodes(peers, target, r);
+                        }
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -1910,6 +2079,10 @@ fn update_post_defer_watch(
             return;
         }
         let Some(v) = val else {
+            watch.remove(target);
+            if target == deferred_name {
+                *rebound_self = true;
+            }
             return;
         };
         let reads_watched = watch
@@ -1945,6 +2118,21 @@ fn update_post_defer_watch(
                 }
             }
         }
+        Stmt::For {
+            kind: Iterate { vars, expr },
+            ..
+        } => {
+            if !matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_)) {
+                let shapes = ck.iterate_var_shapes(st, expr, vars.len());
+                for (target, shape) in vars.iter().zip(shapes) {
+                    if ck.shape_may_share(&shape) {
+                        handle_bind(target, Some(expr));
+                    } else {
+                        handle_bind(target, None);
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -1977,7 +2165,11 @@ fn stmt_moves_watched_binding(
     };
 
     match stmt {
-        Stmt::Task { args, .. } => {
+        Stmt::Task { callee, args, .. } => {
+            let cdesc = format!("the spawn callee `{}`", callee.render());
+            if let Some(mv) = check_expr(callee, cdesc) {
+                return Some(mv);
+            }
             for a in args {
                 let desc = format!("the spawn argument `{}`", a.value.render());
                 if let Some(mv) = check_expr(&a.value, desc) {
@@ -1991,6 +2183,10 @@ fn stmt_moves_watched_binding(
             is_move,
             span,
         } => {
+            let cdesc = format!("the send target `{}`", chan.render());
+            if let Some(mv) = check_expr(chan, cdesc) {
+                return Some(mv);
+            }
             let desc = format!(
                 "the move-send `{} <- {}`",
                 chan.render(),
@@ -2001,7 +2197,7 @@ fn stmt_moves_watched_binding(
                 }
             );
             if *is_move {
-                if let Expr::Ident { name, .. } = crate::model::unwrap_parens(value) {
+                if let Some(name) = value.root_ident() {
                     if watch.contains(name) {
                         return Some(crate::model::MoveInfo {
                             span: *span,
@@ -2062,7 +2258,7 @@ fn stmt_moves_watched_binding(
                             }
                         );
                         if *is_move {
-                            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(value) {
+                            if let Some(name) = value.root_ident() {
                                 if watch.contains(name) {
                                     return Some(crate::model::MoveInfo {
                                         span: chan.span().to(value.span()),
