@@ -839,7 +839,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                     .map(|t| c.kind_of_ty(t, 0))
                     .unwrap_or_else(|| c.kind_of_expr(&cd.value));
                 c.file_consts.insert(cd.name.clone(), k);
-                if cd.ty.is_none() {
+                if cd.ty.is_none() && c.const_expr_scalar(&cd.value).is_none() {
                     c.file_untyped_consts.insert(cd.name.clone());
                 }
             }
@@ -1208,6 +1208,11 @@ impl<'a> Collector<'a> {
     /// Identifiers bound with an explicit type name or explicit array literals
     /// are known; everything else (conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
+        self.typed_value_type_name_at(e, 0)
+    }
+
+    fn typed_value_type_name_at(&self, e: &Expr, depth: usize) -> Option<String> {
+        (depth <= 8).then_some(())?;
         let bare = unwrap_parens(e);
         if let Some((len_opt, inner_elem, array_ty)) = bare.as_array_lit() {
             // #3599: For `[...]int{1, 2, 3}`, len_opt is None; compute length from items.len().
@@ -1226,7 +1231,11 @@ impl<'a> Collector<'a> {
             return Some(array_ty.render());
         }
         match bare {
-            Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::Ident { name, .. } => self.lookup_type_name(name).or_else(|| {
+                (!self.scopes.iter().any(|layer| layer.contains_key(name.as_str())))
+                    .then(|| self.file_const_type_name(name, depth + 1))
+                    .flatten()
+            }),
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
                 self.struct_field_type_name(&bk, name)
@@ -1487,11 +1496,12 @@ impl<'a> Collector<'a> {
     /// #1031 — exact result types of a call whose callee is provably known:
     /// a non-generic top-level function, or a predeclared numeric conversion
     /// `T(x)`. A local binding of the callee name shadows both (fail-open).
-    fn call_result_scalars(
-        &self,
-        callee: &Expr,
-        args: &[CallArg],
-    ) -> Option<Vec<Option<&'static str>>> {
+    fn call_result_scalars(&self, callee: &Expr, args: &[CallArg]) -> Option<Vec<Option<&'static str>>> {
+        self.call_result_scalars_at(callee, args, 0)
+    }
+
+    fn call_result_scalars_at(&self, callee: &Expr, args: &[CallArg], depth: usize) -> Option<Vec<Option<&'static str>>> {
+        (depth <= 8).then_some(())?;
         let Expr::Ident { name, .. } = unwrap_parens(callee) else {
             return None;
         };
@@ -1508,19 +1518,20 @@ impl<'a> Collector<'a> {
             }
             return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
         }
-        if name == "min" || name == "max" {
-            let res_scalar = args
-                .iter()
-                .find_map(|a| self.typed_value_scalar(&a.value));
-            return Some(vec![res_scalar]);
-        }
-        if args.len() == 1
-            && !self.ck.structs.contains_key(name.as_str())
+        if !self.ck.structs.contains_key(name.as_str())
             && !self.ck.enums.contains_key(name.as_str())
             && !self.ck.type_aliases.contains_key(name.as_str())
+            && !self.ck.consts.contains_key(name.as_str())
         {
-            if let Some(s) = canonical_numeric_name(name) {
-                return Some(vec![Some(s)]);
+            match name.as_str() {
+                "len" | "cap" | "copy" => return Some(vec![Some("int")]),
+                "min" | "max" => {
+                    return Some(vec![args
+                        .iter()
+                        .find_map(|a| self.typed_value_scalar_at(&a.value, depth + 1))]);
+                }
+                _ if args.len() == 1 => return canonical_numeric_name(name).map(|s| vec![Some(s)]),
+                _ => {}
             }
         }
         None
@@ -1530,8 +1541,17 @@ impl<'a> Collector<'a> {
     /// Literals are untyped constants (assignable to any numeric type), so
     /// they are deliberately `None` here.
     fn typed_value_scalar(&self, e: &Expr) -> Option<&'static str> {
+        self.typed_value_scalar_at(e, 0)
+    }
+
+    fn typed_value_scalar_at(&self, e: &Expr, depth: usize) -> Option<&'static str> {
+        (depth <= 8).then_some(())?;
         match unwrap_parens(e) {
-            Expr::Ident { name, .. } => self.lookup_scalar(name),
+            Expr::Ident { name, .. } => self.lookup_scalar(name).or_else(|| {
+                (!self.scopes.iter().any(|layer| layer.contains_key(name.as_str())))
+                    .then(|| self.file_const_scalar(name, depth + 1))
+                    .flatten()
+            }),
             // Typed arithmetic keeps its operand type: in any program that
             // builds, both operands share one type or one is an untyped
             // constant, so the typed side names the result type. A shift's
@@ -1545,20 +1565,22 @@ impl<'a> Collector<'a> {
                 | BinOp::BitOr
                 | BinOp::BitXor
                 | BinOp::BitAnd => self
-                    .typed_value_scalar(lhs)
-                    .or_else(|| self.typed_value_scalar(rhs)),
-                BinOp::Shl | BinOp::Shr => self.typed_value_scalar(lhs),
+                    .typed_value_scalar_at(lhs, depth + 1)
+                    .or_else(|| self.typed_value_scalar_at(rhs, depth + 1)),
+                BinOp::Shl | BinOp::Shr => self.typed_value_scalar_at(lhs, depth + 1),
                 _ => None,
             },
             Expr::Unary {
                 op: UnOp::Neg,
                 operand,
                 ..
-            } => self.typed_value_scalar(operand),
-            Expr::Call { callee, args, .. } => match self.call_result_scalars(callee, args) {
-                Some(rs) if rs.len() == 1 => rs[0],
-                _ => None,
-            },
+            } => self.typed_value_scalar_at(operand, depth + 1),
+            Expr::Call { callee, args, .. } => {
+                match self.call_result_scalars_at(callee, args, depth + 1) {
+                    Some(rs) if rs.len() == 1 => rs[0],
+                    _ => None,
+                }
+            }
             // #2858: struct field scalar resolution
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
@@ -1654,9 +1676,10 @@ impl<'a> Collector<'a> {
         if let Some(ty) = &l.ty {
             return vec![self.scalar_of_ty(ty); n];
         }
-        // An untyped `const c = 3` stays an untyped constant: assignable to
-        // any numeric result, so it must not be pinned to `int`.
         if l.kind == LocalKind::Const {
+            if n == l.values.len() {
+                return l.values.iter().map(|v| self.typed_value_scalar(v)).collect();
+            }
             return vec![None; n];
         }
         if n == l.values.len() {
@@ -2285,7 +2308,9 @@ impl<'a> Collector<'a> {
                 used: false,
                 written: false,
                 elidable: false,
-                is_untyped: matches!(l.kind, LocalKind::Const) && l.ty.is_none(),
+                is_untyped: matches!(l.kind, LocalKind::Const)
+                    && l.ty.is_none()
+                    && scalar.is_none(),
             });
             top.insert(name.clone(), Some(id));
         }
@@ -2345,53 +2370,38 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn file_const_scalar(&self, name: &str, depth: usize) -> Option<&'static str> {
+        (depth <= 8).then(|| {
+            self.ck.file.decls.iter().find_map(|d| match d {
+                Decl::Const(c) if c.name == name => c
+                    .ty
+                    .as_ref()
+                    .and_then(|t| self.scalar_of_ty(t))
+                    .or_else(|| self.typed_value_scalar_at(&c.value, depth)),
+                _ => None,
+            })
+        })?
+    }
+
     fn const_expr_scalar(&self, e: &Expr) -> Option<&'static str> {
-        if let Some(s) = self.typed_value_scalar(e) {
-            return Some(s);
-        }
-        match unwrap_parens(e) {
-            Expr::Ident { name, .. } => self.ck.file.decls.iter().find_map(|d| match d {
-                Decl::Const(other) if other.name == *name => {
-                    other.ty.as_ref().and_then(|t| self.scalar_of_ty(t))
-                }
+        self.typed_value_scalar_at(e, 0)
+    }
+
+    fn file_const_type_name(&self, name: &str, depth: usize) -> Option<String> {
+        (depth <= 8).then(|| {
+            self.ck.file.decls.iter().find_map(|d| match d {
+                Decl::Const(c) if c.name == name => c
+                    .ty
+                    .as_ref()
+                    .map(|t| t.render())
+                    .or_else(|| self.typed_value_type_name_at(&c.value, depth)),
                 _ => None,
-            }),
-            Expr::Unary {
-                op: UnOp::Neg,
-                operand,
-                ..
-            } => self.const_expr_scalar(operand),
-            Expr::Binary { op, lhs, rhs, .. } => match op {
-                BinOp::Add
-                | BinOp::Sub
-                | BinOp::Mul
-                | BinOp::Div
-                | BinOp::Mod
-                | BinOp::BitOr
-                | BinOp::BitXor
-                | BinOp::BitAnd => self
-                    .const_expr_scalar(lhs)
-                    .or_else(|| self.const_expr_scalar(rhs)),
-                BinOp::Shl | BinOp::Shr => self.const_expr_scalar(lhs),
-                _ => None,
-            },
-            _ => None,
-        }
+            })
+        })?
     }
 
     fn const_expr_type_name(&self, e: &Expr) -> Option<String> {
-        if let Some(n) = self.typed_value_type_name(e) {
-            return Some(n);
-        }
-        match unwrap_parens(e) {
-            Expr::Ident { name, .. } => self.ck.file.decls.iter().find_map(|d| match d {
-                Decl::Const(other) if other.name == *name => {
-                    other.ty.as_ref().map(|t| t.render())
-                }
-                _ => None,
-            }),
-            _ => None,
-        }
+        self.typed_value_type_name_at(e, 0)
     }
 
     fn infer_local_kinds(&self, l: &LocalDecl) -> Vec<OpKind> {
