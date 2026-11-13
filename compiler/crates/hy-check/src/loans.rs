@@ -48,7 +48,7 @@ fn path_root(path: &str) -> &str {
 /// may-share graph (`alias := m`, shallow copies, closures) or the
 /// single-parent alias chain. Used instead of string equality so an insert
 /// through a peer of the loaned map fires the same E3102 as a direct one.
-fn a3_paths_conflict(st: &FnState, loan_path: &str, event_path: &str) -> bool {
+pub(crate) fn a3_paths_conflict(st: &FnState, loan_path: &str, event_path: &str) -> bool {
     let lr = path_root(loan_path);
     let er = path_root(event_path);
     if lr == er {
@@ -9574,7 +9574,7 @@ impl<'a> Checker<'a> {
     }
 }
 
-fn field_borrow_kind(shape: &TypeShape) -> Option<&'static str> {
+pub(crate) fn field_borrow_kind(shape: &TypeShape) -> Option<&'static str> {
     match shape {
         TypeShape::BorrowHandle(_) => Some("borrow-handle"),
         TypeShape::Pointer(inner) if !matches!(**inner, TypeShape::Atomic) => Some("pointer"),
