@@ -3119,3 +3119,17 @@ fn utf8_byte_escapes_emit_exact_utf8_strings_issue_1199() {
         go
     );
 }
+
+#[test]
+fn issue_4414_shadowed_fn_and_assoc_namespaces() {
+    // 1. Shadowed function does not auto-address pointer param
+    let src1 = "fn step(p *int) {}\nfn main() {\n    step := fn(v any) {}\n    let i = 1\n    step(i)\n}\n";
+    let go1 = emit(src1);
+    assert!(go1.contains("step(i)"), "expected step(i), got:\n{}", go1);
+    assert!(!go1.contains("step(&i)"), "did not expect step(&i), got:\n{}", go1);
+
+    // 2. Method call does not pollute bare function name in expr_is_pointer
+    let src2 = "struct node { val int }\nfn node.next(self *node) *node { return self }\nfn test_call() {\n    next := fn() int { return 42 }\n    x := next()\n}\nfn main() {}\n";
+    let go2 = emit(src2);
+    assert!(go2.contains("x := next()"), "expected x := next(), got:\n{}", go2);
+}

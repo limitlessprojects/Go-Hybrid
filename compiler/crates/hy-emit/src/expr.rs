@@ -1130,7 +1130,7 @@ impl Emitter {
         };
         if let Some((base, head, type_args)) = assoc_field_and_ta {
             if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base) {
-                if !self.is_unshadowed_pkg_root(root) && !self.bindings.contains_key(root) {
+                if !self.is_unshadowed_pkg_root(root) && !self.bindings.contains_key(root) && !self.local_vars.contains(root) {
                     let full = format!("{}.{}", root, head);
                     if self.assoc_fns.contains(&full) {
                         let translated_ta = type_args
@@ -1241,8 +1241,10 @@ impl Emitter {
         let mut ptr_params: Vec<bool> = Vec::new();
         if let Expr::Ident { name, .. } = callee {
             let (fn_head, _) = split_type_args(name);
-            if let Some((_, _, _, params)) = self.fn_shapes.get(fn_head) {
-                ptr_params = params.iter().map(|p| p.is_some()).collect();
+            if !self.local_vars.contains(fn_head) {
+                if let Some((_, _, _, params)) = self.fn_shapes.get(fn_head) {
+                    ptr_params = params.iter().map(|p| p.is_some()).collect();
+                }
             }
         }
         let c = self.emit_expr(raw_callee, ATOM)?;
