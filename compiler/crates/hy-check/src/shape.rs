@@ -106,7 +106,8 @@ impl<'a> Checker<'a> {
         match name {
             "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
-            | "isize" | "uintptr" | "float32" | "float64" | "f32" | "f64" | "bool" | "byte"
+            | "isize" | "uintptr" | "float32" | "float64" | "f32" | "f64" | "complex64"
+            | "complex128" | "c64" | "c128" | "bool" | "byte"
             | "rune" | "char" => TypeShape::Primitive,
             "string" => TypeShape::Str,
             _ => {
@@ -394,7 +395,8 @@ impl<'a> Checker<'a> {
                         .unwrap_or(TypeShape::Unknown),
                     "len" | "cap" | "min" | "max" | "int" | "int8" | "int16" | "int32"
                     | "int64" | "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr"
-                    | "float32" | "float64" | "bool" | "byte" | "rune" => TypeShape::Primitive,
+                    | "float32" | "float64" | "complex64" | "complex128" | "complex" | "real"
+                    | "imag" | "bool" | "byte" | "rune" => TypeShape::Primitive,
                     "string" => TypeShape::Str,
                     // `new(T)` is Go's `new`: it returns `*T` — a POINTER to
                     // zeroed, mutable storage — never a primitive copy. Typing
@@ -1776,6 +1778,10 @@ impl<'a> Checker<'a> {
                             | "uintptr"
                             | "float32"
                             | "float64"
+                            | "complex64"
+                            | "complex128"
+                            | "c64"
+                            | "c128"
                             | "f32"
                             | "f64"
                             | "bool"
