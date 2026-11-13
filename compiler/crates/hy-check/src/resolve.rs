@@ -238,13 +238,23 @@ impl<'a> Scan<'a> {
                     let saved_allowed = self.allowed.clone();
                     let saved_locals = self.local_decls.clone();
                     if let MatchPattern::Path { segments, binding } = &arm.pattern {
+                        let arm_span = arm
+                            .guard
+                            .as_ref()
+                            .map(|g| g.span())
+                            .unwrap_or(arm.body.span);
                         if segments.len() == 1 {
-                            let arm_span = arm
-                                .guard
-                                .as_ref()
-                                .map(|g| g.span())
-                                .unwrap_or(arm.body.span);
                             self.ident(&segments[0], arm_span);
+                        } else if segments.len() >= 2 {
+                            // `pkg.member` / `enum.variant` / `pkg.enum.variant`:
+                            // resolve the qualifier head via `check_type_name`
+                            // (fail-open on members, mirroring value-position
+                            // `Expr::Field`): an undeclared enum qualifier
+                            // fires HYB-E1001 here, while imported packages,
+                            // builtin packages (`option`) and locally declared
+                            // enums pass (issue #4068 — 2-segment patterns
+                            // were skipped entirely).
+                            self.check_type_name(&segments.join("."), arm_span);
                         }
                         if let Some(b) = binding {
                             self.define(b);
@@ -544,7 +554,9 @@ impl<'a> Scan<'a> {
         }
         if let Some((pkg, _)) = trimmed.split_once('.') {
             if !self.local_decls.contains(pkg)
-                && (self.packages.contains(pkg)
+                && (pkg == "option"
+                    || pkg == "set"
+                    || self.packages.contains(pkg)
                     || crate::foreign::BUILTIN_PACKAGES.contains(&pkg)
                     || crate::foreign::is_curated_package_root(pkg))
             {
@@ -588,9 +600,11 @@ impl<'a> Scan<'a> {
                 return;
             }
         }
-        if check_named_types {
-            self.check_type_name(s, span);
-        }
+        // Unparseable type argument: fail open (no false HYB-E1001 on exotic
+        // syntax like `fn(c chan<- int)` that the alias grammar rejects);
+        // the plain-ident fallback previously fired on the raw string and
+        // flagged valid nested types (issue #4068 over-fire).
+        let _ = check_named_types;
     }
 
     fn run_parsed_type(&mut self, t: &TypeExpr, span: Span, check_named_types: bool) {
@@ -661,7 +675,13 @@ impl<'a> Scan<'a> {
             TypeExpr::Named { name, span } => {
                 if let Some((_, rest)) = name.split_once('[') {
                     if let Some(inside) = rest.strip_suffix(']') {
-                        self.run_bracketed_type_args(inside, *span, false);
+                        // Composite literals (`set[undef_ty]{}`), `var` type
+                        // annotations, struct fields and enum variant payloads
+                        // all resolve their type annotations through `run_type`:
+                        // names inside `[...]` must be checked exactly like
+                        // value-position bracket args (issue #4068 — the old
+                        // `false` let `set[undef_ty]{}` bypass HYB-E1001).
+                        self.run_bracketed_type_args(inside, *span, true);
                     }
                 }
             }
