@@ -592,6 +592,12 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                             }
                         }
                         ck.record_move_const_and_a3_loans(st, name, value, 0);
+                        if let Some(src) = crate::model::move_operand_ident(value) {
+                            if st.borrow_bindings.contains(&src) {
+                                st.borrow_bindings.insert(name.clone());
+                                st.borrow_bindings.remove(&src);
+                            }
+                        }
                         continue;
                     }
                     let reads_self = !is_fresh_copy && ck.value_reads_storage_of(&pre_st, value, name);
@@ -842,6 +848,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     }
                     if let Some(v) = val_opt {
                         ck.record_storage_from_snapshot(st, &pre_st, &name, v, &overwritten, true, true);
+                        if ck.expr_carries_borrow(st, v) || crate::model::field_borrow_kind(&shape).is_some() {
+                            st.borrow_bindings.insert(name.clone());
+                        }
                     }
                     if let Some(origin) = shadowed_origin {
                         if let Some(b) = st.env_lookup_mut(&name) {
@@ -1181,6 +1190,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             ck.check_match(st, subject, arms, *span);
             for arm in arms {
                 st.scope_push();
+                let mut bound_borrow_name = None;
                 if let hy_syntax::MatchPattern::Path {
                     binding: Some(name),
                     ..
@@ -1188,6 +1198,17 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 {
                     mark_nested_overwritten(st, name, nested);
                     ck.bind_match_arm(st, name, subject, managed);
+                    let carries_borrow = ck.expr_carries_borrow(st, subject)
+                        || crate::model::as_addr_of(subject).is_some()
+                        || match ck.shape_of_expr(st, subject) {
+                            TypeShape::BorrowHandle(_) => true,
+                            TypeShape::Option(inner) => matches!(*inner, TypeShape::BorrowHandle(_) | TypeShape::Pointer(_)),
+                            _ => false,
+                        };
+                    if carries_borrow {
+                        st.borrow_bindings.insert(name.clone());
+                        bound_borrow_name = Some(name.clone());
+                    }
                     sync_nested_moves(st, nested);
                 }
                 if let Some(g) = &arm.guard {
@@ -1200,6 +1221,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     collect_expr_direct_fnlits(g, st, nested);
                 }
                 check_body_boundaries(ck, st, &arm.body, managed, nested);
+                if let Some(bname) = bound_borrow_name {
+                    st.borrow_bindings.remove(&bname);
+                }
                 pop_scope_and_sync(st, nested);
             }
         }
@@ -1223,6 +1247,18 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             sync_nested_moves(st, nested);
             collect_stmt_direct_fnlits(stmt, st, nested);
             ck.process_closure_assign(st, targets, *op, values);
+            if targets.len() == values.len() {
+                for (t, v) in targets.iter().zip(values.iter()) {
+                    if let hy_syntax::PlaceKind::Ident(tname) = &t.kind {
+                        if let Some(src) = crate::model::move_operand_ident(v) {
+                            if st.borrow_bindings.contains(&src) {
+                                st.borrow_bindings.insert(tname.clone());
+                                st.borrow_bindings.remove(&src);
+                            }
+                        }
+                    }
+                }
+            }
             sync_nested_moves(st, nested);
             if targets.len() == values.len() {
                 for (t, v) in targets.iter().zip(values.iter()) {
@@ -1308,6 +1344,46 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
     let saved_may_share = st.may_share.clone();
     for (stmt, idx) in &flat.stmts {
         let idx = *idx;
+        if let Some(evs) = flat.events.get(&idx) {
+            for ev in evs {
+                if let walk::ScopeEvent::MatchBind { name, subject } = ev {
+                    let mut roots = Vec::new();
+                    crate::walk::collect_ref_roots(subject, &mut roots);
+                    for root in roots {
+                        if st.aliases.contains_key(&root) || !st.share_group(&root).is_empty() {
+                            st.aliases.insert(name.clone(), root.clone());
+                            st.share_edge(name, &root);
+                        }
+                        let inherited: Vec<Loan> = st
+                            .loans
+                            .iter()
+                            .filter_map(|l| match &l.target {
+                                LoanTarget::MapSlot { binding, path, key }
+                                    if l.created <= idx
+                                        && idx <= l.last
+                                        && crate::loans::a3_paths_conflict(st, path, &root) =>
+                                {
+                                    Some(Loan {
+                                        target: LoanTarget::MapSlot {
+                                            binding: binding.clone(),
+                                            path: name.clone(),
+                                            key: key.clone(),
+                                        },
+                                        created: l.created,
+                                        last: l.last,
+                                        span: l.span,
+                                        desc: l.desc.clone(),
+                                    })
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        st.loans.extend(inherited);
+                    }
+                    ck.extend_map_slot_loan_to_alias(st, name, subject, idx);
+                }
+            }
+        }
         if let Stmt::Break { label: Some(_), span, .. }
         | Stmt::Continue { label: Some(_), span, .. } = stmt
         {
@@ -1362,6 +1438,15 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             });
                         } else {
                             ck.extend_map_slot_loan_to_alias(st, name, val, idx);
+                            ck.record_move_const_and_a3_loans(st, name, val, idx);
+                            let mut roots = Vec::new();
+                            crate::walk::collect_ref_roots(val, &mut roots);
+                            for root in roots {
+                                if root != *name {
+                                    st.aliases.insert(name.clone(), root.clone());
+                                    st.share_edge(name, &root);
+                                }
+                            }
                             if let Expr::Ident { name: src, .. } = crate::model::unwrap_parens(val) {
                                 st.aliases.insert(name.clone(), src.clone());
                                 st.share_edge(name, src);
@@ -1433,6 +1518,15 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                                 });
                             } else {
                                 ck.extend_map_slot_loan_to_alias(st, name, v, idx);
+                                ck.record_move_const_and_a3_loans(st, name, v, idx);
+                                let mut roots = Vec::new();
+                                crate::walk::collect_ref_roots(v, &mut roots);
+                                for root in roots {
+                                    if root != *name {
+                                        st.aliases.insert(name.clone(), root.clone());
+                                        st.share_edge(name, &root);
+                                    }
+                                }
                                 if let Expr::Ident { name: src, .. } = crate::model::unwrap_parens(v) {
                                     st.aliases.insert(name.clone(), src.clone());
                                     st.share_edge(name, src);
@@ -1493,6 +1587,46 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             ck.emit_a3_if_live_pub(st, name, t.span, idx, "rebind");
                         } else if let Some(path) = walk::place_path(t) {
                             ck.emit_a3_if_live_pub(st, &path, t.span, idx, "rebind");
+                        }
+                    }
+                }
+            }
+            Stmt::For {
+                kind: hy_syntax::ForKind::Iterate { vars, expr },
+                ..
+            } => {
+                let mut roots = Vec::new();
+                crate::walk::collect_ref_roots(expr, &mut roots);
+                for root in roots {
+                    for v in vars {
+                        if v != "_" {
+                            st.aliases.insert(v.clone(), root.clone());
+                            st.share_edge(v, &root);
+                            let inherited: Vec<Loan> = st
+                                .loans
+                                .iter()
+                                .filter_map(|l| match &l.target {
+                                    LoanTarget::MapSlot { binding, path, key }
+                                        if l.created <= idx
+                                            && idx <= l.last
+                                            && crate::loans::a3_paths_conflict(st, path, &root) =>
+                                    {
+                                        Some(Loan {
+                                            target: LoanTarget::MapSlot {
+                                                binding: binding.clone(),
+                                                path: v.clone(),
+                                                key: key.clone(),
+                                            },
+                                            created: l.created,
+                                            last: l.last,
+                                            span: l.span,
+                                            desc: l.desc.clone(),
+                                        })
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            st.loans.extend(inherited);
                         }
                     }
                 }
