@@ -416,3 +416,59 @@ fn closure_pre_shadow_and_self_shadow_const_writes_are_e3006() {
     assert_eq!(r_self_shadow.verdict, Verdict::Reject, "got {:?}", r_self_shadow.diagnostics);
     assert_eq!(codes(&r_self_shadow), vec!["HYB-E3006"]);
 }
+
+#[test]
+fn set_and_generic_struct_carries_handle_tracks_share_and_param_origin() {
+    let r_set_share = check(
+        "import \"rust/serde_json\"\n\
+         fn wrap_set(d serde_json.value) set[serde_json.value] {\n\
+             s := new(set[serde_json.value])\n\
+             _ = d\n\
+             return s\n\
+         }\n\
+         fn ship_set(s set[serde_json.value]) {}\n\
+         fn main() {\n\
+             doc := serde_json.parse(`{}`)?\n\
+             s := wrap_set(doc)\n\
+             task ship_set(move s)\n\
+             doc.set(\"k\", 1)?\n\
+         }\n",
+    );
+    assert_eq!(r_set_share.verdict, Verdict::Reject, "got {:?}", r_set_share.diagnostics);
+    assert!(codes(&r_set_share).iter().any(|c| c == "HYB-E3003"));
+
+    let r_set_param = check(
+        "import \"rust/serde_json\"\n\
+         fn extract_doc(s set[serde_json.value], fallback serde_json.value) serde_json.value {\n\
+             _ = s\n\
+             return fallback\n\
+         }\n\
+         fn ship_doc(d serde_json.value) {}\n\
+         fn inspect(s set[serde_json.value], fallback serde_json.value) {\n\
+             d := extract_doc(s, fallback)\n\
+             task ship_doc(move d)\n\
+         }\n\
+         fn main() {}\n",
+    );
+    assert_eq!(r_set_param.verdict, Verdict::Reject, "got {:?}", r_set_param.diagnostics);
+    assert!(codes(&r_set_param).iter().any(|c| c == "HYB-E3004"));
+
+    let r_generic_unresolved = check(
+        "import \"rust/serde_json\"\n\
+         struct box[t] { v t }\n\
+         fn wrap_box[t](d serde_json.value, b box[t]) box[t] {\n\
+             _ = d\n\
+             return b\n\
+         }\n\
+         fn inspect[t](b box[t]) error {\n\
+             doc := serde_json.parse(`{}`)?\n\
+             b2 := wrap_box(doc, b)\n\
+             _ = move b2\n\
+             doc.set(\"k\", 1)?\n\
+             return nil\n\
+         }\n\
+         fn main() {}\n",
+    );
+    assert_eq!(r_generic_unresolved.verdict, Verdict::Reject, "got {:?}", r_generic_unresolved.diagnostics);
+    assert!(codes(&r_generic_unresolved).iter().any(|c| c == "HYB-E3003"));
+}
