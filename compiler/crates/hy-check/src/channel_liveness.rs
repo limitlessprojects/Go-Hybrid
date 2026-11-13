@@ -76,6 +76,25 @@ impl ChannelLivenessChecker {
         }
     }
 
+    fn register_pipe(&mut self, tx_name: String, rx_name: String, def_span: Span) {
+        let pipe = PipeInfo {
+            tx: tx_name.clone(),
+            rx: rx_name.clone(),
+            tx_state: ChannelTypestate::Fresh,
+            rx_state: ChannelTypestate::Fresh,
+            def_span,
+        };
+
+        let p_idx = self.pipes_all.len();
+        self.pipes_all.push(pipe.clone());
+        self.cap_to_pipe.insert(tx_name, p_idx);
+        self.cap_to_pipe.insert(rx_name, p_idx);
+
+        if let Some(cur) = self.scope_stack.last_mut() {
+            cur.pipes.push(pipe);
+        }
+    }
+
     fn check_terminal_invariants(&mut self, scope: &ScopeState) {
         for pipe in &scope.pipes {
             // Check send capability terminal state
@@ -122,25 +141,7 @@ impl ChannelLivenessChecker {
             Stmt::Local(decl) => {
                 if decl.names.len() == 2 && decl.values.len() == 1 {
                     if self.is_pipe_call(&decl.values[0]) {
-                        let tx_name = decl.names[0].clone();
-                        let rx_name = decl.names[1].clone();
-
-                        let pipe = PipeInfo {
-                            tx: tx_name.clone(),
-                            rx: rx_name.clone(),
-                            tx_state: ChannelTypestate::Fresh,
-                            rx_state: ChannelTypestate::Fresh,
-                            def_span: decl.span,
-                        };
-
-                        let p_idx = self.pipes_all.len();
-                        self.pipes_all.push(pipe.clone());
-                        self.cap_to_pipe.insert(tx_name, p_idx);
-                        self.cap_to_pipe.insert(rx_name, p_idx);
-
-                        if let Some(cur) = self.scope_stack.last_mut() {
-                            cur.pipes.push(pipe);
-                        }
+                        self.register_pipe(decl.names[0].clone(), decl.names[1].clone(), decl.span);
                         return;
                     }
                 }
@@ -148,7 +149,13 @@ impl ChannelLivenessChecker {
                     self.check_expr(v);
                 }
             }
-            Stmt::Assign { values, .. } => {
+            Stmt::Assign { targets, values, span, .. } => {
+                if targets.len() == 2 && values.len() == 1 && self.is_pipe_call(&values[0]) {
+                    if let (PlaceKind::Ident(tx_name), PlaceKind::Ident(rx_name)) = (&targets[0].kind, &targets[1].kind) {
+                        self.register_pipe(tx_name.clone(), rx_name.clone(), *span);
+                        return;
+                    }
+                }
                 for v in values {
                     self.check_expr(v);
                 }
@@ -183,6 +190,15 @@ impl ChannelLivenessChecker {
                 for s in &body.stmts {
                     self.check_stmt(s);
                 }
+                let has_unconditional_exit = matches!(
+                    body.stmts.last(),
+                    Some(Stmt::Break { .. } | Stmt::Return { .. })
+                );
+                if !has_unconditional_exit {
+                    for s in &body.stmts {
+                        self.check_stmt(s);
+                    }
+                }
                 self.pop_scope();
             }
             Stmt::If {
@@ -202,7 +218,9 @@ impl ChannelLivenessChecker {
                 }
                 self.pop_scope();
                 if let Some(eb) = otherwise {
+                    self.push_scope();
                     self.check_stmt(eb);
+                    self.pop_scope();
                 }
             }
             Stmt::Block { block, .. } => {
@@ -401,7 +419,6 @@ impl ChannelLivenessChecker {
                         match name.as_str() {
                             "close" => {
                                 self.mark_tx_closed(&cap);
-                                self.mark_rx_drained(&cap);
                             }
                             "drain" => {
                                 self.mark_rx_drained(&cap);
@@ -420,6 +437,13 @@ impl ChannelLivenessChecker {
                 for a in args {
                     self.check_expr(&a.value);
                 }
+            }
+            Expr::FnLit { body, .. } => {
+                self.push_scope();
+                for s in &body.stmts {
+                    self.check_stmt(s);
+                }
+                self.pop_scope();
             }
             Expr::Receive { chan, span } => {
                 if let Some(cap) = self.get_cap_name(chan) {
@@ -465,9 +489,17 @@ impl ChannelLivenessChecker {
 
     fn is_pipe_call(&self, expr: &Expr) -> bool {
         let mut e = expr;
-        while let Expr::Paren { inner, .. } = e {
-            e = inner.as_ref();
-        }
+        while match e {
+            Expr::Paren { inner, .. } => {
+                e = inner.as_ref();
+                true
+            }
+            Expr::Try { operand, .. } => {
+                e = operand.as_ref();
+                true
+            }
+            _ => false,
+        } {}
         if let Expr::Call { callee, .. } = e {
             let mut base = callee.as_ref();
             while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
