@@ -1,0 +1,9 @@
+[warrant]
+code = "HYB-E0002"
+tier0_rule = "P"
+summary = "Generic parse / unexpected token"
+provenance = "Issue #4408 Warrant Synthesis"
+
+[expectations]
+reject_first_error = "HYB-E0002"
+near_miss_verdict = "ACCEPT"

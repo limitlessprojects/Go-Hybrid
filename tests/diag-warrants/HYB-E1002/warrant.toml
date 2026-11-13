@@ -1,0 +1,9 @@
+[warrant]
+code = "HYB-E1002"
+tier0_rule = "BUILDABLE"
+summary = "unbuildable declaration: repeated name on left side of :="
+provenance = "Issue #4408 Warrant Synthesis"
+
+[expectations]
+reject_first_error = "HYB-E1002"
+near_miss_verdict = "ACCEPT"
