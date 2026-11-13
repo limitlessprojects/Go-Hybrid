@@ -593,15 +593,6 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                             }
                         }
                         ck.record_move_const_and_a3_loans(st, name, value, 0);
-                        if let Some(src) = crate::model::move_operand_ident(value) {
-                            if st.borrow_bindings.contains(&src) {
-                                st.borrow_bindings.insert(name.clone());
-                                st.borrow_bindings.remove(&src);
-                            }
-                        }
-                        if ck.expr_carries_borrow(st, value) || field_borrow_kind(&shape).is_some() {
-                            st.borrow_bindings.insert(name.clone());
-                        }
                         continue;
                     }
                     let reads_self = !is_fresh_copy && ck.value_reads_storage_of(&pre_st, value, name);
@@ -716,6 +707,14 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     }
                 }
                 ck.record_local_borrow_aliases(st, l);
+                for (name, value) in l.names.iter().zip(l.values.iter()) {
+                    if let Some(src) = crate::model::move_operand_ident(value) {
+                        if st.borrow_bindings.contains(&src) {
+                            st.borrow_bindings.insert(name.clone());
+                            st.borrow_bindings.remove(&src);
+                        }
+                    }
+                }
             } else {
                 // multi-name define from one value (`v, ok := m[k]`, `a, b := f()`)
                 let moved_non_owned = l

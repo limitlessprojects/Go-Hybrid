@@ -121,7 +121,7 @@ fn main() {
 }
 "#;
     let (v, hit) = has_code(src, "HYB-E3104");
-    assert!(v == Verdict::Reject && hit, "expected HYB-E3104 for moved borrow escape from closure");
+    assert!(v == Verdict::Reject && hit, "expected HYB-E3104 for moved borrow escape from closure, got verdict: {:?}, diags: {:?}", v, r.diagnostics);
 }
 
 #[test]
