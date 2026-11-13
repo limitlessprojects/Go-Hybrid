@@ -8510,6 +8510,91 @@ impl<'a> Collector<'a> {
                                 ),
                                 &format!("write `fmt.{}(w, ...)`", name),
                             );
+                        } else if matches!(method, "append" | "appendln") {
+                            if args.is_empty() {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`fmt.{}` requires at least 1 destination byte slice argument `(b[, ...])`, got 0 (HYB-E1002)",
+                                        name
+                                    ),
+                                    &format!("write `fmt.{}(b, ...)`", name),
+                                );
+                            } else {
+                                let bare = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Str(_)
+                                            | LitKind::RawStr(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "`fmt.{}` requires a byte slice destination argument, found non-slice literal (HYB-E1002)",
+                                            name
+                                        ),
+                                        &format!("pass a byte slice `b` as destination to `fmt.{}`", name),
+                                    );
+                                }
+                            }
+                        } else if method == "appendf" {
+                            if args.len() < 2 {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`fmt.appendf` requires at least 2 arguments `(b, format[, ...])`, got {} (HYB-E1002)",
+                                        args.len()
+                                    ),
+                                    "write `fmt.appendf(b, \"%s\", ...)`",
+                                );
+                            } else {
+                                let bare_dst = unwrap_parens(&args[0].value);
+                                if matches!(
+                                    bare_dst,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Str(_)
+                                            | LitKind::RawStr(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.appendf` requires a byte slice destination first argument, found non-slice literal (HYB-E1002)".to_string(),
+                                        "pass a byte slice `b` as destination to `fmt.appendf`",
+                                    );
+                                }
+                                let bare_fmt = unwrap_parens(&args[1].value);
+                                if matches!(
+                                    bare_fmt,
+                                    Expr::Lit {
+                                        kind: LitKind::Int(_)
+                                            | LitKind::Float(_)
+                                            | LitKind::Bool(_)
+                                            | LitKind::Char(_)
+                                            | LitKind::Nil,
+                                        ..
+                                    }
+                                ) {
+                                    self.emit_e1002(
+                                        span,
+                                        "`fmt.appendf` requires a string format second argument, found non-string literal (HYB-E1002)".to_string(),
+                                        "pass a string literal or expression as format to `fmt.appendf`",
+                                    );
+                                }
+                            }
                         }
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
