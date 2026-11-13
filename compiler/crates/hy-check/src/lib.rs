@@ -469,12 +469,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         std::collections::HashSet<String>,
     )> = Vec::new();
     let mut reported_backedge: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut match_guards = flat.match_guards.clone();
+    let mut guard_moved: std::collections::HashMap<usize, model::MoveInfo> = Default::default();
 
-    // Pass B: statements in source order.
-    for (stmt, idx) in &flat.stmts {
-        let stmt: &Stmt = stmt;
-        let idx = *idx;
-        let managed = flat.in_managed(idx);
+    // Pass B: statements in source order (plus `flat.next` trailing scope events).
+    for idx in 0..=flat.next {
+        let managed = idx < flat.next && flat.in_managed(idx);
         // Issue #14: apply the statement's scope events BEFORE processing, in
         // exact order so multiple Pop/Push events at the same index never
         // coalesce into one, and select-receive arm bindings live inside their
@@ -483,7 +483,22 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             for ev in evs {
                 match ev {
                     walk::ScopeEvent::Push => st.scope_push(),
-                    walk::ScopeEvent::Pop => st.scope_pop(),
+                    walk::ScopeEvent::Pop => {
+                        while let Some(&(for_idx, _, od, lb, _)) = active_loops.last() {
+                            if idx <= for_idx
+                                || st.scopes.len() != od + 1 + usize::from(!lb.stmts.is_empty())
+                            {
+                                break;
+                            }
+                            let (fi, le, od, lb, pm) = active_loops.pop().unwrap();
+                            ck.replay_const_backedge(&st, od, lb);
+                            ck.check_loop_backedge(
+                                &st, od, &flat.stmts[fi..=le], &flat.events, lb, &pm,
+                                &mut reported_backedge, &|i| flat.in_managed(i),
+                            );
+                        }
+                        st.scope_pop();
+                    }
                     walk::ScopeEvent::SelectRecv { names, chan } => {
                         let elem = match ck.shape_of_expr(&st, chan) {
                             TypeShape::Chan(e) => *e,
@@ -506,11 +521,26 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         }
                     }
                     walk::ScopeEvent::MatchBind { name, subject } => {
-                        ck.bind_match_arm(&mut st, name, subject, managed);
+                        let (g_opt, m_idx) = walk::pop_guard(&mut match_guards, idx);
+                        ck.bind_match_arm(&mut st, name, subject, flat.in_managed(m_idx));
+                        let prev_mv = guard_moved.get(&m_idx).cloned();
+                        if let (Some(mv), Some(b)) = (prev_mv, st.env_lookup_mut(name)) {
+                            if b.moved.is_none() && !b.shape.is_sendable_by_type() {
+                                b.moved = Some(mv);
+                            }
+                        }
+                        if let Some(ge) = g_opt {
+                            ck.process_match_guard(&mut st, ge, m_idx);
+                            if let Some(mv) = st.env_lookup(name).and_then(|b| b.moved.clone()) {
+                                guard_moved.entry(m_idx).or_insert(mv);
+                            }
+                        }
                     }
                 }
             }
         }
+        let Some((stmt, _)) = flat.stmts.get(idx) else { break };
+        let stmt: &Stmt = stmt;
         if let Stmt::For { body: lbody, .. } = stmt {
             let outer_depth = st.scopes.len().saturating_sub(1);
             let pre_moved = st
@@ -569,7 +599,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // A1b/A7: use-after-move on this statement's own uses (checked
         // BEFORE this statement marks any new transfers).
         let mut uses = Vec::new();
-        walk::own_uses_with_results(stmt, &st.named_results, &mut uses);
+        walk::stmt_uses_pre(stmt, &st.named_results, &mut uses);
         ck.check_uses(&st, &uses);
         // T24: no address-of on a map-slot loan (HYB-E3104).
         ck.check_addr_of_loan(&st, &uses);
@@ -578,7 +608,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         ck.check_slot_loan_rebind(&st, stmt);
 
         let mut fnlits = Vec::new();
-        walk::own_fnlits(stmt, &mut fnlits);
+        walk::stmt_fnlits_pre(stmt, &mut fnlits);
         if !fnlits.is_empty() {
             if let Some(top) = st.fnlit_scopes.last_mut() {
                 for fl in fnlits {
@@ -620,7 +650,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             }
         } else {
             let mut calls = Vec::new();
-            walk::own_calls(stmt, &mut calls);
+            walk::stmt_calls_pre(stmt, &mut calls);
             for cr in calls {
                 ck.process_call(&mut st, &cr, idx, None, &mut stmt_consumes);
             }
@@ -895,15 +925,6 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     subject,
                     format!("the match subject `{}`", subject.render()),
                 );
-                for arm in arms {
-                    if let Some(g) = &arm.guard {
-                        ck.mark_move_in_value(
-                            &mut st,
-                            g,
-                            format!("the match guard `{}`", g.render()),
-                        );
-                    }
-                }
                 ck.check_match(&st, subject, arms, *span);
             }
 
@@ -935,24 +956,6 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             // (init is its own statement entry) and the uses/calls collected above.
             _ => {}
         }
-
-        while let Some((_, loop_end, _, _, _)) = active_loops.last() {
-            if *loop_end != idx {
-                break;
-            }
-            let (for_idx, loop_end, outer_depth, lbody, pre_moved) = active_loops.pop().unwrap();
-            ck.replay_const_backedge(&st, outer_depth, lbody);
-            ck.check_loop_backedge(
-                &st,
-                outer_depth,
-                &flat.stmts[for_idx..=loop_end],
-                &flat.events,
-                lbody,
-                &pre_moved,
-                &mut reported_backedge,
-                &|idx| flat.in_managed(idx),
-            );
-        }
     }
 
     // All remaining block scopes die at the end of the function (issue #14):
@@ -977,6 +980,25 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
 }
 
 impl<'a> Checker<'a> {
+    pub(crate) fn process_match_guard(&mut self, st: &mut FnState, g: &Expr, idx: usize) {
+        let (mut uses, mut fnlits, mut calls, mut consumes) = (vec![], vec![], vec![], vec![]);
+        walk::expr_uses(g, &mut uses);
+        self.check_uses(st, &uses);
+        self.check_addr_of_loan(st, &uses);
+        walk::expr_fnlits(g, &mut fnlits);
+        if let Some(top) = st.fnlit_scopes.last_mut() {
+            for f in fnlits {
+                top.push((f.span().start.line as _, f.span().start.col as _));
+            }
+        }
+        walk::expr_calls(g, &mut calls);
+        calls.iter().for_each(|cr| self.process_call(st, cr, idx, None, &mut consumes));
+        if !consumes.is_empty() {
+            self.check_same_stmt_consumes(st, &uses, &consumes);
+        }
+        self.mark_move_in_value(st, g, format!("the match guard `{}`", g.render()));
+    }
+
     /// Row 14 (discussion #4): audit a `managed` block's reason/category/tickets
     /// and record it in `managed_audit` (shared between Pass B and closures.rs).
     pub(crate) fn audit_managed_block(
