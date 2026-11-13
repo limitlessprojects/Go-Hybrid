@@ -26,7 +26,8 @@
 //!     subset — corpus 10's `hits++` handler shape is the standing example
 //!     (A5, QUESTIONS.md Q1/OQ1: pre-registered ACCEPT, contested openly).
 
-use crate::model::{Binding, Checker, FnState, TypeShape};
+use crate::loans::{a3_paths_conflict, field_borrow_kind};
+use crate::model::{collect_ref_roots, Binding, Checker, FnState, Loan, LoanTarget, TypeShape};
 use hy_syntax::ForKind::*;
 use hy_syntax::{Block, Expr, LocalKind, SelectArmKind, Stmt};
 
@@ -848,7 +849,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     }
                     if let Some(v) = val_opt {
                         ck.record_storage_from_snapshot(st, &pre_st, &name, v, &overwritten, true, true);
-                        if ck.expr_carries_borrow(st, v) || crate::model::field_borrow_kind(&shape).is_some() {
+                        if ck.expr_carries_borrow(st, v) || field_borrow_kind(&shape).is_some() {
                             st.borrow_bindings.insert(name.clone());
                         }
                     }
@@ -1201,8 +1202,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     let carries_borrow = ck.expr_carries_borrow(st, subject)
                         || crate::model::as_addr_of(subject).is_some()
                         || match ck.shape_of_expr(st, subject) {
-                            TypeShape::BorrowHandle(_) => true,
-                            TypeShape::Option(inner) => matches!(*inner, TypeShape::BorrowHandle(_) | TypeShape::Pointer(_)),
+                            TypeShape::BorrowHandle(_) | TypeShape::Pointer(_) => true,
                             _ => false,
                         };
                     if carries_borrow {
@@ -1347,11 +1347,11 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
         if let Some(evs) = flat.events.get(&idx) {
             for ev in evs {
                 if let walk::ScopeEvent::MatchBind { name, subject } = ev {
-                    let mut roots = Vec::new();
-                    crate::walk::collect_ref_roots(subject, &mut roots);
+                    let mut roots: Vec<String> = Vec::new();
+                    collect_ref_roots(subject, &mut roots);
                     for root in roots {
                         if st.aliases.contains_key(&root) || !st.share_group(&root).is_empty() {
-                            st.aliases.insert(name.clone(), root.clone());
+                            st.aliases.insert(name.to_string(), root.clone());
                             st.share_edge(name, &root);
                         }
                         let inherited: Vec<Loan> = st
@@ -1361,12 +1361,12 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                                 LoanTarget::MapSlot { binding, path, key }
                                     if l.created <= idx
                                         && idx <= l.last
-                                        && crate::loans::a3_paths_conflict(st, path, &root) =>
+                                        && a3_paths_conflict(st, path, &root) =>
                                 {
                                     Some(Loan {
                                         target: LoanTarget::MapSlot {
                                             binding: binding.clone(),
-                                            path: name.clone(),
+                                            path: name.to_string(),
                                             key: key.clone(),
                                         },
                                         created: l.created,
@@ -1439,8 +1439,8 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                         } else {
                             ck.extend_map_slot_loan_to_alias(st, name, val, idx);
                             ck.record_move_const_and_a3_loans(st, name, val, idx);
-                            let mut roots = Vec::new();
-                            crate::walk::collect_ref_roots(val, &mut roots);
+                            let mut roots: Vec<String> = Vec::new();
+                            collect_ref_roots(val, &mut roots);
                             for root in roots {
                                 if root != *name {
                                     st.aliases.insert(name.clone(), root.clone());
@@ -1519,8 +1519,8 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             } else {
                                 ck.extend_map_slot_loan_to_alias(st, name, v, idx);
                                 ck.record_move_const_and_a3_loans(st, name, v, idx);
-                                let mut roots = Vec::new();
-                                crate::walk::collect_ref_roots(v, &mut roots);
+                                let mut roots: Vec<String> = Vec::new();
+                                collect_ref_roots(v, &mut roots);
                                 for root in roots {
                                     if root != *name {
                                         st.aliases.insert(name.clone(), root.clone());
@@ -1595,8 +1595,8 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                 kind: hy_syntax::ForKind::Iterate { vars, expr },
                 ..
             } => {
-                let mut roots = Vec::new();
-                crate::walk::collect_ref_roots(expr, &mut roots);
+                let mut roots: Vec<String> = Vec::new();
+                collect_ref_roots(expr, &mut roots);
                 for root in roots {
                     for v in vars {
                         if v != "_" {
@@ -1609,7 +1609,7 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                                     LoanTarget::MapSlot { binding, path, key }
                                         if l.created <= idx
                                             && idx <= l.last
-                                            && crate::loans::a3_paths_conflict(st, path, &root) =>
+                                            && a3_paths_conflict(st, path, &root) =>
                                     {
                                         Some(Loan {
                                             target: LoanTarget::MapSlot {
