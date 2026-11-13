@@ -4671,6 +4671,51 @@ impl<'a> Collector<'a> {
             }
         }
     }
+
+    fn check_bytes_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(member, "buffer" | "reader" | "min_read" | "err_too_large") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `bytes.{member}`: package symbol is a variable, constant, or type, not a function (HYB-E1002)"),
+                &format!("refer to `bytes.{member}` as a value or type rather than calling it"),
+            );
+            return;
+        }
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `bytes.{member}` (HYB-E1002)"),
+                &format!("`bytes.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_buffer" | "new_buffer_string" | "new_reader" | "fields" | "runes" | "title"
+            | "to_lower" | "to_title" | "to_upper" | "trim_space" => Some(1),
+            "compare" | "contains" | "contains_any" | "contains_rune" | "count" | "cut"
+            | "equal" | "equal_fold" | "has_prefix" | "has_suffix" | "index" | "index_any"
+            | "index_byte" | "index_rune" | "join" | "last_index" | "last_index_any"
+            | "last_index_byte" | "repeat" | "split" | "split_after" | "trim"
+            | "trim_left" | "trim_prefix" | "trim_right" | "trim_suffix" => Some(2),
+            "replace_all" | "split_after_n" | "split_n" => Some(3),
+            "replace" => Some(4),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`bytes.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `bytes.{member}`"),
+                );
+            }
+        }
+    }
+
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -8413,6 +8458,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "bytes" && self.lookup_kind(pkg).is_none() {
+                        self.check_bytes_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
