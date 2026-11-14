@@ -194,6 +194,10 @@ Directory discovery recurses through real subdirectories, skipping child directo
 symlinks (including links back to the project). A directory symlink explicitly
 passed as a root and symlinks to individual `.hy` files remain supported.
 
+Like `go build ./...`, the walk never enters directories starting with `.` or `_`,
+`testdata`, `vendor`, or a nested module (a directory with its own `go.mod`, which
+includes the vendored `hybridrt/`); name such a directory explicitly to generate in it.
+
 ## When *not* to use Hybrid
 
 - You need **arbitrary existing Go code to run unmodified** inside the checked
