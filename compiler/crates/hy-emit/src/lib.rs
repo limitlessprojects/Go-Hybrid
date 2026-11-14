@@ -125,6 +125,39 @@ const POP_PRELUDE: &str = concat!(
     "}\n",
 );
 
+const PIPE_PRELUDE: &str = concat!(
+    "// ---- Hybrid prelude: SPSC channel capabilities (auto-generated; do not edit) ----\n",
+    "type hy_send_cap[t any] chan<- t\n",
+    "\n",
+    "func (s hy_send_cap[t]) send(v t) {\n",
+    "\ts <- v\n",
+    "}\n",
+    "\n",
+    "func (s hy_send_cap[t]) close() {\n",
+    "\tclose(s)\n",
+    "}\n",
+    "\n",
+    "type hy_recv_cap[t any] <-chan t\n",
+    "\n",
+    "func (r hy_recv_cap[t]) recv() t {\n",
+    "\treturn <-r\n",
+    "}\n",
+    "\n",
+    "func (r hy_recv_cap[t]) drain() {\n",
+    "\tfor range r {\n",
+    "\t}\n",
+    "}\n",
+    "\n",
+    "func hy_pipe[t any](cap ...int) (hy_send_cap[t], hy_recv_cap[t]) {\n",
+    "\tc := 8\n",
+    "\tif len(cap) > 0 {\n",
+    "\t\tc = cap[0]\n",
+    "\t}\n",
+    "\tch := make(chan t, c)\n",
+    "\treturn hy_send_cap[t](ch), hy_recv_cap[t](ch)\n",
+    "}\n",
+);
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -1036,7 +1069,10 @@ impl Emitter {
                 // An explicit `import "errors"` whose only Hybrid call was
                 // `errors.wrap(err, msg)` lowers to `fmt.Errorf(...)` and
                 // leaves no `errors.` reference in the emitted Go body (#657).
+                // Builtin `hy.pipe` / `hy.send_cap` / `hy.recv_cap` lower to
+                // the generated prelude without a Go `"hy"` package.
                 !(root.as_str() == "errors" && !self.body.contains("errors."))
+                    && !(root.as_str() == "hy" && !self.body.contains("hy."))
             })
             .collect();
         if !active_imports.is_empty() {
@@ -1069,7 +1105,10 @@ impl Emitter {
             || body.contains(".insert(");
         let needs_pop = body.contains("hy_pop(");
         let needs_n5_make = body.contains("hy_n5_make(");
-        if needs_option || needs_set || needs_pop || needs_n5_make {
+        let needs_pipe = body.contains("hy_pipe[")
+            || body.contains("hy_send_cap[")
+            || body.contains("hy_recv_cap[");
+        if needs_option || needs_set || needs_pop || needs_n5_make || needs_pipe {
             out.push('\n');
             if needs_option {
                 out.push_str(OPTION_PRELUDE);
@@ -1085,6 +1124,10 @@ impl Emitter {
             }
             if needs_n5_make {
                 out.push_str(N5_MAKE_PRELUDE);
+                out.push('\n');
+            }
+            if needs_pipe {
+                out.push_str(PIPE_PRELUDE);
                 out.push('\n');
             }
         }
@@ -1825,6 +1868,12 @@ impl Emitter {
         if name.starts_with("set[") || name == "set" {
             return Some(BindingKind::Set);
         }
+        if name.starts_with("hy.recv_cap[") || name == "hy.recv_cap" {
+            return Some(BindingKind::Chan);
+        }
+        if name.starts_with("hy.send_cap[") || name == "hy.send_cap" {
+            return None;
+        }
         if name.is_empty() || !name.contains('.') {
             return None;
         }
@@ -1858,6 +1907,12 @@ impl Emitter {
     }
 
     fn type_is_foreign(&self, t: &TypeExpr) -> bool {
+        if let TypeExpr::Named { name, .. } = self.resolve_type_alias(t) {
+            let base = name.split('[').next().unwrap_or(name);
+            if base == "hy.send_cap" || base == "hy.recv_cap" {
+                return false;
+            }
+        }
         match t {
             TypeExpr::Named { name, .. } => name.contains('.'),
             TypeExpr::Pointer { to, .. } => self.type_is_foreign(to),
@@ -2094,6 +2149,12 @@ impl Emitter {
                     .join(", ");
                 return format!("{}[{}]", go_head, go_args);
             }
+        }
+        if name == "hy.send_cap" {
+            return "hy_send_cap".to_string();
+        }
+        if name == "hy.recv_cap" {
+            return "hy_recv_cap".to_string();
         }
         if let Some((root, rest)) = name.split_once('.') {
             // Rust-owned types map to their binding package's handle type
