@@ -758,6 +758,12 @@ struct Collector<'a> {
     /// Whether every result of the enclosing signature is named, so Go's
     /// naked `return` is legal (corpus 63).
     fn_results_all_named: bool,
+    /// Named results of the enclosing signature and the index of the
+    /// `scopes` layer that binds them. Go refuses a naked `return` while an
+    /// inner-scope binding shadows a named result (`result parameter x not
+    /// in scope at return`). Swapped per body like `fn_results`.
+    fn_result_names: Vec<String>,
+    fn_result_scope: usize,
     /// Whether the enclosing signature's last result is `error`, which the
     /// emitter zero-fills — a short return is then lowered to the full arity
     /// (`return v` in a `(value, error)` fn emits `return v, nil`, the E3
@@ -818,6 +824,8 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_result_type_names: Vec::new(),
             fn_type_params: HashSet::new(),
             fn_results_all_named: false,
+            fn_result_names: Vec::new(),
+            fn_result_scope: 0,
             fn_results_error_tail: false,
             scalar_scopes: Vec::new(),
             container_elem_scopes: Vec::new(),
@@ -2020,6 +2028,12 @@ impl<'a> Collector<'a> {
         let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
+        let outer_result_names = std::mem::replace(
+            &mut self.fn_result_names,
+            f.results.iter().filter_map(|r| r.name.clone()).collect(),
+        );
+        let outer_result_scope =
+            std::mem::replace(&mut self.fn_result_scope, self.scopes.len().saturating_sub(1));
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
         let mut tp: HashSet<String> = f.type_params.iter().map(|p| p.name.clone()).collect();
         if let Some(r) = &f.receiver {
@@ -2041,6 +2055,8 @@ impl<'a> Collector<'a> {
         self.select_depth = outer_select;
         self.fn_results = outer;
         self.fn_results_all_named = outer_named;
+        self.fn_result_names = outer_result_names;
+        self.fn_result_scope = outer_result_scope;
         self.fn_results_error_tail = outer_err;
         self.fn_result_scalars = outer_scalars;
         self.fn_result_type_names = outer_rt;
@@ -2605,6 +2621,9 @@ impl<'a> Collector<'a> {
                     self.expr(v);
                 }
                 self.check_return(values, *span);
+                if values.is_empty() && self.fn_results_all_named {
+                    self.check_naked_return_shadow(*span);
+                }
             }
             Stmt::Task { callee, args, span } => {
                 self.expr(callee);
@@ -3270,6 +3289,14 @@ impl<'a> Collector<'a> {
                 let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
+                let outer_result_names = std::mem::replace(
+                    &mut self.fn_result_names,
+                    results.iter().filter_map(|r| r.name.clone()).collect(),
+                );
+                let outer_result_scope = std::mem::replace(
+                    &mut self.fn_result_scope,
+                    self.scopes.len().saturating_sub(1),
+                );
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
                 let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
                 let outer_select = std::mem::replace(&mut self.select_depth, 0);
@@ -3278,6 +3305,8 @@ impl<'a> Collector<'a> {
                 self.select_depth = outer_select;
                 self.fn_results = outer;
                 self.fn_results_all_named = outer_named;
+                self.fn_result_names = outer_result_names;
+                self.fn_result_scope = outer_result_scope;
                 self.fn_results_error_tail = outer_err;
                 self.fn_result_scalars = outer_scalars;
                 self.fn_result_type_names = outer_rt;
@@ -5768,6 +5797,54 @@ impl<'a> Collector<'a> {
     /// #577 C10 — a `return` must supply the enclosing function's result
     /// list: the same number of values, each assignable to its result type.
     /// Go refuses the emitted statement otherwise (Row 13).
+    /// Reject naked `return` when any named result is shadowed by a binder
+    /// in an inner scope. Under Go, a naked return reads whatever is in
+    /// scope by that name; shadowing with a local binding produces
+    /// `result parameter x not in scope at return`.
+    ///
+    /// An unread, unwritten `for` binder is emitted as `_` (#139) and does
+    /// not actually introduce an entity of that name in the Go output, so
+    /// only a binder already read or written counts.
+    fn check_naked_return_shadow(&mut self, span: Span) {
+        let base = self.fn_result_scope;
+        let mut shadowed: Vec<String> = Vec::new();
+        for rname in &self.fn_result_names {
+            if rname == "_" {
+                continue;
+            }
+            let Some((depth, entry)) = self
+                .scopes
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(i, layer)| layer.get(rname.as_str()).map(|e| (i, *e)))
+            else {
+                continue;
+            };
+            if depth <= base {
+                continue;
+            }
+            if let Some(id) = entry {
+                let d = &self.defines[id];
+                if d.elidable && !d.used && !d.written {
+                    continue;
+                }
+            }
+            shadowed.push(rname.clone());
+        }
+        for rname in shadowed {
+            self.emit_e1002(
+                span,
+                format!(
+                    "naked `return` while named result `{rname}` is shadowed by an inner-scope binding — Go refuses `result parameter {rname} not in scope at return` (HYB-E1002)"
+                ),
+                &format!(
+                    "rename the inner `{rname}`, assign to the result with `=` instead of `:=`, or return the values explicitly"
+                ),
+            );
+        }
+    }
+
     fn check_return(&mut self, values: &[Expr], span: Span) {
         let want = self.fn_results.clone();
         // Go's multi-value rule: `return f()` where `f`'s results line up
