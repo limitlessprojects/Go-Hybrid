@@ -693,6 +693,8 @@ pub struct Emitter {
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
     n5_generic_structs: BTreeMap<String, (Vec<TypeParam>, Vec<FieldDecl>)>,
     n5_aliases: BTreeMap<String, TypeExpr>,
+    chan_elem: BTreeMap<String, TypeExpr>,
+    pub(crate) fn_ret_chan_elem: BTreeMap<String, TypeExpr>,
     /// IR witness table (issue #3930): concurrency-site witnesses in
     /// emission order; drained by `emit_go_with_proof`.
     pub(crate) witnesses: Vec<crate::witness::Witness>,
@@ -705,6 +707,7 @@ pub(crate) struct ScopeSnapshot {
     var_struct: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
     loan_aliases: BTreeMap<String, BTreeSet<String>>,
+    chan_elem: BTreeMap<String, TypeExpr>,
 }
 
 impl Emitter {
@@ -748,6 +751,8 @@ impl Emitter {
             n5_structs: BTreeMap::new(),
             n5_generic_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
+            chan_elem: BTreeMap::new(),
+            fn_ret_chan_elem: BTreeMap::new(),
             witnesses: Vec::new(),
         }
     }
@@ -764,6 +769,7 @@ impl Emitter {
             var_struct: self.var_struct.clone(),
             pointer_vars: self.pointer_vars.clone(),
             loan_aliases: self.loan_aliases.clone(),
+            chan_elem: self.chan_elem.clone(),
         }
     }
 
@@ -774,6 +780,7 @@ impl Emitter {
         self.var_struct = saved.var_struct;
         self.pointer_vars = saved.pointer_vars;
         self.loan_aliases = saved.loan_aliases;
+        self.chan_elem = saved.chan_elem;
     }
 
     pub(crate) fn shadow_local_name(&mut self, name: &str) {
@@ -783,6 +790,7 @@ impl Emitter {
             self.var_ty.remove(name);
             self.var_struct.remove(name);
             self.pointer_vars.remove(name);
+            self.chan_elem.remove(name);
             self.loan_aliases.remove(name);
             for aliases in self.loan_aliases.values_mut() {
                 aliases.remove(name);
@@ -920,6 +928,27 @@ impl Emitter {
                     }
                 };
                 Some((key, ret_sn))
+            })
+            .collect();
+        self.fn_ret_chan_elem = file
+            .fns()
+            .filter_map(|f| {
+                if result_shape(&f.results).0 != 1 {
+                    return None;
+                }
+                let elem = f
+                    .results
+                    .first()
+                    .and_then(|r| self.chan_elem_of_type(&r.ty))?;
+                let key = match &f.receiver {
+                    None => f.name.clone(),
+                    Some(recv) => {
+                        let recv_sn = base_ty_name(&recv.ty)
+                            .and_then(|n| self.resolve_to_struct_name(&n))?;
+                        format!("{recv_sn}.{}", f.name)
+                    }
+                };
+                Some((key, elem))
             })
             .collect();
         self.fn_shapes = file
@@ -1456,6 +1485,7 @@ impl Emitter {
     fn emit_fn(&mut self, f: &FnDecl) -> Result<(), EmitError> {
         self.bindings.clear();
         self.var_struct.clear();
+        self.chan_elem.clear();
         self.closure_shapes.clear();
         self.var_ty.clear();
         self.pointer_vars.clear();
@@ -1755,16 +1785,28 @@ impl Emitter {
     fn emit_hints_from_params(&mut self, params: &[Param]) {
         for p in params {
             self.shadow_local_name(&p.name);
-            if let Some(kind) = self.binding_kind_of_ty(&p.ty) {
-                self.bindings.insert(p.name.clone(), kind);
-            } else if matches!(self.resolve_type_alias(&p.ty), TypeExpr::Chan { .. }) {
-                self.bindings.insert(p.name.clone(), BindingKind::Chan);
-            }
-            if self.is_pointer_ty(&p.ty) {
-                self.pointer_vars.insert(p.name.clone());
-            }
-            self.register_var_ty(&p.name, &p.ty);
+            self.register_var_from_ty(&p.name, &p.ty);
         }
+    }
+
+    pub(crate) fn chan_elem_of_type(&self, ty: &TypeExpr) -> Option<TypeExpr> {
+        match self.resolve_type_alias(ty) {
+            TypeExpr::Chan { elem, .. } => Some((**elem).clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn register_var_from_ty(&mut self, name: &str, ty: &TypeExpr) {
+        if name == "_" {
+            return;
+        }
+        if let Some(kind) = self.binding_kind_of_ty(ty) {
+            self.bindings.insert(name.to_string(), kind);
+        }
+        if self.is_pointer_ty(ty) {
+            self.pointer_vars.insert(name.to_string());
+        }
+        self.register_var_ty(name, ty);
     }
 
     pub(crate) fn expr_is_pointer(&self, e: &Expr) -> bool {
@@ -1773,6 +1815,9 @@ impl Emitter {
             Expr::Paren { inner, .. } => self.expr_is_pointer(inner),
             Expr::Try { operand, .. } => self.expr_is_pointer(operand),
             Expr::Ident { name, .. } => self.pointer_vars.contains(name),
+            Expr::Receive { chan, .. } => self
+                .chan_elem_of_expr(chan)
+                .is_some_and(|t| self.is_pointer_ty(&t)),
             Expr::Call { callee, .. } => {
                 if let Expr::Ident { name, .. } = callee.as_ref() {
                     self.ptr_returning_fns.contains(name)
@@ -1789,6 +1834,15 @@ impl Emitter {
     /// whose type is a user struct (`pool_stats`, value or pointer) lands
     /// in var_struct — `stats.mu.lock()` types through struct_fields.
     fn register_var_ty(&mut self, name: &str, ty: &TypeExpr) {
+        if let Some(elem) = self.chan_elem_of_type(ty) {
+            if name != "_" {
+                self.chan_elem.insert(name.to_string(), elem);
+            }
+            return;
+        }
+        if name != "_" {
+            self.chan_elem.remove(name);
+        }
         let (base, ptr) = match self.resolve_type_alias(ty) {
             TypeExpr::Pointer { to, .. } => (base_ty_name(self.resolve_type_alias(to)), true),
             t => (base_ty_name(t), false),
