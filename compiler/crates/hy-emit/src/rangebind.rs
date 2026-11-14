@@ -216,7 +216,10 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
                         // so it counts regardless. Conservative direction:
                         // treat the name as read; a missing `_` merely leaves
                         // the old emission.
-                        if *inclusive || crate::Emitter::expr_has_call_or_recv(hi) {
+                        if *inclusive
+                            || crate::Emitter::expr_has_call_or_recv(hi)
+                            || expr_projects_target(hi, target)
+                        {
                             if expr_reads(hi, target) {
                                 return true;
                             }
@@ -384,5 +387,26 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
             }
             false
         }
+    }
+}
+
+fn expr_projects_target(e: &Expr, target: &str) -> bool {
+    match e {
+        Expr::Index { base, index, .. } => expr_reads(base, target) || expr_reads(index, target),
+        Expr::Field { base, .. } => expr_reads(base, target),
+        Expr::Slice { base, lo, hi, .. } => {
+            expr_reads(base, target)
+                || lo.as_ref().is_some_and(|x| expr_reads(x, target))
+                || hi.as_ref().is_some_and(|x| expr_reads(x, target))
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_projects_target(lhs, target) || expr_projects_target(rhs, target)
+        }
+        Expr::Unary { operand, .. }
+        | Expr::AddrOf { operand, .. }
+        | Expr::Move { operand, .. }
+        | Expr::Try { operand, .. }
+        | Expr::Paren { inner: operand, .. } => expr_projects_target(operand, target),
+        _ => false,
     }
 }
