@@ -125,6 +125,41 @@ const POP_PRELUDE: &str = concat!(
     "}\n",
 );
 
+const PIPE_PRELUDE: &str = concat!(
+    "// ---- Hybrid prelude: SPSC pipe capabilities (auto-generated; do not edit) ----\n",
+    "type hy_send_cap[t any] chan<- t\n",
+    "\n",
+    "func (c hy_send_cap[t]) send(v t) {\n",
+    "\tc <- v\n",
+    "}\n",
+    "\n",
+    "func (c hy_send_cap[t]) close() {\n",
+    "\tclose(c)\n",
+    "}\n",
+    "\n",
+    "type hy_recv_cap[t any] <-chan t\n",
+    "\n",
+    "func (c hy_recv_cap[t]) recv() t {\n",
+    "\treturn <-c\n",
+    "}\n",
+    "\n",
+    "func (c hy_recv_cap[t]) drain() {\n",
+    "\tfor range c {\n",
+    "\t}\n",
+    "}\n",
+    "\n",
+    "func hy_pipe[t any](buf ...int) (hy_send_cap[t], hy_recv_cap[t]) {\n",
+    "\tn := 0\n",
+    "\tif len(buf) > 0 {\n",
+    "\t\tn = buf[0]\n",
+    "\t}\n",
+    "\tch := make(chan t, n)\n",
+    "\tvar tx chan<- t = ch\n",
+    "\tvar rx <-chan t = ch\n",
+    "\treturn hy_send_cap[t](tx), hy_recv_cap[t](rx)\n",
+    "}\n",
+);
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -693,6 +728,10 @@ pub struct Emitter {
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
     n5_generic_structs: BTreeMap<String, (Vec<TypeParam>, Vec<FieldDecl>)>,
     n5_aliases: BTreeMap<String, TypeExpr>,
+    /// Element types for channel capabilities (rx name -> element type name).
+    chan_elem_ty: BTreeMap<String, String>,
+    /// Multi-result return types per top-level function.
+    fn_return_kinds: BTreeMap<String, Vec<Option<BindingKind>>>,
     /// IR witness table (issue #3930): concurrency-site witnesses in
     /// emission order; drained by `emit_go_with_proof`.
     pub(crate) witnesses: Vec<crate::witness::Witness>,
@@ -701,6 +740,7 @@ pub struct Emitter {
 pub(crate) struct ScopeSnapshot {
     local_vars: BTreeSet<String>,
     bindings: BTreeMap<String, BindingKind>,
+    chan_elem_ty: BTreeMap<String, String>,
     var_ty: BTreeMap<String, (String, bool)>,
     var_struct: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
@@ -748,6 +788,8 @@ impl Emitter {
             n5_structs: BTreeMap::new(),
             n5_generic_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
+            chan_elem_ty: BTreeMap::new(),
+            fn_return_kinds: BTreeMap::new(),
             witnesses: Vec::new(),
         }
     }
@@ -760,6 +802,7 @@ impl Emitter {
         ScopeSnapshot {
             local_vars: self.local_vars.clone(),
             bindings: self.bindings.clone(),
+            chan_elem_ty: self.chan_elem_ty.clone(),
             var_ty: self.var_ty.clone(),
             var_struct: self.var_struct.clone(),
             pointer_vars: self.pointer_vars.clone(),
@@ -770,6 +813,7 @@ impl Emitter {
     pub(crate) fn restore_scope(&mut self, saved: ScopeSnapshot) {
         self.local_vars = saved.local_vars;
         self.bindings = saved.bindings;
+        self.chan_elem_ty = saved.chan_elem_ty;
         self.var_ty = saved.var_ty;
         self.var_struct = saved.var_struct;
         self.pointer_vars = saved.pointer_vars;
@@ -780,6 +824,7 @@ impl Emitter {
         if name != "_" {
             self.local_vars.insert(name.to_string());
             self.bindings.remove(name);
+            self.chan_elem_ty.remove(name);
             self.var_ty.remove(name);
             self.var_struct.remove(name);
             self.pointer_vars.remove(name);
@@ -959,6 +1004,24 @@ impl Emitter {
                 (key, (value_count, err, kind, ptr_params))
             })
             .collect();
+        self.fn_return_kinds = file
+            .fns()
+            .map(|f| {
+                let key = match &f.receiver {
+                    Some(recv) => base_ty_name(&recv.ty)
+                        .and_then(|n| self.resolve_to_struct_name(&n))
+                        .map(|sn| format!("{sn}.{}", f.name))
+                        .unwrap_or_else(|| f.name.clone()),
+                    None => f.name.clone(),
+                };
+                let kinds: Vec<Option<BindingKind>> = f
+                    .results
+                    .iter()
+                    .map(|r| self.binding_kind_of_ty(&r.ty))
+                    .collect();
+                (key, kinds)
+            })
+            .collect();
 
         // Pass 1: render every declaration into the body buffer, collecting
         // used packages as we go. Top-level decls separate with a blank line
@@ -1069,7 +1132,11 @@ impl Emitter {
             || body.contains(".insert(");
         let needs_pop = body.contains("hy_pop(");
         let needs_n5_make = body.contains("hy_n5_make(");
-        if needs_option || needs_set || needs_pop || needs_n5_make {
+        let needs_pipe = body.contains("hy_pipe[")
+            || body.contains("hy_pipe(")
+            || body.contains("hy_send_cap[")
+            || body.contains("hy_recv_cap[");
+        if needs_option || needs_set || needs_pop || needs_n5_make || needs_pipe {
             out.push('\n');
             if needs_option {
                 out.push_str(OPTION_PRELUDE);
@@ -1085,6 +1152,10 @@ impl Emitter {
             }
             if needs_n5_make {
                 out.push_str(N5_MAKE_PRELUDE);
+                out.push('\n');
+            }
+            if needs_pipe {
+                out.push_str(PIPE_PRELUDE);
                 out.push('\n');
             }
         }
@@ -1760,6 +1831,21 @@ impl Emitter {
             } else if matches!(self.resolve_type_alias(&p.ty), TypeExpr::Chan { .. }) {
                 self.bindings.insert(p.name.clone(), BindingKind::Chan);
             }
+            if let Some(base) = base_ty_name(&p.ty) {
+                let head = base.split('[').next().unwrap_or(&base);
+                if head == "hy.send_cap"
+                    || head == "hy.recv_cap"
+                    || head == "hy_send_cap"
+                    || head == "hy_recv_cap"
+                {
+                    if let Some(open) = base.find('[') {
+                        if base.ends_with(']') {
+                            let elem = &base[open + 1..base.len() - 1];
+                            self.chan_elem_ty.insert(p.name.clone(), elem.to_string());
+                        }
+                    }
+                }
+            }
             if self.is_pointer_ty(&p.ty) {
                 self.pointer_vars.insert(p.name.clone());
             }
@@ -1825,6 +1911,14 @@ impl Emitter {
         if name.starts_with("set[") || name == "set" {
             return Some(BindingKind::Set);
         }
+        let head = name.split('[').next().unwrap_or(name);
+        if head == "hy.send_cap"
+            || head == "hy.recv_cap"
+            || head == "hy_send_cap"
+            || head == "hy_recv_cap"
+        {
+            return Some(BindingKind::Chan);
+        }
         if name.is_empty() || !name.contains('.') {
             return None;
         }
@@ -1859,7 +1953,17 @@ impl Emitter {
 
     fn type_is_foreign(&self, t: &TypeExpr) -> bool {
         match t {
-            TypeExpr::Named { name, .. } => name.contains('.'),
+            TypeExpr::Named { name, .. } => {
+                let head = name.split('[').next().unwrap_or(name.as_str());
+                if head == "hy.send_cap"
+                    || head == "hy.recv_cap"
+                    || head == "hy_send_cap"
+                    || head == "hy_recv_cap"
+                {
+                    return false;
+                }
+                name.contains('.')
+            }
             TypeExpr::Pointer { to, .. } => self.type_is_foreign(to),
             TypeExpr::Slice { elem, .. } => self.type_is_foreign(elem),
             TypeExpr::Map { key, value, .. } => {
@@ -2094,6 +2198,12 @@ impl Emitter {
                     .join(", ");
                 return format!("{}[{}]", go_head, go_args);
             }
+        }
+        if name == "hy.send_cap" || name == "hy_send_cap" {
+            return "hy_send_cap".to_string();
+        }
+        if name == "hy.recv_cap" || name == "hy_recv_cap" {
+            return "hy_recv_cap".to_string();
         }
         if let Some((root, rest)) = name.split_once('.') {
             // Rust-owned types map to their binding package's handle type

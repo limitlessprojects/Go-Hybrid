@@ -19,3 +19,6 @@ features = ["derive"]
 
 [dependencies.serde_json]
 version = "1"
+
+[dev-dependencies]
+hy-check = { path = "../hy-check" }
