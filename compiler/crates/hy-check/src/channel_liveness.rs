@@ -127,6 +127,18 @@ impl ChannelLivenessChecker {
     }
 
     fn check_fn(&mut self, f: &FnDecl) {
+        // A function body is a fresh capability world. Capability identity is
+        // the BINDING, but `cap_to_pipe` is keyed by the bare name and
+        // `pop_scope` promotes a body's `moved_caps` into the file-level
+        // scope, so without this every later function inherited the moves (and
+        // pipe indices) of the functions checked before it: the second
+        // function's own `tx` was then "moved" and its uses rejected, and a
+        // name that a previous function had already closed looks closed. The
+        // state is saved and restored instead of cleared so whatever the file
+        // level legitimately carried is kept.
+        let outer_caps = std::mem::take(&mut self.cap_to_pipe);
+        let outer_pipes = std::mem::take(&mut self.pipes_all);
+        let outer_moved = std::mem::take(&mut self.scope_stack[0].moved_caps);
         self.push_scope();
         if let Some(body) = &f.body {
             for stmt in &body.stmts {
@@ -134,6 +146,9 @@ impl ChannelLivenessChecker {
             }
         }
         self.pop_scope();
+        self.cap_to_pipe = outer_caps;
+        self.pipes_all = outer_pipes;
+        self.scope_stack[0].moved_caps = outer_moved;
     }
 
     fn check_stmt(&mut self, stmt: &Stmt) {
