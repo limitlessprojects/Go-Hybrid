@@ -196,3 +196,46 @@ fn drain(opt option[chan chan<- int]) {
     );
     assert_has(&r_select, "HYB-E3008");
 }
+
+#[test]
+fn decl_type_expr_array_length_non_channel_receive_rejected_3880() {
+    // Issue #3880: struct field, type alias, enum payload, and fn signature
+    // array-length TypeExprs must reject receive from non-channel with HYB-E2008.
+    let r_struct = check(
+        r#"package main
+
+struct bad_struct {
+    a [<-5]int
+}
+"#,
+    );
+    assert_has(&r_struct, "HYB-E2008");
+
+    let r_alias = check(
+        r#"package main
+
+type bad_alias = [<-"abc"]int
+"#,
+    );
+    assert_has(&r_alias, "HYB-E2008");
+
+    let r_fn_param = check(
+        r#"package main
+
+fn run(a [<-5]int) {
+    _ = a
+}
+"#,
+    );
+    assert_has(&r_fn_param, "HYB-E2008");
+
+    let r_fn_ret = check(
+        r#"package main
+
+fn run() [<-5]int {
+    return [0]
+}
+"#,
+    );
+    assert_has(&r_fn_ret, "HYB-E2008");
+}
