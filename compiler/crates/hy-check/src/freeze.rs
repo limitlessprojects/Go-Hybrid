@@ -532,8 +532,8 @@ impl<'a> Checker<'a> {
         let notes = vec![
             why,
             format!(
-                "fix: copy `{}` into a fresh local before moving (`fresh := ...; move fresh`), move the caller's owned binding at the spawn/send site directly, or wrap a genuinely synchronized share in `managed(\"reason\", \"category\") {{ ... }}`",
-                name
+                "fix: deep-copy `{}` into a freshly allocated local before moving (e.g. allocate a fresh map/slice and copy elements; a shallow `fresh := {}` retains the alias), move the caller's owned binding at the spawn/send site directly, or wrap a genuinely synchronized share in `managed(\"reason\", \"category\") {{ ... }}`",
+                name, name
             ),
         ];
         self.diags.push(

@@ -287,3 +287,38 @@ fn pure_local_define_without_post_move_use_stays_accept() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+#[test]
+fn e3004_fixit_notes_advise_deep_copy_issue_2272() {
+    let src = "
+fn worker(m map[string]int) {
+    m[\"x\"] = 1
+}
+
+fn spawner(m map[string]int) {
+    task worker(move m)
+}
+";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    let e3004 = r
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "HYB-E3004")
+        .expect("E3004 present");
+    let fix_note = e3004
+        .notes
+        .iter()
+        .find(|n| n.starts_with("fix:"))
+        .expect("fix note present");
+    assert!(
+        fix_note.contains("deep-copy"),
+        "fix-it must advise a deep copy, got: {}",
+        fix_note
+    );
+    assert!(
+        !fix_note.contains("`fresh := ...; move fresh`"),
+        "fix-it must not advise shallow fresh := ... rebinding, got: {}",
+        fix_note
+    );
+}
