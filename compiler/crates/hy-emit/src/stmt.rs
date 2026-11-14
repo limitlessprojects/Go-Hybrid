@@ -32,7 +32,7 @@ impl Emitter {
                 values,
                 ..
             } => self.emit_assign(targets, *op, values),
-            Stmt::Expr { expr, .. } => {
+            Stmt::Expr { expr, span, .. } => {
                 // A zero-result call with `?` IS its own statement (Batch I):
                 // the hoist emits the call + propagation — no value temp, so
                 // there is nothing left to emit afterwards.
@@ -47,6 +47,24 @@ impl Emitter {
                 }
                 let text = self.emit_expr(expr, 0)?;
                 self.push(&text);
+
+                // Witness channel capability method sends `tx.send(v)` (issue #4464)
+                let bare = Self::peel_parens_and_try(expr);
+                if let Expr::Call { callee, args, .. } = bare {
+                    if args.len() == 1 {
+                        if let Expr::Field { base, name, .. } = Self::peel_parens(callee) {
+                            if name == "send" {
+                                if let Expr::Ident { name: ch_name, .. } = Self::peel_parens(base) {
+                                    if self.bindings.get(ch_name) == Some(&BindingKind::Chan) {
+                                        self.witnesses
+                                            .push(crate::witness::witness_send(base, &args[0].value, *span));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Ok(())
             }
             Stmt::Send { chan, value, span, .. } => {
@@ -524,6 +542,25 @@ impl Emitter {
                         for n in &l.names {
                             if n != "_" {
                                 self.bindings.insert(n.clone(), kind);
+                            }
+                        }
+                    }
+                    if let Some(base) = super::base_ty_name(t) {
+                        let head = base.split('[').next().unwrap_or(&base);
+                        if head == "hy.send_cap"
+                            || head == "hy.recv_cap"
+                            || head == "hy_send_cap"
+                            || head == "hy_recv_cap"
+                        {
+                            if let Some(open) = base.find('[') {
+                                if base.ends_with(']') {
+                                    let elem = &base[open + 1..base.len() - 1];
+                                    for n in &l.names {
+                                        if n != "_" {
+                                            self.chan_elem_ty.insert(n.clone(), elem.to_string());
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1306,6 +1343,34 @@ impl Emitter {
                 self.var_struct.insert(names[0].clone(), sn);
             }
         }
+        if names.len() == 2 && values.len() == 1 {
+            let v = Self::peel_parens_and_try(&values[0]);
+            if self.is_pipe_call(v) {
+                for n in names.iter().take(2) {
+                    if n != "_" {
+                        self.bindings.insert(n.clone(), BindingKind::Chan);
+                    }
+                }
+                if let Some(elem) = self.pipe_call_elem_ty(v) {
+                    if names[0] != "_" {
+                        self.chan_elem_ty.insert(names[0].clone(), elem.clone());
+                    }
+                    if names[1] != "_" {
+                        self.chan_elem_ty.insert(names[1].clone(), elem);
+                    }
+                }
+            } else if let Some(kinds) = self.call_result_binding_kinds(v) {
+                for (n, kind_opt) in names.iter().zip(kinds.iter()) {
+                    if n != "_" {
+                        if let Some(kind) = kind_opt {
+                            if *kind != BindingKind::Plain {
+                                self.bindings.insert(n.clone(), *kind);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         for (name, is_ptr) in names.iter().zip(ptr_flags) {
             if name != "_" && is_ptr {
                 self.pointer_vars.insert(name.clone());
@@ -1344,6 +1409,15 @@ impl Emitter {
             _ => return BindingKind::Plain,
         };
         if let Expr::Field { base, name, .. } = call {
+            if name == "recv" && args.is_empty() {
+                if let Expr::Ident { name: rx_name, .. } = Self::peel_parens(base) {
+                    if let Some(elem) = self.chan_elem_ty.get(rx_name) {
+                        if let Some((k, _)) = super::shapes::SHAPES.iter().find(|(k, _)| *k == elem.as_str()) {
+                            return BindingKind::ForeignTy(k);
+                        }
+                    }
+                }
+            }
             if let Expr::Ident { name: pkg, .. } = base.as_ref() {
                 if self.is_unshadowed_pkg_root(pkg) {
                     if pkg == "io" && name == "read_all" {
@@ -1662,6 +1736,33 @@ impl Emitter {
             }
         }
         self.push(&format!("{} {} {}", ts.join(", "), op_text, vs.join(", ")));
+        if targets.len() == 2 && values.len() == 1 {
+            let v = Self::peel_parens_and_try(&values[0]);
+            if self.is_pipe_call(v) {
+                if let PlaceKind::Ident(tx_name) = &targets[0].kind {
+                    if tx_name != "_" {
+                        self.bindings.insert(tx_name.clone(), BindingKind::Chan);
+                    }
+                }
+                if let PlaceKind::Ident(rx_name) = &targets[1].kind {
+                    if rx_name != "_" {
+                        self.bindings.insert(rx_name.clone(), BindingKind::Chan);
+                    }
+                }
+                if let Some(elem) = self.pipe_call_elem_ty(v) {
+                    if let PlaceKind::Ident(tx_name) = &targets[0].kind {
+                        if tx_name != "_" {
+                            self.chan_elem_ty.insert(tx_name.clone(), elem.clone());
+                        }
+                    }
+                    if let PlaceKind::Ident(rx_name) = &targets[1].kind {
+                        if rx_name != "_" {
+                            self.chan_elem_ty.insert(rx_name.clone(), elem);
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1954,6 +2055,25 @@ impl Emitter {
                             }
                         }
                     }
+                    if let Some(base) = super::base_ty_name(t) {
+                        let head = base.split('[').next().unwrap_or(&base);
+                        if head == "hy.send_cap"
+                            || head == "hy.recv_cap"
+                            || head == "hy_send_cap"
+                            || head == "hy_recv_cap"
+                        {
+                            if let Some(open) = base.find('[') {
+                                if base.ends_with(']') {
+                                    let elem = &base[open + 1..base.len() - 1];
+                                    for n in &l.names {
+                                        if n != "_" {
+                                            self.chan_elem_ty.insert(n.clone(), elem.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if l.names.len() == 1 && l.names[0] != "_" {
                         self.register_var_ty(&l.names[0], t);
                     }
@@ -2234,7 +2354,33 @@ impl Emitter {
                             // SPEC LX13: single-var range over a map binds
                             // the KEY (#2945) — Go's own single-var form.
                             if over_chan || self.is_map_expr(expr) {
+                                let range_name = match expr {
+                                    Expr::Ident { name, .. } => Some(name.clone()),
+                                    Expr::Try { .. } => Some(e.clone()),
+                                    _ => None,
+                                };
+                                let elem_ty = range_name.as_ref().and_then(|n| {
+                                    if let Some(elem) = self.chan_elem_ty.get(n) {
+                                        if let Some((k, _)) = super::shapes::SHAPES.iter().find(|(k, _)| *k == elem.as_str()) {
+                                            return Some(*k);
+                                        }
+                                    }
+                                    match self.bindings.get(n) {
+                                        Some(BindingKind::ForeignTy(t)) => Some(*t),
+                                        _ => None,
+                                    }
+                                });
                                 self.shadow_local_names(vars);
+                                if let Some(t) = elem_ty {
+                                    self.bindings
+                                        .insert(vars[0].clone(), BindingKind::ForeignTy(t));
+                                }
+                                if let Some(sn) = range_name
+                                    .and_then(|n| self.chan_elem_ty.get(&n).cloned())
+                                    .filter(|sn| self.struct_fields.contains_key(sn))
+                                {
+                                    self.var_struct.insert(vars[0].clone(), sn);
+                                }
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {
                                 // A rust-handle slice (ForeignTy binding)
@@ -4036,6 +4182,115 @@ impl Emitter {
                 .any(|s| Self::stmt_modifies_ident(s, target)),
             _ => false,
         }
+    }
+
+    pub(crate) fn peel_parens_and_try(mut e: &Expr) -> &Expr {
+        loop {
+            match e {
+                Expr::Paren { inner, .. } => e = inner.as_ref(),
+                Expr::Try { operand, .. } => e = operand.as_ref(),
+                _ => return e,
+            }
+        }
+    }
+
+    pub(crate) fn is_pipe_call(&self, expr: &Expr) -> bool {
+        let e = Self::peel_parens_and_try(expr);
+        if let Expr::Call { callee, .. } = e {
+            let mut base = callee.as_ref();
+            while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
+                base = inner.as_ref();
+            }
+            if let Expr::Field { base: pkg, name, .. } = base {
+                let pkg_bare = Self::peel_parens(pkg);
+                if let Expr::Ident { name: pkg_name, .. } = pkg_bare {
+                    let (head, _) = super::expr::split_type_args(name);
+                    if pkg_name == "hy"
+                        && (head == "pipe" || head == "new_pipe")
+                        && !self.local_vars.contains("hy")
+                    {
+                        return true;
+                    }
+                }
+            }
+            if let Expr::Ident { name, .. } = base {
+                let (head, _) = super::expr::split_type_args(name);
+                if (head == "pipe" || head == "new_pipe")
+                    && !self.local_vars.contains(head)
+                    && !self.fn_shapes.contains_key(head)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub(crate) fn pipe_call_elem_ty(&self, expr: &Expr) -> Option<String> {
+        let e = Self::peel_parens_and_try(expr);
+        if let Expr::Call { callee, .. } = e {
+            let bare_callee = Self::peel_parens(callee);
+            match bare_callee {
+                Expr::Index { index, .. } => {
+                    return Self::assoc_index_type_arg(index);
+                }
+                Expr::Field { name, .. } => {
+                    let (_, ta) = super::expr::split_type_args(name);
+                    if let Some(inner) = ta {
+                        if inner.starts_with('[') && inner.ends_with(']') {
+                            return Some(inner[1..inner.len() - 1].to_string());
+                        }
+                    }
+                }
+                Expr::Ident { name, .. } => {
+                    let (_, ta) = super::expr::split_type_args(name);
+                    if let Some(inner) = ta {
+                        if inner.starts_with('[') && inner.ends_with(']') {
+                            return Some(inner[1..inner.len() - 1].to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    pub(crate) fn call_result_binding_kinds(
+        &self,
+        expr: &Expr,
+    ) -> Option<Vec<Option<BindingKind>>> {
+        let e = Self::peel_parens_and_try(expr);
+        if let Expr::Call { callee, .. } = e {
+            let callee_base = match Self::peel_parens(callee) {
+                Expr::Index { base, .. } => Self::peel_parens(base),
+                other => other,
+            };
+            let fn_name = match callee_base {
+                Expr::Ident { name, .. } => {
+                    Some(name.split('[').next().unwrap_or(name).to_string())
+                }
+                Expr::Field { base, name, .. } => {
+                    let head = name.split('[').next().unwrap_or(name);
+                    if let Some(recv_sn) = self.user_struct_name_of(base) {
+                        Some(format!("{recv_sn}.{head}"))
+                    } else if matches!(Self::peel_parens(base), Expr::Ident { .. })
+                        && !self.local_vars.contains(&Self::peel_parens(base).render())
+                    {
+                        Some(format!("{}.{head}", Self::peel_parens(base).render()))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(fn_head) = fn_name.as_deref().filter(|h| !self.local_vars.contains(*h)) {
+                if let Some(kinds) = self.fn_return_kinds.get(fn_head) {
+                    return Some(kinds.clone());
+                }
+            }
+        }
+        None
     }
 }
 
