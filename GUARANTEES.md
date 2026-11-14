@@ -69,7 +69,7 @@ Everything the checker **accepts was proven** sendable; everything it
   **pre-registered before the checker existed** (the checker was built
   against them, not adjusted after); 19–20 were added during integration
   and 21+ after the checker landed, still hand-derived from the rule text
-  first. Current census: **67 REJECT / 32 ACCEPT / 2 ACCEPT-MANAGED**,
+  first. Current census: **92 REJECT / 45 ACCEPT / 2 ACCEPT-MANAGED**,
   pinned to specific diagnostic codes. Verdicts may change only by a logged
   amendment in [VERDICTS.md](tests/checker-corpus/VERDICTS.md).
 - **Differential loop** — [tools/differential_loop.py](tools/differential_loop.py):
