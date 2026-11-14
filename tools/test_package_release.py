@@ -28,7 +28,9 @@ import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -77,6 +79,8 @@ mark="FRESH-HYB${triple:+ $triple}"
 if [ "$pkg" = "hyb" ]; then
     sed "s/BUILD_MARK/$mark/" "$HYB_TEST_FAKE_HYB" > "$dir/hyb"
     chmod +x "$dir/hyb"
+elif [ -n "${HYB_TEST_LIB_PAYLOAD:-}" ]; then
+    cp "$HYB_TEST_LIB_PAYLOAD" "$dir/libhyrt.a"
 else
     printf 'FRESH-LIB%s\n' "${triple:+ $triple}" > "$dir/libhyrt.a"
 fi
@@ -131,6 +135,8 @@ class PackageReleaseIsolationTests(unittest.TestCase):
         gobin.mkdir()
         (gobin / "go").write_text("#!/bin/sh\nexit 0\n")
         (gobin / "go").chmod(0o755)
+        (gobin / "python3").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+        (gobin / "python3").chmod(0o755)
 
         self.cargo_bin = cargo_bin
         self.win_cargo = win_cargo
@@ -162,10 +168,13 @@ class PackageReleaseIsolationTests(unittest.TestCase):
         return self.repo / "dist" / self.dist_name
 
     def shipped(self, member):
+        return self.shipped_bytes(member).decode()
+
+    def shipped_bytes(self, member):
         with tarfile.open(self.tarball()) as tar:
             extracted = tar.extractfile(f"hybrid-{VERSION}/{member}")
             self.assertIsNotNone(extracted, member)
-            return extracted.read().decode()
+            return extracted.read()
 
     def smoke_env(self):
         self.assertTrue(self.log.is_file(), "the smoke never ran hyb")
@@ -266,6 +275,56 @@ class PackageReleaseIsolationTests(unittest.TestCase):
                     (directory / "cargo.exe").is_file() and os.access(directory / "cargo.exe", os.X_OK),
                     part,
                 )
+
+    def test_strips_disallowed_lto_sections_from_packaged_staticlib(self):
+        def ar_member(name: str, payload: bytes) -> bytes:
+            hdr = f"{name:<16}{'0':<12}{'0':<6}{'0':<6}{'0':<8}{len(payload):<10}`\n".encode()
+            return hdr + payload + (b"\n" if len(payload) % 2 else b"")
+
+        # 1. Mach-O 64-bit MH_OBJECT with __TEXT,__text and __LLVM,__bitcode + __LLVM,__cmdline
+        def macho_sec(seg: bytes, sec: bytes, sz: int, off: int) -> bytes:
+            buf = bytearray(80)
+            buf[0 : len(sec)] = sec
+            buf[16 : 16 + len(seg)] = seg
+            struct.pack_into("<QII", buf, 40, sz, off, 0)
+            return bytes(buf)
+
+        secs = (
+            macho_sec(b"__TEXT", b"__text", 64, 512)
+            + macho_sec(b"__LLVM", b"__bitcode", 1024, 576)
+            + macho_sec(b"__LLVM", b"__cmdline", 128, 1600)
+        )
+        seg = bytearray(72)
+        struct.pack_into("<II", seg, 0, 0x19, 72 + len(secs))
+        struct.pack_into("<I", seg, 64, 3)
+        macho_obj = struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 1, 1, 72 + len(secs), 0, 0) + bytes(seg) + secs
+
+        # 2. ELF64 LE ET_REL with .text, .llvmbc, .llvmcmd, and SHT_LLVM_LTO
+        shstr = b"\0.text\0.llvmbc\0.llvmcmd\0.shstrtab\0"
+        shoff = 64 + len(shstr)
+        elf_obj = bytearray(shoff + 5 * 64)
+        elf_obj[0:4] = b"\x7fELF"
+        elf_obj[4:7] = bytes([2, 1, 1])
+        struct.pack_into("<HHI", elf_obj, 16, 1, 0x3E, 1)
+        struct.pack_into("<Q", elf_obj, 40, shoff)
+        struct.pack_into("<HHH", elf_obj, 58, 64, 5, 4)
+        elf_obj[64 : 64 + len(shstr)] = shstr
+        for idx, (nm, ty, sz) in enumerate([(1, 1, 64), (7, 1, 512), (15, 0x6FFF4C0C, 128), (24, 3, len(shstr))], start=1):
+            base = shoff + idx * 64
+            struct.pack_into("<IIQQQQ", elf_obj, base, nm, ty, 0, 0, 64 if idx == 4 else 128, sz)
+
+        archive = b"!<arch>\n" + ar_member("macho.o/", macho_obj) + ar_member("elf.o/", bytes(elf_obj))
+        payload_path = self.root / "lto-seeded-libhyrt.a"
+        payload_path.write_bytes(archive)
+
+        self.package(HYB_TEST_LIB_PAYLOAD=str(payload_path))
+        shipped = self.shipped_bytes("runtime/rust/hyrt/target/release/libhyrt.a")
+        self.assertEqual(len(shipped), len(archive))
+        for forbidden in (b"__LLVM", b"__bitcode", b"__cmdline", b".llvmbc", b".llvmcmd"):
+            self.assertNotIn(forbidden, shipped)
+        self.assertIn(b"__TEXT", shipped)
+        self.assertIn(b"__text", shipped)
+        self.assertIn(b".text", shipped)
 
 
 if __name__ == "__main__":

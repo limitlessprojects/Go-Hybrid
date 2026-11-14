@@ -1352,6 +1352,7 @@ fn ensure_staticlib(rt: &std::path::Path) -> Result<std::path::PathBuf, BuildErr
             }
         }
     };
+    let _ = sanitize_staticlib_file(&src_lib);
     Ok(src_lib)
 }
 
@@ -1570,21 +1571,561 @@ pub(crate) fn extract_go_package_name(src: &str) -> Option<String> {
 /// msvc .lib, ALSO under the .lib spellings so MS-style consumers and any
 /// mingw ld probing the no-prefix name find it. Content decides format; the
 /// aliases are the same bytes.
+///
+/// Before writing, any embedded LLVM/GNU LTO bitcode or command-line sections
+/// (`__LLVM,__bitcode`, `.llvmbc`, `.llvmcmd`, `.llvm.lto*`, `.gnu.lto_*`,
+/// `.gnu.debuglto_*`, `SHT_LLVM_LTO`) are neutralized in place so Go 1.26.11+
+/// and 1.27.4+ (`checkLinkerObjectRegion`, CVE-2026-97038) accept the archive.
 pub(crate) fn install_staticlib(
     src: &std::path::Path,
     libdir: &std::path::Path,
 ) -> Result<(), String> {
     std::fs::create_dir_all(libdir)
         .map_err(|e| format!("creating {}: {}", libdir.display(), e))?;
-    std::fs::copy(src, libdir.join("libhyrt.a"))
-        .map_err(|e| format!("copying staticlib: {}", e))?;
+    let mut bytes =
+        std::fs::read(src).map_err(|e| format!("reading staticlib {}: {}", src.display(), e))?;
+    let _ = strip_lto_sections(&mut bytes);
+    std::fs::write(libdir.join("libhyrt.a"), &bytes)
+        .map_err(|e| format!("writing staticlib: {}", e))?;
     if src.extension().and_then(|e| e.to_str()) == Some("lib") {
         for alias in ["hyrt.lib", "libhyrt.lib"] {
-            std::fs::copy(src, libdir.join(alias))
-                .map_err(|e| format!("copying staticlib alias {}: {}", alias, e))?;
+            std::fs::write(libdir.join(alias), &bytes)
+                .map_err(|e| format!("writing staticlib alias {}: {}", alias, e))?;
         }
     }
     Ok(())
+}
+
+/// Sanitize a staticlib archive in place on disk if it contains disallowed LTO
+/// sections, preserving member sizes and archive symbol-table offsets.
+pub(crate) fn sanitize_staticlib_file(path: &std::path::Path) -> Result<usize, String> {
+    let mut bytes =
+        std::fs::read(path).map_err(|e| format!("reading {}: {}", path.display(), e))?;
+    let stripped = strip_lto_sections(&mut bytes);
+    if stripped > 0 {
+        std::fs::write(path, &bytes)
+            .map_err(|e| format!("writing sanitized {}: {}", path.display(), e))?;
+    }
+    Ok(stripped)
+}
+
+fn is_disallowed_lto_section_name(name: &str) -> bool {
+    let n = name.trim_matches(|c: char| c == '\0' || c.is_ascii_whitespace());
+    n.starts_with(".gnu.lto_")
+        || n.starts_with(".gnu.debuglto_")
+        || n.starts_with(".llvm.lto")
+        || n == ".llvmbc"
+        || n == ".llvmcmd"
+}
+
+fn is_disallowed_lto_segment_name(seg: &str) -> bool {
+    let s = seg.trim_matches(|c: char| c == '\0' || c.is_ascii_whitespace());
+    s == "__LLVM" || s == "__GNU_LTO"
+}
+
+/// Neutralize disallowed LLVM/GNU LTO sections across an `!<arch>\n` archive
+/// (or a standalone ELF / Mach-O / COFF object) in place without changing any
+/// member's byte length, keeping all archive symbol-index offsets valid.
+pub(crate) fn strip_lto_sections(bytes: &mut [u8]) -> usize {
+    if !bytes.starts_with(b"!<arch>\n") {
+        return strip_lto_in_object(bytes);
+    }
+    let file_len = bytes.len();
+    let mut off = 8usize;
+    let mut member_idx = 0usize;
+    let mut total = 0usize;
+    while off.checked_add(60).is_some_and(|end| end <= file_len) {
+        if &bytes[off + 58..off + 60] != b"`\n" {
+            break;
+        }
+        let Ok(raw_name) = std::str::from_utf8(&bytes[off..off + 16]) else {
+            break;
+        };
+        let name = raw_name.trim_end();
+        let Some(size) = std::str::from_utf8(&bytes[off + 48..off + 58])
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+        else {
+            break;
+        };
+        let payload_start = off + 60;
+        let Some(payload_end) = payload_start.checked_add(size) else {
+            break;
+        };
+        if payload_end > file_len {
+            break;
+        }
+        if name == "/"
+            || name == "//"
+            || (member_idx == 0 && (name == "__.SYMDEF" || name == "__.SYMDEF SORTED"))
+        {
+            // Archive symbol or string table member — skip.
+        } else if let Some(len_str) = name.strip_prefix("#1/") {
+            if let Ok(name_len) = len_str.trim().parse::<usize>() {
+                if name_len > 0 && name_len <= size {
+                    let real_name_bytes = &bytes[payload_start..payload_start + name_len];
+                    let is_symdef = member_idx == 0
+                        && std::str::from_utf8(real_name_bytes)
+                            .ok()
+                            .map(|s| s.trim_end_matches('\0'))
+                            .is_some_and(|s| s == "__.SYMDEF" || s == "__.SYMDEF SORTED");
+                    if !is_symdef && name_len < size {
+                        total +=
+                            strip_lto_in_object(&mut bytes[payload_start + name_len..payload_end]);
+                    }
+                }
+            }
+        } else if size > 0 {
+            total += strip_lto_in_object(&mut bytes[payload_start..payload_end]);
+        }
+        off = payload_end + (size & 1);
+        member_idx += 1;
+    }
+    total
+}
+
+fn strip_lto_in_object(obj: &mut [u8]) -> usize {
+    if obj.len() < 4 {
+        return 0;
+    }
+    if obj.starts_with(b"!<arch>\n") {
+        return strip_lto_sections(obj);
+    }
+    if obj.starts_with(b"\x7fELF") {
+        return strip_lto_in_elf(obj);
+    }
+    let magic_be = u32::from_be_bytes([obj[0], obj[1], obj[2], obj[3]]);
+    let magic_le = u32::from_le_bytes([obj[0], obj[1], obj[2], obj[3]]);
+    if magic_be == 0xcafebabe {
+        return strip_lto_in_macho_fat(obj);
+    }
+    if magic_le == 0xfeedfacf || magic_be == 0xfeedfacf {
+        return strip_lto_in_macho(obj, true, magic_le == 0xfeedfacf);
+    }
+    if magic_le == 0xfeedface || magic_be == 0xfeedface {
+        return strip_lto_in_macho(obj, false, magic_le == 0xfeedface);
+    }
+    strip_lto_in_coff(obj)
+}
+
+fn strip_lto_in_macho_fat(obj: &mut [u8]) -> usize {
+    if obj.len() < 8 {
+        return 0;
+    }
+    let nfat = u32::from_be_bytes([obj[4], obj[5], obj[6], obj[7]]) as usize;
+    if nfat == 0 || nfat > 32 || 8 + nfat * 20 > obj.len() {
+        return 0;
+    }
+    let mut slices = Vec::with_capacity(nfat);
+    for i in 0..nfat {
+        let base = 8 + i * 20;
+        let off = u32::from_be_bytes([obj[base + 8], obj[base + 9], obj[base + 10], obj[base + 11]])
+            as usize;
+        let sz = u32::from_be_bytes([
+            obj[base + 12],
+            obj[base + 13],
+            obj[base + 14],
+            obj[base + 15],
+        ]) as usize;
+        if off >= 8 + nfat * 20 && sz > 0 && off.checked_add(sz).is_some_and(|e| e <= obj.len()) {
+            slices.push((off, sz));
+        }
+    }
+    let mut total = 0;
+    for (off, sz) in slices {
+        total += strip_lto_in_object(&mut obj[off..off + sz]);
+    }
+    total
+}
+
+fn strip_lto_in_macho(obj: &mut [u8], is_64: bool, le: bool) -> usize {
+    let hdr_size = if is_64 { 32usize } else { 28usize };
+    if obj.len() < hdr_size {
+        return 0;
+    }
+    let r_u32 = |b: &[u8], o: usize| -> u32 {
+        let arr: [u8; 4] = b[o..o + 4].try_into().unwrap();
+        if le {
+            u32::from_le_bytes(arr)
+        } else {
+            u32::from_be_bytes(arr)
+        }
+    };
+    let w_u32 = |b: &mut [u8], o: usize, v: u32| {
+        let bytes = if le { v.to_le_bytes() } else { v.to_be_bytes() };
+        b[o..o + 4].copy_from_slice(&bytes);
+    };
+    let w_u64 = |b: &mut [u8], o: usize, v: u64| {
+        let bytes = if le { v.to_le_bytes() } else { v.to_be_bytes() };
+        b[o..o + 8].copy_from_slice(&bytes);
+    };
+    let ncmds = r_u32(obj, 16) as usize;
+    let sizeofcmds = r_u32(obj, 20) as usize;
+    let Some(cmds_end) = hdr_size.checked_add(sizeofcmds) else {
+        return 0;
+    };
+    if cmds_end > obj.len() {
+        return 0;
+    }
+    let lc_segment = if is_64 { 0x19u32 } else { 0x1u32 };
+    let seg_hdr_size = if is_64 { 72usize } else { 56usize };
+    let sec_hdr_size = if is_64 { 80usize } else { 68usize };
+    let nsects_off = if is_64 { 64usize } else { 48usize };
+
+    let mut cmd_off = hdr_size;
+    let mut stripped = 0usize;
+    for _ in 0..ncmds {
+        if cmd_off.checked_add(8).is_none_or(|e| e > cmds_end) {
+            break;
+        }
+        let cmd = r_u32(obj, cmd_off);
+        let cmdsize = r_u32(obj, cmd_off + 4) as usize;
+        if cmdsize < 8 || cmd_off.checked_add(cmdsize).is_none_or(|e| e > cmds_end) {
+            break;
+        }
+        if cmd == lc_segment && cmdsize >= seg_hdr_size {
+            if let Ok(seg_name) = std::str::from_utf8(&obj[cmd_off + 8..cmd_off + 24]) {
+                if is_disallowed_lto_segment_name(seg_name) {
+                    obj[cmd_off + 8..cmd_off + 24].copy_from_slice(b"__DWARF\0\0\0\0\0\0\0\0\0");
+                    stripped += 1;
+                }
+            }
+            let nsects = r_u32(obj, cmd_off + nsects_off) as usize;
+            if let Some(total_sec_bytes) = nsects.checked_mul(sec_hdr_size) {
+                if seg_hdr_size + total_sec_bytes <= cmdsize {
+                    for s in 0..nsects {
+                        let sec_off = cmd_off + seg_hdr_size + s * sec_hdr_size;
+                        let sect_ok = std::str::from_utf8(&obj[sec_off..sec_off + 16])
+                            .ok()
+                            .is_some_and(is_disallowed_lto_section_name);
+                        let seg_ok = std::str::from_utf8(&obj[sec_off + 16..sec_off + 32])
+                            .ok()
+                            .is_some_and(is_disallowed_lto_segment_name);
+                        if sect_ok || seg_ok {
+                            obj[sec_off..sec_off + 16]
+                                .copy_from_slice(b"__debug_noop\0\0\0\0");
+                            obj[sec_off + 16..sec_off + 32]
+                                .copy_from_slice(b"__DWARF\0\0\0\0\0\0\0\0\0");
+                            if is_64 {
+                                w_u64(obj, sec_off + 40, 0); // size = 0
+                                w_u32(obj, sec_off + 48, 0); // offset = 0
+                                w_u32(obj, sec_off + 56, 0); // reloff = 0
+                                w_u32(obj, sec_off + 60, 0); // nreloc = 0
+                                w_u32(obj, sec_off + 64, 0x0200_0000); // S_ATTR_DEBUG
+                            } else {
+                                w_u32(obj, sec_off + 36, 0); // size = 0
+                                w_u32(obj, sec_off + 40, 0); // offset = 0
+                                w_u32(obj, sec_off + 48, 0); // reloff = 0
+                                w_u32(obj, sec_off + 52, 0); // nreloc = 0
+                                w_u32(obj, sec_off + 56, 0x0200_0000); // S_ATTR_DEBUG
+                            }
+                            stripped += 1;
+                        }
+                    }
+                }
+            }
+        }
+        cmd_off += cmdsize;
+    }
+    stripped
+}
+
+fn strip_lto_in_elf(obj: &mut [u8]) -> usize {
+    if obj.len() < 52 {
+        return 0;
+    }
+    let class = obj[4];
+    let data_enc = obj[5];
+    if (class != 1 && class != 2) || (data_enc != 1 && data_enc != 2) {
+        return 0;
+    }
+    let is_64 = class == 2;
+    let le = data_enc == 1;
+    if is_64 && obj.len() < 64 {
+        return 0;
+    }
+    let r_u16 = |b: &[u8], o: usize| -> u16 {
+        let arr: [u8; 2] = b[o..o + 2].try_into().unwrap();
+        if le {
+            u16::from_le_bytes(arr)
+        } else {
+            u16::from_be_bytes(arr)
+        }
+    };
+    let r_u32 = |b: &[u8], o: usize| -> u32 {
+        let arr: [u8; 4] = b[o..o + 4].try_into().unwrap();
+        if le {
+            u32::from_le_bytes(arr)
+        } else {
+            u32::from_be_bytes(arr)
+        }
+    };
+    let r_u64 = |b: &[u8], o: usize| -> u64 {
+        let arr: [u8; 8] = b[o..o + 8].try_into().unwrap();
+        if le {
+            u64::from_le_bytes(arr)
+        } else {
+            u64::from_be_bytes(arr)
+        }
+    };
+    let w_u32 = |b: &mut [u8], o: usize, v: u32| {
+        let bytes = if le { v.to_le_bytes() } else { v.to_be_bytes() };
+        b[o..o + 4].copy_from_slice(&bytes);
+    };
+    let w_u64 = |b: &mut [u8], o: usize, v: u64| {
+        let bytes = if le { v.to_le_bytes() } else { v.to_be_bytes() };
+        b[o..o + 8].copy_from_slice(&bytes);
+    };
+
+    let (e_shoff, e_shentsize, mut e_shnum, mut e_shstrndx) = if is_64 {
+        (
+            r_u64(obj, 40) as usize,
+            r_u16(obj, 58) as usize,
+            r_u16(obj, 60) as usize,
+            r_u16(obj, 62) as usize,
+        )
+    } else {
+        (
+            r_u32(obj, 32) as usize,
+            r_u16(obj, 46) as usize,
+            r_u16(obj, 48) as usize,
+            r_u16(obj, 50) as usize,
+        )
+    };
+    let min_shent = if is_64 { 64usize } else { 40usize };
+    if e_shoff == 0 || e_shentsize < min_shent || e_shoff >= obj.len() {
+        return 0;
+    }
+    if e_shnum == 0 || e_shstrndx == 0xffff {
+        if e_shoff.checked_add(e_shentsize).is_none_or(|e| e > obj.len()) {
+            return 0;
+        }
+        if e_shnum == 0 {
+            e_shnum = if is_64 {
+                r_u64(obj, e_shoff + 32) as usize
+            } else {
+                r_u32(obj, e_shoff + 20) as usize
+            };
+        }
+        if e_shstrndx == 0xffff {
+            e_shstrndx = r_u32(obj, e_shoff + 24) as usize;
+        }
+    }
+    let Some(sh_table_bytes) = e_shnum.checked_mul(e_shentsize) else {
+        return 0;
+    };
+    if e_shoff.checked_add(sh_table_bytes).is_none_or(|e| e > obj.len()) || e_shstrndx >= e_shnum {
+        return 0;
+    }
+    let shstr_hdr = e_shoff + e_shstrndx * e_shentsize;
+    let (shstr_off, shstr_size) = if is_64 {
+        (
+            r_u64(obj, shstr_hdr + 24) as usize,
+            r_u64(obj, shstr_hdr + 32) as usize,
+        )
+    } else {
+        (
+            r_u32(obj, shstr_hdr + 16) as usize,
+            r_u32(obj, shstr_hdr + 20) as usize,
+        )
+    };
+    let Some(shstr_end) = shstr_off.checked_add(shstr_size) else {
+        return 0;
+    };
+    if shstr_end > obj.len() {
+        return 0;
+    }
+
+    let mut stripped = 0usize;
+    for i in 0..e_shnum {
+        let sh_off = e_shoff + i * e_shentsize;
+        let sh_name = r_u32(obj, sh_off) as usize;
+        let sh_type = r_u32(obj, sh_off + 4);
+        let name_start = shstr_off.saturating_add(sh_name);
+        let (is_lto_name, name_len) = if name_start < shstr_end {
+            let slice = &obj[name_start..shstr_end];
+            let nul_pos = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+            let matched = std::str::from_utf8(&slice[..nul_pos])
+                .ok()
+                .is_some_and(is_disallowed_lto_section_name);
+            (matched, nul_pos)
+        } else {
+            (false, 0)
+        };
+        let is_lto_type = sh_type == 0x6fff_4c0c; // SHT_LLVM_LTO
+        if is_lto_name || is_lto_type {
+            if is_lto_type {
+                w_u32(obj, sh_off + 4, 1); // SHT_PROGBITS
+            }
+            if is_64 {
+                w_u64(obj, sh_off + 8, 0); // sh_flags = 0 (non-SHF_ALLOC)
+                w_u64(obj, sh_off + 32, 0); // sh_size = 0
+            } else {
+                w_u32(obj, sh_off + 8, 0); // sh_flags = 0
+                w_u32(obj, sh_off + 20, 0); // sh_size = 0
+            }
+            if is_lto_name && name_len >= 4 && name_start + 4 <= shstr_end {
+                obj[name_start..name_start + 4].copy_from_slice(b".hyb");
+            }
+            stripped += 1;
+        }
+    }
+    stripped
+}
+
+fn is_coff_machine(m: u16) -> bool {
+    matches!(
+        m,
+        0x014c | 0x8664 | 0x01c0 | 0x01c4 | 0xaa64 | 0x6232 | 0x6264 | 0x5032 | 0x5064 | 0x5128
+    )
+}
+
+fn has_coff_control_before_comment(buf: &[u8]) -> bool {
+    for i in 0..buf.len() {
+        if i + 1 < buf.len() && buf[i] == b'/' && buf[i + 1] == b'*' {
+            return false;
+        }
+        let b = buf[i];
+        if b < 0x09 || (b > 0x0d && b < 0x20) || b == 0x7f {
+            return true;
+        }
+    }
+    false
+}
+
+fn strip_lto_in_coff(obj: &mut [u8]) -> usize {
+    if obj.len() < 20 {
+        return 0;
+    }
+    let mach = u16::from_le_bytes([obj[0], obj[1]]);
+    if !is_coff_machine(mach) || !has_coff_control_before_comment(&obj[..20]) {
+        return 0;
+    }
+    let num_sections = u16::from_le_bytes([obj[2], obj[3]]) as usize;
+    let symtab_off = u32::from_le_bytes([obj[8], obj[9], obj[10], obj[11]]) as usize;
+    let num_syms = u32::from_le_bytes([obj[12], obj[13], obj[14], obj[15]]) as usize;
+    let opt_hdr_size = u16::from_le_bytes([obj[16], obj[17]]) as usize;
+    let Some(sec_table_off) = 20usize.checked_add(opt_hdr_size) else {
+        return 0;
+    };
+    let Some(sec_bytes) = num_sections.checked_mul(40) else {
+        return 0;
+    };
+    let Some(sec_table_end) = sec_table_off.checked_add(sec_bytes) else {
+        return 0;
+    };
+    if sec_table_end > obj.len() {
+        return 0;
+    }
+    let (strtab_off, strtab_end) = if symtab_off > 0 {
+        let Some(sym_bytes) = num_syms.checked_mul(18) else {
+            return 0;
+        };
+        let Some(st_off) = symtab_off.checked_add(sym_bytes) else {
+            return 0;
+        };
+        if st_off + 4 <= obj.len() {
+            let st_sz = u32::from_le_bytes([
+                obj[st_off],
+                obj[st_off + 1],
+                obj[st_off + 2],
+                obj[st_off + 3],
+            ]) as usize;
+            let st_end = st_off.saturating_add(st_sz).min(obj.len());
+            (st_off, st_end)
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
+
+    let mut stripped = 0usize;
+    for i in 0..num_sections {
+        let sh_off = sec_table_off + i * 40;
+        let mut is_lto = false;
+        if obj[sh_off] == b'/' && strtab_off > 0 {
+            let digits = &obj[sh_off + 1..sh_off + 8];
+            let end = digits
+                .iter()
+                .position(|&b| b == 0 || b == b' ')
+                .unwrap_or(digits.len());
+            if let Ok(s_off) = std::str::from_utf8(&digits[..end])
+                .unwrap_or("")
+                .parse::<usize>()
+            {
+                let abs = strtab_off.saturating_add(s_off);
+                if abs < strtab_end {
+                    let slice = &obj[abs..strtab_end];
+                    let nul = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+                    if std::str::from_utf8(&slice[..nul])
+                        .ok()
+                        .is_some_and(is_disallowed_lto_section_name)
+                    {
+                        is_lto = true;
+                        if nul >= 4 && abs + 4 <= strtab_end {
+                            obj[abs..abs + 4].copy_from_slice(b".hyb");
+                        }
+                    }
+                }
+            }
+        } else if let Ok(inline_name) = std::str::from_utf8(&obj[sh_off..sh_off + 8]) {
+            if is_disallowed_lto_section_name(inline_name) {
+                is_lto = true;
+            }
+        }
+        if is_lto {
+            obj[sh_off..sh_off + 8].copy_from_slice(b".hyb_lto");
+            obj[sh_off + 8..sh_off + 12].copy_from_slice(&0u32.to_le_bytes()); // VirtualSize
+            obj[sh_off + 16..sh_off + 20].copy_from_slice(&0u32.to_le_bytes()); // SizeOfRawData
+            obj[sh_off + 20..sh_off + 24].copy_from_slice(&0u32.to_le_bytes()); // PointerToRawData
+            obj[sh_off + 24..sh_off + 28].copy_from_slice(&0u32.to_le_bytes()); // PointerToRelocations
+            obj[sh_off + 32..sh_off + 34].copy_from_slice(&0u16.to_le_bytes()); // NumberOfRelocations
+            // IMAGE_SCN_LNK_REMOVE (0x800) | IMAGE_SCN_MEM_DISCARDABLE (0x02000000)
+            obj[sh_off + 36..sh_off + 40].copy_from_slice(&0x0200_0800u32.to_le_bytes());
+            stripped += 1;
+        }
+    }
+
+    if stripped > 0 && symtab_off > 0 && strtab_off <= obj.len() {
+        let mut idx = 0usize;
+        while idx < num_syms {
+            let sym_off = symtab_off + idx * 18;
+            if sym_off + 18 > obj.len() {
+                break;
+            }
+            let num_aux = obj[sym_off + 17] as usize;
+            if &obj[sym_off..sym_off + 4] == b"\0\0\0\0" {
+                if strtab_off > 0 {
+                    let s_off = u32::from_le_bytes([
+                        obj[sym_off + 4],
+                        obj[sym_off + 5],
+                        obj[sym_off + 6],
+                        obj[sym_off + 7],
+                    ]) as usize;
+                    let abs = strtab_off.saturating_add(s_off);
+                    if abs < strtab_end {
+                        let slice = &obj[abs..strtab_end];
+                        let nul = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+                        if std::str::from_utf8(&slice[..nul])
+                            .ok()
+                            .is_some_and(is_disallowed_lto_section_name)
+                            && nul >= 4
+                            && abs + 4 <= strtab_end
+                        {
+                            obj[abs..abs + 4].copy_from_slice(b".hyb");
+                        }
+                    }
+                }
+            } else if let Ok(sym_name) = std::str::from_utf8(&obj[sym_off..sym_off + 8]) {
+                if is_disallowed_lto_section_name(sym_name) {
+                    obj[sym_off..sym_off + 8].copy_from_slice(b".hyb_lto");
+                }
+            }
+            idx = idx.saturating_add(1 + num_aux);
+        }
+    }
+    stripped
 }
 
 /// The runtime directory: HYB_RUNTIME_DIR override, then the TARBALL layout

@@ -87,6 +87,204 @@ echo "==> building hyrt staticlib (crate-local)"
       env CARGO_BUILD_JOBS=2 $CROSS_ENV cargo build --release --target "$RUST_TARGET" --quiet; \
   else \
       CARGO_BUILD_JOBS=2 cargo build --release --quiet; fi )
+HYRT_LIB="$REPO_ROOT/runtime/rust/hyrt/target/release/libhyrt.a"
+if [ -n "$RUST_TARGET" ]; then
+    HYRT_LIB="$REPO_ROOT/runtime/rust/hyrt/target/$RUST_TARGET/release/libhyrt.a"
+fi
+# Strip embedded LLVM/GNU LTO bitcode and command-line sections (__LLVM,__bitcode,
+# __LLVM,__cmdline, __GNU_LTO, .llvmbc, .llvmcmd, .llvm.lto*, .gnu.lto_*,
+# .gnu.debuglto_*, SHT_LLVM_LTO) in place so Go 1.26.11+ / 1.27.4+ cgo link-time
+# checks accept the prebuilt archive inside the release tarball (#4470).
+if [ -f "$HYRT_LIB" ] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$HYRT_LIB" <<'PY'
+import struct, sys
+from pathlib import Path
+
+def is_bad_sec(name: bytes) -> bool:
+    s = name.split(b"\x00", 1)[0].strip()
+    return (
+        s in (b".llvmbc", b".llvmcmd", b"__bitcode", b"__cmdline")
+        or s.startswith((b".llvmbc.", b".llvmcmd.", b".llvm.lto", b".gnu.lto_", b".gnu.debuglto_"))
+    )
+
+def is_bad_seg(name: bytes) -> bool:
+    s = name.split(b"\x00", 1)[0].strip()
+    return s in (b"__LLVM", b"__GNU_LTO")
+
+def scrub_macho(buf: memoryview) -> None:
+    if len(buf) < 28:
+        return
+    m = struct.unpack_from("<I", buf, 0)[0]
+    if m in (0xFEEDFACE, 0xFEEDFACF):
+        end, is64 = "<", (m == 0xFEEDFACF)
+    elif m in (0xCEFAEDFE, 0xCFFAEDFE):
+        end, is64 = ">", (m == 0xCFFAEDFE)
+    else:
+        return
+    hdr_sz = 32 if is64 else 28
+    if len(buf) < hdr_sz:
+        return
+    filetype, ncmds, sizeofcmds = struct.unpack_from(end + "III", buf, 12)
+    if filetype != 1:
+        return
+    cmd_end = min(len(buf), hdr_sz + sizeofcmds)
+    off = hdr_sz
+    for _ in range(ncmds):
+        if off + 8 > cmd_end:
+            break
+        cmd, cmdsize = struct.unpack_from(end + "II", buf, off)
+        if cmdsize < 8 or off + cmdsize > cmd_end:
+            break
+        if (is64 and cmd == 0x19 and cmdsize >= 72) or (not is64 and cmd == 0x1 and cmdsize >= 56):
+            seg_hdr = 72 if is64 else 56
+            sec_sz = 80 if is64 else 68
+            segname = bytes(buf[off + 8 : off + 24])
+            bad_seg = is_bad_seg(segname)
+            if bad_seg:
+                buf[off + 8 : off + 24] = b"\x00" * 16
+            nsects = struct.unpack_from(end + "I", buf, off + (64 if is64 else 48))[0]
+            for i in range(nsects):
+                s = off + seg_hdr + i * sec_sz
+                if s + sec_sz > off + cmdsize:
+                    break
+                sectname = bytes(buf[s : s + 16])
+                s_segname = bytes(buf[s + 16 : s + 32])
+                if bad_seg or is_bad_seg(s_segname) or is_bad_sec(sectname):
+                    buf[s : s + 16] = b"__debug_noop\x00\x00\x00\x00"
+                    buf[s + 16 : s + 32] = b"__DWARF\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+                    if is64:
+                        struct.pack_into(end + "QIIIII", buf, s + 40, 0, 0, 0, 0, 0, 0x02000000)
+                    else:
+                        struct.pack_into(end + "IIIIII", buf, s + 36, 0, 0, 0, 0, 0, 0x02000000)
+        off += cmdsize
+
+def scrub_elf(buf: memoryview) -> None:
+    if len(buf) < 52 or bytes(buf[:4]) != b"\x7fELF":
+        return
+    cls, data = buf[4], buf[5]
+    end = "<" if data == 1 else (">" if data == 2 else None)
+    if not end or cls not in (1, 2):
+        return
+    is64 = cls == 2
+    if is64 and len(buf) < 64:
+        return
+    shoff = struct.unpack_from(end + ("Q" if is64 else "I"), buf, 40 if is64 else 32)[0]
+    shentsize, shnum, shstrndx = struct.unpack_from(end + "HHH", buf, 58 if is64 else 46)
+    min_sh = 64 if is64 else 40
+    if shentsize < min_sh or shnum == 0 or shoff + shnum * shentsize > len(buf):
+        return
+    str_off = str_sz = 0
+    if shstrndx < shnum:
+        sb = shoff + shstrndx * shentsize
+        str_off, str_sz = struct.unpack_from(end + ("QQ" if is64 else "II"), buf, sb + (24 if is64 else 16))
+    for i in range(shnum):
+        sh = shoff + i * shentsize
+        sh_name, sh_type = struct.unpack_from(end + "II", buf, sh)
+        bad = sh_type in (0x6FFF4C0C, 0x6FFF4C01, 0x6FFF4C04)
+        name_pos = None
+        if str_sz and sh_name < str_sz and str_off + str_sz <= len(buf):
+            name_pos = str_off + sh_name
+            nul = bytes(buf[name_pos : str_off + str_sz]).find(b"\x00")
+            if nul >= 0 and is_bad_sec(bytes(buf[name_pos : name_pos + nul])):
+                bad = True
+                if nul >= 4:
+                    buf[name_pos : name_pos + 4] = b".hyb"
+        if bad:
+            struct.pack_into(end + "I", buf, sh + 4, 1)
+            if is64:
+                struct.pack_into(end + "QQQQ", buf, sh + 8, 0, 0, 0, 0)
+            else:
+                struct.pack_into(end + "IIII", buf, sh + 8, 0, 0, 0, 0)
+
+def scrub_coff(buf: memoryview) -> None:
+    if len(buf) < 20:
+        return
+    machine, nsects, _, sym_ptr, nsyms, opt_sz = struct.unpack_from("<HHIIIH", buf, 0)
+    if machine not in (0x8664, 0xAA64, 0x014C):
+        return
+    sec_off = 20 + opt_sz
+    if sec_off + nsects * 40 > len(buf):
+        return
+    str_off = sym_ptr + nsyms * 18 if sym_ptr and nsyms else 0
+    str_sz = struct.unpack_from("<I", buf, str_off)[0] if str_off and str_off + 4 <= len(buf) else 0
+    for i in range(nsects):
+        sh = sec_off + i * 40
+        raw_name = bytes(buf[sh : sh + 8])
+        bad = False
+        if raw_name.startswith(b"/"):
+            try:
+                soff = int(raw_name[1:].split(b"\x00", 1)[0].strip())
+            except ValueError:
+                soff = 0
+            if str_sz >= 4 and 4 <= soff < str_sz and str_off + str_sz <= len(buf):
+                p = str_off + soff
+                nul = bytes(buf[p : str_off + str_sz]).find(b"\x00")
+                if nul >= 0 and is_bad_sec(bytes(buf[p : p + nul])):
+                    bad = True
+                    if nul >= 4:
+                        buf[p : p + 4] = b".hyb"
+        elif is_bad_sec(raw_name):
+            bad = True
+            buf[sh : sh + 8] = b".hyb_lto"
+        if bad:
+            struct.pack_into("<III", buf, sh + 16, 0, 0, 0)
+            struct.pack_into("<H", buf, sh + 32, 0)
+            struct.pack_into("<I", buf, sh + 36, 0x02000800)
+
+def scrub_obj(buf: memoryview) -> None:
+    if len(buf) < 4:
+        return
+    m = struct.unpack_from(">I", buf, 0)[0]
+    if m in (0xCAFEBABE, 0xCAFEBABF):
+        if len(buf) < 8:
+            return
+        narch = struct.unpack_from(">I", buf, 4)[0]
+        esize = 32 if m == 0xCAFEBABF else 20
+        for i in range(narch):
+            e = 8 + i * esize
+            if e + esize > len(buf):
+                break
+            off, sz = struct.unpack_from(">QQ" if m == 0xCAFEBABF else ">II", buf, e + 8)
+            if off + sz <= len(buf):
+                scrub_obj(buf[off : off + sz])
+        return
+    scrub_macho(buf)
+    scrub_elf(buf)
+    scrub_coff(buf)
+
+path = Path(sys.argv[1])
+data = bytearray(path.read_bytes())
+if data.startswith(b"!<arch>\n"):
+    view = memoryview(data)
+    pos = 8
+    while pos + 60 <= len(data):
+        raw_name = bytes(view[pos : pos + 16])
+        try:
+            size = int(bytes(view[pos + 48 : pos + 58]).strip())
+        except ValueError:
+            break
+        body_start = pos + 60
+        body_end = body_start + size
+        if body_end > len(data):
+            break
+        pos = body_end + (size & 1)
+        obj_start = body_start
+        mname = raw_name.strip()
+        if raw_name.startswith(b"#1/"):
+            try:
+                nlen = int(raw_name[3:].strip())
+            except ValueError:
+                continue
+            if nlen > size:
+                continue
+            mname = bytes(view[body_start : body_start + nlen]).rstrip(b"\x00")
+            obj_start = body_start + nlen
+        if mname in (b"/", b"//", b"/SYM64/") or mname.startswith(b"__.SYMDEF"):
+            continue
+        scrub_obj(view[obj_start:body_end])
+    path.write_bytes(data)
+PY
+fi
 
 # --- 2. build the CLI (same target as the staticlib — the hyb BINARY must
 #        run on the target arch) ---
