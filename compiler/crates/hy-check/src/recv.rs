@@ -199,7 +199,7 @@ impl<'a> Checker<'a> {
     /// Recurse an expression tree, classifying every `Expr::Receive`
     /// operand found at any depth. FnLit bodies are the A5 perimeter —
     /// not walked here (the closure pass enters them).
-    fn check_expr_recv_operands(&mut self, st: &FnState, expr: &Expr) {
+    pub(crate) fn check_expr_recv_operands(&mut self, st: &FnState, expr: &Expr) {
         match expr {
             Expr::Receive { chan, span } => {
                 self.check_recv_operand(st, chan, *span);
