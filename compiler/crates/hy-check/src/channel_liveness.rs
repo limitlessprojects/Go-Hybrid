@@ -487,6 +487,33 @@ impl ChannelLivenessChecker {
         }
     }
 
+    fn shadowed_hy_spans_key(
+    ) -> &'static std::thread::LocalKey<std::cell::RefCell<HashSet<(u32, u32)>>> {
+        std::thread_local! {
+            static SPANS: std::cell::RefCell<HashSet<(u32, u32)>> =
+                std::cell::RefCell::new(HashSet::new());
+        }
+        &SPANS
+    }
+
+    pub(crate) fn with_shadowed_hy_spans<R>(
+        spans: HashSet<(u32, u32)>,
+        run: impl FnOnce() -> R,
+    ) -> R {
+        struct Guard(HashSet<(u32, u32)>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let prev = std::mem::take(&mut self.0);
+                ChannelLivenessChecker::shadowed_hy_spans_key()
+                    .with(|cell| *cell.borrow_mut() = prev);
+            }
+        }
+        let prev = Self::shadowed_hy_spans_key()
+            .with(|cell| std::mem::replace(&mut *cell.borrow_mut(), spans));
+        let _guard = Guard(prev);
+        run()
+    }
+
     fn is_pipe_call(&self, expr: &Expr) -> bool {
         let mut e = expr;
         while match e {
@@ -500,7 +527,12 @@ impl ChannelLivenessChecker {
             }
             _ => false,
         } {}
-        if let Expr::Call { callee, .. } = e {
+        if let Expr::Call { callee, span, .. } = e {
+            if Self::shadowed_hy_spans_key()
+                .with(|cell| cell.borrow().contains(&(span.start.line, span.start.col)))
+            {
+                return false;
+            }
             let mut base = callee.as_ref();
             while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
                 base = inner.as_ref();
@@ -509,17 +541,15 @@ impl ChannelLivenessChecker {
                 base: pkg, name, ..
             } = base
             {
-                if let Expr::Ident { name: pkg_name, .. } = pkg.as_ref() {
+                let mut pkg_base = pkg.as_ref();
+                while let Expr::Paren { inner, .. } = pkg_base {
+                    pkg_base = inner.as_ref();
+                }
+                if let Expr::Ident { name: pkg_name, .. } = pkg_base {
                     let head = name.split('[').next().unwrap_or(name.as_str());
                     if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") {
                         return true;
                     }
-                }
-            }
-            if let Expr::Ident { name, .. } = base {
-                let head = name.split('[').next().unwrap_or(name.as_str());
-                if head == "pipe" || head == "new_pipe" {
-                    return true;
                 }
             }
         }
