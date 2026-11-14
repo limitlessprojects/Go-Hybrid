@@ -5499,30 +5499,36 @@ impl<'a> Collector<'a> {
                     }
                 }
             }
-            "is_valid" => {
+            "is_valid" | "compile" => {
                 if args.len() != 1 {
+                    let hint = if name == "is_valid" {
+                        "write `regex.is_valid(pattern)` (SPEC M6 regex binding)"
+                    } else {
+                        "write `regex.compile(pattern)` (SPEC regex surface)"
+                    };
                     self.emit_e1002(
                         span,
                         format!(
-                            "`regex.is_valid` takes exactly 1 argument `(pattern)`, got {} (HYB-E1002)",
+                            "`regex.{}` takes exactly 1 argument `(pattern)`, got {} (HYB-E1002)",
+                            name,
                             args.len()
                         ),
-                        "write `regex.is_valid(pattern)` (SPEC M6 regex binding)",
+                        hint,
                     );
                 } else if let Some(ref n) = args[0].name {
                     if n != "pattern" {
                         self.emit_e1002(
                             span,
                             format!(
-                                "`regex.is_valid` has no parameter named `{}` (params: pattern) (HYB-E1002)",
-                                n
+                                "`regex.{}` has no parameter named `{}` (params: pattern) (HYB-E1002)",
+                                name, n
                             ),
                             "pass argument by position or use parameter name `pattern`",
                         );
                     }
                 }
             }
-            "compile" | "match_string" => {
+            "match_string" => {
                 self.emit_e1002(
                     span,
                     format!("cannot call unpinned symbol `regex.{}` (HYB-E1002)", name),

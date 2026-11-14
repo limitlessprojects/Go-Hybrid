@@ -6,12 +6,13 @@
 //!    - `sha3.stream_checksum` (exact 2 args: `iters`, `seed`)
 //!    - `regex.is_match` (exact 2 args: `pattern`, `text`)
 //!    - `regex.is_valid` (exact 1 arg: `pattern`)
+//!    - `regex.compile` (exact 1 arg: `pattern`)
 //!    - `serde_json.parse` (exact 1 arg: `data`)
 //!    - `serde_json.new_object` (exact 0 args)
 //!    - `serde_json.new_array` (exact 0 args)
 //!    - `serde_json.to_string_pretty` (exact 1 arg: `v`)
 //!
-//! 2. Unpinned symbols in `regex` (`regex.compile`, `regex.match_string`) and package types
+//! 2. Unpinned symbols in `regex` (`regex.match_string`) and package types
 //!    (`serde_json.value`) must reject fail-closed with `HYB-E1002`.
 //!
 //! 3. Named arguments with unrecognized parameter names must reject with `HYB-E1002`.
@@ -171,15 +172,35 @@ fn main() {
 }
 
 #[test]
-fn test_regex_unpinned_symbols_reject() {
+fn test_regex_compile_arity_rejects() {
     rejects_e1002(r#"
 import "rust/regex"
 fn main() {
-    r, err := regex.compile("^[a-z]+$")
+    r, err := regex.compile()
     _ = r
     _ = err
 }
 "#);
+    rejects_e1002(r#"
+import "rust/regex"
+fn main() {
+    r, err := regex.compile("a", "b")
+    _ = r
+    _ = err
+}
+"#);
+    rejects_e1002(r#"
+import "rust/regex"
+fn main() {
+    r, err := regex.compile(bad="a")
+    _ = r
+    _ = err
+}
+"#);
+}
+
+#[test]
+fn test_regex_unpinned_symbols_reject() {
     rejects_e1002(r#"
 import "rust/regex"
 fn main() {
@@ -296,10 +317,16 @@ fn test_regex() error {
     m2 := regex.is_match(pattern="^[a-z]+$", text="hybrid")?
     v1 := regex.is_valid("^[a-z]+$")
     v2 := regex.is_valid(pattern="^[a-z]+$")
+    c1, err1 := regex.compile("^[a-z]+$")
+    c2, err2 := regex.compile(pattern="^[a-z]+$")
     _ = m1
     _ = m2
     _ = v1
     _ = v2
+    _ = c1
+    _ = err1
+    _ = c2
+    _ = err2
     return nil
 }
 
