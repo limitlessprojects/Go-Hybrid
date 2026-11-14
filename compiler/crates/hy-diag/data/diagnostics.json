@@ -566,6 +566,36 @@
       "tier0_rule_id": "N1"
     },
     {
+      "code": "HYB-E4004",
+      "name": "send-capability-not-closed",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "a linear send capability must be closed before its scope exits",
+      "summary": "`hy.pipe[T]()` splits a channel into linear capabilities: `tx` (send) and `rx` (receive). A send capability reaches its terminal state `closed` and nothing else — leaving a scope with `tx` open strands the receiver, which can then never observe the end of the stream. Moving `tx` into a subtask transfers the responsibility (the subtask must close it).",
+      "fixits": [
+        "close it before the scope exits: `tx.close()`",
+        "hand the capability to the task that owns the lifecycle: `task worker(tx, ...)`",
+        "if the open stream is genuinely intended, make the open end explicit at the boundary"
+      ],
+      "example": "tx, rx := hy.pipe[int]()\ntx.send(1)   // reject: HYB-E4004 — `tx` was never closed",
+      "rule": "O"
+    },
+    {
+      "code": "HYB-E4005",
+      "name": "recv-capability-not-drained",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "a linear receive capability must be drained before its scope exits",
+      "summary": "The receive half of `hy.pipe[T]()` is linear too: it reaches its terminal state `drained` and nothing else. Leaving a scope with `rx` undrained drops buffered values silently — the sender's work is lost with no diagnostic. Moving `rx` into a subtask transfers the responsibility.",
+      "fixits": [
+        "drain it before the scope exits: `for v in rx { ... }` or `rx.drain()`",
+        "hand the capability to the task that owns the lifecycle: `task worker(..., rx)`",
+        "if the undrained tail is intended, say so at the boundary"
+      ],
+      "example": "tx, rx := hy.pipe[int]()\ntx.send(1)\ntx.close()   // reject: HYB-E4005 — `rx` was never drained",
+      "rule": "O"
+    },
+    {
       "code": "HYB-E5001",
       "name": "match-not-exhaustive",
       "category": "match",

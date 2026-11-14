@@ -13,7 +13,7 @@ CARGO := $(HOME)/.cargo/bin/cargo
 CARGO_TARGET_DIR ?= $(HOME)/go-hybrid-target
 HYB_BIN := $(CARGO_TARGET_DIR)/debug/hyb
 
-.PHONY: help env check test-quick ci corpus workspace examples differential bench spike0-kaggle spike0-kaggle-status spike0-kaggle-fetch \
+.PHONY: help env check test-quick ci corpus registry workspace examples differential bench spike0-kaggle spike0-kaggle-status spike0-kaggle-fetch \
         spike0-actions-4 spike0-actions-20 spike-1 spike-2 spike-3 kaggle-job kaggle-status kaggle-fetch kaggle-wait \
         actions-dispatch actions-watch census guarantees clean
 
@@ -25,6 +25,7 @@ help:
 	@echo "make examples         — the ten target programs, byte-exact acceptance"
 	@echo "make corpus           — Tier-0 corpus verdicts (139/139)"
 	@echo "make census           — every stated corpus count matches the corpus"
+	@echo "make registry         — every emitted diagnostic code is registered"
 	@echo "make guarantees       — GUARANTEES.md claims table matches the rules and corpus"
 	@echo "make differential     — the differential corpus loop (accept + reject)"
 	@echo "make bench            — G2 call-overhead bench on the live bridge (hyb bench-overhead)"
@@ -52,8 +53,10 @@ check:
 	@$(PY) -m unittest discover -s tools/runner -p test_runner.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_test_registration.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_corpus_census.py -v
+	@$(PY) -m unittest discover -s tools -p test_check_diagnostic_registry.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_claims_links.py -v
 	@$(PY) tools/check_corpus_census.py && echo "corpus census OK"
+	@$(PY) tools/check_diagnostic_registry.py && echo "diagnostic registry OK"
 	@$(PY) tools/check_claims_links.py && echo "claims links OK"
 	@$(PY) tools/check_guarantees.py && echo "guarantees OK"
 	@$(PY) tools/check_test_registration.py && echo "test registration OK"
@@ -88,6 +91,11 @@ corpus:
 
 census:
 	@$(PY) tools/check_corpus_census.py
+
+# `hyb explain` serves data/diagnostics.json; an emitted code missing from it is
+# unexplainable (and un-citable from a GUARANTEES row).
+registry:
+	@$(PY) tools/check_diagnostic_registry.py
 
 # GUARANTEES.md claims table is rendered from guarantees.json; this fails when a
 # row names a rule the registry no longer has, when a fixture EXPECTED-VERDICT
