@@ -32,9 +32,9 @@ no runtime, no VM, no FFI in the output.
 // checkout.hy — a checked file, dropped into an existing Go module
 import "rust/regex"
 
-fn validate_email(raw string) (string, error) {
-    re := regex.must_compile(`^[\w.+-]+@[\w-]+\.[\w.]+$`)
-    if !re.is_match(raw) {
+pub fn validate_email(raw string) (string, error) {
+    ok := regex.is_match(`^[^@\s]+@[^@\s]+\.[^@\s]+$`, raw)?
+    if !ok {
         return "", errors.new("invalid email")
     }
     return raw, nil
@@ -47,7 +47,7 @@ email, err := hybrid.ValidateEmail(raw)
 ```
 
 ```sh
-hyb build checkout.hy -o myapp    # one command: check → emit Go → go build
+hyb build checkout.hy --package hybrid --out-dir hybrid    # one command: check → emit Go → importable package
 ```
 
 ## Why Hybrid
@@ -109,7 +109,7 @@ skip the cgo runtime.
 | What does a Go→Rust call cost? | **2.8 ns** safe stack-switched trampoline vs **46.8 ns** cgo — 16.5× faster, 0 allocs | ✅ [spike 1](spikes/spike1-call-overhead/RESULTS.md) · [G2 bench: fast path 3.37 ns ≤ 5 ns on the live bridge](gates/G2.md) |
 | Can consumers skip the toolchain? | Yes — generated Go + prebuilt artifact; a plain `go run` imports a Hybrid package | ✅ [example 09](examples/09-go-imports-hybrid/) |
 | Can a scheduler-safe checked language work at all? | Bounded blocking pool, two-tier budgets, race-clean under `-race` | ✅ [spike 4: 100k-cell matrix](spikes/spike4-scheduling/RESULTS.md) |
-| Ownership rules without visible lifetimes? | Tier-0 checker: 6 sendable classes, move/freeze, loans, fail-closed boundary | ✅ [checker corpus 139/139](tests/checker-corpus/) + [differential loop 40/40 + 80/80](tools/differential_loop.py) |
+| Ownership rules without visible lifetimes? | Tier-0 checker: 6 sendable classes, move/freeze, loans, fail-closed boundary | ✅ [checker corpus 139/139](tests/checker-corpus/) + [differential loop 47/47 + 92/92](tools/differential_loop.py) |
 | Scheduling with blocking Rust calls | resolved: pool + Go-scheduler fallback, budgets pinned | ✅ spike 4 |
 
 ## Quick start
@@ -125,11 +125,11 @@ Prefer building from source? The pins are the contract (Go 1.26.9 / Rust 1.99.0)
 ```bash
 git clone https://github.com/limitlessprojects/Go-Hybrid.git && cd Go-Hybrid
 make examples     # all ten target programs, byte-exact vs expected.txt
-make test-quick   # workspace tests + checker corpus (109/109) + differential (36/36 + 73/73)
+make test-quick   # workspace tests + checker corpus (139/139) + differential (47/47 + 92/92)
 make bench        # G2 call-overhead bench on the LIVE bridge
 
 hyb build examples/01-hello/program.hy -o hello && ./hello
-hyb build --package mypkg --out-dir out --binding-prefix example.com/mypkg
+hyb build examples/09-go-imports-hybrid/program.hy --package mypkg --out-dir out --binding-prefix example.com/mypkg
 ```
 
 The ten examples are the acceptance suite: worker pools with backpressure,

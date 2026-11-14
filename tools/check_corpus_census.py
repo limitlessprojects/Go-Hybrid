@@ -61,7 +61,7 @@ TOTAL_SURFACES: list[tuple[str, str, str]] = [
     ),
     (
         "README.md",
-        r"checker corpus (\d+)/(\d+)",
+        r"checker corpus \(?(\d+)/(\d+)",
         "the README corpus claim",
     ),
     (
@@ -80,6 +80,15 @@ TOTAL_SURFACES: list[tuple[str, str, str]] = [
 README_BREAKDOWN = (
     "tests/checker-corpus/README.md",
     r"corpus:\s*(\d+) programs\D+ACCEPT (\d+)\D+ACCEPT-MANAGED (\d+)\D+REJECT (\d+)",
+)
+
+# README also restates the differential loop's two ratios. differential_loop.py
+# counts every non-REJECT fixture on the accept side (build + run) and every
+# REJECT fixture on the reject side, so at full agreement all four numbers
+# are derived from the verdict census, never from another claim.
+README_DIFFERENTIAL = (
+    "README.md",
+    r"differential(?: loop)?\s*\(?(\d+)/(\d+)\s*\+\s*(\d+)/(\d+)",
 )
 
 
@@ -155,6 +164,32 @@ def check_breakdown(root: Path, total: int, counts: Counter) -> list[str]:
     return problems
 
 
+def check_differential(root: Path, counts: Counter) -> list[str]:
+    rel, pattern = README_DIFFERENTIAL
+    path = root / rel
+    if not path.exists():
+        return []  # check_total_surfaces already reports the missing file
+    text = path.read_text(encoding="utf-8")
+    matches = list(re.finditer(pattern, text, re.M))
+    if not matches:
+        return [
+            f"{rel}: no differential-loop claim found — the pattern {pattern!r} "
+            f"no longer matches; update this guard"
+        ]
+    accept = counts["ACCEPT"] + counts["ACCEPT-MANAGED"]
+    reject = counts["REJECT"]
+    problems: list[str] = []
+    for match in matches:
+        line = text.count("\n", 0, match.start()) + 1
+        a_pass, a_total, r_pass, r_total = (int(g) for g in match.groups())
+        if (a_pass, a_total, r_pass, r_total) != (accept, accept, reject, reject):
+            problems.append(
+                f"{rel}: line {line}: differential claim says {a_pass}/{a_total} + "
+                f"{r_pass}/{r_total}, corpus implies {accept}/{accept} + {reject}/{reject}"
+            )
+    return problems
+
+
 def collect_problems(root: Path) -> tuple[list[str], int, Counter]:
     """Every disagreement with the corpus, plus the derived census."""
     corpus_dir = root / CORPUS_REL
@@ -165,7 +200,11 @@ def collect_problems(root: Path) -> tuple[list[str], int, Counter]:
     if total == 0:
         return ["the corpus is empty; refusing to certify a count"], 0, counts
 
-    problems = check_total_surfaces(root, total) + check_breakdown(root, total, counts)
+    problems = (
+        check_total_surfaces(root, total)
+        + check_breakdown(root, total, counts)
+        + check_differential(root, counts)
+    )
     no_verdict = counts.get("NO-VERDICT", 0)
     if no_verdict:
         problems.append(
@@ -195,7 +234,7 @@ def main() -> int:
         return 1
 
     print(
-        f"OK: all {len(TOTAL_SURFACES) + 1} corpus census surfaces agree with the "
+        f"OK: all {len(TOTAL_SURFACES) + 2} corpus census surfaces agree with the "
         f"corpus ({total} programs: ACCEPT {counts['ACCEPT']} · "
         f"ACCEPT-MANAGED {counts['ACCEPT-MANAGED']} · REJECT {counts['REJECT']})."
     )

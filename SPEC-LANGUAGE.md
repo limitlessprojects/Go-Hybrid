@@ -1615,7 +1615,7 @@ own API escapes is still the open question OQ1, unchanged by this rule.
 mux.handle("/x", http.handler(fn(w http.response_writer) {
     ch <- counts        // reject: HYB-E3002 — a send inside a closure is a
                         // real boundary; `counts` is a live mutable map
-    managed { ch <- other }   // ok: hatch taken knowingly (E8001, counted)
+    managed("send handed to an actor loop", "actor") { ch <- other }   // ok: hatch taken knowingly (E8001, counted)
 }))
 ```
 
@@ -1776,7 +1776,7 @@ never one without the other.
 
 ```hy
 // fragment:
-managed {
+managed("two tasks tally one map; mutex-free by design", "other") {
     counter := map[string]int{}
     task tally(counter)        // unchecked share — DRF-SC contract applies;
     task tally(counter)        // audited by --report-managed, linted, -race backstop
