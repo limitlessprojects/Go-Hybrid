@@ -226,3 +226,88 @@ func TestFailedSetPreservesValueHandle(t *testing.T) {
 		t.Fatalf("child.Int(x) after failed Set = %d, %v (want 7, nil)", got, err)
 	}
 }
+
+func TestHandleLifecycleTable(t *testing.T) {
+	// Table-driven regression tests for #1314:
+	// 1. Move stops runtime.Cleanup so GC never double-releases recycled slots.
+	// 2. Failed scalar Set deterministically drops temp handle.
+	// 3. Deterministic Release zeroes ID and stops cleanup safely.
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "moved_handle_stops_cleanup_across_gc",
+			run: func(t *testing.T) {
+				doc := NewObject()
+				func() {
+					inner := NewObject()
+					if err := inner.Set("v", int64(100)); err != nil {
+						t.Fatalf("inner.Set: %v", err)
+					}
+					if err := doc.Set("child", inner); err != nil {
+						t.Fatalf("doc.Set: %v", err)
+					}
+					if inner.h.id != 0 {
+						t.Fatalf("moved handle id = %d, want 0", inner.h.id)
+					}
+				}()
+				for range 4 {
+					runtime.GC()
+				}
+				reused, err := Parse([]byte(`{"reused": 200}`))
+				if err != nil {
+					t.Fatalf("Parse reused: %v", err)
+				}
+				for range 4 {
+					runtime.GC()
+				}
+				val, err := reused.Int("reused")
+				if err != nil || val != 200 {
+					t.Fatalf("reused.Int after GC = %d, %v (want 200, nil)", val, err)
+				}
+				runtime.KeepAlive(doc)
+				runtime.KeepAlive(reused)
+			},
+		},
+		{
+			name: "deterministic_release_zeroes_id_and_is_idempotent",
+			run: func(t *testing.T) {
+				v := NewObject()
+				if v.h == nil || v.h.id == 0 {
+					t.Fatal("expected valid handle")
+				}
+				v.Release()
+				if v.h.id != 0 {
+					t.Fatalf("expected id=0 after Release, got %d", v.h.id)
+				}
+				// Repeated release must not panic or error.
+				v.Release()
+				if _, err := v.Int("k"); err != ErrJSON {
+					t.Fatalf("Int on released handle returned %v, want ErrJSON", err)
+				}
+			},
+		},
+		{
+			name: "failed_scalar_set_does_not_leak_and_keeps_receiver_valid",
+			run: func(t *testing.T) {
+				arr := NewArray()
+				// Setting a keyed property on an array fails at the Rust layer
+				if err := arr.Set("invalid_key", 42); err == nil {
+					t.Fatal("Set on array receiver must return error")
+				}
+				if err := arr.PushString("valid_item"); err != nil {
+					t.Fatalf("PushString on array after failed Set failed: %v", err)
+				}
+				s, err := ToStringPretty(arr)
+				if err != nil || s != "[\n  \"valid_item\"\n]" {
+					t.Fatalf("ToStringPretty = %q, %v", s, err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, tc.run)
+	}
+}
