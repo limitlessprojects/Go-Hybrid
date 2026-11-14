@@ -1284,7 +1284,40 @@ impl Emitter {
     }
 
     /// Binding hints from the defining values (see `BindingKind`).
+    fn is_hy_pipe_call(e: &Expr) -> bool {
+        let Expr::Call { callee, .. } = Self::peel_parens(e) else {
+            return false;
+        };
+        let field = match Self::peel_parens(callee) {
+            Expr::Field { base, name, .. } => {
+                let head = name.split('[').next().unwrap_or(name);
+                Some((base.as_ref(), head))
+            }
+            Expr::Index { base, .. } => match Self::peel_parens(base) {
+                Expr::Field { base, name, .. } => Some((base.as_ref(), name.as_str())),
+                _ => None,
+            },
+            _ => None,
+        };
+        matches!(
+            field,
+            Some((base, head))
+                if matches!(Self::peel_parens(base), Expr::Ident { name, .. } if name == "hy")
+                    && matches!(head, "pipe" | "new_pipe")
+        )
+    }
+
     fn hint_from_values(&mut self, names: &[String], values: &[Expr]) {
+        let pipe_rx_hint = if names.len() == 2
+            && values.len() == 1
+            && names[1] != "_"
+            && !self.local_vars.contains("hy")
+            && !self.bindings.contains_key("hy")
+        {
+            Self::is_hy_pipe_call(&values[0])
+        } else {
+            false
+        };
         let single_hint = if names.len() == 1 && values.len() == 1 && names[0] != "_" {
             Some(self.binding_kind_of(&values[0]))
         } else {
@@ -1296,6 +1329,9 @@ impl Emitter {
             Vec::new()
         };
         self.shadow_local_names(names);
+        if pipe_rx_hint {
+            self.bindings.insert(names[1].clone(), BindingKind::Chan);
+        }
         if let Some(kind) = single_hint {
             if kind != BindingKind::Plain {
                 self.bindings.insert(names[0].clone(), kind);
