@@ -676,6 +676,15 @@ impl<'a> Checker<'a> {
                     .unwrap_or_else(|| format!("the pointee `{root}` has an unresolvable type")),
             });
         }
+        // `&s.hits` where the FIELD is atomic-typed: the borrow is
+        // atomic-mediated even though the root is a struct, so it belongs with
+        // the mediated route below and not with the struct reject — that one
+        // is about the struct's unmediated fields (`&s` really does let a
+        // borrower write `s.m`). The field spelling is what a caller with a
+        // counter inside a struct has to write.
+        if matches!(self.shape_of_expr(st, operand), TypeShape::Atomic) {
+            return Outcome::Ok;
+        }
         match &b.shape {
             // `&hits` where hits is atomic-typed — the mediated route (OQ6)
             TypeShape::Atomic => Outcome::Ok,
@@ -1588,8 +1597,37 @@ impl<'a> Checker<'a> {
                     Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
                 );
 
+            // A bare atomic-typed value crosses BY COPY: the receiver gets
+            // its own atomic, so every `add`/`store` it performs is lost. The
+            // class-2 rationale ("internally synchronized by construction")
+            // only holds for the one instance, and O4 class 2 names atomics
+            // as a *value* class — so the copy is not the shared thing the
+            // class credits. `&x` is the mediated route (OQ6) and stays
+            // accepted; a spawn against a pointer parameter already
+            // auto-addresses above, so this covers value parameters and
+            // channel sends (where no element type can be auto-addressed).
+            // `go vet` agrees: `copylocks` fires on the by-value call only.
+            let atomic_by_value = !is_auto_addressed
+                && matches!(
+                    self.shape_of_expr(st, crate::model::unwrap_parens(v)),
+                    TypeShape::Atomic
+                );
+
             let outcome = if is_auto_addressed {
                 self.classify_addr_of(st, v, crate::model::unwrap_parens(v))
+            } else if atomic_by_value {
+                Outcome::Rejected(RejectInfo {
+                    value: v.render(),
+                    ty: self
+                        .shape_of_expr(st, crate::model::unwrap_parens(v))
+                        .render(),
+                    notes: vec![
+                        "an atomic value crossed by value is a COPY: the receiver gets its own atomic and every `add`/`store` it performs is lost when it returns — the receiver's synchronization never reaches the sender".to_string(),
+                        "the class-2 rationale (\"internally synchronized by construction\") holds for the instance, not for a copy of it; `go vet`'s copylocks agrees".to_string(),
+                        "take the mediated route: `&x` against an `*atomic.T` parameter (OQ6) — a spawn against a pointer parameter auto-addresses it for you".to_string(),
+                        "a channel cannot auto-address its element type: send `&x` over a `chan *atomic.T`, or route the value through a channel instead".to_string(),
+                    ],
+                })
             } else {
                 self.classify_value(st, v)
             };

@@ -1112,3 +1112,25 @@ the move freeze reach the send path as well.
 | struct-chan-shared-map-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct over the channel freezes that storage, so `m["after"] = 2` is a write through a live alias |
 
 With this registration the corpus is **139 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 92**.
+
+-------------------------------------------------------------------------------
+
+### atomic-value-by-value-reject / atomic-value-by-reference-accept — REJECT + ACCEPT (issue #4457, corpus growth)
+
+A1c asks whether a value may cross at all; this pair pins WHICH FORM of a
+class-2 value may. `atomic.int64` was class 2 by type on the strength of the
+class-2 rationale "internally synchronized by construction" — true of one
+instance, not of a copy of it. The by-value spawn was ACCEPT with 0 diagnostics
+and printed `hits=0` (writes lost into the callee's copy); the `&` twin printed
+`hits=1`, and `go vet`'s copylocks fired on the by-value call only.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| atomic-value-by-value-reject | REJECT | A1c | `HYB-E3001` | a bare atomic value at a spawn against a VALUE parameter is a copy: class 2 does not cover the instance's copy, so the write is lost silently (`go run`: `hits=0`); the fix-it names `&x` |
+| atomic-value-by-reference-accept | ACCEPT | — | — | the mediated route (OQ6) at both sites — `&hits` and an auto-addressed `task add_auto(auto, done)` at a spawn, `&v` over a `chan *atomic.int64` at a send; same instance, `-race` clean, prints `500 10 100` |
+
+Row 11 moves with the pair: it said "[TBD] … until then: unproven → rejected"
+while scalar atomics were in fact accepted by type. It now claims class 2 **only
+behind `&`** and cites both fixtures.
+
+With this registration the corpus is **141 programs — ACCEPT 46 · ACCEPT-MANAGED 2 · REJECT 93**.
