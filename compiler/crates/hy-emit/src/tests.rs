@@ -708,16 +708,16 @@ fn inclusive_range_and_labeled_break() {
         go
     );
     assert!(go.contains("break hyLoop"), ":\n{}", go);
-    // Inclusive ranges use a continue-safe stop flag (#322), not
+    // Inclusive ranges use a continue-safe stop flag (#322, #2153), not
     // `i <= 8; i++` (that form wraps at a type maximum). Bounds are
-    // hoisted so the stop check is `i != hyHiN`.
+    // hoisted and stepped via `i, hyCont = i + 1, i < hyHiN`.
     assert!(
         go.contains("<= ") && go.contains("8"),
         "inclusive empty-range guard:\n{}",
         go
     );
     assert!(
-        go.contains("i != "),
+        go.contains("i < hyHi") && go.contains("hyCont"),
         "inclusive last-value stop check:\n{}",
         go
     );
@@ -742,7 +742,7 @@ fn inclusive_range_at_type_maximum_uses_stop_flag() {
         go
     );
     assert!(
-        go.contains("value !="),
+        go.contains("value < hyHi") && go.contains("hyCont"),
         "continue-safe stop check present:\n{}",
         go
     );
