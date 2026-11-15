@@ -3,13 +3,17 @@ package regexbinding
 import (
 	"errors"
 	"runtime"
+	"unicode/utf8"
 	"unsafe"
 
 	"hybrid.program/hybridge"
 )
 
 // The binding's error surface (Spike 5 sentinel shape).
-var ErrRegex = errors.New("regex: pattern or text invalid")
+var (
+	ErrRegex = errors.New("regex: pattern or text invalid")
+	ErrABI   = errors.New("regexbinding: hyrt ABI handshake mismatch (rebuild the runtime)")
+)
 
 // pinString: the copy-small pinned borrow for one string argument.
 func pinString(s string) (uintptr, uintptr, *runtime.Pinner, []byte) {
@@ -31,6 +35,9 @@ func pinString(s string) (uintptr, uintptr, *runtime.Pinner, []byte) {
 // regex_syntax::ast::Ast / ClassSet recurses on bracket nesting depth. That
 // exceeds the 4,096 B DEFAULT fast-path guard even for a 1-byte pattern.
 func IsMatch(pattern, text string) (bool, error) {
+	if !utf8.ValidString(pattern) || !utf8.ValidString(text) {
+		return false, ErrRegex
+	}
 	pptr, plen, pp, pb := pinString(pattern)
 	tptr, tlen, tp, tb := pinString(text)
 	v := int64(hybridge.CrossDeep4(FnIsMatch, pptr, plen, tptr, tlen))
@@ -40,10 +47,14 @@ func IsMatch(pattern, text string) (bool, error) {
 	runtime.KeepAlive(pb)
 	runtime.KeepAlive(tp)
 	runtime.KeepAlive(tb)
-	if v < 0 {
+	switch v {
+	case 0:
+		return false, nil
+	case 1:
+		return true, nil
+	default:
 		return false, ErrRegex
 	}
-	return v == 1, nil
 }
 
 // IsValid reports whether the pattern compiles (validity as a bool — no
@@ -52,6 +63,9 @@ func IsMatch(pattern, text string) (bool, error) {
 // Stack class: DEEP (CrossDeep2) — same Regex::new compilation and AST-drop
 // stack profile as IsMatch.
 func IsValid(pattern string) bool {
+	if !utf8.ValidString(pattern) {
+		return false
+	}
 	pptr, plen, pp, pb := pinString(pattern)
 	v := hybridge.CrossDeep2(FnIsValid, pptr, plen)
 	pp.Unpin()
