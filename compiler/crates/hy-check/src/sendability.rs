@@ -519,13 +519,22 @@ impl<'a> Checker<'a> {
             }
             Expr::SliceLit { items, .. } => self.classify_composite(st, expr, items.iter()),
             Expr::Call { callee, args, .. }
-                if matches!(
-                    unwrap_parens(callee),
-                    Expr::Ident { name, .. }
-                        if Self::base_named_type_str(name) == "some"
-                            && self.lookup_binding(st, name).is_none()
-                            && self.lookup_binding(st, Self::base_named_type_str(name)).is_none()
-                ) =>
+                if {
+                    let u = unwrap_parens(callee);
+                    matches!(
+                        u,
+                        Expr::Ident { name, .. }
+                            if Self::base_named_type_str(name) == "some"
+                                && self.lookup_binding(st, name).is_none()
+                                && self.lookup_binding(st, Self::base_named_type_str(name))
+                                    .is_none()
+                    ) || matches!(
+                        // Allocating type conversion produces fresh storage (O4.6 / #2274)
+                        u,
+                        Expr::SliceLit { elem: Some(_), items, .. }
+                            if items.is_empty() && u.as_array_lit().is_none()
+                    )
+                } =>
             {
                 self.classify_composite(st, expr, args.iter().map(|a| &a.value))
             }
