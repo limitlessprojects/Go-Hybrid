@@ -4934,7 +4934,7 @@ impl<'a> Collector<'a> {
                 rhs,
                 ..
             } => {
-                if self.is_untyped_int_const(lhs) && !self.is_untyped_int_const(rhs) {
+                if self.is_int_const_expr(lhs, true) && !self.is_int_const_expr(rhs, false) {
                     Some((e, *op))
                 } else {
                     self.find_untyped_nonconst_shift(lhs)
@@ -4978,10 +4978,8 @@ impl<'a> Collector<'a> {
         // When an untyped shift (`1 << n`) appears inside a float/complex conversion
         // (`float64(...)`, `complex128(...)`), the untyped constant left operand adopts
         // the non-integer target type, which Go forbids with `invalid operation: 1 << n (shift of type float64)`.
-        if matches!(
-            name,
-            "float32" | "float64" | "f32" | "f64" | "complex64" | "complex128" | "c64" | "c128"
-        ) {
+        // Also covers `string(1 << n)` / `bool(1 << n)` and aliases to non-integer scalars (#3630).
+        if matches!(k, OpKind::Float | OpKind::Str | OpKind::Bool) {
             if let Some((shift_expr, _)) = self.find_untyped_nonconst_shift(arg) {
                 self.emit_e1002(
                     shift_expr.span(),
@@ -4991,7 +4989,7 @@ impl<'a> Collector<'a> {
                         name,
                         name
                     ),
-                    "a non-constant shift of an untyped constant inherits the target type of the enclosing conversion; bitwise shifts are not defined on floating-point or complex types",
+                    "a non-constant shift of an untyped constant inherits the target type of the enclosing conversion; bitwise shifts are not defined on floating-point, complex, string, or bool types",
                 );
                 return;
             }
@@ -7465,6 +7463,10 @@ impl<'a> Collector<'a> {
     }
 
     fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        self.is_int_const_expr(expr, true)
+    }
+
+    fn is_int_const_expr(&self, expr: &Expr, require_untyped: bool) -> bool {
         match unwrap_parens(expr) {
             Expr::Lit {
                 kind: LitKind::Int(_) | LitKind::Char(_),
@@ -7474,19 +7476,19 @@ impl<'a> Collector<'a> {
                 for layer in self.scopes.iter().rev() {
                     if let Some(Some(id)) = layer.get(name) {
                         let d = &self.defines[*id];
-                        if d.kind == LocalKind::Const && d.is_untyped {
+                        if d.kind == LocalKind::Const && (!require_untyped || d.is_untyped) {
                             return self.lookup_kind(name) == Some(OpKind::Int);
                         }
                         return false;
                     }
                 }
-                if self.file_untyped_consts.contains(name) {
+                if !require_untyped || self.file_untyped_consts.contains(name) {
                     return self.file_consts.get(name) == Some(&OpKind::Int);
                 }
                 false
             }
             Expr::Unary { op, operand, .. } => {
-                matches!(op, UnOp::Neg) && self.is_untyped_int_const(operand)
+                matches!(op, UnOp::Neg) && self.is_int_const_expr(operand, require_untyped)
             }
             Expr::Binary { op, lhs, rhs, .. } => {
                 matches!(
@@ -7501,8 +7503,8 @@ impl<'a> Collector<'a> {
                         | BinOp::BitXor
                         | BinOp::Shl
                         | BinOp::Shr
-                ) && self.is_untyped_int_const(lhs)
-                    && self.is_untyped_int_const(rhs)
+                ) && self.is_int_const_expr(lhs, require_untyped)
+                    && self.is_int_const_expr(rhs, require_untyped)
             }
             _ => false,
         }
