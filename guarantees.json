@@ -344,13 +344,13 @@
     },
     {
       "id": 17,
-      "surface": "Memory safety, Go side",
-      "does": "Go's GC, unchanged — Hybrid emits Go source",
-      "claim": "**Inherited from Go**",
-      "strength": "inherited",
+      "surface": "Memory safety & allocation, Go side",
+      "does": "Go's GC backed by compositional heap-allocation budgets for the checked subset (proven constant/linear allocation bounds; unbounded allocations fail-closed unless annotated or managed)",
+      "claim": "**Inherited from Go with Proven Allocation Bounds in Checked Subset**",
+      "strength": "guaranteed",
       "rules": [],
       "fixtures": [],
-      "evidence_md": "§9.2"
+      "evidence_md": "§9.2, [W-028](MOONSHOT.md), [Spike Results](spikes/w-checked-allocation-4492/RESULTS.md)"
     },
     {
       "id": 18,
