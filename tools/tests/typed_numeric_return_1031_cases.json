@@ -1,0 +1,1 @@
+{"suite": "typed_numeric_return_1031", "cases": ["fn f() float64 { n := 3; return n }"]}

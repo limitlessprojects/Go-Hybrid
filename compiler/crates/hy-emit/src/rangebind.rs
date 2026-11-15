@@ -216,7 +216,7 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
                         // so it counts regardless. Conservative direction:
                         // treat the name as read; a missing `_` merely leaves
                         // the old emission.
-                        if *inclusive || crate::Emitter::expr_has_hoistable_try(hi) {
+                        if *inclusive || crate::Emitter::expr_has_call_or_recv(hi) {
                             if expr_reads(hi, target) {
                                 return true;
                             }
@@ -254,7 +254,14 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
                         MatchPattern::Path { segments, .. } if segments == &["none"]
                     ) || matches!(&a.pattern, MatchPattern::Wildcard)
                 });
-            if is_option_match {
+            let simple_none_wild = arms.iter().all(|a| {
+                matches!(&a.pattern, MatchPattern::Path { segments, binding: Some(_) } if segments == &["some"])
+                    || a.guard.is_none()
+            }) && arms.iter().filter(|a| matches!(&a.pattern, MatchPattern::Path { segments, .. } if segments == &["none"])).count() <= 1
+                && arms.iter().filter(|a| matches!(&a.pattern, MatchPattern::Wildcard)).count() <= 1
+                && arms.iter().position(|a| matches!(&a.pattern, MatchPattern::Wildcard))
+                    .is_none_or(|wi| wi + 1 == arms.len());
+            if is_option_match && simple_none_wild {
                 let mut some_arms: Vec<(&str, &hy_syntax::MatchArm)> = Vec::new();
                 let mut none_arm: Option<&hy_syntax::MatchArm> = None;
                 let mut wildcard_arm: Option<&hy_syntax::MatchArm> = None;
@@ -304,20 +311,49 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
                 return none_arm.is_some_and(|arm| block_reads(&arm.body, target))
                     || wildcard_arm.is_some_and(|arm| block_reads(&arm.body, target));
             }
+            let mut seen_unguarded_some = false;
+            let mut seen_unguarded_none = false;
             for arm in arms {
-                if matches!(
+                let is_some = matches!(
+                    &arm.pattern,
+                    MatchPattern::Path {
+                        segments,
+                        binding: Some(_),
+                    } if segments == &["some"]
+                );
+                let is_none = matches!(
+                    &arm.pattern,
+                    MatchPattern::Path { segments, .. } if segments == &["none"]
+                );
+                let is_wild = matches!(&arm.pattern, MatchPattern::Wildcard);
+                if (is_some && seen_unguarded_some) || (is_none && seen_unguarded_none) {
+                    continue;
+                }
+                let shadowed_some = matches!(
                     &arm.pattern,
                     MatchPattern::Path {
                         segments,
                         binding: Some(b),
                     } if segments == &["some"] && b == target
-                ) {
-                    continue;
-                }
-                if arm.guard.as_ref().is_some_and(|g| expr_reads(g, target))
-                    || block_reads(&arm.body, target)
+                );
+                if !shadowed_some
+                    && (arm.guard.as_ref().is_some_and(|g| expr_reads(g, target))
+                        || block_reads(&arm.body, target))
                 {
                     return true;
+                }
+                if arm.guard.is_none() {
+                    if is_wild {
+                        break;
+                    }
+                    if is_some {
+                        seen_unguarded_some = true;
+                    } else if is_none {
+                        seen_unguarded_none = true;
+                    }
+                    if seen_unguarded_some && seen_unguarded_none {
+                        break;
+                    }
                 }
             }
             false

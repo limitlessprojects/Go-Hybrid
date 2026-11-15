@@ -176,6 +176,12 @@ enum Frame {
     Interp { depth: u32 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrEscape {
+    Char(char),
+    Byte(u8),
+}
+
 struct Lexer<'a> {
     path: String,
     chars: Vec<char>,
@@ -479,23 +485,39 @@ impl<'a> Lexer<'a> {
             self.bump();
             s.push('0');
             s.push(base);
+            let mut underscore_err = false;
+            let mut prev_underscore = false;
+            let mut trailing_underscore = false;
+            if self.at(0) == Some('_') {
+                underscore_err = true;
+            }
             while let Some(c) = self.at(0) {
                 if c == '_' || c.is_ascii_alphanumeric() {
-                    if c != '_' {
+                    if c == '_' {
+                        if prev_underscore {
+                            underscore_err = true;
+                        }
+                        prev_underscore = true;
+                        trailing_underscore = true;
+                    } else {
                         s.push(c);
+                        prev_underscore = false;
+                        trailing_underscore = false;
                     }
                     self.bump();
                 } else {
                     break;
                 }
             }
-            if self.at(0) == Some('.') && self.at(1) != Some('.') {
+            if trailing_underscore {
+                underscore_err = true;
+            }
+            if (self.at(0) == Some('.') && self.at(1) != Some('.')) || (s.ends_with(['p', 'P']) && matches!(self.at(0), Some('+') | Some('-'))) {
                 // A prefixed base literal (0x, 0b, 0o) cannot have a fractional part
                 // (SPEC-LANGUAGE.md LX6). Consume the dot and subsequent characters so
                 // it fails as a single malformed literal instead of leaking as an orphan
                 // leading-dot float on the same line (issue #1168).
-                s.push('.');
-                self.bump();
+                s.push(self.bump().unwrap());
                 while let Some(c) = self.at(0) {
                     if c == '_' || c.is_ascii_alphanumeric() || c == '+' || c == '-' {
                         s.push(c);
@@ -536,20 +558,43 @@ impl<'a> Lexer<'a> {
                     ),
                 );
             }
+            if underscore_err {
+                self.escape_diag(
+                    start,
+                    false,
+                    format!(
+                        "malformed 0{base} integer literal: '_' must separate successive digits (SPEC-LANGUAGE.md LX6)"
+                    ),
+                );
+            }
             return self.tok(start, Tok::Int(s));
         }
 
         // decimal / float
         let mut is_float = false;
+        let mut underscore_err = false;
+        let mut prev_underscore = false;
+        let mut trailing_underscore = false;
         while let Some(c) = self.at(0) {
             if c == '_' || c.is_ascii_digit() {
-                if c != '_' {
+                if c == '_' {
+                    if prev_underscore {
+                        underscore_err = true;
+                    }
+                    prev_underscore = true;
+                    trailing_underscore = true;
+                } else {
                     s.push(c);
+                    prev_underscore = false;
+                    trailing_underscore = false;
                 }
                 self.bump();
             } else {
                 break;
             }
+        }
+        if trailing_underscore {
+            underscore_err = true;
         }
         // fractional part — SPEC LX6: `1.5`, `2.`, `.5`, `1e9`.
         // A dot after digits is part of a float unless:
@@ -558,25 +603,42 @@ impl<'a> Lexer<'a> {
         //    UNLESS that starts an exponent (`2.e3`, `2.e+3`, `2.e-3`).
         if self.at(0) == Some('.') {
             let is_range = self.at(1) == Some('.');
-            let is_exp = matches!(self.at(1), Some('e') | Some('E')) && {
-                let k = if matches!(self.at(2), Some('+') | Some('-')) { 3 } else { 2 };
-                self.at(k).map(|d| d.is_ascii_digit()) == Some(true)
-            };
-            let is_ident_start = self.at(1).map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false);
+            let is_exp = matches!(self.at(1), Some('e') | Some('E'))
+                && matches!(self.at(2), Some('+') | Some('-') | Some('0'..='9'));
+            let is_ident_start = self.at(1).map(|c| c.is_ascii_alphabetic()).unwrap_or(false);
 
             if !is_range && (!is_ident_start || is_exp) {
+                if trailing_underscore {
+                    underscore_err = true;
+                }
                 is_float = true;
                 s.push('.');
                 self.bump();
+                if self.at(0) == Some('_') {
+                    underscore_err = true;
+                }
+                prev_underscore = false;
+                trailing_underscore = false;
                 while let Some(c) = self.at(0) {
                     if c == '_' || c.is_ascii_digit() {
-                        if c != '_' {
+                        if c == '_' {
+                            if prev_underscore {
+                                underscore_err = true;
+                            }
+                            prev_underscore = true;
+                            trailing_underscore = true;
+                        } else {
                             s.push(c);
+                            prev_underscore = false;
+                            trailing_underscore = false;
                         }
                         self.bump();
                     } else {
                         break;
                     }
+                }
+                if trailing_underscore {
+                    underscore_err = true;
                 }
             }
         }
@@ -587,6 +649,9 @@ impl<'a> Lexer<'a> {
                 k = 2;
             }
             if self.at(k).map(|d| d.is_ascii_digit()) == Some(true) {
+                if trailing_underscore {
+                    underscore_err = true;
+                }
                 is_float = true;
                 // push the exponent marker (and sign) exactly once — the
                 // bumped chars ARE the marker; no extra `e` push.
@@ -595,22 +660,70 @@ impl<'a> Lexer<'a> {
                         s.push(c);
                     }
                 }
+                if self.at(0) == Some('_') {
+                    underscore_err = true;
+                }
+                prev_underscore = false;
+                trailing_underscore = false;
                 while let Some(c) = self.at(0) {
                     if c == '_' || c.is_ascii_digit() {
-                        if c != '_' {
+                        if c == '_' {
+                            if prev_underscore {
+                                underscore_err = true;
+                            }
+                            prev_underscore = true;
+                            trailing_underscore = true;
+                        } else {
                             s.push(c);
+                            prev_underscore = false;
+                            trailing_underscore = false;
                         }
                         self.bump();
                     } else {
                         break;
                     }
                 }
+                if trailing_underscore {
+                    underscore_err = true;
+                }
+            } else {
+                is_float = true;
+                for _ in 0..k {
+                    s.push(self.bump().unwrap());
+                }
+                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                    s.push(self.bump().unwrap());
+                }
+                self.escape_diag(start, false, "malformed float literal: exponent has no digits (SPEC-LANGUAGE.md LX6)");
             }
         }
         if is_float {
+            if self.at(0) == Some('.') && self.at(1) != Some('.') {
+                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric() || (c == '.' && self.at(1) != Some('.'))) {
+                    s.push(self.bump().unwrap());
+                }
+                self.escape_diag(start, false, "malformed float literal: unexpected second . in float literal (SPEC-LANGUAGE.md LX6)");
+            } else if self.at(0).is_some_and(|c| c.is_ascii_alphabetic()) {
+                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                    s.push(self.bump().unwrap());
+                }
+                self.escape_diag(start, false, "malformed float literal: invalid character in float literal (SPEC-LANGUAGE.md LX6)");
+            }
+            if underscore_err {
+                self.escape_diag(
+                    start,
+                    false,
+                    "malformed float literal: '_' must separate successive digits (SPEC-LANGUAGE.md LX6)",
+                );
+            }
             self.tok(start, Tok::Float(s))
         } else {
-            if s.starts_with('0') && s.len() > 1 {
+            if self.at(0).is_some_and(|c| c.is_ascii_alphabetic()) {
+                while self.at(0).is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                    s.push(self.bump().unwrap());
+                }
+                self.escape_diag(start, false, "malformed integer literal: invalid trailing suffix (SPEC-LANGUAGE.md LX6)");
+            } else if s.starts_with('0') && s.len() > 1 {
                 if let Some(bad) = s.chars().find(|&c| !matches!(c, '0'..='7')) {
                     self.escape_diag(
                         start,
@@ -620,6 +733,13 @@ impl<'a> Lexer<'a> {
                         ),
                     );
                 }
+            }
+            if underscore_err {
+                self.escape_diag(
+                    start,
+                    false,
+                    "malformed integer literal: '_' must separate successive digits (SPEC-LANGUAGE.md LX6)",
+                );
             }
             self.tok(start, Tok::Int(s))
         }
@@ -748,6 +868,23 @@ impl<'a> Lexer<'a> {
 
     // -- string mode -----------------------------------------------------------
 
+    /// Flush buffered byte-valued escapes (`\xNN`, `\NNN`) into `cooked`.
+    /// Valid UTF-8 sequences decode directly to their Unicode scalar values
+    /// (preserving multi-byte UTF-8 sequences like `"\xc3\xa9"` -> `"é"` per
+    /// LX7/T3); any non-UTF-8 remainder bytes fall back byte-for-byte.
+    fn flush_str_bytes(pending_bytes: &mut Vec<u8>, cooked: &mut String) {
+        if pending_bytes.is_empty() {
+            return;
+        }
+        for chunk in pending_bytes.utf8_chunks() {
+            cooked.push_str(chunk.valid());
+            for &b in chunk.invalid() {
+                cooked.push(char::from(b));
+            }
+        }
+        pending_bytes.clear();
+    }
+
     /// Scan one segment of a `"…"` string: a literal chunk (terminated by
     /// `"` or EOF) or an interpolation opener (terminated by `{`). Returns
     /// `None` never — every path emits a token (chunks carry their StrEnd /
@@ -755,8 +892,10 @@ impl<'a> Lexer<'a> {
     fn lex_str_segment(&mut self, emitted_any: bool) -> Option<Token> {
         let start = self.pos();
         let mut cooked = String::new();
+        let mut pending_bytes: Vec<u8> = Vec::new();
         loop {
             let Some(c) = self.at(0) else {
+                Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
                 self.frames.pop();
                 self.diag(PARSE_ERR_CODE, start, "unterminated string literal");
                 if cooked.is_empty() && emitted_any {
@@ -767,6 +906,7 @@ impl<'a> Lexer<'a> {
             };
             match c {
                 '"' => {
+                    Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
                     self.bump();
                     self.frames.pop();
                     if cooked.is_empty() && emitted_any {
@@ -776,6 +916,7 @@ impl<'a> Lexer<'a> {
                     return Some(self.tok(start, Tok::StrChunk(cooked)));
                 }
                 '{' => {
+                    Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
                     if self.at(1) == Some('{') {
                         self.bump();
                         self.bump();
@@ -795,6 +936,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 '}' => {
+                    Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
                     // `}}` escapes a literal brace; a lone `}` is literal text
                     self.bump();
                     if self.at(0) == Some('}') {
@@ -804,9 +946,14 @@ impl<'a> Lexer<'a> {
                 }
                 '\\' => {
                     self.bump();
-                    match self.escape_char(true) {
-                        Some(e) => cooked.push(e),
+                    match self.escape_raw(true) {
+                        Some(StrEscape::Byte(b)) => pending_bytes.push(b),
+                        Some(StrEscape::Char(e)) => {
+                            Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
+                            cooked.push(e);
+                        }
                         None => {
+                            Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
                             // unknown escape: keep the char verbatim (diag recorded)
                             if let Some(c2) = self.bump() {
                                 cooked.push(c2);
@@ -815,6 +962,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 _ => {
+                    Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
                     cooked.push(c);
                     self.bump();
                 }
@@ -822,8 +970,20 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// One escape sequence after `\` for rune literals (`'…'`), where `\xNN`
+    /// and `\NNN` denote a code point in `0..=255`.
+    fn escape_char(&mut self, str_mode: bool) -> Option<char> {
+        match self.escape_raw(str_mode)? {
+            StrEscape::Char(c) => Some(c),
+            StrEscape::Byte(b) => Some(char::from(b)),
+        }
+    }
+
     /// One escape sequence after `\`. `str_mode` selects the Go string escape
     /// set (`\uNNNN`); char literals use the rune set (`\u{…}`, LX6).
+    /// Byte-valued escapes (`\xNN`, `\NNN`) return `StrEscape::Byte(u8)` so
+    /// interpreted strings can assemble multi-byte UTF-8 sequences before
+    /// decoding, while rune literals convert the byte to its scalar value.
     ///
     /// Fail-closed contract (GUARANTEES.md row 4's spirit, extended to the
     /// lexer): every malformed escape this function can SEE must record a
@@ -831,20 +991,20 @@ impl<'a> Lexer<'a> {
     /// recorded" on `None`. The one silent `None` left is end-of-input
     /// mid-escape: the literal loop then runs to EOF and the caller emits
     /// its own `unterminated string/char literal` diagnostic.
-    fn escape_char(&mut self, str_mode: bool) -> Option<char> {
+    fn escape_raw(&mut self, str_mode: bool) -> Option<StrEscape> {
         let start = self.pos();
         let c = self.bump()?;
         let out = match c {
-            'n' => '\n',
-            't' => '\t',
-            'r' => '\r',
-            '\\' => '\\',
-            '"' => '"',
-            '\'' => '\'',
-            'a' => '\u{7}',
-            'b' => '\u{8}',
-            'f' => '\u{c}',
-            'v' => '\u{b}',
+            'n' => StrEscape::Char('\n'),
+            't' => StrEscape::Char('\t'),
+            'r' => StrEscape::Char('\r'),
+            '\\' => StrEscape::Char('\\'),
+            '"' => StrEscape::Char('"'),
+            '\'' => StrEscape::Char('\''),
+            'a' => StrEscape::Char('\u{7}'),
+            'b' => StrEscape::Char('\u{8}'),
+            'f' => StrEscape::Char('\u{c}'),
+            'v' => StrEscape::Char('\u{b}'),
             'x' => {
                 let mut v: u32 = 0;
                 for _ in 0..2 {
@@ -861,8 +1021,7 @@ impl<'a> Lexer<'a> {
                     };
                     v = v * 16 + d;
                 }
-                // v <= 0xFF is always a scalar value; from_u32 cannot fail.
-                char::from_u32(v)?
+                StrEscape::Byte(v as u8)
             }
             'u' => {
                 if str_mode {
@@ -881,7 +1040,7 @@ impl<'a> Lexer<'a> {
                         };
                         v = v * 16 + d;
                     }
-                    self.scalar_or_diag(v, start, str_mode, "\\u")?
+                    StrEscape::Char(self.scalar_or_diag(v, start, str_mode, "\\u")?)
                 } else {
                     // rune style: \u{1F600}
                     if self.bump() != Some('{') {
@@ -924,7 +1083,7 @@ impl<'a> Lexer<'a> {
                             }
                         }
                     }
-                    self.scalar_or_diag(v, start, str_mode, "\\u{…}")?
+                    StrEscape::Char(self.scalar_or_diag(v, start, str_mode, "\\u{…}")?)
                 }
             }
             'U' => {
@@ -943,7 +1102,7 @@ impl<'a> Lexer<'a> {
                     };
                     v = v * 16 + d;
                 }
-                self.scalar_or_diag(v, start, str_mode, "\\U")?
+                StrEscape::Char(self.scalar_or_diag(v, start, str_mode, "\\U")?)
             }
             '0'..='7' => {
                 // octal \NNN — at most three digits (c plus up to two more),
@@ -966,7 +1125,7 @@ impl<'a> Lexer<'a> {
                     );
                     return None;
                 }
-                char::from_u32(v)?
+                StrEscape::Byte(v as u8)
             }
             _ => {
                 self.diag(

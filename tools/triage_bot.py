@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -37,6 +38,7 @@ from urllib.request import Request, urlopen
 CONFIG_PATH = Path(__file__).resolve().parent / "triage_config.json"
 DEFAULT_TOKEN_FILE = "/home/z/my-project/.gh_token"
 BOARD_MARKER = "triage-bot:board:v1"
+BOARD_TITLE = "Triage Board (auto-updated daily — pin me)"
 API = "https://api.github.com"
 
 
@@ -184,25 +186,32 @@ def collect(cfg, gh, args):
     # the actionable rebase window; a PR 600 commits behind is a stale-base
     # close-candidate regardless of overlap.
     overlap_window = 100
+    mb_cache, mb_lock = {}, threading.Lock()
+
+    def get_main_paths(merge_base):
+        with mb_lock:
+            if merge_base not in mb_cache:
+                cmp2 = gh.get("/repos/%s/compare/%s...%s?per_page=250" % (gh.repo, merge_base, main_sha))
+                mb_cache[merge_base] = {f["filename"] for f in (cmp2 or {}).get("files", []) if f.get("filename")}
+            return mb_cache[merge_base]
 
     def one(pr):
         n = pr["number"]
-        full = gh.get("/repos/%s/pulls/%d" % (gh.repo, n))
-        files = gh.paginate("/repos/%s/pulls/%d/files?per_page=100" % (gh.repo, n))
-        paths = [f["filename"] for f in files]
+        full = gh.get("/repos/%s/pulls/%d" % (gh.repo, n)) or {}
+        files = gh.paginate("/repos/%s/pulls/%d/files?per_page=100" % (gh.repo, n)) or []
+        paths = [f["filename"] for f in files if f.get("filename")]
         pset = set(paths)
         adds = sum(f.get("additions", 0) or 0 for f in files)
         dels = sum(f.get("deletions", 0) or 0 for f in files)
 
-        behind_by, overlap_paths, merge_base = 0, set(), None
-        cmp1 = gh.get("/repos/%s/compare/%s...%s" % (gh.repo, main_sha, pr["head"]["sha"]))
+        head_sha = (pr.get("head") or {}).get("sha", "")
+        behind_by, overlap_paths, merge_base = 0, set(), (main_sha if head_sha == main_sha else None)
+        cmp1 = None if head_sha == main_sha else gh.get("/repos/%s/compare/%s...%s" % (gh.repo, main_sha, head_sha))
         if cmp1:
             behind_by = cmp1.get("behind_by", 0) or 0
             merge_base = (cmp1.get("merge_base_commit") or {}).get("sha")
             if 0 < behind_by <= overlap_window and merge_base:
-                cmp2 = gh.get("/repos/%s/compare/%s...%s?per_page=250" % (gh.repo, merge_base, main_sha))
-                main_paths = {f["filename"] for f in (cmp2 or {}).get("files", [])}
-                overlap_paths = pset & main_paths
+                overlap_paths = pset & get_main_paths(merge_base)
         return {
             "number": n,
             "title": pr["title"][:90],
@@ -551,6 +560,47 @@ def cmd_labels(args):
 
 # ---------------------------------------------------------------- board
 
+def is_board_issue(issue, *, discovered=False):
+    if not isinstance(issue, dict) or issue.get("state") != "open" or "pull_request" in issue:
+        return False
+    marker = "<!-- %s -->" % BOARD_MARKER
+    if marker not in [line.strip() for line in (issue.get("body") or "").splitlines()]:
+        return False
+    if discovered:
+        trusted = issue.get("author_association") in {"OWNER", "MEMBER", "COLLABORATOR"}
+        trusted = trusted or (issue.get("user") or {}).get("login") == "github-actions[bot]"
+        return trusted and issue.get("title") == BOARD_TITLE
+    return True
+
+
+def board_target(cfg, gh):
+    """Select a validated target; search relevance is not board identity."""
+    number = cfg.get("board_issue")
+    discovered = number is None
+    if discovered:
+        status, result = gh.req("GET", "/search/issues?q=%s&per_page=100" % quote(
+            'repo:%s is:issue is:open "%s" in:body' % (cfg["repo"], BOARD_MARKER)))
+        if status != 200 or not isinstance(result, dict):
+            raise RuntimeError("board search failed; no issue was changed")
+        hits = result.get("items")
+        if (not isinstance(hits, list) or result.get("incomplete_results")
+                or result.get("total_count") != len(hits)):
+            raise RuntimeError("board search is incomplete; configure board_issue before posting")
+        candidates = [item for item in hits if is_board_issue(item, discovered=True)]
+        if len(candidates) > 1:
+            raise RuntimeError("multiple board candidates; configure board_issue before posting")
+        if not candidates:
+            return None
+        number = candidates[0].get("number")
+    if type(number) is not int or number <= 0:
+        raise RuntimeError("board_issue must be a positive issue number")
+    status, issue = gh.req("GET", "/repos/%s/issues/%d" % (gh.repo, number))
+    if (status != 200 or not is_board_issue(issue, discovered=discovered)
+            or issue.get("number") != number):
+        raise RuntimeError("board target #%d is missing, closed, or invalid; no issue was changed" % number)
+    return number
+
+
 def cmd_board(args):
     cfg = load_cfg()
     pareto_n = args.pareto or cfg["pareto_n"]
@@ -571,16 +621,13 @@ def cmd_board(args):
     if not args.post:
         print(md)
         return
-    _, srch = gh.req("GET", "/search/issues?q=%s" % quote(
-        'repo:%s is:issue is:open "%s" in:body' % (cfg["repo"], BOARD_MARKER)))
-    hits = (srch or {}).get("items", [])
-    if hits:
-        n = hits[0]["number"]
+    n = board_target(cfg, gh)
+    if n is not None:
         gh.patch("/repos/%s/issues/%d" % (cfg["repo"], n), {"body": md})
         log("board updated on #%d (%d calls, %s remaining)" % (n, gh.calls, gh.remaining))
     else:
         iss = gh.post("/repos/%s/issues" % cfg["repo"],
-                      {"title": "Triage Board (auto-updated daily — pin me)",
+                      {"title": BOARD_TITLE,
                        "body": md})
         log("board created: %s (%d calls)" % (iss.get("html_url"), gh.calls))
 
