@@ -146,6 +146,39 @@ class WorkflowWorkspacePaths(unittest.TestCase):
         self.assertIn("tools/corpus_harness.py --bin compiler/target/debug/hyb", src)
         self.assertIn("tools/differential_loop.py --bin compiler/target/debug/hyb", src)
 
+    def test_always_w7_session_logs_bind_job_status(self):
+        for wf in ("shepherd-board.yml", "shepherd-dup.yml", "shepherd-rebase.yml"):
+            src = (self.ROOT / ".github" / "workflows" / wf).read_text(encoding="utf-8")
+            self.assertIn("--job-status", src, wf)
+            self.assertIn("${{ job.status }}", src, wf)
+
+
+class W7LogOutcomeTests(unittest.TestCase):
+    """if: always() W7 session-log steps must never record verdict='ok' or a
+    completion note when an earlier workflow step failed or cancelled
+    (reproduced in production run 43752174585 on shepherd-board)."""
+
+    def test_success_job_status_preserves_ok_verdict_and_note(self):
+        verdict, note = sh.resolve_log_outcome("ok", "board + labels refreshed", "success")
+        self.assertEqual(verdict, "ok")
+        self.assertEqual(note, "board + labels refreshed")
+
+    def test_failed_job_status_overrides_ok_verdict_and_completion_note(self):
+        verdict, note = sh.resolve_log_outcome("ok", "board + labels refreshed", "failure")
+        self.assertEqual(verdict, "failure")
+        self.assertNotEqual(note, "board + labels refreshed")
+        self.assertIn("failure", note)
+
+    def test_cancelled_job_status_overrides_unset_verdict(self):
+        verdict, note = sh.resolve_log_outcome(None, "phase A/B pass complete", "cancelled")
+        self.assertEqual(verdict, "cancelled")
+        self.assertIn("cancelled", note)
+
+    def test_unset_job_status_keeps_explicit_caller_fields(self):
+        verdict, note = sh.resolve_log_outcome("blocked", "probe evidence posted", None)
+        self.assertEqual(verdict, "blocked")
+        self.assertEqual(note, "probe evidence posted")
+
 
 class CmdProbeTests(unittest.TestCase):
     """cmd_probe must not crash with NameError on unmatched diffs or TypeError

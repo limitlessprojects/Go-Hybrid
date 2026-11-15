@@ -61,4 +61,4 @@ jobs:
 
       - name: W7 session log
         if: always()
-        run: python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event board-refresh --verdict "ok" --note "board + labels refreshed"
+        run: python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event board-refresh --verdict "ok" --note "board + labels refreshed" --job-status "${{ job.status }}"
