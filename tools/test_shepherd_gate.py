@@ -185,5 +185,74 @@ class CmdProbeTests(unittest.TestCase):
             Path(p).unlink(missing_ok=True)
 
 
+class LogOutcomeTests(unittest.TestCase):
+    """resolve_log_outcome normalizes verdict and note from ${{ job.status }} (#4499)."""
+
+    def test_none_or_empty_job_status_preserves_verdict_and_note(self):
+        self.assertEqual(
+            sh.resolve_log_outcome("ok", "hello", None),
+            ("ok", "hello"),
+        )
+        self.assertEqual(
+            sh.resolve_log_outcome(None, None, None),
+            (None, None),
+        )
+        self.assertEqual(
+            sh.resolve_log_outcome("custom-verdict", "custom-note", ""),
+            ("custom-verdict", "custom-note"),
+        )
+
+    def test_success_job_status_preserves_note_and_defaults_verdict(self):
+        self.assertEqual(
+            sh.resolve_log_outcome("ok", "note", "success"),
+            ("ok", "note"),
+        )
+        self.assertEqual(
+            sh.resolve_log_outcome(None, "note", "SUCCESS"),
+            ("ok", "note"),
+        )
+        self.assertEqual(
+            sh.resolve_log_outcome("custom", "note", "success"),
+            ("custom", "note"),
+        )
+
+    def test_failure_job_status_overrides_verdict_and_rewrites_note(self):
+        self.assertEqual(
+            sh.resolve_log_outcome("ok", "board + labels refreshed", "failure"),
+            ("failure", "job failure before completion (intended: board + labels refreshed)"),
+        )
+        self.assertEqual(
+            sh.resolve_log_outcome("ok", "phase A/B pass complete", "FAILURE"),
+            ("failure", "job failure before completion (intended: phase A/B pass complete)"),
+        )
+
+    def test_cancelled_job_status_overrides_verdict_and_rewrites_note(self):
+        self.assertEqual(
+            sh.resolve_log_outcome("ok", "rebase shepherd tick", "cancelled"),
+            ("cancelled", "job cancelled before completion (intended: rebase shepherd tick)"),
+        )
+        self.assertEqual(
+            sh.resolve_log_outcome("ok", "rebase shepherd tick", "CANCELLED"),
+            ("cancelled", "job cancelled before completion (intended: rebase shepherd tick)"),
+        )
+
+
+class WorkflowSessionLogTests(unittest.TestCase):
+    """All if: always() session-log steps must bind job.status to avoid false ok verdicts (#4499)."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def test_always_session_logs_forward_job_status(self):
+        workflows = [
+            self.ROOT / ".github" / "workflows" / "shepherd-board.yml",
+            self.ROOT / ".github" / "workflows" / "shepherd-dup.yml",
+            self.ROOT / ".github" / "workflows" / "shepherd-rebase.yml",
+        ]
+        for wf_path in workflows:
+            src = wf_path.read_text(encoding="utf-8")
+            self.assertIn('job-status "${{ job.status }}"', src, f"{wf_path.name} missing job.status binding")
+            self.assertIn('--verdict "ok"', src, f"{wf_path.name} missing explicit verdict ok")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -57,4 +57,4 @@ jobs:
 
       - name: W7 session log
         if: always()
-        run: python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event rebase-tick --note "rebase shepherd tick"
+        run: python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event rebase-tick --verdict "ok" --note "rebase shepherd tick" --job-status "${{ job.status }}"
