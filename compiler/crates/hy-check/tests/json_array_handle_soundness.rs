@@ -74,3 +74,62 @@ fn const_value_struct_addr_of_borrow_in_closure_and_rebind_is_rejected() {
     assert_eq!(r_multi_root.verdict, Verdict::Reject);
     assert!(codes(&r_multi_root).iter().any(|c| c == "HYB-E3004"));
 }
+
+#[test]
+fn json_set_rejects_non_owned_param_and_closure_capture_consume_e3004() {
+    let r_method_param = check("import \"rust/serde_json\"\nfn store(doc serde_json.value, child serde_json.value) {\n doc.set(\"c\", child)?\n}\nfn main() {\n doc := serde_json.new_object()\n child := serde_json.new_object()\n store(doc, child)\n child.set(\"k\", 1)?\n}\n");
+    assert_eq!(r_method_param.verdict, Verdict::Reject);
+    assert!(codes(&r_method_param).iter().any(|c| c == "HYB-E3004"));
+
+    let r_pkg_param = check("import \"rust/serde_json\"\nfn store(doc serde_json.value, child serde_json.value) {\n serde_json.set(doc, \"c\", child)?\n}\nfn main() {}\n");
+    assert_eq!(r_pkg_param.verdict, Verdict::Reject);
+    assert!(codes(&r_pkg_param).iter().any(|c| c == "HYB-E3004"));
+
+    let r_capture = check("import \"rust/serde_json\"\nfn main() {\n doc := serde_json.new_object()\n child := serde_json.new_object()\n f := fn() {\n doc.set(\"c\", child)?\n }\n f()\n child.set(\"k\", 1)?\n}\n");
+    assert_eq!(r_capture.verdict, Verdict::Reject);
+    assert!(codes(&r_capture).iter().any(|c| c == "HYB-E3004"));
+}
+
+#[test]
+fn json_set_consumes_projected_struct_slice_and_map_handles() {
+    let r_field = check("import \"rust/serde_json\"\nstruct box { v serde_json.value }\nfn main() {\n doc := serde_json.new_object()\n child := serde_json.new_object()\n b := box{v: child}\n doc.set(\"c\", b.v)?\n child.set(\"k\", 1)?\n}\n");
+    assert_eq!(r_field.verdict, Verdict::Reject);
+    assert!(codes(&r_field).iter().any(|c| c == "HYB-E3003"));
+
+    let r_slice = check("import \"rust/serde_json\"\nfn main() {\n doc := serde_json.new_object()\n child := serde_json.new_object()\n xs := []serde_json.value{child}\n serde_json.set(doc, \"c\", xs[0])?\n xs[0].set(\"k\", 1)?\n}\n");
+    assert_eq!(r_slice.verdict, Verdict::Reject);
+    assert!(codes(&r_slice).iter().any(|c| c == "HYB-E3003"));
+
+    let r_map = check("import \"rust/serde_json\"\nfn main() {\n doc := serde_json.new_object()\n child := serde_json.new_object()\n mp := map[string]serde_json.value{\"k\": child}\n doc.set(\"c\", mp[\"k\"])?\n child.set(\"k\", 1)?\n}\n");
+    assert_eq!(r_map.verdict, Verdict::Reject);
+    assert!(codes(&r_map).iter().any(|c| c == "HYB-E3003"));
+
+    let r_loan = check("import \"rust/serde_json\"\nstruct box { v serde_json.value }\nfn main() {\n doc := serde_json.new_object()\n child := serde_json.parse(`{\"items\": [1, 2]}`)?\n items := child.array(\"items\")?\n b := box{v: child}\n doc.set(\"c\", b.v)?\n _ = items.len()\n}\n");
+    assert_eq!(r_loan.verdict, Verdict::Reject);
+    assert!(codes(&r_loan).iter().any(|c| c == "HYB-E3101"));
+}
+
+#[test]
+fn json_set_consumes_unrooted_and_forwarding_handle_expressions() {
+    let r_comp_field = check("import \"rust/serde_json\"\nstruct box { v serde_json.value }\nfn main() {\n doc := serde_json.new_object()\n child := serde_json.new_object()\n doc.set(\"c\", (box{v: child}).v)?\n child.set(\"k\", 1)?\n}\n");
+    assert_eq!(r_comp_field.verdict, Verdict::Reject);
+    assert!(codes(&r_comp_field).iter().any(|c| c == "HYB-E3003"));
+
+    let r_comp_slice = check("import \"rust/serde_json\"\nfn main() {\n doc := serde_json.new_object()\n child := serde_json.new_object()\n doc.set(\"c\", []serde_json.value{child}[0])?\n child.set(\"k\", 1)?\n}\n");
+    assert_eq!(r_comp_slice.verdict, Verdict::Reject);
+    assert!(codes(&r_comp_slice).iter().any(|c| c == "HYB-E3003"));
+
+    let r_forward_call = check("import \"rust/serde_json\"\nfn id(v serde_json.value) serde_json.value { return v }\nfn main() {\n doc := serde_json.new_object()\n child := serde_json.new_object()\n doc.set(\"c\", id(child))?\n child.set(\"k\", 1)?\n}\n");
+    assert_eq!(r_forward_call.verdict, Verdict::Reject);
+    assert!(codes(&r_forward_call).iter().any(|c| c == "HYB-E3003"));
+
+    let r_forward_param = check("import \"rust/serde_json\"\nfn id(v serde_json.value) serde_json.value { return v }\nfn store(doc serde_json.value, child serde_json.value) {\n doc.set(\"c\", id(child))?\n}\nfn main() {}\n");
+    assert_eq!(r_forward_param.verdict, Verdict::Reject);
+    assert!(codes(&r_forward_param).iter().any(|c| c == "HYB-E3004"));
+}
+
+#[test]
+fn json_set_accepts_non_handle_fresh_read_and_managed_consumes() {
+    let r_ok = check("import \"rust/serde_json\"\nstruct box { v serde_json.value }\nfn make_fresh(other serde_json.value) serde_json.value {\n _ = other\n return serde_json.new_object()\n}\nfn managed_store(doc serde_json.value, child serde_json.value) error {\n managed(\"json\", \"interop\") {\n doc.set(\"c\", child)?\n }\n return nil\n}\nfn main() {\n doc := serde_json.new_object()\n nums := []int{1, 2}\n doc.set(\"n\", nums[0])?\n doc.set(\"fresh\", serde_json.new_object())?\n other := serde_json.new_object()\n doc.set(\"from_fn\", make_fresh(other))?\n other.set(\"ok\", 1)?\n doc2 := serde_json.parse(`{\"a\": 1}`)?\n doc.set(\"read_int\", doc2.int(\"a\")?)?\n doc2.set(\"ok\", 2)?\n child := serde_json.new_object()\n b := box{v: child}\n doc.set(\"boxed\", b.v)?\n}\n");
+    assert_eq!(r_ok.verdict, Verdict::Accept, "expected 0 diagnostics, got {:?}", r_ok.diagnostics);
+}

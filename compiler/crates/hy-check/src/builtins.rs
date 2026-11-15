@@ -884,7 +884,7 @@ impl<'a> Checker<'a> {
 
     /// Is this call lexically inside a `managed(...)` block? `managed` is the
     /// declared escape hatch, so an escape site there is permitted.
-    fn in_managed_at(&self, span: Span) -> bool { self.managed_depth > 0 || self.enclosing_fn(span).and_then(|f| f.body.as_ref()).is_some_and(|b| { let fl = crate::walk::flatten(b); fl.stmts.iter().any(|(s, i)| span_contains(s.span(), span) && fl.in_managed(*i)) }) }
+    pub(crate) fn in_managed_at(&self, span: Span) -> bool { self.managed_depth > 0 || self.enclosing_fn(span).and_then(|f| f.body.as_ref()).is_some_and(|b| { let fl = crate::walk::flatten(b); fl.stmts.iter().any(|(s, i)| span_contains(s.span(), span) && fl.in_managed(*i)) }) }
     fn closure_writes_captured(&self, st: &FnState, params: &[hy_syntax::Param], results: &[hy_syntax::FnResult], body: &hy_syntax::Block, seeded: Option<Seed>) -> Option<Orig> {
         let (mut init, dep, esc_span, seed_origins, strict, mut sa, frames) = seeded.unwrap_or_else(|| (HashMap::new(), 0, fn_span(params, results, body), Vec::new(), false, self.enclosing_fn(body.span).map_or_else(|| StateAt::new(st.clone()), |ef| self.state_at(ef, Some(body.span))), Vec::new()));
         self.push_fn_sig(&mut sa, params, results, Some(&mut init)); let (mut scopes, mut local_fns) = (vec![init], HashMap::<String, LocalFn<'_>>::new());
