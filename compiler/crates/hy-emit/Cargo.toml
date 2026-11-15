@@ -7,3 +7,15 @@ authors.workspace = true
 
 [dependencies]
 hy-syntax = { path = "../hy-syntax" }
+hy-diag = { path = "../hy-diag" }
+
+# IR witness table (issue #3930): `Span`/`Pos` from hy-diag are
+# Serialize/Deserialize already; the emitter serializes the proof.json
+# envelope. Logged decision (PLAN.md Decision Log): serde + serde_json
+# added to hy-emit — the only tree dependencies, matching hy-diag.
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+
+[dependencies.serde_json]
+version = "1"
