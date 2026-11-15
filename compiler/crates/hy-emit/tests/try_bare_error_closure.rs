@@ -47,3 +47,9 @@ fn rebinding_a_closure_name_to_a_non_closure_forgets_its_shape() {
     assert!(go.contains("hyErr0 := check()"), "{go}");
     assert!(go.contains("ok, hyErr1 := check()"), "{go}");
 }
+
+#[test]
+fn closure_short_and_bare_returns_fill_error_tail_2969() {
+    let go = emit("fn main() {\n    f := fn() (int, error) {\n        if true { return 7 }\n        return\n    }\n    _, _ = f()\n}\n");
+    assert!(go.contains("return 7, nil") && go.contains("return 0, nil"), "{go}");
+}
