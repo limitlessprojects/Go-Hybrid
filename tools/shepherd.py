@@ -566,6 +566,25 @@ def cmd_comment(args):
 
 # ------------------------------------------------------------------ W7 log
 
+def resolve_log_outcome(verdict, note, job_status=None):
+    """Normalize log verdict and note based on GitHub Actions job status.
+    - Direct CLI calls without job_status (or job_status is None) preserve verdict and note unchanged.
+    - When job_status is 'success', preserve verdict (defaulting None to 'ok') and note.
+    - When job_status is non-'success' (e.g. 'failure', 'cancelled'), override optimistic verdicts
+      with normalized job status and rewrite note to 'job <status> before completion (intended: <note>)'.
+    """
+    if job_status is None or job_status == "":
+        return verdict, note
+    status = str(job_status).strip().lower()
+    if status == "success":
+        final_verdict = verdict if verdict is not None else "ok"
+        return final_verdict, note
+    final_verdict = status
+    intended = note if note is not None else ""
+    final_note = "job %s before completion (intended: %s)" % (status, intended)
+    return final_verdict, final_note
+
+
 def cmd_log(args):
     """Structured session log: one JSON line per bot action, appended to
     logs/SESSION.jsonl on the automation/session-log branch via the contents
@@ -576,9 +595,10 @@ def cmd_log(args):
     cfg = load_cfg()
     gh = tb.Gh(cfg["repo"], tb.load_token(args))
     branch, path = cfg["log_branch"], cfg["log_path"]
+    verdict, note = resolve_log_outcome(args.verdict, args.note, getattr(args, "job_status", None))
     rec = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-           "event": args.event, "pr": args.pr, "verdict": args.verdict,
-           "sha": args.sha, "note": args.note, "run": run_url()}
+           "event": args.event, "pr": args.pr, "verdict": verdict,
+           "sha": args.sha, "note": note, "run": run_url()}
     line = json.dumps(rec, ensure_ascii=False)
     try:
         st, ref = gh.req("GET", "/repos/%s/git/ref/heads/%s" % (gh.repo, branch))
@@ -696,6 +716,7 @@ def main():
     p.add_argument("--verdict", default=None)
     p.add_argument("--sha", default=None)
     p.add_argument("--note", default=None)
+    p.add_argument("--job-status", default=None)
     p.set_defaults(fn=cmd_log)
 
     args = ap.parse_args()
