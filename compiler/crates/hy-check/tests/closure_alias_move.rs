@@ -93,3 +93,38 @@ fn main() {
         cs
     );
 }
+
+#[test]
+fn defer_on_for_iterate_and_match_arm_binding_rejects_later_container_move_e3003() {
+    let r_for = check(
+        "fn worker(xs [][]int) {}\n\
+         fn report(x []int) { _ = x }\n\
+         fn main() {\n\
+             items := [][]int{[]int{1}}\n\
+             for v in items {\n\
+                 defer report(v)\n\
+             }\n\
+             task worker(move items)\n\
+         }\n",
+    );
+    assert_eq!(r_for.verdict, Verdict::Reject, "got {:?}", r_for.diagnostics);
+    assert!(codes(&r_for).iter().any(|c| c == "HYB-E3003"));
+
+    let r_match = check(
+        "enum opt { some([]int), none }\n\
+         fn worker(o opt) {}\n\
+         fn report(x []int) { _ = x }\n\
+         fn main() {\n\
+             o := opt.some([]int{1})\n\
+             match o {\n\
+                 some(v) => {\n\
+                     defer report(v)\n\
+                 }\n\
+                 none => {}\n\
+             }\n\
+             task worker(move o)\n\
+         }\n",
+    );
+    assert_eq!(r_match.verdict, Verdict::Reject, "got {:?}", r_match.diagnostics);
+    assert!(codes(&r_match).iter().any(|c| c == "HYB-E3003"));
+}
