@@ -231,6 +231,46 @@ class SpecializedReproVerdictTests(unittest.TestCase):
         for path, exp_new in expected.items():
             self.assertEqual(by_path[path], exp_new, f"dual-count drift in {path}")
 
+    def test_missing_accept_control_at_head_fails_closed(self):
+        with tempfile.TemporaryDirectory(prefix="specialized-ctl-") as directory:
+            root = Path(directory)
+            def shell(args, **kwargs):
+                if args[0] == "cargo":
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                if args[:2] == ["git", "show"]:
+                    return subprocess.CompletedProcess(args, 128, "", "fatal: Path does not exist")
+                return subprocess.CompletedProcess(args, 1, "error[HYB-E6002]: rejected", "")
+            with contextlib.ExitStack() as stack:
+                for name, value in {
+                    "ROOT": root, "COMPILER": root, "HYB": root / "fake-hyb",
+                    "SMOKE_DIR": root / "smoke", "ACCEPT_CONTROLS": ["tests/checker-corpus/missing.hy"],
+                }.items():
+                    stack.enter_context(patch.object(SPECIALIZED, name, value))
+                stack.enter_context(patch.object(SPECIALIZED, "sh", side_effect=shell))
+                verdict, reason = SPECIALIZED.smoke("repro.hy", "HYB-E6002", [])
+            self.assertFalse(verdict)
+            self.assertIn("missing or empty at HEAD", reason)
+
+    def test_propose_nonpositive_round_and_exception_cleanup(self):
+        with tempfile.TemporaryDirectory(prefix="specialized-propose-") as directory:
+            root = Path(directory)
+            reverted = []
+            with contextlib.ExitStack() as stack:
+                for name, value in {
+                    "ROOT": root, "SMOKE_DIR": root / "compiler/target/author-stage",
+                    "BRAIN_TRACE": root / "trace",
+                }.items():
+                    stack.enter_context(patch.object(SPECIALIZED, name, value))
+                stack.enter_context(patch.object(SPECIALIZED, "revert_tree", side_effect=lambda: reverted.append(True)))
+                res = SPECIALIZED.propose(123, 0, "fn main() {}", "HYB-E6001", "")
+                self.assertIn("descent exhausted at round 0", res)
+                self.assertEqual(reverted, [])
+                stack.enter_context(patch.object(SPECIALIZED, "apply_candidate"))
+                stack.enter_context(patch.object(SPECIALIZED, "smoke", side_effect=RuntimeError("boom")))
+                with self.assertRaisesRegex(RuntimeError, "boom"):
+                    SPECIALIZED.propose(123, 1, "fn main() {}", "HYB-E6001", "")
+                self.assertEqual(len(reverted), 1)
+
 
 class AutolandReproVerdictTests(unittest.TestCase):
     """Offline tests for autoland's baseline/patched repro gates and log_event CLI args."""
