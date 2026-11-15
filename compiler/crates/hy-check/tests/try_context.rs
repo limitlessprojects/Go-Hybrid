@@ -111,3 +111,53 @@ fn one_diagnostic_per_misplaced_try_with_e4_note() {
         .unwrap();
     assert!(d.message.contains("`noerr` has none"), "{}", d.message);
 }
+
+#[test]
+fn error_type_alias_allows_e4_try_propagation() {
+    // Regression test for issue #3323: type alias to builtin error must satisfy E4 result requirement.
+    let accept_src = r#"
+type failure = error
+
+fn val() (int, error) {
+    return 1, nil
+}
+
+fn outer() (int, failure) {
+    x := val()?
+    return x, nil
+}
+
+type deep_err = failure
+
+fn deep() (int, deep_err) {
+    x := val()?
+    return x, nil
+}
+
+fn main() {
+    _, _ = outer()
+    _, _ = deep()
+}
+"#;
+    let r = check(accept_src);
+    assert_eq!(e2011(&r), 0, "error type alias must allow E4 `?`: {:?}", r.diagnostics);
+
+    let reject_non_error = r#"
+type not_err = int
+
+fn val() (int, error) {
+    return 1, nil
+}
+
+fn bad() (int, not_err) {
+    x := val()?
+    return x, 0
+}
+
+fn main() {
+    _, _ = bad()
+}
+"#;
+    let r2 = check(reject_non_error);
+    assert_eq!(e2011(&r2), 1, "non-error type alias must reject with HYB-E2011: {:?}", r2.diagnostics);
+}

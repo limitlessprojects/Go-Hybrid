@@ -95,10 +95,10 @@ fn file_level_const_closures_and_composites_reject_multi_value_binds() {
     // Untyped slice literal in file-level `const` holding a closure with a 1-target bind of a 2-value call.
     assert_only_e2002(
         "fn minmax(a int, b int) (int, int) { return a, b }\n\
-         const fns = [fn() {\n\
+         const fns = []fn(){fn() {\n\
              p := minmax(3, 9)\n\
              _ = p\n\
-         }]\n\
+         }}\n\
          fn main() {\n\
              _ = fns\n\
          }\n",
@@ -168,7 +168,7 @@ fn single_value_return_and_forwarded_calls_reject_move_foreign_indirect_and_alia
     );
     assert_only_e2002(
         "fn minmax(a int, b int) (int, int) { return a, b }\n\
-         const fns = [minmax]\n\
+         const fns = []fn(){ fn() { _ = minmax(3, 9) } }\n\
          fn bad() int {\n\
              return fns[0](3, 9)\n\
          }\n\
@@ -215,11 +215,11 @@ fn valid_forwarding_and_const_destructuring_stay_accepted() {
          fn minmax(a int, b int) (int, int) { return a, b }\n\
          fn w(x int, y int) { _ = x\n _ = y }\n\
          fn fwd() (i64, error) { return strconv.parse_int(\"42\", 10, 64) }\n\
-         const fns = [fn() {\n\
+         const fns = []fn(){fn() {\n\
              a, b := minmax(3, 9)\n\
              _ = a\n\
              _ = b\n\
-         }]\n\
+         }}\n\
          fn main() {\n\
              (fn(x int, y int) { _ = x\n _ = y })(minmax(1, 2))\n\
              w(minmax(1, 2))\n\
@@ -228,6 +228,43 @@ fn valid_forwarding_and_const_destructuring_stay_accepted() {
              _ = v\n\
              _ = err\n\
              _ = fns\n\
+         }\n",
+    );
+}
+
+#[test]
+fn const_fn_callee_and_array_len_type_expr_multi_value_soundness() {
+    assert_e2002(
+        "const mm = fn(a int, b int) (int, int) { return a, b }\n\
+         fn main() {\n\
+             p := mm(1, 2)\n\
+             _ = p\n\
+         }\n",
+    );
+    assert_e2002(
+        "fn minmax(a int, b int) (int, int) { return a, b }\n\
+         fn id(a int, b int) int { return a + b }\n\
+         const base = minmax\n\
+         const mm = base\n\
+         fn main() {\n\
+             base := id\n\
+             _ = base\n\
+             p := mm(1, 2)\n\
+             _ = p\n\
+         }\n",
+    );
+    assert_e2002(
+        "import \"strconv\"\n\
+         fn main() {\n\
+             var a [strconv.parse_int(\"1\", 10, 64)]int\n\
+             _ = a\n\
+         }\n",
+    );
+    assert_e2002(
+        "import \"strconv\"\n\
+         fn main() {\n\
+             xs := [][strconv.parse_int(\"1\", 10, 64)]int{}\n\
+             _ = xs\n\
          }\n",
     );
 }
