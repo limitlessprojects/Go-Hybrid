@@ -605,12 +605,12 @@ impl<'a> Checker<'a> {
     /// loop-carried moves active; local definitions (`chunk := ...`, corpus 15)
     /// live in inner scopes and are discarded when `scopes` is truncated to
     /// `outer_depth`.
-    fn is_single_iteration_loop(for_stmt: Option<&hy_syntax::Stmt>) -> bool {
+    fn is_single_iteration_loop(&self, st: &FnState, od: usize, for_stmt: Option<&hy_syntax::Stmt>) -> bool {
         let Some(hy_syntax::Stmt::For { kind, body, .. }) = for_stmt else {
             return false;
         };
         if let hy_syntax::ForKind::Range { var, lo, hi, inclusive } = kind {
-            if Self::is_loop_var_mutated(var, &body.stmts) {
+            if Self::is_loop_var_mutated(var, &body.stmts) || self.stmts_auto_addr_var(st, od, &body.stmts, var, false, &mut (HashSet::new(), HashSet::new())) {
                 return false;
             }
             if let (Some(lo_val), Some(hi_val)) = (Self::as_int_lit(lo), Self::as_int_lit(hi)) {
@@ -787,6 +787,92 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn stmts_auto_addr_var(&self, st: &FnState, od: usize, stmts: &[hy_syntax::Stmt], var: &str, nested: bool, sc: &mut (HashSet<String>, HashSet<String>)) -> bool {
+        stmts.iter().any(|s| self.stmt_auto_addr_var(st, od, s, var, nested, sc))
+    }
+    fn stmt_auto_addr_var(&self, st: &FnState, od: usize, stmt: &hy_syntax::Stmt, var: &str, nested: bool, sc: &mut (HashSet<String>, HashSet<String>)) -> bool {
+        use hy_syntax::{ForKind, MatchPattern, SelectArmKind, Stmt};
+        match stmt {
+            Stmt::Assign { values: es, .. } | Stmt::Return { values: es, .. } => es.iter().any(|e| self.expr_auto_addr_var(st, od, e, var, sc)),
+            Stmt::Local(l) => { let h = l.values.iter().any(|e| self.expr_auto_addr_var(st, od, e, var, sc)); (if nested { &mut sc.1 } else { &mut sc.0 }).extend(l.names.iter().filter(|n| n.as_str() != "_").cloned()); h }
+            Stmt::Expr { expr: e, .. } | Stmt::Defer { call: e, .. } => self.expr_auto_addr_var(st, od, e, var, sc),
+            Stmt::Send { chan: a, value: b, .. } => self.expr_auto_addr_var(st, od, a, var, sc) || self.expr_auto_addr_var(st, od, b, var, sc),
+            Stmt::If { init, cond, then, otherwise, .. } => init.as_ref().is_some_and(|s| self.stmt_auto_addr_var(st, od, s, var, true, sc)) || self.expr_auto_addr_var(st, od, cond, var, sc) || self.stmts_auto_addr_var(st, od, &then.stmts, var, true, sc) || otherwise.as_ref().is_some_and(|s| self.stmt_auto_addr_var(st, od, s, var, true, sc)),
+            Stmt::For { kind, body, .. } => (match kind {
+                ForKind::While { cond: e } => self.expr_auto_addr_var(st, od, e, var, sc),
+                ForKind::Iterate { vars, expr } => { let h = self.expr_auto_addr_var(st, od, expr, var, sc); sc.1.extend(vars.iter().filter(|n| n.as_str() != "_").cloned()); h }
+                ForKind::Range { var: v, lo, hi, .. } => { let h = self.expr_auto_addr_var(st, od, lo, var, sc) || self.expr_auto_addr_var(st, od, hi, var, sc); if v != "_" { sc.1.insert(v.clone()); } h }
+                ForKind::Infinite => false,
+            }) || self.stmts_auto_addr_var(st, od, &body.stmts, var, true, sc),
+            Stmt::Task { callee, args, .. } => self.call_auto_addr_var(st, od, callee, args, var, sc),
+            Stmt::Managed { body: b, .. } | Stmt::Block { block: b, .. } => self.stmts_auto_addr_var(st, od, &b.stmts, var, true, sc),
+            Stmt::Match { subject, arms, .. } => self.expr_auto_addr_var(st, od, subject, var, sc) || arms.iter().any(|a| { if let MatchPattern::Path { binding: Some(b), .. } = &a.pattern { if b != "_" { sc.1.insert(b.clone()); } } a.guard.as_ref().is_some_and(|g| self.expr_auto_addr_var(st, od, g, var, sc)) || self.stmts_auto_addr_var(st, od, &a.body.stmts, var, true, sc) }),
+            Stmt::Select { arms, .. } => arms.iter().any(|a| (match &a.kind {
+                SelectArmKind::Send { chan: x, value: y, .. } => self.expr_auto_addr_var(st, od, x, var, sc) || self.expr_auto_addr_var(st, od, y, var, sc),
+                SelectArmKind::Recv { names, chan, .. } => { let c = self.expr_auto_addr_var(st, od, chan, var, sc); sc.1.extend(names.iter().filter(|n| n.as_str() != "_").cloned()); c }
+                SelectArmKind::Default => false,
+            }) || self.stmts_auto_addr_var(st, od, &a.body.stmts, var, true, sc)),
+            Stmt::Break { .. } | Stmt::Continue { .. } => false,
+        }
+    }
+    fn call_auto_addr_var(&self, st: &FnState, od: usize, callee: &Expr, args: &[hy_syntax::CallArg], var: &str, sc: &mut (HashSet<String>, HashSet<String>)) -> bool {
+        self.expr_auto_addr_var(st, od, callee, var, sc) || args.iter().enumerate().any(|(i, a)| self.expr_auto_addr_var(st, od, &a.value, var, sc) || (Self::expr_is_or_touches_var(&a.value, var) && self.callee_param_may_be_ptr(st, od, callee, i, sc)))
+    }
+    fn expr_auto_addr_var(&self, st: &FnState, od: usize, expr: &Expr, var: &str, sc: &mut (HashSet<String>, HashSet<String>)) -> bool {
+        match expr {
+            Expr::Ident { .. } | Expr::Lit { .. } => false,
+            Expr::Interp { parts, .. } => parts.iter().any(|p| matches!(p, hy_syntax::InterpPart::Expr(e) if self.expr_auto_addr_var(st, od, e, var, sc))),
+            Expr::Binary { lhs: a, rhs: b, .. } | Expr::Index { base: a, index: b, .. } => self.expr_auto_addr_var(st, od, a, var, sc) || self.expr_auto_addr_var(st, od, b, var, sc),
+            Expr::Unary { operand: e, .. } | Expr::AddrOf { operand: e, .. } | Expr::Move { operand: e, .. } | Expr::Try { operand: e, .. } | Expr::Receive { chan: e, .. } | Expr::Field { base: e, .. } | Expr::Paren { inner: e, .. } => self.expr_auto_addr_var(st, od, e, var, sc),
+            Expr::Slice { base, lo, hi, .. } => self.expr_auto_addr_var(st, od, base, var, sc) || lo.as_ref().is_some_and(|e| self.expr_auto_addr_var(st, od, e, var, sc)) || hi.as_ref().is_some_and(|e| self.expr_auto_addr_var(st, od, e, var, sc)),
+            Expr::Call { callee, args, .. } => self.call_auto_addr_var(st, od, callee, args, var, sc),
+            Expr::StructLit { fields, .. } => fields.iter().any(|f| self.expr_auto_addr_var(st, od, &f.value, var, sc)),
+            Expr::SliceLit { items, .. } => items.iter().any(|e| self.expr_auto_addr_var(st, od, e, var, sc)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| self.expr_auto_addr_var(st, od, k, var, sc) || self.expr_auto_addr_var(st, od, v, var, sc)),
+            Expr::FnLit { params, body, .. } => { sc.1.extend(params.iter().map(|p| p.name.clone()).filter(|n| n != "_")); self.stmts_auto_addr_var(st, od, &body.stmts, var, true, sc) }
+        }
+    }
+    fn param_is_ptr(&self, params: &[hy_syntax::Param], idx: usize) -> bool {
+        params.get(idx).is_some_and(|p| matches!(self.resolve_type_alias(&p.ty), hy_syntax::TypeExpr::Pointer { .. }) || matches!(&p.ty, hy_syntax::TypeExpr::Named { name, .. } if name.is_empty()))
+    }
+    fn callee_param_may_be_ptr(&self, st: &FnState, od: usize, callee: &Expr, idx: usize, sc: &(HashSet<String>, HashSet<String>)) -> bool {
+        let mut root = callee;
+        while let Expr::Field { base: b, .. } | Expr::Index { base: b, .. } | Expr::Paren { inner: b, .. } = root { root = b; }
+        if matches!(root, Expr::Ident { name, .. } if sc.1.contains(name) || (!sc.0.contains(name) && st.scopes.get(od..).is_some_and(|ss| ss.iter().any(|s| s.contains_key(name))))) { return true; }
+        let callee = crate::model::unwrap_parens(callee);
+        if let Some(hy_syntax::TypeExpr::Fn { params, .. }) = self.ty_of_expr(st, callee).map(|t| self.resolve_type_alias(&t)) { return self.param_is_ptr(&params, idx); }
+        match callee {
+            Expr::Ident { name, .. } => {
+                if self.lookup_binding(st, name).is_some() { return true; }
+                let head = Self::base_named_type_str(name);
+                if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) { return self.param_is_ptr(&f.params, idx); }
+                !(crate::const_init::is_conversion_type_name(name) || crate::const_overflow::fixed_width_int_range(name).is_some() || self.type_aliases.contains_key(name) || self.structs.contains_key(head) || self.enums.contains_key(head)
+                    || matches!(name.as_str(), "len" | "cap" | "append" | "copy" | "delete" | "close" | "panic" | "print" | "println" | "min" | "max" | "clear" | "some" | "new" | "make"))
+            }
+            Expr::Field { base, name, .. } => {
+                let head = Self::base_named_type_str(name);
+                if let Expr::Ident { name: r, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, r).is_none() {
+                        if let Some(f) = self.fns.get(&format!("{r}.{head}")) { return self.param_is_ptr(&f.params, idx); }
+                        if self.known_package(r) { return false; }
+                    }
+                }
+                let rb = self.ty_of_expr(st, base).map(|t| self.resolve_type_alias(&t)).and_then(|t| Self::base_named_type(&t)).or_else(|| match self.shape_of_expr(st, base) {
+                    crate::model::TypeShape::Struct(Some(s)) => Some(s),
+                    crate::model::TypeShape::Pointer(inner) => if let crate::model::TypeShape::Struct(Some(s)) = *inner { Some(s) } else { None },
+                    _ => None,
+                }.map(|s| Self::base_named_type_str(&s).to_string()));
+                if let Some(f) = rb.and_then(|r| self.method_decls.get(&(r, head.to_string()))) { return self.param_is_ptr(&f.params, idx); }
+                let (mut seen, mut ptr) = (false, false);
+                for ((_, m), f) in &self.method_decls { if m == head { seen = true; ptr |= self.param_is_ptr(&f.params, idx); } }
+                ptr || (!seen && matches!(self.shape_of_expr(st, base), crate::model::TypeShape::Unknown | crate::model::TypeShape::Struct(None)))
+            }
+            Expr::FnLit { params, .. } => self.param_is_ptr(params, idx),
+            Expr::SliceLit { elem: Some(_), items, .. } if items.is_empty() => false,
+            _ => true,
+        }
+    }
+
     fn as_int_lit(expr: &hy_syntax::Expr) -> Option<i64> {
         match expr {
             hy_syntax::Expr::Lit {
@@ -810,17 +896,19 @@ impl<'a> Checker<'a> {
         events: &std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>>,
         in_managed: &dyn Fn(usize) -> bool,
     ) {
-        let has_loop_carried_state = iter_st
-            .env
-            .iter()
-            .chain(iter_st.scopes.iter().flat_map(|s| s.iter()))
-            .any(|(name, b)| {
-                b.moved.is_some()
-                    || b.slot_loan
-                    || self.non_owned_origin_of(iter_st, name).is_some()
-                    || iter_st.aliases.contains_key(name)
-                    || !iter_st.share_group(name).is_empty()
-            });
+        let has_loop_carried_state = !iter_st.borrow_bindings.is_empty()
+            || !iter_st.loans.is_empty()
+            || iter_st
+                .env
+                .iter()
+                .chain(iter_st.scopes.iter().flat_map(|s| s.iter()))
+                .any(|(name, b)| {
+                    b.moved.is_some()
+                        || b.slot_loan
+                        || self.non_owned_origin_of(iter_st, name).is_some()
+                        || iter_st.aliases.contains_key(name)
+                        || !iter_st.share_group(name).is_empty()
+                });
         if !has_loop_carried_state {
             return;
         }
@@ -877,7 +965,13 @@ impl<'a> Checker<'a> {
                             let elem = match self.shape_of_expr(&replay_st, expr) {
                                 crate::model::TypeShape::Slice(e) | crate::model::TypeShape::Array(e) => *e,
                                 crate::model::TypeShape::Chan(e) => *e,
-                                crate::model::TypeShape::Map(_, v) => *v,
+                                crate::model::TypeShape::Map(k, v) => {
+                                    if vars.len() == 1 {
+                                        *k
+                                    } else {
+                                        *v
+                                    }
+                                },
                                 _ => crate::model::TypeShape::Unknown,
                             };
                             for (idx_var, v) in vars.iter().enumerate() {
@@ -913,6 +1007,28 @@ impl<'a> Checker<'a> {
             self.check_slot_loan_rebind(&replay_st, stmt);
             self.check_stmt_addr_of_loan_projections(&replay_st, stmt, false);
 
+            let mut stmt_consumes = Vec::new();
+            if let hy_syntax::Stmt::For {
+                kind: hy_syntax::ForKind::Iterate { expr, .. },
+                ..
+            } = stmt
+            {
+                let mut calls = Vec::new();
+                crate::walk::expr_calls(expr, &mut calls);
+                for cr in calls {
+                    self.process_call(&mut replay_st, &cr, idx, None, &mut stmt_consumes);
+                }
+            } else {
+                let mut calls = Vec::new();
+                crate::walk::own_calls(stmt, &mut calls);
+                for cr in calls {
+                    self.process_call(&mut replay_st, &cr, idx, None, &mut stmt_consumes);
+                }
+            }
+            if !stmt_consumes.is_empty() {
+                self.check_same_stmt_consumes(&replay_st, &uses, &stmt_consumes);
+            }
+
             match stmt {
                 hy_syntax::Stmt::Local(l) => {
                     self.process_local(&mut replay_st, l, idx, managed);
@@ -928,6 +1044,9 @@ impl<'a> Checker<'a> {
                     self.process_assign(&mut replay_st, targets, *op, values, *span, idx);
                     self.record_assign_borrow_aliases(&mut replay_st, targets, *op, values);
                     self.mark_slot_loans_assign(&mut replay_st, targets, *op, values);
+                }
+                hy_syntax::Stmt::Return { values, span } => {
+                    self.process_return(&mut replay_st, values, *span);
                 }
                 hy_syntax::Stmt::Task { callee, args, span } => {
                     self.mark_move_in_value(
@@ -1079,7 +1198,7 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        if Self::is_single_iteration_loop(loop_stmts.first().map(|(s, _)| *s)) {
+        if self.is_single_iteration_loop(st, outer_depth, loop_stmts.first().map(|(s, _)| *s)) {
             return;
         }
 
@@ -1858,5 +1977,3 @@ mod tests {
         assert!(r_iter.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
     }
 }
-
-
