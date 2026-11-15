@@ -127,26 +127,31 @@ def check_breakdown(root: Path, total: int, counts: Counter) -> list[str]:
     path = root / rel
     if not path.exists():
         return [f"{rel}: missing"]
-    match = re.search(pattern, path.read_text(encoding="utf-8"), re.M)
-    if not match:
+    text = path.read_text(encoding="utf-8")
+    matches = list(re.finditer(pattern, text, re.M))
+    if not matches:
         return [
             f"{rel}: no verdict breakdown found — the pattern no longer matches; "
             f"update this guard"
         ]
-    claimed_total, accept, managed, reject = (int(g) for g in match.groups())
     problems: list[str] = []
-    if claimed_total != total:
-        problems.append(f"{rel}: says {claimed_total} programs, corpus holds {total}")
-    if (accept, managed, reject) != (
-        counts["ACCEPT"],
-        counts["ACCEPT-MANAGED"],
-        counts["REJECT"],
-    ):
-        problems.append(
-            f"{rel}: breakdown says ACCEPT {accept} / ACCEPT-MANAGED {managed} / "
-            f"REJECT {reject}, corpus holds ACCEPT {counts['ACCEPT']} / "
-            f"ACCEPT-MANAGED {counts['ACCEPT-MANAGED']} / REJECT {counts['REJECT']}"
-        )
+    for match in matches:
+        line = text.count("\n", 0, match.start()) + 1
+        claimed_total, accept, managed, reject = (int(g) for g in match.groups())
+        if claimed_total != total:
+            problems.append(
+                f"{rel}: line {line}: says {claimed_total} programs, corpus holds {total}"
+            )
+        if (accept, managed, reject) != (
+            counts["ACCEPT"],
+            counts["ACCEPT-MANAGED"],
+            counts["REJECT"],
+        ):
+            problems.append(
+                f"{rel}: line {line}: breakdown says ACCEPT {accept} / ACCEPT-MANAGED {managed} / "
+                f"REJECT {reject}, corpus holds ACCEPT {counts['ACCEPT']} / "
+                f"ACCEPT-MANAGED {counts['ACCEPT-MANAGED']} / REJECT {counts['REJECT']}"
+            )
     return problems
 
 

@@ -38,6 +38,7 @@ from urllib.request import Request, urlopen
 CONFIG_PATH = Path(__file__).resolve().parent / "triage_config.json"
 DEFAULT_TOKEN_FILE = "/home/z/my-project/.gh_token"
 BOARD_MARKER = "triage-bot:board:v1"
+BOARD_TITLE = "Triage Board (auto-updated daily — pin me)"
 API = "https://api.github.com"
 
 
@@ -559,6 +560,47 @@ def cmd_labels(args):
 
 # ---------------------------------------------------------------- board
 
+def is_board_issue(issue, *, discovered=False):
+    if not isinstance(issue, dict) or issue.get("state") != "open" or "pull_request" in issue:
+        return False
+    marker = "<!-- %s -->" % BOARD_MARKER
+    if marker not in [line.strip() for line in (issue.get("body") or "").splitlines()]:
+        return False
+    if discovered:
+        trusted = issue.get("author_association") in {"OWNER", "MEMBER", "COLLABORATOR"}
+        trusted = trusted or (issue.get("user") or {}).get("login") == "github-actions[bot]"
+        return trusted and issue.get("title") == BOARD_TITLE
+    return True
+
+
+def board_target(cfg, gh):
+    """Select a validated target; search relevance is not board identity."""
+    number = cfg.get("board_issue")
+    discovered = number is None
+    if discovered:
+        status, result = gh.req("GET", "/search/issues?q=%s&per_page=100" % quote(
+            'repo:%s is:issue is:open "%s" in:body' % (cfg["repo"], BOARD_MARKER)))
+        if status != 200 or not isinstance(result, dict):
+            raise RuntimeError("board search failed; no issue was changed")
+        hits = result.get("items")
+        if (not isinstance(hits, list) or result.get("incomplete_results")
+                or result.get("total_count") != len(hits)):
+            raise RuntimeError("board search is incomplete; configure board_issue before posting")
+        candidates = [item for item in hits if is_board_issue(item, discovered=True)]
+        if len(candidates) > 1:
+            raise RuntimeError("multiple board candidates; configure board_issue before posting")
+        if not candidates:
+            return None
+        number = candidates[0].get("number")
+    if type(number) is not int or number <= 0:
+        raise RuntimeError("board_issue must be a positive issue number")
+    status, issue = gh.req("GET", "/repos/%s/issues/%d" % (gh.repo, number))
+    if (status != 200 or not is_board_issue(issue, discovered=discovered)
+            or issue.get("number") != number):
+        raise RuntimeError("board target #%d is missing, closed, or invalid; no issue was changed" % number)
+    return number
+
+
 def cmd_board(args):
     cfg = load_cfg()
     pareto_n = args.pareto or cfg["pareto_n"]
@@ -579,16 +621,13 @@ def cmd_board(args):
     if not args.post:
         print(md)
         return
-    _, srch = gh.req("GET", "/search/issues?q=%s" % quote(
-        'repo:%s is:issue is:open "%s" in:body' % (cfg["repo"], BOARD_MARKER)))
-    hits = (srch or {}).get("items", [])
-    if hits:
-        n = hits[0]["number"]
+    n = board_target(cfg, gh)
+    if n is not None:
         gh.patch("/repos/%s/issues/%d" % (cfg["repo"], n), {"body": md})
         log("board updated on #%d (%d calls, %s remaining)" % (n, gh.calls, gh.remaining))
     else:
         iss = gh.post("/repos/%s/issues" % cfg["repo"],
-                      {"title": "Triage Board (auto-updated daily — pin me)",
+                      {"title": BOARD_TITLE,
                        "body": md})
         log("board created: %s (%d calls)" % (iss.get("html_url"), gh.calls))
 

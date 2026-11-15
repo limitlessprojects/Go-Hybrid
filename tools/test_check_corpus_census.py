@@ -210,5 +210,34 @@ class FailClosedTests(_ProblemsMixin, unittest.TestCase):
         self.assertIn("no corpus count found", hits[0])
 
 
+class MultipleCurrentBreakdownTests(_ProblemsMixin, unittest.TestCase):
+    clean = "**Current registered corpus: 3 programs** — ACCEPT 1 · ACCEPT-MANAGED 0 · REJECT 2\n"
+    bad_total = "**Current registered corpus: 4 programs** — ACCEPT 1 · ACCEPT-MANAGED 0 · REJECT 2\n"
+    bad_counts = "**Current registered corpus: 3 programs** — ACCEPT 2 · ACCEPT-MANAGED 0 · REJECT 1\n"
+
+    def _hits(self, rows):
+        return self._problems_with("tests/checker-corpus/README.md", "\n".join(rows))
+
+    def test_clean_then_stale_total(self):
+        self.assertTrue(self._hits([self.clean, self.bad_total]))
+
+    def test_stale_total_then_clean(self):
+        self.assertTrue(self._hits([self.bad_total, self.clean]))
+
+    def test_clean_then_stale_counts(self):
+        self.assertTrue(self._hits([self.clean, self.bad_counts]))
+
+    def test_stale_counts_then_clean(self):
+        self.assertTrue(self._hits([self.bad_counts, self.clean]))
+
+    def test_two_consistent_breakdowns(self):
+        self.assertEqual(self._hits([self.clean, self.clean]), [])
+
+    def test_two_later_stale_breakdowns_are_both_reported(self):
+        hits = self._hits([self.clean, self.bad_total, self.bad_counts])
+        self.assertEqual(len(hits), 2)
+        self.assertTrue(all("line " in hit for hit in hits))
+
+
 if __name__ == "__main__":
     unittest.main()
