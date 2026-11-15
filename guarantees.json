@@ -324,13 +324,13 @@
     },
     {
       "id": 15,
-      "surface": "cgo",
-      "does": "Not part of `.hy`; cgo code in the surrounding Go project is foreign code the checker cannot see",
-      "claim": "**No claim**",
-      "strength": "no-claim",
+      "surface": "cgo / foreign FFI",
+      "does": "ABI-Verified Foreign Memory Membranes via Membrane[T] certificates; Clang AST parameter contracts enforce borrow bounds, linear surrender (`move`) on C-retained pointers, and `runtime.Pinner` deferred unpinning eliminate GC hazards",
+      "claim": "**Guaranteed in checked subset**",
+      "strength": "guaranteed",
       "rules": [],
       "fixtures": [],
-      "evidence_md": "§9.2"
+      "evidence_md": "§9.2, [W-027](MOONSHOT.md), [Spike Results](spikes/w-cgo-foreign-memory-membrane-4491/RESULTS.md)"
     },
     {
       "id": 16,
