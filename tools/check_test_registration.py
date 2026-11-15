@@ -25,7 +25,8 @@ and unsupported mapping forms cannot establish root execution. Raw command
 snippets retain their repository-root convention. Comments, echoed text,
 step names, interpreter flags, chained later commands, and paths passed as
 arguments to other scripts register nothing. This is not a general
-shell/YAML interpreter.
+shell/YAML interpreter. Standalone here-document payload lines are data,
+not test invocations; quoted and tab-stripped delimiters are recognized.
 
 Usage: python3 tools/check_test_registration.py [--workflow PATH] [--root DIR]
 Exit:  0 = every test file is registered; 1 = unregistered file(s); 2 = guard misuse.
@@ -38,6 +39,7 @@ from pathlib import Path
 import re
 import shlex
 import sys
+import textwrap
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -52,6 +54,45 @@ def shell_words(line):
     lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>()")
     lexer.whitespace_split = True
     return list(lexer)
+
+
+def heredoc_redirects(line):
+    """Read explicit here-doc redirects without treating quoted << as one."""
+    lexer = shlex.shlex(line, posix=False, punctuation_chars=";&|<>()")
+    lexer.whitespace_split = True
+    words = list(lexer)
+    for index, word in enumerate(words[:-1]):
+        if word != "<<":
+            continue
+        delimiter = words[index + 1]
+        strip_tabs = delimiter.startswith("-")
+        if strip_tabs:
+            delimiter = delimiter[1:]
+        # Apply shell quote removal to the delimiter only. Expanding it
+        # would be incorrect, even for an unquoted delimiter.
+        parts = shlex.split(delimiter, posix=True)
+        if len(parts) == 1:
+            yield parts[0], strip_tabs
+
+
+def command_lines(workflow_text):
+    """Remove YAML indentation from explicit literal run blocks only."""
+    lines = workflow_text.splitlines()
+    index = 0
+    while index < len(lines):
+        source = lines[index]
+        block = re.fullmatch(r"( *)(?:-\s+)?run:\s*\|(?:[1-9][+-]?|[+-][1-9]?)?\s*(?:#.*)?", source)
+        index += 1
+        if not block:
+            yield source
+            continue
+        start = index
+        while index < len(lines):
+            line = lines[index]
+            if line.strip() and len(line) - len(line.lstrip(" ")) <= len(block[1]):
+                break
+            index += 1
+        yield from textwrap.dedent("\n".join(lines[start:index])).splitlines()
 
 
 def yaml_fields(lines, indent=None):
@@ -109,8 +150,8 @@ def default_root_cwd(fields, inherited):
     return inherited if cwd is None else root_working_directory(cwd[0])
 
 
-def workflow_run_lines(workflow_text):
-    """Yield shell lines only from steps whose effective cwd is root.
+def workflow_run_blocks(workflow_text):
+    """Yield per-step lists of shell lines only from steps whose cwd is root.
 
     Literal block syntax avoids treating folded shell commands as independent
     lines. Flow mappings, aliases and unknown directories fail closed. Existing
@@ -120,7 +161,7 @@ def workflow_run_lines(workflow_text):
     lines = workflow_text.splitlines()
     workflow = yaml_fields(lines, indent=0)
     if "jobs" not in workflow:
-        yield from lines
+        yield list(command_lines(workflow_text))
         return
     jobs = block_fields(workflow["jobs"])
     if jobs is None:
@@ -157,57 +198,75 @@ def workflow_run_lines(workflow_text):
             value, commands = run
             scalar = re.split(r"\s+#", value.strip(), 1)[0]
             if re.fullmatch(r"\|(?:[1-9][+-]?|[+-][1-9]?)?", scalar):
-                yield from commands
+                yield textwrap.dedent("\n".join(commands)).splitlines()
             elif scalar.startswith(">"):
                 continue
             elif not any(line.strip() and not line.lstrip().startswith("#")
                          for line in commands):
-                yield "run: " + value
+                yield ["run: " + value]
+
+
+def workflow_run_lines(workflow_text):
+    """Yield shell lines only from steps whose effective cwd is root."""
+    for block in workflow_run_blocks(workflow_text):
+        yield from block
 
 
 def python_commands(workflow_text):
     """Yield arguments of explicit, single-line Python invocations."""
-    for line in workflow_run_lines(workflow_text):
-        line = line.strip()
-        inline_run = re.match(r"(?:-\s+)?run:\s*(.*)", line)
-        if inline_run:
-            line = inline_run.group(1)
-        try:
-            tokens = shell_words(line)
-            # A quoted YAML run scalar wraps the whole shell command.
-            if inline_run and len(tokens) == 1:
-                tokens = shell_words(tokens[0])
-        except ValueError:
-            continue
-        if tokens and PYTHON_RE.fullmatch(tokens[0]):
-            # Only the first simple command is covered. A following echo's
-            # -p flag must never become another unittest discovery pattern.
-            end = next((i for i, token in enumerate(tokens)
-                        if token and all(c in ";&|<>()" for c in token)), len(tokens))
-            # Issue #2880: an OR-list (`||`), pipeline (`|`), or background
-            # operator (`&`) masks a non-zero exit status under `set -e`
-            # (without `pipefail`), so a failing test suite would not fail CI.
-            if any(
-                token and all(c in ";&|<>()" for c in token)
-                and ("|" in token or "&" in token.replace("&&", ""))
-                for token in tokens[end:]
-            ):
+    for block in workflow_run_blocks(workflow_text):
+        pending_heredocs = []
+        for source_line in block:
+            if pending_heredocs:
+                delimiter, strip_tabs = pending_heredocs[0]
+                candidate = source_line
+                if strip_tabs:
+                    candidate = candidate.lstrip("\t")
+                if candidate == delimiter:
+                    pending_heredocs.pop(0)
                 continue
-            arguments = tokens[1:end]
-            while arguments:
-                option = arguments[0]
-                if PYTHON_FLAGS_RE.fullmatch(option):
-                    arguments = arguments[1:]
-                elif option in ("-W", "-X", "--check-hash-based-pycs"):
-                    arguments = arguments[2:]
-                elif option.startswith(("-W", "-X")):
-                    arguments = arguments[1:]
-                elif option == "--":
-                    arguments = arguments[1:]
-                    break
-                else:
-                    break  # In particular, never interpret a -c string.
-            yield arguments
+            line = source_line.strip()
+            inline_run = re.match(r"(?:-\s+)?run:\s*(.*)", line)
+            if inline_run:
+                line = inline_run.group(1)
+            try:
+                tokens = shell_words(line)
+                # A quoted YAML run scalar wraps the whole shell command.
+                if inline_run and len(tokens) == 1:
+                    line = tokens[0]
+                    tokens = shell_words(line)
+                pending_heredocs.extend(heredoc_redirects(line))
+            except ValueError:
+                continue
+            if tokens and PYTHON_RE.fullmatch(tokens[0]):
+                # Only the first simple command is covered. A following echo's
+                # -p flag must never become another unittest discovery pattern.
+                end = next((i for i, token in enumerate(tokens)
+                            if token and all(c in ";&|<>()" for c in token)), len(tokens))
+                # Issue #2880: an OR-list (`||`), pipeline (`|`), or background
+                # operator (`&`) masks a non-zero exit status under `set -e`
+                # (without `pipefail`), so a failing test suite would not fail CI.
+                if any(
+                    token and all(c in ";&|<>()" for c in token)
+                    and ("|" in token or "&" in token.replace("&&", ""))
+                    for token in tokens[end:]
+                ):
+                    continue
+                arguments = tokens[1:end]
+                while arguments:
+                    option = arguments[0]
+                    if PYTHON_FLAGS_RE.fullmatch(option):
+                        arguments = arguments[1:]
+                    elif option in ("-W", "-X", "--check-hash-based-pycs"):
+                        arguments = arguments[2:]
+                    elif option.startswith(("-W", "-X")):
+                        arguments = arguments[1:]
+                    elif option == "--":
+                        arguments = arguments[1:]
+                        break
+                    else:
+                        break  # In particular, never interpret a -c string.
+                yield arguments
 
 
 # Directories whose test files this guard covers, and how each is invoked.
