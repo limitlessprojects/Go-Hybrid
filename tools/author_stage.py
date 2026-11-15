@@ -138,23 +138,205 @@ def chat(messages) -> str:
         return json.loads(r.read().decode())["choices"][0]["message"]["content"]
 
 
+HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+MODE_HEADER_RE = re.compile(
+    r"^(?:new file mode|new mode|old mode|deleted file mode)\s+([0-7]+)\s*$"
+)
+INDEX_MODE_RE = re.compile(r"^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ ([0-7]+)\s*$")
+
+
+def _decode_c_escaped(body: str) -> str | None:
+    out = bytearray()
+    i = 0
+    escapes = {
+        "a": 0x07, "b": 0x08, "t": 0x09, "n": 0x0A,
+        "v": 0x0B, "f": 0x0C, "r": 0x0D, '"': 0x22, "\\": 0x5C,
+    }
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\":
+            out.extend(ch.encode("utf-8"))
+            i += 1
+            continue
+        i += 1
+        if i >= len(body):
+            return None
+        esc = body[i]
+        if esc in "01234567":
+            oct_digits = body[i:i + 3]
+            if len(oct_digits) != 3 or any(c not in "01234567" for c in oct_digits):
+                return None
+            out.append(int(oct_digits, 8) & 0xFF)
+            i += 3
+        elif esc in escapes:
+            out.append(escapes[esc])
+            i += 1
+        else:
+            return None
+    try:
+        return out.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _parse_git_header_path(raw: str, *, strip_ab: bool) -> str | None:
+    s = raw.strip()
+    if not s:
+        return None
+    if s.startswith('"'):
+        i = 1
+        while i < len(s):
+            if s[i] == "\\":
+                i += 2
+                continue
+            if s[i] == '"':
+                break
+            i += 1
+        if i >= len(s) or s[i] != '"':
+            return None
+        rest = s[i + 1:]
+        if rest and not rest.startswith("\t"):
+            return None
+        path = _decode_c_escaped(s[1:i])
+        if path is None:
+            return None
+    else:
+        path = s.split("\t", 1)[0].strip()
+    if path == "/dev/null":
+        return "/dev/null"
+    if strip_ab:
+        if not path.startswith(("a/", "b/")):
+            return None
+        path = path[2:]
+    return path
+
+
+def _split_diff_git_paths(rest: str) -> tuple[str | None, str | None]:
+    s = rest.strip()
+    if not s:
+        return None, None
+    if s.startswith('"'):
+        i = 1
+        while i < len(s):
+            if s[i] == "\\":
+                i += 2
+                continue
+            if s[i] == '"':
+                break
+            i += 1
+        if i >= len(s) or i + 1 >= len(s) or s[i + 1] != " ":
+            return None, None
+        left = _parse_git_header_path(s[:i + 1], strip_ab=True)
+        right = _parse_git_header_path(s[i + 2:], strip_ab=True)
+        return left, right
+    # Unquoted `diff --git a/<src> b/<dst>`: split on ` b/` when unambiguous.
+    if not s.startswith("a/"):
+        return None, None
+    parts = [idx for idx in range(len(s)) if s.startswith(" b/", idx)]
+    if len(parts) != 1:
+        return None, None
+    idx = parts[0]
+    left = _parse_git_header_path(s[:idx], strip_ab=True)
+    right = _parse_git_header_path(s[idx + 1:], strip_ab=True)
+    return left, right
+
+
+def _path_in_scope(p: str | None) -> bool:
+    if not p or p.startswith("/") or "\\" in p or "\x00" in p:
+        return False
+    segs = p.split("/")
+    if any(not seg or seg in (".", "..") for seg in segs):
+        return False
+    return p.startswith(SCOPE_PREFIXES)
+
+
 def diff_paths(d: str) -> list[str]:
-    paths = []
+    paths: list[str] = []
+    old_rem = 0
+    new_rem = 0
     for line in d.splitlines():
-        if line.startswith(("+++ ", "--- ")):
-            p = line[4:].strip()
-            if p.startswith(("a/", "b/")):
-                p = p[2:]
-            if p != "/dev/null":
-                paths.append(p)
+        if old_rem > 0 or new_rem > 0:
+            if line.startswith("\\"):
+                continue
+            if line.startswith(" ") or line == "":
+                if old_rem > 0:
+                    old_rem -= 1
+                if new_rem > 0:
+                    new_rem -= 1
+                continue
+            if line.startswith("-") and old_rem > 0:
+                old_rem -= 1
+                continue
+            if line.startswith("+") and new_rem > 0:
+                new_rem -= 1
+                continue
+            paths.append("")
+            continue
+
+        hm = HUNK_HEADER_RE.match(line)
+        if hm:
+            old_rem = int(hm.group(2)) if hm.group(2) is not None else 1
+            new_rem = int(hm.group(4)) if hm.group(4) is not None else 1
+            continue
+
+        mm = MODE_HEADER_RE.match(line) or INDEX_MODE_RE.match(line)
+        if mm and mm.group(1) in ("120000", "160000"):
+            paths.append("")
+            continue
+        if line.startswith(("GIT binary patch", "Binary files ")):
+            paths.append("")
+            continue
+
+        if line.startswith("diff --git "):
+            left, right = _split_diff_git_paths(line[len("diff --git "):])
+            paths.append(left or "")
+            paths.append(right or "")
+        elif line.startswith(("--- ", "+++ ")):
+            parsed = _parse_git_header_path(line[4:], strip_ab=True)
+            if parsed is None:
+                paths.append("")
+            elif parsed != "/dev/null":
+                paths.append(parsed)
+        elif line.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
+            prefix = next(
+                pfx for pfx in ("rename from ", "rename to ", "copy from ", "copy to ")
+                if line.startswith(pfx)
+            )
+            parsed = _parse_git_header_path(line[len(prefix):], strip_ab=False)
+            paths.append(parsed or "")
     return paths
 
 
 def scope_ok(d: str) -> bool:
     ps = diff_paths(d)
-    return bool(ps) and all(
-        p.startswith(SCOPE_PREFIXES) and ".." not in p.split("/") and not p.startswith("/") for p in ps
-    )
+    return bool(ps) and all(_path_in_scope(p) for p in ps)
+
+
+def worktree_scope_ok() -> tuple[bool, list[str]]:
+    r = sh(["git", "status", "--porcelain", "-z", "--untracked-files=all"], timeout=60)
+    if r.returncode != 0:
+        return False, ["git status failed"]
+    bad: list[str] = []
+    entries = (r.stdout or "").split("\x00")
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        i += 1
+        if not entry:
+            continue
+        status = entry[:2]
+        rel = entry[3:]
+        touched = [rel]
+        if "R" in status or "C" in status:
+            if i < len(entries) and entries[i]:
+                touched.append(entries[i])
+            i += 1
+        for p in touched:
+            norm = p.replace("\\", "/")
+            full = ROOT / norm
+            if not _path_in_scope(norm) or full.is_symlink():
+                bad.append(norm)
+    return (not bad), bad
 
 
 def render_messages(issue: dict, feedback: str, files: list[str]) -> list[dict]:
@@ -210,14 +392,15 @@ def write_blocked(issue_no: int, trace: pathlib.Path, note: str) -> int:
 
 def run_author(issue_no: int, out: pathlib.Path, max_rounds: int,
                brain: str = "api") -> int:
-    trace = pathlib.Path(tempfile.mkdtemp(prefix="author-stage-")) / "trace.log"
-    if not QUEUE.resolve() in out.resolve().parents and out.resolve() != QUEUE.resolve():
-        if not str(out).startswith(str(ROOT)):
-            print(f"AUTHOR-STAGE-ERROR: --out must live inside the repo ({ROOT})")
-            return 2
+    root_resolved = ROOT.resolve()
+    out = out.resolve()
+    if not out.is_relative_to(root_resolved):
+        print(f"AUTHOR-STAGE-ERROR: --out must live inside the repo ({ROOT})")
+        return 2
     if dirty():
         print("AUTHOR-STAGE-ERROR: working tree dirty — refusing to run (clean it first)")
         return 2
+    trace = pathlib.Path(tempfile.mkdtemp(prefix="author-stage-")) / "trace.log"
     if brain == "api" and not (
         os.environ.get("AUTHOR_API_BASE") and os.environ.get("AUTHOR_MODEL")
     ):
@@ -302,6 +485,13 @@ def run_author(issue_no: int, out: pathlib.Path, max_rounds: int,
                note=feedback[:200])
             revert_tree()
             continue
+        wt_ok, wt_bad = worktree_scope_ok()
+        if not wt_ok:
+            feedback = (f"post-apply scope violation — worktree touched {wt_bad}; "
+                        f"allowed prefixes: {', '.join(SCOPE_PREFIXES)}")
+            tr(trace, "gate-apply-failed", round=rnd, note=feedback[:200])
+            revert_tree()
+            continue
 
         b = sh(["cargo", "build", "-p", "hyb", "--quiet"], cwd=str(COMPILER),
                timeout=1800)
@@ -337,8 +527,12 @@ def run_author(issue_no: int, out: pathlib.Path, max_rounds: int,
         controls_ok = True
         for cpath in ACCEPT_CONTROLS:
             gs = sh(["git", "show", f"HEAD:{cpath}"], timeout=60)
-            if gs.returncode != 0 or not gs.stdout:
-                continue
+            if gs.returncode != 0 or not gs.stdout.strip():
+                feedback = (f"accept control {cpath} missing or empty at HEAD "
+                            f"(git show exited {gs.returncode})")
+                tr(trace, "gate-control-missing", round=rnd, control=cpath, exit=gs.returncode)
+                controls_ok = False
+                break
             tmpc = REPRO_DIR / ("control-" + pathlib.Path(cpath).name)
             tmpc.write_text(gs.stdout)
             cc, _ = hyb_check(str(tmpc.relative_to(ROOT)))
@@ -371,7 +565,7 @@ def run_author(issue_no: int, out: pathlib.Path, max_rounds: int,
                       "acceptControls": ACCEPT_CONTROLS, "rounds": rnd},
         }, indent=2) + "\n")
         tr(trace, "ready", rounds=rnd, out=str(out))
-        print(f"AUTHOR-STAGE-READY: {out.relative_to(ROOT)} — issue #{issue_no}, "
+        print(f"AUTHOR-STAGE-READY: {out.relative_to(root_resolved)} — issue #{issue_no}, "
               f"rounds={rnd}, brain={os.environ.get('AUTHOR_MODEL')}")
         print("  NOT a landing: autoland must still pass baseline ACCEPT -> patched "
               "REJECT -> full battery -> push-and-assert.")
