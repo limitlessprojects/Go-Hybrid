@@ -334,13 +334,13 @@
     },
     {
       "id": 16,
-      "surface": "Send-on-closed-channel panics",
-      "does": "The checker proves value sendability, not send/close protocol ordering",
-      "claim": "**No claim** — a liveness/protocol property, out of Tier-0's scope",
-      "strength": "no-claim",
+      "surface": "Publication authority & protocol effects",
+      "does": "Opt-in publication-authority regions verify aggregate cross-task obligations against global capacity limits before effect publication, with canonical plan encoding and deterministic all-or-nothing rollback",
+      "claim": "**Guaranteed in checked publication-authority regions**; send/close protocol liveness outside regions remains unmodeled",
+      "strength": "guaranteed",
       "rules": [],
       "fixtures": [],
-      "evidence_md": "§8.4 C5 (check-sites are exactly two)"
+      "evidence_md": "§8.4 C5, [W-029](MOONSHOT.md), [Spike Results](spikes/w-publication-authority-4488/RESULTS.md)"
     },
     {
       "id": 17,
