@@ -24,6 +24,8 @@ use hy_syntax::{
     PlaceKind, SelectArmKind, Stmt, TypeExpr,
 };
 
+use std::collections::HashMap;
+
 /// The conversion targets that carry an E11 propagation contract. "Scope:
 /// exactly one target carries a contract at MVP; adding one is a Decision
 /// Log entry" — keep in sync with hy-emit's `CONVERSIONS[..].propagate`.
@@ -152,6 +154,7 @@ enum Ctx<'a> {
 struct TryWalker<'a, 'b> {
     ck: &'b mut Checker<'a>,
     scopes: Vec<Vec<String>>,
+    scope_tys: Vec<HashMap<String, Option<TypeExpr>>>,
     type_params: Vec<String>,
     return_e11: bool,
 }
@@ -159,16 +162,32 @@ struct TryWalker<'a, 'b> {
 impl<'a, 'b> TryWalker<'a, 'b> {
     fn push_scope(&mut self) {
         self.scopes.push(Vec::new());
+        self.scope_tys.push(HashMap::new());
     }
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.scope_tys.pop();
     }
     fn bind_name(&mut self, name: &str) {
+        self.bind_typed_name(name, None);
+    }
+    fn bind_typed_name(&mut self, name: &str, ty: Option<TypeExpr>) {
         if name != "_" && !name.is_empty() {
             if let Some(top) = self.scopes.last_mut() {
                 top.push(name.to_string());
             }
+            if let Some(top_ty) = self.scope_tys.last_mut() {
+                top_ty.insert(name.to_string(), ty);
+            }
         }
+    }
+    fn lookup_local_ty(&self, name: &str) -> Option<Option<&TypeExpr>> {
+        for scope in self.scope_tys.iter().rev() {
+            if let Some(entry) = scope.get(name) {
+                return Some(entry.as_ref());
+            }
+        }
+        None
     }
     fn is_unshadowed_pkg_root(&self, pkg: &str) -> bool {
         !(self.ck.fns.contains_key(pkg)
@@ -205,6 +224,7 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
     let mut w = TryWalker {
         ck,
         scopes: Vec::new(),
+        scope_tys: Vec::new(),
         type_params: Vec::new(),
         return_e11: false,
     };
@@ -234,10 +254,15 @@ pub(crate) fn check_try_contexts<'a>(ck: &mut Checker<'a>, file: &'a File) {
                 };
                 w.push_scope();
                 if let Some(r) = &f.receiver {
-                    w.bind_name(&r.name);
+                    w.bind_typed_name(&r.name, Some(r.ty.clone()));
                 }
-                f.params.iter().for_each(|p| w.bind_name(&p.name));
-                f.results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| w.bind_name(n));
+                f.params
+                    .iter()
+                    .for_each(|p| w.bind_typed_name(&p.name, Some(p.ty.clone())));
+                f.results
+                    .iter()
+                    .filter_map(|r| r.name.as_deref().map(|n| (n, r.ty.clone())))
+                    .for_each(|(n, ty)| w.bind_typed_name(n, Some(ty)));
                 let is_main = f.name == "main" && f.receiver.is_none();
                 let ctx = if is_main || results_end_in_error(w.ck, &f.results, &w.type_params) {
                     Ctx::Ok
@@ -304,7 +329,24 @@ fn walk_stmt(ck: &mut TryWalker<'_, '_>, s: &Stmt, ctx: Ctx<'_>) {
                 walk_type(ck, ty, val_ctx);
             }
             l.values.iter().for_each(|v| walk_expr(ck, v, val_ctx));
-            l.names.iter().for_each(|n| ck.bind_name(n));
+            if let Some(ty) = &l.ty {
+                if l.names.len() == 1 {
+                    ck.bind_typed_name(&l.names[0], Some(ty.clone()));
+                } else {
+                    l.names.iter().for_each(|n| ck.bind_name(n));
+                }
+            } else if l.names.len() == l.values.len() {
+                let inferred: Vec<Option<TypeExpr>> = l
+                    .values
+                    .iter()
+                    .map(|v| infer_expr_type(ck, v))
+                    .collect();
+                for (n, ty) in l.names.iter().zip(inferred) {
+                    ck.bind_typed_name(n, ty);
+                }
+            } else {
+                l.names.iter().for_each(|n| ck.bind_name(n));
+            }
         }
         Stmt::Assign {
             targets, values, ..
@@ -435,8 +477,13 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
         let saved_return_e11 = std::mem::replace(&mut ck.return_e11, false);
         ck.push_scope();
         let fnlit_scope_idx = ck.scopes.len() - 1;
-        params.iter().for_each(|p| ck.bind_name(&p.name));
-        results.iter().filter_map(|r| r.name.as_deref()).for_each(|n| ck.bind_name(n));
+        params
+            .iter()
+            .for_each(|p| ck.bind_typed_name(&p.name, Some(p.ty.clone())));
+        results
+            .iter()
+            .filter_map(|r| r.name.as_deref().map(|n| (n, r.ty.clone())))
+            .for_each(|(n, ty)| ck.bind_typed_name(n, Some(ty)));
         let ctx = if e11 {
             if fnlit_has_valid_e11_signature(ck.ck, params, results, http_before) {
                 Ctx::E11Handler { fnlit_scope_idx }
@@ -457,13 +504,261 @@ fn walk_fnlit(ck: &mut TryWalker<'_, '_>, e: &Expr, e11: bool, outer_ctx: Ctx<'_
 }
 
 fn is_option_type(ck: &Checker<'_>, ty: &TypeExpr) -> bool {
-    matches!(ck.resolve_type_alias(ty), TypeExpr::Option { .. })
+    match ck.resolve_type_alias(ty) {
+        TypeExpr::Option { .. } => true,
+        TypeExpr::Named { name, .. } => name == "option" || name.starts_with("option["),
+        _ => false,
+    }
+}
+
+fn strip_type_args(name: &str) -> &str {
+    name.split('[').next().unwrap_or(name)
+}
+
+fn split_explicit_type_args(name: &str) -> Vec<&str> {
+    let Some((_, rest)) = name.split_once('[') else {
+        return Vec::new();
+    };
+    let Some(inner) = rest.strip_suffix(']') else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (idx, ch) in inner.char_indices() {
+        match ch {
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let part = inner[start..idx].trim();
+                if !part.is_empty() {
+                    out.push(part);
+                }
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = inner[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail);
+    }
+    out
+}
+
+fn substitute_result_ty(ty: &TypeExpr, subst: &HashMap<String, TypeExpr>) -> TypeExpr {
+    if subst.is_empty() {
+        return ty.clone();
+    }
+    match ty {
+        TypeExpr::Named { name, span } => subst
+            .get(name.as_str())
+            .cloned()
+            .unwrap_or_else(|| TypeExpr::Named {
+                name: name.clone(),
+                span: *span,
+            }),
+        TypeExpr::Option { elem, span } => TypeExpr::Option {
+            elem: Box::new(substitute_result_ty(elem, subst)),
+            span: *span,
+        },
+        other => other.clone(),
+    }
+}
+
+fn instantiate_fn_decl_results(
+    f: &FnDecl,
+    type_arg_name: &str,
+    span: Span,
+) -> (Vec<TypeExpr>, Vec<String>) {
+    let explicit = split_explicit_type_args(type_arg_name);
+    let mut subst = HashMap::new();
+    let mut remaining_type_params = fn_decl_type_param_names(f);
+    if !explicit.is_empty() && explicit.len() == f.type_params.len() {
+        for (tp, arg) in f.type_params.iter().zip(explicit.iter()) {
+            let trimmed = arg.trim();
+            let rep = if let Some(inner) = trimmed.strip_prefix("option[").and_then(|s| s.strip_suffix(']')) {
+                TypeExpr::Option {
+                    elem: Box::new(TypeExpr::Named {
+                        name: inner.trim().to_string(),
+                        span,
+                    }),
+                    span,
+                }
+            } else {
+                TypeExpr::Named {
+                    name: trimmed.to_string(),
+                    span,
+                }
+            };
+            subst.insert(tp.name.clone(), rep);
+        }
+        remaining_type_params.retain(|tp| !subst.contains_key(tp));
+    }
+    let res = f
+        .results
+        .iter()
+        .map(|r| substitute_result_ty(&r.ty, &subst))
+        .collect();
+    (res, remaining_type_params)
+}
+
+fn peel_pointer_alias<'a>(ck: &'a Checker<'_>, mut ty: TypeExpr) -> TypeExpr {
+    for _ in 0..8 {
+        ty = ck.resolve_type_alias(&ty);
+        if let TypeExpr::Pointer { to, .. } = ty {
+            ty = *to;
+        } else {
+            break;
+        }
+    }
+    ty
+}
+
+fn struct_field_type(ck: &Checker<'_>, struct_ty: &TypeExpr, field: &str) -> Option<TypeExpr> {
+    let TypeExpr::Named { name, .. } = peel_pointer_alias(ck, struct_ty.clone()) else {
+        return None;
+    };
+    let base = strip_type_args(&name);
+    ck.structs.get(base).and_then(|fields| {
+        fields
+            .iter()
+            .find(|(fname, _)| fname == field)
+            .map(|(_, fty)| fty.clone())
+    })
+}
+
+fn infer_expr_type(ck: &TryWalker<'_, '_>, expr: &Expr) -> Option<TypeExpr> {
+    match unwrap_parens(expr) {
+        Expr::FnLit {
+            params,
+            results,
+            span,
+            ..
+        } => Some(TypeExpr::Fn {
+            params: params.clone(),
+            results: results.iter().map(|r| r.ty.clone()).collect(),
+            span: *span,
+        }),
+        Expr::StructLit {
+            ty: Some(ty), ..
+        } => Some(ty.clone()),
+        Expr::AddrOf { operand, .. } | Expr::Move { operand, .. } => infer_expr_type(ck, operand),
+        Expr::Try { operand, .. } => match unwrap_parens(operand) {
+            Expr::Call { callee, .. } => {
+                let (res, _) = resolve_callee_results(ck, callee);
+                res.and_then(|mut rs| {
+                    if rs.len() >= 2 {
+                        Some(rs.remove(0))
+                    } else {
+                        None
+                    }
+                })
+            }
+            _ => None,
+        },
+        Expr::Call { callee, .. } => {
+            let (res, _) = resolve_callee_results(ck, callee);
+            res.and_then(|rs| if rs.len() == 1 { Some(rs[0].clone()) } else { None })
+        }
+        Expr::Ident { name, .. } => {
+            if let Some(local) = ck.lookup_local_ty(name) {
+                return local.cloned();
+            }
+            ck.ck.consts.get(name.as_str()).and_then(|b| b.ty.clone())
+        }
+        Expr::Field { base, name, .. } => {
+            let base_ty = infer_expr_type(ck, base)?;
+            struct_field_type(ck.ck, &base_ty, strip_type_args(name))
+        }
+        _ => None,
+    }
+}
+
+fn resolve_callee_results(
+    ck: &TryWalker<'_, '_>,
+    callee: &Expr,
+) -> (Option<Vec<TypeExpr>>, Vec<String>) {
+    let mut cur = unwrap_parens(callee);
+    while let Expr::Index { base, .. } = cur {
+        cur = unwrap_parens(base);
+    }
+    match cur {
+        Expr::Ident { name, span } => {
+            if let Some(bound_ty_opt) = ck.lookup_local_ty(name) {
+                let Some(bound_ty) = bound_ty_opt else {
+                    return (None, Vec::new());
+                };
+                if let TypeExpr::Fn { results, .. } = ck.ck.resolve_type_alias(bound_ty) {
+                    return (Some(results), ck.type_params.clone());
+                }
+                return (None, Vec::new());
+            }
+            let base = strip_type_args(name);
+            let fn_decl = ck.ck.fns.get(name.as_str()).or_else(|| ck.ck.fns.get(base));
+            match fn_decl {
+                Some(f) => {
+                    let (res, tps) = instantiate_fn_decl_results(f, name, *span);
+                    (Some(res), tps)
+                }
+                None => (None, Vec::new()),
+            }
+        }
+        Expr::Field { base, name, span } => {
+            let method_base = strip_type_args(name);
+            if let Expr::Ident { name: root, .. } = unwrap_parens(base) {
+                if ck.lookup_local_ty(root).is_none()
+                    && !ck.type_params.iter().any(|tp| tp == root)
+                {
+                    let full_raw = format!("{}.{}", strip_type_args(root), name);
+                    let full_base = format!("{}.{}", strip_type_args(root), method_base);
+                    if let Some(f) = ck
+                        .ck
+                        .fns
+                        .get(full_raw.as_str())
+                        .or_else(|| ck.ck.fns.get(full_base.as_str()))
+                    {
+                        let (res, tps) = instantiate_fn_decl_results(f, name, *span);
+                        return (Some(res), tps);
+                    }
+                }
+            }
+            if let Some(recv_ty) = infer_expr_type(ck, base) {
+                let peeled = peel_pointer_alias(ck.ck, recv_ty);
+                if let TypeExpr::Named {
+                    name: recv_name, ..
+                } = &peeled
+                {
+                    let recv_base = strip_type_args(recv_name);
+                    if let Some(f) = ck
+                        .ck
+                        .method_decls
+                        .get(&(recv_base.to_string(), method_base.to_string()))
+                    {
+                        let (res, tps) = instantiate_fn_decl_results(f, name, *span);
+                        return (Some(res), tps);
+                    }
+                    if let Some(fty) = struct_field_type(ck.ck, &peeled, method_base) {
+                        if let TypeExpr::Fn { results, .. } = ck.ck.resolve_type_alias(&fty) {
+                            return (Some(results), ck.type_params.clone());
+                        }
+                    }
+                }
+            }
+            (None, Vec::new())
+        }
+        Expr::FnLit { results, .. } => (
+            Some(results.iter().map(|r| r.ty.clone()).collect()),
+            ck.type_params.clone(),
+        ),
+        _ => (None, Vec::new()),
+    }
 }
 
 /// E3/E4 operand half: `?` is postfix on an error-returning call only.
 /// Non-calls (`1?`, `x.f?`, `none?`) and known calls whose results do not
 /// end in `error` (including `option[T]`) are HYB-E2011. Unresolved /
-/// foreign / locally-shadowed callees stay fail-open — those shapes are
+/// foreign / dynamically-unknown callees stay fail-open — those shapes are
 /// owned by emit / other passes.
 fn check_try_operand(ck: &mut TryWalker<'_, '_>, operand: &Expr, span: Span) {
     let op = unwrap_parens(operand);
@@ -488,36 +783,20 @@ fn check_try_operand(ck: &mut TryWalker<'_, '_>, operand: &Expr, span: Span) {
     };
 
     let callee = unwrap_parens(callee);
-    // Judge *this callee's* results with *its* type params, not the walker's.
-    // A file-level fn from `ck.fns` uses `fn_decl_type_param_names` (own params
-    // plus receiver params — the same list `Decl::Fn` passes). An `FnLit` has
-    // no type-param list; `walk_fnlit` judges that signature with the enclosing
-    // function's type params, which are in scope for the literal.
-    let (results, type_params): (Option<&[FnResult]>, Vec<String>) = match callee {
-        Expr::Ident { name, .. } => {
-            // A local binding shadows the file-level fn — fail open (closure
-            // values / rebinds do not always carry a recoverable signature here).
-            if ck.scopes.iter().any(|s| s.iter().any(|n| n == name)) {
-                return;
-            }
-            match ck.ck.fns.get(name.as_str()) {
-                Some(f) => (Some(f.results.as_slice()), fn_decl_type_param_names(f)),
-                None => (None, Vec::new()),
-            }
-        }
-        Expr::FnLit { results, .. } => (Some(results.as_slice()), ck.type_params.clone()),
-        _ => (None, Vec::new()), // methods / selectors / computed: fail open
-    };
+    let (results, type_params) = resolve_callee_results(ck, callee);
 
     let Some(results) = results else {
         return;
     };
 
-    if results_end_in_error(ck.ck, results, &type_params) {
+    if results
+        .last()
+        .is_some_and(|r| is_builtin_error_type(ck.ck, r, &type_params))
+    {
         return;
     }
 
-    if results.len() == 1 && is_option_type(ck.ck, &results[0].ty) {
+    if results.len() == 1 && is_option_type(ck.ck, &results[0]) {
         ck.ck.diags.push(
             Diagnostic::error(
                 "HYB-E2011",
