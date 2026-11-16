@@ -1304,6 +1304,12 @@ fn ensure_staticlib(rt: &std::path::Path) -> Result<std::path::PathBuf, BuildErr
             // No fresh arch-matching lib — rebuild native (the dev flow; the
             // release tarball never lands here because packaging touches the
             // shipped lib's mtime past every source's).
+            if let Some(diag) = check_rust_pin("hyrt") {
+                return Err(BuildError::Tool(format!(
+                    "{}\n  = rebuilding the hyrt staticlib needs the pinned Rust; install it, or use a release install, which ships the prebuilt staticlib",
+                    diag.render_head()
+                )));
+            }
             let mut cargo = Command::new(cargo_bin());
             cargo
                 .args(["build", "--release", "-j2"])
@@ -1758,8 +1764,9 @@ fn newest_mtime(dir: &std::path::Path) -> Option<std::time::SystemTime> {
     newest
 }
 
-/// Compare installed toolchains against the pins. Returns the E9001
-/// diagnostic on the FIRST mismatch (go first — it gates codegen).
+/// Compare the installed Go against the pin. Returns the E9001 diagnostic on
+/// a mismatch — Go gates codegen, so this guards EVERY build. The Rust pin is
+/// `check_rust_pin`: it only matters where rustc actually produces something.
 fn check_toolchain_pins(file: &str) -> Option<Diagnostic> {
     let span = Span::point(Pos::new(1, 1));
 
@@ -1789,7 +1796,17 @@ fn check_toolchain_pins(file: &str) -> Option<Diagnostic> {
             }
         }
     }
+    None
+}
 
+/// Compare the installed rustc against the pin. rustc output never reaches a
+/// bridge-free program, and a release install links the PREBUILT hyrt
+/// staticlib without ever running rustc ("No Rust toolchain needed",
+/// tools/RELEASE-INSTALL.md) — so this is checked only where rustc DOES
+/// produce the artifact: rebuilding the staticlib (`ensure_staticlib`) and
+/// the bench, never as a blanket gate on `hyb build`.
+fn check_rust_pin(file: &str) -> Option<Diagnostic> {
+    let span = Span::point(Pos::new(1, 1));
     let rust_out = Command::new("rustc")
         .arg("--version")
         .output()
@@ -2047,7 +2064,9 @@ struct BenchRun {
 fn cmd_bench_overhead() -> ExitCode {
     // Same pins discipline as build (HYB-E9001): the bench measures the
     // pinned toolchains, nothing else.
-    if let Some(diag) = check_toolchain_pins("bench-overhead") {
+    if let Some(diag) =
+        check_toolchain_pins("bench-overhead").or_else(|| check_rust_pin("bench-overhead"))
+    {
         eprintln!("{}", diag.render_head());
         for n in &diag.notes {
             eprintln!("  = {}", n);
