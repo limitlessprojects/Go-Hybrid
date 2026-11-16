@@ -75,9 +75,12 @@ test-quick: check
 
 # MVP-0 walking-skeleton acceptance: parse → Tier-0 check → emit → go build
 # → run → diff against each example's expected.txt.
+# Cargo builds from compiler/, but the runner starts at the repo root.
 examples:
-	@cd compiler && CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) CARGO_BUILD_JOBS=2 $(CARGO) build -p hyb --quiet
-	@bash tools/run_examples.sh
+	@target_dir="$(CARGO_TARGET_DIR)"; \
+	case "$$target_dir" in /*|[A-Za-z]:/*) ;; *) target_dir="$$PWD/compiler/$$target_dir";; esac; \
+	(cd compiler && CARGO_TARGET_DIR="$$target_dir" CARGO_BUILD_JOBS=2 $(CARGO) build -p hyb --quiet) && \
+	CARGO_TARGET_DIR="$$target_dir" bash tools/run_examples.sh
 
 workspace:
 	@cd compiler && CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) CARGO_BUILD_JOBS=2 $(CARGO) check --workspace
