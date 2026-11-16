@@ -136,6 +136,25 @@ def joined(problems):
     return "\n".join(problems)
 
 
+class UnknownKeys(unittest.TestCase):
+    """A typo'd key is the quietest way to weaken the table: the field reads as
+    absent, the guard's presence checks still pass on the other fields, and the
+    promise silently stops being bound to anything."""
+
+    def test_unknown_row_key_fails(self):
+        tmp, root = build(rows=[row(severity="high")])
+        self.addCleanup(tmp.cleanup)
+        self.assertIn("unknown key `severity`", joined(problems_of(root)))
+
+    def test_unknown_top_level_key_fails(self):
+        tmp, root = build()
+        self.addCleanup(tmp.cleanup)
+        doc = json.loads((root / "guarantees.json").read_text(encoding="utf-8"))
+        doc["roww"] = []
+        (root / "guarantees.json").write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        self.assertIn("unknown key `roww`", joined(problems_of(root)))
+
+
 class CleanTree(unittest.TestCase):
     def test_consistent_table_passes(self):
         tmp, root = build()

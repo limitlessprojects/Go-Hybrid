@@ -68,6 +68,8 @@ DIAGNOSTIC_RE = re.compile(r"^//[ \t]*EXPECTED-DIAGNOSTIC:[ \t]*(HYB-E\d+)", re.
 LINK_RE = re.compile(r"\]\(([^)\s]+)\)")
 CORPUS_PATH_RE = re.compile(r"tests/checker-corpus/[A-Za-z0-9._-]+\.hy")
 
+ROW_KEYS = {"id", "surface", "does", "claim", "strength", "rules", "fixtures", "evidence_md"}
+TOP_KEYS = {"_comment", "version", "registry", "corpus", "doc", "scope", "rows", "unclaimed"}
 EXPECT_DIRECTION = {
     "accept": "ACCEPT",
     "accept-managed": "ACCEPT-MANAGED",
@@ -149,9 +151,19 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
     claimed_codes: set[str] = set()
     seen_ids: set[int] = set()
 
+    for key in table:
+        if key not in TOP_KEYS:
+            problems.append(f"top level: unknown key `{key}` — a typo here reads as absent")
+
     for row in table["rows"]:
         rid = row.get("id")
         where = f"row {rid}"
+        for key in row:
+            if key not in ROW_KEYS:
+                problems.append(
+                    f"{where}: unknown key `{key}` — it is silently ignored, so a typo can "
+                    f"detach a claim from its rule or fixture"
+                )
         for field in ("surface", "does", "claim", "strength", "evidence_md"):
             if not row.get(field):
                 problems.append(f"{where}: missing `{field}`")
