@@ -8158,6 +8158,8 @@ impl<'a> Checker<'a> {
                         let mutates = match crate::model::unwrap_parens(base) {
                             Expr::Ident { name: pkg, .. } => {
                                 foreign::package_mutated_arg(pkg, method_name) == Some(i)
+                                    && !(foreign::is_package_append_fn(pkg, method_name)
+                                        && self.append_dst_reallocates(st, &a.value))
                             }
                             _ => false,
                         };
