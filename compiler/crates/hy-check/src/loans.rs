@@ -10354,5 +10354,37 @@ fn main() {
             "expected HYB-E3103 for parenthesized &(x) stored in struct field"
         );
     }
+
+    #[test]
+    fn newline_after_bare_return_and_slice_alias_enforces_tier0_checks() {
+        let src_loan_escape = "\
+type int_ptr = *int
+
+fn leak(fallback int_ptr) (out int_ptr) {
+    local := 1
+    out = &local
+    return
+    fallback
+}
+";
+        assert!(
+            check_codes(src_loan_escape).iter().any(|c| c == "HYB-E3104"),
+            "expected HYB-E3104 for bare return of named borrow result before next-line expression"
+        );
+
+        let src_const_alias = "\
+const xs = []int{10, 20}
+
+fn main() {
+    y := xs
+    [0]
+    y[0] = 99
+}
+";
+        assert!(
+            check_codes(src_const_alias).iter().any(|c| c == "HYB-E3006"),
+            "expected HYB-E3006 when mutating slice alias y := xs followed by [0] on next line"
+        );
+    }
 }
 

@@ -151,10 +151,10 @@ impl<'a> Checker<'a> {
         // type in Go — `var x int = 2.5` fails with `(truncated)` (and a
         // magnitude that cannot fit fails with `(overflows)`).
         if let Some(f) = const_float_value(value).or_else(|| {
-            (!self.expr_has_local_or_binder(value) && is_float_const_expr(value, &self.const_values, 0, st))
+            (!self.expr_has_local_or_binder(value) && self.is_float_const_expr_at(value, st, 0))
                 .then(|| self.const_float_fold(value, st))
                 .flatten()
-                .filter(|f| f.fract() != 0.0 || !(*f >= lo as f64 && *f <= hi as f64))
+                .filter(|f| !(f.is_finite() && f.fract() == 0.0 && *f >= lo as f64 && *f <= hi as f64))
         }) {
             let span = value.span();
             let msg = format!(
@@ -318,10 +318,10 @@ impl<'a> Checker<'a> {
         }
         if const_float_value(value).is_some()
             || (!self.expr_has_local_or_binder(value)
-                && is_float_const_expr(value, &self.const_values, 0, st)
+                && self.is_float_const_expr_at(value, st, 0)
                 && self
                     .const_float_fold(value, st)
-                    .is_some_and(|f| f.fract() != 0.0 || !(f >= lo as f64 && f <= hi as f64)))
+                    .is_some_and(|f| !(f.is_finite() && f.fract() == 0.0 && f >= lo as f64 && f <= hi as f64)))
         {
             let span = value.span();
             let msg = format!(
@@ -400,7 +400,7 @@ impl<'a> Checker<'a> {
         st: Option<&FnState>,
     ) {
         let value = self.unwrap_some_call_arg(value, st).unwrap_or(value);
-        if self.expr_has_local_or_binder(value) || !is_float_const_expr(value, &self.const_values, 0, st) {
+        if self.expr_has_local_or_binder(value) || !self.is_float_const_expr_at(value, st, 0) {
             return;
         }
         if let Some(f) = self.const_float_fold(value, st) {
@@ -517,10 +517,13 @@ impl<'a> Checker<'a> {
                 let r = self.const_int_fold_at(rhs, st, depth + 1);
                 fold_bin(*op, l, r)
             }
-            Expr::Call { callee, args, .. } if args.len() == 1 => {
-                let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+            Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
+                let Expr::Ident { name, span } = unwrap_parens(callee) else {
                     return ConstFold::NotConst;
                 };
+                if self.is_shadowed_ident_at(name, span.start) {
+                    return ConstFold::NotConst;
+                }
                 let Some((lo, hi)) = fixed_width_int_range(name) else {
                     return ConstFold::NotConst;
                 };
@@ -536,7 +539,89 @@ impl<'a> Checker<'a> {
 
     /// Fold a constant float expression (literals, identifiers, unary, binary).
     pub(crate) fn const_float_fold(&self, e: &Expr, st: Option<&FnState>) -> Option<f64> {
-        const_float_fold_with(e, &self.const_values, 0, st)
+        self.const_float_fold_at(e, st, 0)
+    }
+
+    fn const_float_fold_at(&self, e: &Expr, st: Option<&FnState>, depth: u32) -> Option<f64> {
+        if depth >= 16 {
+            return None;
+        }
+        match unwrap_parens(e) {
+            Expr::Ident { name, span } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, span.start) {
+                    let init = sight.constant_initializer()?;
+                    if (sight.pos.line, sight.pos.col) == (span.start.line, span.start.col) {
+                        return None;
+                    }
+                    return self.const_float_fold_at(init, st, depth + 1);
+                }
+                if st.is_some_and(|s| s.env_lookup(name).is_some())
+                    || self.is_lexical_binder_at(name, span.start)
+                {
+                    return None;
+                }
+                self.const_values
+                    .get(name)
+                    .and_then(|v| self.const_float_fold_at(v, None, depth + 1))
+            }
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.const_float_fold_at(operand, st, depth + 1).map(|v| -v),
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let l = self.const_float_fold_at(lhs, st, depth + 1)?;
+                let r = self.const_float_fold_at(rhs, st, depth + 1)?;
+                match op {
+                    BinOp::Add => Some(l + r),
+                    BinOp::Sub => Some(l - r),
+                    BinOp::Mul => Some(l * r),
+                    BinOp::Div => (r != 0.0).then_some(l / r),
+                    _ => None,
+                }
+            }
+            other => const_float_fold_with(other, &self.const_values, depth, st),
+        }
+    }
+
+    fn is_float_const_expr_at(&self, e: &Expr, st: Option<&FnState>, depth: u32) -> bool {
+        if depth >= 16 {
+            return false;
+        }
+        match unwrap_parens(e) {
+            Expr::Lit {
+                kind: LitKind::Float(_),
+                ..
+            } => true,
+            Expr::Ident { name, span } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, span.start) {
+                    let Some(init) = sight.constant_initializer() else {
+                        return false;
+                    };
+                    if sight.ty.as_ref().is_some_and(|ty| {
+                        !matches!(self.resolve_type_alias(ty), TypeExpr::Named { name: ref tn, .. } if is_float_type(tn).is_some())
+                    }) {
+                        return false;
+                    }
+                    return (sight.pos.line, sight.pos.col) != (span.start.line, span.start.col)
+                        && self.is_float_const_expr_at(init, st, depth + 1);
+                }
+                if st.is_some_and(|s| s.env_lookup(name).is_some())
+                    || self.is_lexical_binder_at(name, span.start)
+                {
+                    return false;
+                }
+                self.const_values
+                    .get(name)
+                    .is_some_and(|v| self.is_float_const_expr_at(v, None, depth + 1))
+            }
+            Expr::Unary { operand, .. } => self.is_float_const_expr_at(operand, st, depth + 1),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_float_const_expr_at(lhs, st, depth + 1)
+                    || self.is_float_const_expr_at(rhs, st, depth + 1)
+            }
+            _ => false,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -916,10 +1001,28 @@ impl<'a> Checker<'a> {
     }
 
     fn expr_has_local_or_binder(&self, e: &Expr) -> bool {
+        self.expr_has_local_or_binder_at(e, 0)
+    }
+
+    fn expr_has_local_or_binder_at(&self, e: &Expr, depth: u32) -> bool {
+        if depth >= 16 {
+            return true;
+        }
         match unwrap_parens(e) {
-            Expr::Ident { name, span } => self.resolve_local_binding_at(name, span.start).is_some() || self.is_lexical_binder_at(name, span.start),
-            Expr::Unary { operand, .. } => self.expr_has_local_or_binder(operand),
-            Expr::Binary { lhs, rhs, .. } => self.expr_has_local_or_binder(lhs) || self.expr_has_local_or_binder(rhs),
+            Expr::Ident { name, span } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, span.start) {
+                    return sight.constant_initializer().map_or(true, |init| {
+                        (sight.pos.line, sight.pos.col) == (span.start.line, span.start.col)
+                            || self.expr_has_local_or_binder_at(init, depth + 1)
+                    });
+                }
+                self.is_lexical_binder_at(name, span.start)
+            }
+            Expr::Unary { operand, .. } => self.expr_has_local_or_binder_at(operand, depth + 1),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr_has_local_or_binder_at(lhs, depth + 1)
+                    || self.expr_has_local_or_binder_at(rhs, depth + 1)
+            }
             _ => false,
         }
     }
@@ -1019,7 +1122,7 @@ impl<'a> Checker<'a> {
         if self.expr_has_local_or_binder(e) {
             return None;
         }
-        if is_float_const_expr(e, &self.const_values, 0, None) {
+        if self.is_float_const_expr_at(e, None, 0) {
             return self.const_float_fold(e, None).map(ConvConst::Float);
         }
         match self.const_int_fold_expr(e, None) {
@@ -1851,40 +1954,6 @@ pub(crate) fn const_float_fold_with(
     }
 }
 
-/// Returns true if `e` is an untyped float constant expression (contains at least one float literal or float const).
-fn is_float_const_expr(
-    e: &Expr,
-    consts: &HashMap<String, &Expr>,
-    depth: u32,
-    st: Option<&FnState>,
-) -> bool {
-    match unwrap_parens(e) {
-        Expr::Lit {
-            kind: LitKind::Float(_),
-            ..
-        } => true,
-        Expr::Lit { .. } => false,
-        Expr::Ident { name, .. } => {
-            if let Some(st) = st {
-                if st.env_lookup(name).is_some() {
-                    return false;
-                }
-            }
-            if depth < 16 {
-                if let Some(v) = consts.get(name) {
-                    return is_float_const_expr(v, consts, depth + 1, None);
-                }
-            }
-            false
-        }
-        Expr::Unary { operand, .. } => is_float_const_expr(operand, consts, depth + 1, st),
-        Expr::Binary { lhs, rhs, .. } => {
-            is_float_const_expr(lhs, consts, depth + 1, st)
-                || is_float_const_expr(rhs, consts, depth + 1, st)
-        }
-        _ => false,
-    }
-}
 
 fn is_char_const_expr(
     e: &Expr,
