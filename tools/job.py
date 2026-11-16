@@ -6,7 +6,7 @@
   job.py kaggle wait    <minutes> [slug]    poll until a NEW run terminates (0 ok/1 err/2 timeout)
   job.py kaggle fetch   <jobdir>             download kernel output -> jobdir/result/raw/
   job.py actions dispatch <workflow> <sha> <jobname> <shards> <maxparallel>
-  job.py actions watch   [run_id]             poll latest heavy run (one shot)
+  job.py actions watch   [run_id]             list recent heavy runs (one shot)
   job.py actions fetch   <run_id> <jobdir>    download artifacts -> jobdir/result/ runs
 
 Environment: KAGGLE_CLI (default /home/z/.venv/bin/kaggle), GITHUB_TOKEN read from
@@ -313,7 +313,8 @@ def actions_dispatch(workflow, sha, jobname, shards, maxparallel):
 
 def actions_watch(run_id=None):
     if run_id is None:
-        runs = gh_api("/repos/limitlessprojects/Go-Hybrid/actions/runs?per_page=5")["workflow_runs"]
+        # Filter before pagination so busy PR workflows cannot hide heavy jobs.
+        runs = gh_api("/repos/limitlessprojects/Go-Hybrid/actions/workflows/heavy.yml/runs?per_page=5")["workflow_runs"]
         for r in runs:
             print("{}  {}  {}  sha={}".format(r["id"], r["name"], r["status"], r["head_sha"][:10]))
         return

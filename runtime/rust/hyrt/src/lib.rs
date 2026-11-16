@@ -144,7 +144,7 @@ fn handle_unpack(h: u64) -> Option<(usize, u32)> {
     }
     let raw_idx = (h & 0xFFFF_FFFF) as usize;
     let gen = (h >> 32) as u32;
-    if raw_idx == 0 || gen == 0 {
+    if raw_idx == 0 || raw_idx == u32::MAX as usize || gen == 0 || gen == u32::MAX {
         return None;
     }
     Some((raw_idx - 1, gen))
@@ -367,13 +367,9 @@ pub extern "C" fn hy_json_array_get(arr: u64, i: u64, out_handle: *mut u64) -> i
         return ERR_TABLE;
     }
     with_table(|t| {
+        let a = table_get(t, arr)?.as_array().ok_or(ERR_JSON)?;
         let idx = usize::try_from(i).map_err(|_| ERR_JSON)?;
-        let elem = table_get(t, arr)?
-            .as_array()
-            .ok_or(ERR_JSON)?
-            .get(idx)
-            .ok_or(ERR_JSON)?
-            .clone();
+        let elem = a.get(idx).ok_or(ERR_JSON)?.clone();
         let h = table_insert(t, elem);
         unsafe {
             *out_handle = h;
@@ -386,9 +382,9 @@ pub extern "C" fn hy_json_array_get(arr: u64, i: u64, out_handle: *mut u64) -> i
 #[no_mangle]
 pub extern "C" fn hy_json_array_push_string(arr: u64, sptr: u64, slen: u64) -> i32 {
     with_table(|t| {
-        let a = table_get_mut(t, arr)?.as_array_mut().ok_or(ERR_JSON)?;
+        let val = table_get_mut(t, arr)?;
         let sv = unsafe { HyStr::from_raw(sptr, slen) }.as_str()?.to_string();
-        a.push(Json::String(sv));
+        val.as_array_mut().ok_or(ERR_JSON)?.push(Json::String(sv));
         Ok(())
     })
 }

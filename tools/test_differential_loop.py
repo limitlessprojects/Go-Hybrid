@@ -447,3 +447,137 @@ class TimeoutCorpusTests(unittest.TestCase):
         status, output = self.run_with_timeout(None)
         self.assertEqual(status, 0, output)
         self.assertIn("differential: FULL AGREEMENT", output)
+
+
+# A race report shaped like the real thing: go1.26's swiss-map runtime names
+# the contended object through mapaccess1_faststr / mapassign_faststr, and
+# never uses the word "writes" that the corpus hazard registers. That
+# vocabulary mismatch is the whole reason documented_race() exists.
+RACE_ON_MAP = """==================
+WARNING: DATA RACE
+Read at 0x00c00009c0f0 by goroutine 8:
+  runtime.mapaccess1_faststr()
+      /home/user/tools/go/src/internal/runtime/maps/runtime_faststr.go:101 +0x0
+  main.tally()
+      /tmp/case/rb.go:21 +0xa4
+  main.main.gowrap1()
+      /tmp/case/rb.go:33 +0x12
+
+Previous write at 0x00c00009c0f0 by goroutine 11:
+  runtime.mapassign_faststr()
+      /home/user/tools/go/src/internal/runtime/maps/runtime_faststr.go:263 +0x0
+  main.tally()
+      /tmp/case/rb.go:21 +0xd6
+  main.main.gowrap1()
+      /tmp/case/rb.go:33 +0x12
+
+Goroutine 8 (running) created at:
+  main.main()
+      /tmp/case/rb.go:33 +0x8f
+==================
+"""
+
+RACE_ON_SLICE = """==================
+WARNING: DATA RACE
+Write at 0x00c000112080 by goroutine 7:
+  main.bump()
+      /tmp/case/rb.go:14 +0x51
+
+Previous read at 0x00c000112080 by goroutine 9:
+  main.reader()
+      /tmp/case/rb.go:22 +0x3c
+==================
+"""
+
+
+class RaceDetectorTests(unittest.TestCase):
+    """`--race` links the race detector and fails on undocumented races.
+
+    The plain loop only ever sees a hazard when the runtime aborts. The
+    detector sees the same defect while the program still exits 0, which is
+    the gap this option closes.
+    """
+
+    def run_race_case(self, stderr, hazards=(), stdout="", exit_code=0):
+        build = subprocess.CompletedProcess([], 0, "", "")
+        run = subprocess.CompletedProcess([], exit_code, stdout, stderr)
+        with patch.object(HARNESS_MOD.subprocess, "run",
+                          side_effect=[build, run]), \
+             patch.object(HARNESS_MOD.os.path, "exists", return_value=True):
+            return HARNESS_MOD.build_and_run(
+                "hyb", "case.hy", ".", list(hazards), race=True)
+
+    def test_race_with_no_registered_hazard_fails(self):
+        ok, detail = self.run_race_case(RACE_ON_MAP)
+        self.assertFalse(ok)
+        self.assertIn("data race detected", detail)
+
+    def test_race_matching_registered_hazard_is_documented(self):
+        ok, detail = self.run_race_case(
+            RACE_ON_MAP, ["concurrent map writes (Go fatal, pre-registered)"])
+        self.assertTrue(ok, detail)
+        self.assertIn("documented RUNTIME-HAZARD race", detail)
+
+    def test_race_on_other_object_is_not_covered_by_map_hazard(self):
+        ok, detail = self.run_race_case(
+            RACE_ON_SLICE, ["concurrent map writes (Go fatal, pre-registered)"])
+        self.assertFalse(ok)
+        self.assertIn("data race detected", detail)
+
+    def test_detector_silent_means_no_race_failure(self):
+        ok, detail = self.run_race_case("", ["concurrent map writes"])
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, "exit 0")
+
+    def test_race_ignored_when_option_off(self):
+        """Without race=True a race report must not change the verdict.
+
+        The default loop is byte-for-byte the behaviour it had before; the
+        new capability is strictly opt-in.
+        """
+        build = subprocess.CompletedProcess([], 0, "", "")
+        run = subprocess.CompletedProcess([], 0, "", RACE_ON_MAP)
+        with patch.object(HARNESS_MOD.subprocess, "run",
+                          side_effect=[build, run]), \
+             patch.object(HARNESS_MOD.os.path, "exists", return_value=True):
+            ok, detail = HARNESS_MOD.build_and_run("hyb", "case.hy", ".")
+        self.assertTrue(ok)
+        self.assertEqual(detail, "exit 0")
+
+
+class RaceFlagPlumbingTests(unittest.TestCase):
+    """`--race` reaches `hyb build`, and only when asked for."""
+
+    def capture_build_cmd(self, race=False):
+        """Capture the argv handed to `hyb build` on the first subprocess call.
+
+        The harness makes two calls — first `hyb build`, then the built
+        binary. A call counter is used rather than a side_effect *list*,
+        because a CompletedProcess sitting in that list is not a callable
+        and mock would hand the function object back as the result.
+        """
+        captured = {}
+        state = {"calls": 0}
+
+        def fake_run(cmd, *a, **kw):
+            state["calls"] += 1
+            if state["calls"] == 1:
+                captured["cmd"] = list(cmd)
+            return subprocess.CompletedProcess(list(cmd), 0, "", "")
+
+        with patch.object(HARNESS_MOD.subprocess, "run", side_effect=fake_run), \
+             patch.object(HARNESS_MOD.os.path, "exists", return_value=True):
+            HARNESS_MOD.build_and_run("hyb", "case.hy", ".", race=race)
+        return captured.get("cmd", [])
+
+    def test_race_flag_present_when_enabled(self):
+        self.assertIn("--race", self.capture_build_cmd(race=True))
+
+    def test_race_flag_absent_by_default(self):
+        self.assertNotIn("--race", self.capture_build_cmd(race=False))
+
+    def test_race_flag_does_not_displace_the_input_file(self):
+        cmd = self.capture_build_cmd(race=True)
+        self.assertEqual(cmd[0], "hyb")
+        self.assertEqual(cmd[1], "build")
+        self.assertIn("case.hy", cmd)
