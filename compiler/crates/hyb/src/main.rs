@@ -794,6 +794,21 @@ fn render_build_error(e: &BuildError) -> String {
     }
 }
 
+fn get_active_go_version(go_bin: &str) -> String {
+    Command::new(go_bin)
+        .arg("version")
+        .output()
+        .ok()
+        .and_then(|o| {
+            if !o.status.success() {
+                return None;
+            }
+            let s = String::from_utf8_lossy(&o.stdout);
+            s.split_whitespace().nth(2).map(String::from)
+        })
+        .unwrap_or_else(|| PINNED_GO.to_string())
+}
+
 fn cmd_build(args: &[String]) -> ExitCode {
     const USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--emit-proof] [--race] [--deny-managed] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
     // Validate the entire invocation before touching the filesystem or the
@@ -1133,7 +1148,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
             .output();
         match build {
             Ok(out) if out.status.success() => {
-                println!("built {} (go {})", out_path, PINNED_GO);
+                println!("built {} (go {})", out_path, get_active_go_version(go_bin));
                 ExitCode::SUCCESS
             }
             Ok(out) => {
@@ -1149,7 +1164,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
     } else {
         match build_with_bridge(go_bin, &out_path, &go_src, &bindings, race) {
             Ok(()) => {
-                println!("built {} (go {}, bridge: hyrt)", out_path, PINNED_GO);
+                println!("built {} (go {}, bridge: hyrt)", out_path, get_active_go_version(go_bin));
                 ExitCode::SUCCESS
             }
             Err(BuildError::Tool(msg)) => {
