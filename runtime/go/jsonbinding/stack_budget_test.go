@@ -26,18 +26,18 @@ const (
 	defaultLimit = uintptr(4096)                // Cross* (hybridge.fastStackNeed)
 )
 
-func TestSmallRoutedCalleesStayUnderTheirGuard(t *testing.T) {
+func TestCalleesStayUnderTheirGuardClass(t *testing.T) {
 	type probe struct {
 		limit uintptr
 		worst uintptr
 	}
 	p := map[string]*probe{
-		"FnNewObject":  {limit: smallLimit},
-		"FnNewArray":   {limit: smallLimit},
+		"FnNewObject":  {limit: defaultLimit},
+		"FnNewArray":   {limit: defaultLimit},
 		"FnGetInt":     {limit: smallLimit},
-		"FnGetString":  {limit: smallLimit},
+		"FnGetString":  {limit: defaultLimit},
 		"FnArrayLen":   {limit: smallLimit},
-		"FnPushString": {limit: smallLimit},
+		"FnPushString": {limit: defaultLimit},
 		"FnAbiWord":    {limit: smallLimit},
 	}
 	measure := func(name string, fn unsafe.Pointer, a1, a2, a3, a4 uintptr) {

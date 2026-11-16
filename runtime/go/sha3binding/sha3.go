@@ -40,10 +40,12 @@ func Digest256(data []byte) ([]byte, error) {
 		p.Pin(&data[0])
 	}
 	p.Pin(&out[0])
-	// SMALL class (guard 1024, row 4): Keccak-f[1600] absorb/squeeze is a
-	// fixed 200-byte state permutation in a loop — no recursion, no
-	// input-proportional stack (interfaces/descriptors.md sha3 rows).
-	st := hybridge.Cross3S(FnDigest256, dataPtr, uintptr(len(data)),
+	// DEFAULT class (guard 4096, row 4): Keccak-f[1600] absorb/squeeze is a
+	// fixed-size state permutation in a loop — no recursion, no
+	// input-proportional stack — but its measured high-water mark is 1048 B
+	// once the input reaches one 136-byte block (stack_budget_test.go), above
+	// the 1024 B SMALL guard (interfaces/descriptors.md sha3 rows).
+	st := hybridge.Cross3(FnDigest256, dataPtr, uintptr(len(data)),
 		uintptr(unsafe.Pointer(&out[0])))
 	p.Unpin()
 	runtime.KeepAlive(&p)

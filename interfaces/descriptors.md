@@ -18,12 +18,12 @@ Decision Log event, never a silent edit.
 
 ## Curated surface (as of row 4)
 
-### sha3binding — ALL SMALL
+### sha3binding — SMALL except `FnDigest256`
 
 | fn | class | justification |
 |----|-------|---------------|
 | `FnAbiWord` | SMALL | constant return; zero recursion, zero heap, handful of bytes of frame |
-| `FnDigest256` | SMALL | Keccak-f[1600] absorb/squeeze: fixed 200-byte state permutation in a loop; stack use is a constant independent of input length |
+| `FnDigest256` | DEFAULT | Keccak-f[1600] absorb/squeeze: fixed-size state permutation in a loop, no recursion, input-length independent — but **measured 1048 B** high-water (darwin/arm64, `TestDigest256StackUnderItsGuard`) from one full 136-byte block up, above the 1024 B SMALL guard; the argued "≤ 1 KiB" was not an upper bound |
 | `FnStreamChecksum` | SMALL | N permutations inside one call; the loop carries no stack growth (iters live in registers) |
 
 ### jsonbinding — SPLIT BY RECURSION
@@ -42,11 +42,11 @@ nested value is DEEP regardless of the caller's input shape.**
 | `FnSet` | **DEEP** | `BTreeMap::insert` DROPS the replaced value; drop recurses |
 | `FnRelease` | **DEEP** | `*slot = None` drops the value; drop recurses. Includes the cleanup-goroutine release (arbitrary stacks) |
 | `FnToStringPretty` | **DEEP** | `to_writer` serializes by tree walk |
-| `FnNewObject` / `FnNewArray` | SMALL | table insert of an empty value, O(1) |
+| `FnNewObject` / `FnNewArray` | DEFAULT | table insert of an empty value, O(1) — but a handle-table `Vec` realloc runs libc malloc on the caller's stack: **measured 1120 B** (`TestCalleesStayUnderTheirGuardClass`) |
 | `FnGetInt` | SMALL | BTreeMap lookup + scalar copy |
-| `FnGetString` | SMALL | string clone = heap copy, not a tree walk |
+| `FnGetString` | DEFAULT | string clone = heap copy, not a tree walk — but clone + table insert allocate: **measured 1184 B** |
 | `FnArrayLen` | SMALL | Vec len read |
-| `FnPushString` | SMALL | Vec push + heap copy of the string |
+| `FnPushString` | DEFAULT | Vec push + heap copy of the string; the `Vec` realloc allocates: **measured 1168 B** |
 
 ### regexbinding — ALL DEEP
 
@@ -79,6 +79,13 @@ recurses on bracket nesting depth (`drop_in_place::<Ast>` ↔ `ClassSet::drop`).
 - `TestSmallClassFastPathOnShallowStack` (hybridge): a controlled-headroom
   goroutine in the (1024, 4096) window takes the fast path through `Cross*S`
   while the default class takes the deep path — DeepPathCount is the oracle.
+- `TestCalleesStayUnderTheirGuardClass` (jsonbinding) and
+  `TestDigest256StackUnderItsGuard` / `TestStreamChecksumStackUnderItsGuard`
+  (sha3binding): MEASURE each fn's stack high-water mark on a painted pooled
+  stack (`hybridge.StackHighWaterForTest`) — across handle-table growth and
+  across the SHA3 block boundary — and fail if a fn exceeds the guard of the
+  class it is routed through. Arguing a bound is not measuring it: four fns
+  argued SMALL measured 1048–1184 B.
 - The offsets canary (`SPHeadroomForTest` + extract_offsets.py) is unchanged:
   both guard classes read the same `g.stackguard0` offset.
 

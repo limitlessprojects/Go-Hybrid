@@ -31,10 +31,14 @@ func TestDigest256StackUnderItsGuard(t *testing.T) {
 			worst, worstLen = hw, n
 		}
 	}
-	// Digest256 is routed through: Cross3S (SMALL).
-	if limit := smallLimit; worst > limit {
-		t.Fatalf("FnDigest256: measured stack high-water %d B (input %d B) exceeds its %d B guard class — descriptors.md's \"≤ 1 KiB constant\" argument is false; route it through the DEFAULT class",
-			worst, worstLen, limit)
+	// Digest256 is routed through: Cross3 (DEFAULT, 4096 B). It measures 1048 B
+	// from one full 136-byte block up, so it must NOT sit in the 1024 B SMALL class.
+	if worst > defaultLimit {
+		t.Fatalf("FnDigest256: measured stack high-water %d B (input %d B) exceeds its %d B guard class",
+			worst, worstLen, defaultLimit)
+	}
+	if worst <= smallLimit {
+		t.Logf("FnDigest256 now fits the SMALL guard (%d B); the ledger may move it back", worst)
 	}
 }
 
