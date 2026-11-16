@@ -79,3 +79,25 @@ fn deny_managed_passes_a_hatch_free_program() {
         "corpus 15 (no managed blocks) must pass even under --deny-managed: {stdout}"
     );
 }
+
+#[test]
+fn require_managed_contracts_rejects_uncontracted_corpus_02() {
+    let (code, stdout, _stderr) = hyb(&["check", CORPUS02, "--require-managed-contracts", "--json"]);
+    assert_eq!(code, 1, "--require-managed-contracts must reject uncontracted mutex hatch");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(v["summary"]["verdict"], "reject");
+    assert!(
+        v["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "HYB-E0005"),
+        "expected HYB-E0005 in diagnostics: {stdout}"
+    );
+}
+
+#[test]
+fn report_managed_separates_verified_and_unverified_contracts() {
+    let (code, stdout, _stderr) = hyb(&["check", CORPUS02, "--report-managed"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("contracts: 0 verified, 1 unverified"),
+        "expected verified/unverified split in --report-managed: {stdout}"
+    );
+}

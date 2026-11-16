@@ -332,6 +332,7 @@ pub enum Stmt {
         reason: String,
         category: String,
         tickets: Vec<String>,
+        contract: Option<ManagedContract>,
         body: Block,
         span: Span,
     },
@@ -366,6 +367,17 @@ pub enum Stmt {
         arms: Vec<SelectArm>,
         span: Span,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct ManagedContract {
+    /// Synchronization guard path for `"mutex"` contracts (e.g. `guard: stats.mu`).
+    pub guard: Option<(String, Span)>,
+    /// Protected root or field paths (e.g. `protects: stats` or `protects: [stats.processed]`).
+    pub protects: Vec<(String, Span)>,
+    /// Malformed, duplicate, or unknown contract clauses (reported as HYB-E0005 by hy-check).
+    pub invalid: Vec<(String, Span)>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]

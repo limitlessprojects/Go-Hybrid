@@ -975,6 +975,7 @@ impl Parser {
                 // payload SHAPE: string literals (computed payloads would
                 // make the audit un-greppable).
                 let mut payload: Vec<String> = Vec::new();
+                let mut contract: Option<ManagedContract> = None;
                 if matches!(self.cur(), Tok::Punct("(")) {
                     self.bump();
                     loop {
@@ -987,12 +988,73 @@ impl Parser {
                                 self.bump();
                             }
                             Tok::StrChunk(_) | Tok::RawStr(_) => {
+                                if contract.is_some() {
+                                    return self.err(
+                                        "managed string literals (reason, category, tickets) must precede contract clauses (`guard:`, `protects:`)",
+                                    );
+                                }
                                 let (s, _) = self.parse_string_lit()?;
                                 payload.push(s);
                             }
+                            Tok::Ident(_) if matches!(self.nth(1), Tok::Punct(":")) => {
+                                let cstart = self.pos;
+                                let Tok::Ident(key) = self.cur().clone() else {
+                                    unreachable!()
+                                };
+                                self.bump();
+                                self.bump(); // ':'
+                                let paths = self.parse_managed_contract_targets()?;
+                                let cspan = self.span_from(cstart);
+                                let entry = contract.get_or_insert_with(|| ManagedContract {
+                                    guard: None,
+                                    protects: Vec::new(),
+                                    invalid: Vec::new(),
+                                    span: cspan,
+                                });
+                                entry.span = entry.span.to(cspan);
+                                match key.as_str() {
+                                    "guard" => {
+                                        if entry.guard.is_some() {
+                                            entry.invalid.push((
+                                                "duplicate `guard` clause in managed contract"
+                                                    .to_string(),
+                                                cspan,
+                                            ));
+                                        } else if paths.len() != 1 {
+                                            entry.invalid.push((
+                                                "`guard` requires exactly one mutex path"
+                                                    .to_string(),
+                                                cspan,
+                                            ));
+                                        } else {
+                                            entry.guard = paths.into_iter().next();
+                                        }
+                                    }
+                                    "protects" => {
+                                        if paths.is_empty() {
+                                            entry.invalid.push((
+                                                "`protects` clause must name at least one target"
+                                                    .to_string(),
+                                                cspan,
+                                            ));
+                                        } else {
+                                            entry.protects.extend(paths);
+                                        }
+                                    }
+                                    _ => {
+                                        entry.invalid.push((
+                                            format!(
+                                                "unknown managed contract clause `{}` (expected `guard` or `protects`)",
+                                                key
+                                            ),
+                                            cspan,
+                                        ));
+                                    }
+                                }
+                            }
                             _ => {
                                 return self.err(format!(
-                                    "managed payload takes string literals only (reason, category, tickets...); found {}",
+                                    "managed payload takes string literals (reason, category, tickets...) followed by optional contract clauses (`guard:`, `protects:`); found {}",
                                     self.describe_cur()
                                 ));
                             }
@@ -1007,6 +1069,7 @@ impl Parser {
                     reason: reason.clone(),
                     category: category.clone(),
                     tickets: payload[2.min(payload.len())..].to_vec(),
+                    contract,
                     body,
                     span: self.span_from(start),
                 })
@@ -2059,6 +2122,59 @@ impl Parser {
         }
     }
 
+    /// Parse a single `ident(.ident)*` path or a bracketed list `[p1, p2]` in a
+    /// `managed` synchronization contract (`guard: stats.mu, protects: [a, b]`).
+    fn parse_managed_contract_targets(&mut self) -> PResult<Vec<(String, Span)>> {
+        if self.eat_punct("[") {
+            let mut items = Vec::new();
+            while !self.at_punct("]") && !self.at_eof() {
+                items.push(self.parse_managed_contract_path()?);
+                if !self.eat_punct(",") && !self.at_punct("]") {
+                    return self.err(format!(
+                        "expected ',' or ']' in managed contract target list, found {}",
+                        self.describe_cur()
+                    ));
+                }
+            }
+            self.expect_punct("]")?;
+            Ok(items)
+        } else {
+            Ok(vec![self.parse_managed_contract_path()?])
+        }
+    }
+
+    fn parse_managed_contract_path(&mut self) -> PResult<(String, Span)> {
+        let start = self.pos;
+        let mut segs = Vec::new();
+        match self.cur().clone() {
+            Tok::Ident(s) => {
+                self.bump();
+                segs.push(s);
+            }
+            _ => {
+                return self.err(format!(
+                    "expected identifier path in managed contract, found {}",
+                    self.describe_cur()
+                ));
+            }
+        }
+        while self.eat_punct(".") {
+            match self.cur().clone() {
+                Tok::Ident(s) => {
+                    self.bump();
+                    segs.push(s);
+                }
+                _ => {
+                    return self.err(format!(
+                        "expected field identifier after '.' in managed contract path, found {}",
+                        self.describe_cur()
+                    ));
+                }
+            }
+        }
+        Ok((segs.join("."), self.span_from(start)))
+    }
+
     /// Operand-start `[`: `[]T{…}` typed slice literal, `[]T` type-as-value
     /// (make argument), `[N]T{…}` / `[...]T{…}` typed array composite literal,
     /// or `[a, b, c]` untyped composite literal.
@@ -2763,6 +2879,30 @@ mod tests {
             "fn main() { managed(reason, \"mutex\") { x := 1 } }"
         )
         .is_err());
+    }
+
+    #[test]
+    fn managed_contract_clauses_parse() {
+        let f = parse_src(
+            "fn main() { managed(\"pool stats\", \"mutex\", \"CORPUS-18\", guard: stats.mu, protects: [stats.processed, stats.failures]) { x := 1 } }",
+        );
+        let Stmt::Managed {
+            reason,
+            category,
+            tickets,
+            contract: Some(c),
+            ..
+        } = first_stmt(&f)
+        else {
+            panic!("expected contracted managed")
+        };
+        assert_eq!(reason, "pool stats");
+        assert_eq!(category, "mutex");
+        assert_eq!(tickets, &vec!["CORPUS-18".to_string()]);
+        assert_eq!(c.guard.as_ref().map(|(g, _)| g.as_str()), Some("stats.mu"));
+        let protected: Vec<&str> = c.protects.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(protected, vec!["stats.processed", "stats.failures"]);
+        assert!(c.invalid.is_empty());
     }
 
     #[test]
