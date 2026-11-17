@@ -4671,6 +4671,94 @@ impl<'a> Collector<'a> {
             }
         }
     }
+
+    fn check_math_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        // Constants in math package cannot be called as functions
+        if matches!(
+            member,
+            "e" | "pi"
+                | "phi"
+                | "sqrt2"
+                | "sqrte"
+                | "sqrtpi"
+                | "sqrtphi"
+                | "ln2"
+                | "log2e"
+                | "ln10"
+                | "log10e"
+                | "max_float32"
+                | "smallest_non_zero_float32"
+                | "max_float64"
+                | "smallest_non_zero_float64"
+                | "max_int"
+                | "min_int"
+                | "max_int8"
+                | "min_int8"
+                | "max_int16"
+                | "min_int16"
+                | "max_int32"
+                | "min_int32"
+                | "max_int64"
+                | "min_int64"
+                | "max_uint"
+                | "max_uint8"
+                | "max_uint16"
+                | "max_uint32"
+                | "max_uint64"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("`math.{member}` is not a function — it is a package-level constant/value and cannot be called (HYB-E1002)"),
+                &format!("reference `math.{member}` directly, do not call it"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            // 0 args: NaN()
+            "nan" => Some(0),
+            // 1 arg: Abs(x), Acos(x), Acosh(x), Asin(x), Asinh(x), Atan(x), Atanh(x),
+            // Cbrt(x), Ceil(x), Cos(x), Cosh(x), Erf(x), Erfc(x), Erfcinv(x), Erfinv(x),
+            // Exp(x), Exp2(x), Expm1(x), Floor(x), Gamma(x), Ilogb(x), Inf(sign),
+            // IsNaN(f), J0(x), J1(x), Log(x), Log10(x), Log1p(x), Log2(x), Logb(x),
+            // Pow10(n), Round(x), RoundToEven(x), Sin(x), Sinh(x), Sqrt(x), Tan(x),
+            // Tanh(x), Trunc(x), Y0(x), Y1(x), Frexp(f), Modf(f), Sincos(x),
+            // Float32bits(f), Float32frombits(b), Float64bits(f), Float64frombits(b)
+            "abs" | "acos" | "acosh" | "asin" | "asinh" | "atan" | "atanh" | "cbrt"
+            | "ceil" | "cos" | "cosh" | "erf" | "erfc" | "erfcinv" | "erfinv" | "exp"
+            | "exp2" | "expm1" | "floor" | "gamma" | "ilogb" | "inf" | "is_nan" | "j0"
+            | "j1" | "log" | "log10" | "log1p" | "log2" | "logb" | "pow10" | "round"
+            | "round_to_even" | "sin" | "sinh" | "sqrt" | "tan" | "tanh" | "trunc"
+            | "y0" | "y1" | "frexp" | "modf" | "sincos" | "float32bits" | "float32frombits"
+            | "float64bits" | "float64frombits" => Some(1),
+            // 2 args: Atan2(y, x), Copysign(f, sign), Dim(x, y), Hypot(p, q),
+            // IsInf(f, sign), Jn(n, x), Ldexp(frac, exp), Max(x, y), Min(x, y),
+            // Mod(x, y), Nextafter(x, y), Nextafter32(x, y), Pow(x, y),
+            // Remainder(x, y), Yn(n, x)
+            "atan2" | "copysign" | "dim" | "hypot" | "is_inf" | "jn" | "ldexp" | "max"
+            | "min" | "mod" | "nextafter" | "nextafter32" | "pow" | "remainder" | "yn" => Some(2),
+            // 3 args: FMA(x, y, z)
+            "fma" => Some(3),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `math.{member}` (HYB-E1002)"),
+                    &format!("`math.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`math.{member}` takes exactly {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `math.{member}`"),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -8413,6 +8501,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "math" && self.lookup_kind(pkg).is_none() {
+                        self.check_math_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
