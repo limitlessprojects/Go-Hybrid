@@ -976,14 +976,21 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                             TypeShape::Chan(e) => *e,
                             _ => TypeShape::Unknown,
                         };
+                        let elem_ty = ck.chan_elem_ty(st, chan);
                         for (i, n) in names.iter().enumerate() {
-                            let shape = if i == 0 {
-                                elem.clone()
+                            let (shape, ty) = if i == 0 {
+                                (elem.clone(), elem_ty.clone())
                             } else {
-                                TypeShape::Primitive
+                                (
+                                    TypeShape::Primitive,
+                                    Some(hy_syntax::TypeExpr::Named {
+                                        name: "bool".to_string(),
+                                        span: chan.span(),
+                                    }),
+                                )
                             };
                             mark_nested_overwritten(st, n, nested);
-                            ck.define_binding(st, n, shape, None, false, managed, false);
+                            ck.define_binding(st, n, shape, ty, false, managed, false);
                         }
                         sync_nested_moves(st, nested);
                     }
@@ -1055,11 +1062,12 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     collect_expr_direct_fnlits(expr, st, nested);
                     let is_chan = matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(st, expr, vars.len());
-                    for (name, shape) in vars.iter().zip(shapes) {
+                    let var_tys = ck.iterate_var_tys(st, expr, vars.len());
+                    for ((name, shape), var_ty) in vars.iter().zip(shapes).zip(var_tys) {
                         let is_ref = shape.is_reference_alias();
                         let may_share = ck.shape_may_share(&shape);
                         mark_nested_overwritten(st, name, nested);
-                        ck.define_binding(st, name, shape, None, false, managed, false);
+                        ck.define_binding(st, name, shape, var_ty, false, managed, false);
                         if !is_chan {
                             if may_share {
                                 ck.record_may_share(st, name, expr);
@@ -1096,8 +1104,15 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     sync_nested_moves(st, nested);
                     collect_expr_direct_fnlits(lo, st, nested);
                     collect_expr_direct_fnlits(hi, st, nested);
+                    let range_ty = ck
+                        .typed_int_bound(st, lo)
+                        .or_else(|| ck.typed_int_bound(st, hi))
+                        .map(|name| hy_syntax::TypeExpr::Named {
+                            name,
+                            span: lo.span(),
+                        });
                     mark_nested_overwritten(st, var, nested);
-                    ck.define_binding(st, var, TypeShape::Primitive, None, false, managed, false);
+                    ck.define_binding(st, var, TypeShape::Primitive, range_ty, false, managed, false);
                     sync_nested_moves(st, nested);
                 }
                 While { cond } => {
@@ -1171,7 +1186,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     ..
                 } = &arm.pattern
                 {
+                    mark_nested_overwritten(st, name, nested);
                     ck.bind_match_arm(st, name, subject, managed);
+                    sync_nested_moves(st, nested);
                 }
                 if let Some(g) = &arm.guard {
                     ck.mark_move_in_value(
@@ -1984,6 +2001,67 @@ fn update_pre_defer_peers(
                 }
             }
         }
+        Stmt::For {
+            kind: Iterate { vars, expr },
+            ..
+        } => {
+            if !matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_)) {
+                let shapes = ck.iterate_var_shapes(st, expr, vars.len());
+                let mut refs = Vec::new();
+                expr_referenced_bindings(expr, &mut refs);
+                for (target, shape) in vars.iter().zip(shapes) {
+                    if target == "_" {
+                        continue;
+                    }
+                    let self_read = ck.value_reads_storage_of(st, expr, target);
+                    if !self_read {
+                        sever_peer_node(peers, target);
+                    }
+                    if ck.shape_may_share(&shape) {
+                        for r in &refs {
+                            let may_share = ck
+                                .lookup_binding(st, r)
+                                .map(|b| ck.shape_may_share(&b.shape))
+                                .unwrap_or(true);
+                            if may_share {
+                                link_peer_nodes(peers, target, r);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Stmt::Match { subject, arms, .. } => {
+            let mut refs = Vec::new();
+            expr_referenced_bindings(subject, &mut refs);
+            for arm in arms {
+                if let hy_syntax::MatchPattern::Path {
+                    binding: Some(target),
+                    ..
+                } = &arm.pattern
+                {
+                    if target == "_" {
+                        continue;
+                    }
+                    let self_read = ck.value_reads_storage_of(st, subject, target);
+                    if !self_read {
+                        sever_peer_node(peers, target);
+                    }
+                    for r in &refs {
+                        let may_share = ck
+                            .lookup_binding(st, r)
+                            .map(|b| {
+                                ck.shape_may_share(&b.shape)
+                                    || matches!(b.shape, TypeShape::Unknown)
+                            })
+                            .unwrap_or(true);
+                        if may_share {
+                            link_peer_nodes(peers, target, r);
+                        }
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -2087,7 +2165,11 @@ fn stmt_moves_watched_binding(
     };
 
     match stmt {
-        Stmt::Task { args, .. } => {
+        Stmt::Task { callee, args, .. } => {
+            let cdesc = format!("the spawn callee `{}`", callee.render());
+            if let Some(mv) = check_expr(callee, cdesc) {
+                return Some(mv);
+            }
             for a in args {
                 let desc = format!("the spawn argument `{}`", a.value.render());
                 if let Some(mv) = check_expr(&a.value, desc) {
@@ -2101,6 +2183,10 @@ fn stmt_moves_watched_binding(
             is_move,
             span,
         } => {
+            let cdesc = format!("the send target `{}`", chan.render());
+            if let Some(mv) = check_expr(chan, cdesc) {
+                return Some(mv);
+            }
             let desc = format!(
                 "the move-send `{} <- {}`",
                 chan.render(),

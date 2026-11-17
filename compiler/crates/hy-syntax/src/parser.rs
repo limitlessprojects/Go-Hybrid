@@ -938,7 +938,11 @@ impl Parser {
             Tok::Kw("select") => self.parse_select(start),
             Tok::Kw("return") => {
                 self.bump();
-                let values = if self.at_punct("}") || self.at_eof() || self.at_punct(";") {
+                let values = if !self.same_line_as_prev()
+                    || self.at_punct("}")
+                    || self.at_eof()
+                    || self.at_punct(";")
+                {
                     Vec::new()
                 } else {
                     self.parse_expr_list(true)?
@@ -1022,7 +1026,10 @@ impl Parser {
                 // so a bare-ident label is ambiguous with the next
                 // statement's first token — only `loop` is captured;
                 // user-named labels arrive with real loop labels.
-                let label = if self.at_kw("loop") {
+                let label = if self.at_kw("loop")
+                    && self.same_line_as_prev()
+                    && !matches!(self.nth(1), Tok::Punct("{"))
+                {
                     self.bump();
                     Some("loop".to_string())
                 } else {
@@ -1035,7 +1042,10 @@ impl Parser {
             }
             Tok::Kw("continue") => {
                 self.bump();
-                let label = if self.at_kw("loop") {
+                let label = if self.at_kw("loop")
+                    && self.same_line_as_prev()
+                    && !matches!(self.nth(1), Tok::Punct("{"))
+                {
                     self.bump();
                     Some("loop".to_string())
                 } else {
@@ -2265,7 +2275,7 @@ impl Parser {
         loop {
             // composite literal `T{…}`: attaches only to a pure type-name
             // chain at a literal-allowing position (see module docs).
-            if self.at_punct("{") && lit {
+            if self.at_punct("{") && lit && self.same_line_as_prev() {
                 if let Some(name) = type_name_chain(&e) {
                     let ty = TypeExpr::Named {
                         name,
@@ -2326,6 +2336,9 @@ impl Parser {
                     };
                 }
                 Tok::Punct("[") => {
+                    if !self.same_line_as_prev() {
+                        break;
+                    }
                     if self.peek_generic_args() {
                         // `lru_cache[k, v]{…}` / `lru_cache.new[string, int](2)`:
                         // type arguments folded into the callee name (contract gap)
@@ -4481,5 +4494,105 @@ fn main() {
         assert!(r.is_err(), "leading dot on new line must not fold into statement");
     }
 
+    #[test]
+    fn bare_return_does_not_consume_next_line_or_arm_head() {
+        let f = parse_src(
+            "fn compute() (res int) {\n\
+                 res = 42\n\
+                 return\n\
+                 res = 99\n\
+             }",
+        );
+        let body = f.fns().next().unwrap().body.as_ref().unwrap();
+        assert_eq!(body.stmts.len(), 3, "got {:?}", body.stmts);
+        assert!(
+            matches!(&body.stmts[1], Stmt::Return { values, .. } if values.is_empty()),
+            "bare return on its own line must have empty values: {:?}",
+            body.stmts[1]
+        );
+
+        let f_arms = parse_src(
+            "fn handle(opt option[int], ch chan int, quit chan bool) {\n\
+                 match opt {\n\
+                     none => return\n\
+                     some(v) => _ = v\n\
+                 }\n\
+                 select {\n\
+                     <-quit:\n\
+                         return\n\
+                     v := <-ch:\n\
+                         _ = v\n\
+                 }\n\
+             }",
+        );
+        let arms_body = f_arms.fns().next().unwrap().body.as_ref().unwrap();
+        assert_eq!(arms_body.stmts.len(), 2);
+    }
+
+    #[test]
+    fn break_and_continue_do_not_consume_next_line_loop_stmt() {
+        let f = parse_src(
+            "fn main() {\n\
+                 for i in 0..3 {\n\
+                     break\n\
+                     loop {\n\
+                         continue\n\
+                         loop {\n\
+                             break\n\
+                         }\n\
+                     }\n\
+                 }\n\
+             }",
+        );
+        let outer_for = first_stmt(&f);
+        let Stmt::For { body, .. } = outer_for else {
+            panic!("expected outer for, got {:?}", outer_for);
+        };
+        assert_eq!(body.stmts.len(), 2, "got {:?}", body.stmts);
+        assert!(
+            matches!(&body.stmts[0], Stmt::Break { label: None, .. }),
+            "plain break must not steal `loop` from next line: {:?}",
+            body.stmts[0]
+        );
+        assert!(
+            matches!(&body.stmts[1], Stmt::For { kind: ForKind::Infinite, .. }),
+            "second statement must remain an infinite loop, not a bare block: {:?}",
+            body.stmts[1]
+        );
+    }
+
+    #[test]
+    fn line_leading_bracket_and_brace_do_not_fold_into_previous_expr() {
+        let f = parse_src(
+            "fn main() {\n\
+                 xs := []int{10, 20}\n\
+                 y := xs\n\
+                 [0]\n\
+                 {\n\
+                     z := 1\n\
+                 }\n\
+             }",
+        );
+        let body = f.fns().next().unwrap().body.as_ref().unwrap();
+        assert_eq!(body.stmts.len(), 4, "got {:?}", body.stmts);
+        let Stmt::Local(y_decl) = &body.stmts[1] else {
+            panic!("expected y := xs local decl");
+        };
+        assert!(
+            matches!(&y_decl.values[0], Expr::Ident { name, .. } if name == "xs"),
+            "y := xs must not fuse with [0] on next line: {:?}",
+            y_decl.values[0]
+        );
+        assert!(
+            matches!(&body.stmts[2], Stmt::Expr { expr: Expr::SliceLit { .. }, .. }),
+            "third statement must be [0] slice literal: {:?}",
+            body.stmts[2]
+        );
+        assert!(
+            matches!(&body.stmts[3], Stmt::Block { .. }),
+            "fourth statement must be bare block: {:?}",
+            body.stmts[3]
+        );
+    }
 }
 
