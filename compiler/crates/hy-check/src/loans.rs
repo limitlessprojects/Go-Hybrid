@@ -8198,6 +8198,10 @@ impl<'a> Checker<'a> {
                             })
                         }) {
                             (field_fn_ptr, true)
+                        } else if let Some(idx) = crate::shape::receiver_type_name(&self.shape_of_expr(st, base))
+                            .and_then(|k| foreign::foreign_method_mutated_arg(&k, method_name.as_str()))
+                        {
+                            (false, idx == i)
                         } else if matches!(self.shape_of_expr(st, callee), TypeShape::Closure) {
                             indirect_callee_effect(callee)
                         } else {
