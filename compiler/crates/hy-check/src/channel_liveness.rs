@@ -1,4 +1,4 @@
-//! channel_liveness.rs — SPSC linear channel capability & nursery lifecycle invariants (Milestone 1, #4200).
+//! channel_liveness.rs 鈥?SPSC linear channel capability & nursery lifecycle invariants (Milestone 1, #4200).
 //!
 //! Enforces:
 //! - Capability split: SPSC linear channel capabilities (`hy.send_cap[T]`, `hy.recv_cap[T]`) via `hy.pipe[T]()`.
@@ -32,7 +32,14 @@ pub struct PipeInfo {
 #[derive(Debug, Clone, Default)]
 pub struct ScopeState {
     pub pipes: Vec<PipeInfo>,
+    /// Caps moved on EVERY path reaching this point 鈥?excuses the close /
+    /// drain obligation at `check_terminal_invariants` (#4322: conditional
+    /// merge must intersect, not union).
     pub moved_caps: HashSet<String>,
+    /// Caps moved on AT LEAST ONE path 鈥?`is_moved` consults this so a
+    /// one-branch `task w(move tx)` still flags a later `tx.send` as
+    /// use-after-move on the taken path.
+    pub maybe_caps: HashSet<String>,
 }
 
 pub struct ChannelLivenessChecker {
@@ -72,8 +79,122 @@ impl ChannelLivenessChecker {
             self.check_terminal_invariants(&scope);
             if let Some(parent) = self.scope_stack.last_mut() {
                 parent.moved_caps.extend(scope.moved_caps);
+                parent.maybe_caps.extend(scope.maybe_caps);
             }
         }
+    }
+
+    /// Mutable checker state a conditional arm can touch (#4322 fix):
+    /// scope stacks carry both pipe typestates and `moved_caps`;
+    /// `cap_to_pipe`/`pipes_all` grow on arm-local `hy.pipe` registrations
+    /// and must not leak to sibling arms or to the join path.
+    fn branch_snapshot(&self) -> (Vec<ScopeState>, HashMap<String, usize>, Vec<PipeInfo>) {
+        (
+            self.scope_stack.clone(),
+            self.cap_to_pipe.clone(),
+            self.pipes_all.clone(),
+        )
+    }
+
+    fn restore_branch(&mut self, snap: &(Vec<ScopeState>, HashMap<String, usize>, Vec<PipeInfo>)) {
+        self.scope_stack = snap.0.clone();
+        self.cap_to_pipe = snap.1.clone();
+        self.pipes_all = snap.2.clone();
+    }
+
+    /// Path-sensitive meet over per-arm end states (fixes #4322).
+    /// `stacks` holds one entry per arm, plus one snapshot entry for an
+    /// implicit untouched path (missing `else`, guarded `match` arms).
+    ///
+    /// Meet semantics per cap:
+    /// - `maybe_caps` = union 鈥?a move on ANY arm must still flag a later
+    ///   use (use-after-move exists on that path);
+    /// - `moved_caps` = intersection 鈥?the close/drain obligation is excused
+    ///   only when EVERY path transferred the cap;
+    /// - pipe typestate = the least-progressed arm value, UNLESS every arm
+    ///   discharged the obligation 鈥?then the merged cap is `Closed` (all
+    ///   arms closed it) or recorded as moved (mixed close/move discharge
+    ///   鈥?any post-join use is use-after-move anyway).
+    fn apply_branch_meet(
+        &mut self,
+        snap: &(Vec<ScopeState>, HashMap<String, usize>, Vec<PipeInfo>),
+        stacks: Vec<Vec<ScopeState>>,
+    ) {
+        let arm_moved = |stacks: &[Vec<ScopeState>], k: usize, name: &str| {
+            stacks[k]
+                .iter()
+                .any(|s| s.moved_caps.contains(name) || s.maybe_caps.contains(name))
+        };
+        let mut merged = snap.0.clone();
+        for (si, scope) in merged.iter_mut().enumerate() {
+            let mut all_names: HashSet<String> = HashSet::new();
+            for s in &stacks {
+                for n in s[si].moved_caps.iter().chain(s[si].maybe_caps.iter()) {
+                    all_names.insert(n.clone());
+                }
+            }
+            // Definite moves: names moved on every arm (intersection).
+            let mut moved: HashSet<String> = all_names
+                .iter()
+                .filter(|n| (0..stacks.len()).all(|k| arm_moved(&stacks, k, n)))
+                .cloned()
+                .collect();
+            // Maybe moves: union.
+            let maybe: HashSet<String> = all_names
+                .iter()
+                .filter(|n| (0..stacks.len()).any(|k| arm_moved(&stacks, k, n)))
+                .cloned()
+                .collect();
+            for p in scope.pipes.iter_mut() {
+                let tx_all_closed = stacks
+                    .iter()
+                    .enumerate()
+                    .all(|(k, s)| s[si].pipes.iter().any(|q| q.tx == p.tx && q.tx_state == ChannelTypestate::Closed) || arm_moved(&stacks, k, &p.tx));
+                let rx_all_drained = stacks
+                    .iter()
+                    .enumerate()
+                    .all(|(k, s)| s[si].pipes.iter().any(|q| q.rx == p.rx && q.rx_state == ChannelTypestate::Drained) || arm_moved(&stacks, k, &p.rx));
+                if tx_all_closed {
+                    if stacks.iter().all(|s| {
+                        s[si].pipes
+                            .iter()
+                            .any(|q| q.tx == p.tx && q.tx_state == ChannelTypestate::Closed)
+                    }) {
+                        p.tx_state = ChannelTypestate::Closed;
+                    } else {
+                        moved.insert(p.tx.clone());
+                    }
+                } else {
+                    for s in &stacks {
+                        if let Some(q) = s[si].pipes.iter().find(|q| q.tx == p.tx) {
+                            p.tx_state = meet_state(p.tx_state, q.tx_state);
+                        }
+                    }
+                }
+                if rx_all_drained {
+                    if stacks.iter().all(|s| {
+                        s[si].pipes
+                            .iter()
+                            .any(|q| q.rx == p.rx && q.rx_state == ChannelTypestate::Drained)
+                    }) {
+                        p.rx_state = ChannelTypestate::Drained;
+                    } else {
+                        moved.insert(p.rx.clone());
+                    }
+                } else {
+                    for s in &stacks {
+                        if let Some(q) = s[si].pipes.iter().find(|q| q.rx == p.rx) {
+                            p.rx_state = meet_state(p.rx_state, q.rx_state);
+                        }
+                    }
+                }
+            }
+            scope.moved_caps = moved;
+            scope.maybe_caps = maybe;
+        }
+        self.scope_stack = merged;
+        self.cap_to_pipe = snap.1.clone();
+        self.pipes_all = snap.2.clone();
     }
 
     fn register_pipe(&mut self, tx_name: String, rx_name: String, def_span: Span) {
@@ -212,15 +333,45 @@ impl ChannelLivenessChecker {
                     self.check_stmt(i);
                 }
                 self.check_expr(cond);
-                self.push_scope();
-                for s in &then.stmts {
-                    self.check_stmt(s);
-                }
-                self.pop_scope();
-                if let Some(eb) = otherwise {
-                    self.push_scope();
-                    self.check_stmt(eb);
-                    self.pop_scope();
+                // Literal conditions take exactly one path 鈥?run that arm
+                // unconditionally (no meet, no fallthrough arm).
+                match lit_bool(cond) {
+                    Some(true) => {
+                        self.push_scope();
+                        for s in &then.stmts {
+                            self.check_stmt(s);
+                        }
+                        self.pop_scope();
+                    }
+                    Some(false) => {
+                        if let Some(eb) = otherwise {
+                            self.push_scope();
+                            self.check_stmt(eb);
+                            self.pop_scope();
+                        }
+                    }
+                    None => {
+                        let snap = self.branch_snapshot();
+                        let mut stacks = Vec::with_capacity(2);
+                        self.restore_branch(&snap);
+                        self.push_scope();
+                        for s in &then.stmts {
+                            self.check_stmt(s);
+                        }
+                        self.pop_scope();
+                        stacks.push(self.scope_stack.clone());
+                        if let Some(eb) = otherwise {
+                            self.restore_branch(&snap);
+                            self.push_scope();
+                            self.check_stmt(eb);
+                            self.pop_scope();
+                            stacks.push(self.scope_stack.clone());
+                        } else {
+                            // No else: the untouched path is an arm of its own.
+                            stacks.push(snap.0.clone());
+                        }
+                        self.apply_branch_meet(&snap, stacks);
+                    }
                 }
             }
             Stmt::Block { block, .. } => {
@@ -232,7 +383,19 @@ impl ChannelLivenessChecker {
             }
             Stmt::Match { subject, arms, .. } => {
                 self.check_expr(subject);
+                // A path can escape the match only through a guard (`x if
+                // cond` whose cond is false) or a missing arm 鈥?E5001 owns
+                // exhaustiveness, so a fallthrough arm is needed only when
+                // some arm is guarded and no unguarded `_` covers the rest.
+                let needs_fallthrough = arms.is_empty()
+                    || (arms.iter().any(|a| a.guard.is_some())
+                        && !arms
+                            .iter()
+                            .any(|a| a.guard.is_none() && matches!(a.pattern, MatchPattern::Wildcard)));
+                let snap = self.branch_snapshot();
+                let mut stacks = Vec::with_capacity(arms.len() + 1);
                 for arm in arms {
+                    self.restore_branch(&snap);
                     if let Some(guard) = &arm.guard {
                         self.check_expr(guard);
                     }
@@ -241,7 +404,12 @@ impl ChannelLivenessChecker {
                         self.check_stmt(s);
                     }
                     self.pop_scope();
+                    stacks.push(self.scope_stack.clone());
                 }
+                if needs_fallthrough {
+                    stacks.push(snap.0.clone());
+                }
+                self.apply_branch_meet(&snap, stacks);
             }
             Stmt::Defer { call, .. } => {
                 self.check_expr(call);
@@ -274,7 +442,16 @@ impl ChannelLivenessChecker {
                 self.check_expr(value);
             }
             Stmt::Select { arms, .. } => {
+                // Each arm runs from the same pre-select state; the merged
+                // state meets them. A select without `default` blocks
+                // forever on the uncovered path 鈥?a path that never reaches
+                // scope exit carries no terminal obligation, so no
+                // fallthrough arm is needed.
+                let snap = self.branch_snapshot();
+                let mut stacks = Vec::with_capacity(arms.len());
                 for arm in arms {
+                    self.restore_branch(&snap);
+                    self.push_scope();
                     match &arm.kind {
                         SelectArmKind::Recv { chan, .. } => {
                             if let Some(cap) = self.get_cap_name(chan) {
@@ -305,12 +482,13 @@ impl ChannelLivenessChecker {
                         }
                         SelectArmKind::Default => {}
                     }
-                    self.push_scope();
                     for s in &arm.body.stmts {
                         self.check_stmt(s);
                     }
                     self.pop_scope();
+                    stacks.push(self.scope_stack.clone());
                 }
+                self.apply_branch_meet(&snap, stacks);
             }
             _ => {}
         }
@@ -545,7 +723,7 @@ impl ChannelLivenessChecker {
 
     fn is_moved(&self, name: &str) -> bool {
         for scope in self.scope_stack.iter().rev() {
-            if scope.moved_caps.contains(name) {
+            if scope.maybe_caps.contains(name) {
                 return true;
             }
         }
@@ -555,6 +733,7 @@ impl ChannelLivenessChecker {
     fn mark_moved(&mut self, name: &str) {
         if let Some(scope) = self.scope_stack.last_mut() {
             scope.moved_caps.insert(name.to_string());
+            scope.maybe_caps.insert(name.to_string());
         }
     }
 
@@ -600,5 +779,41 @@ impl ChannelLivenessChecker {
                 }
             }
         }
+    }
+}
+
+/// Least-progressed of two typestates along Fresh < Active < terminal
+/// (Closed/Drained/Moved). Used by `apply_branch_meet`: after a branch the
+/// merged state may claim only the progress EVERY arm made.
+fn meet_state(a: ChannelTypestate, b: ChannelTypestate) -> ChannelTypestate {
+    fn rank(s: ChannelTypestate) -> u8 {
+        match s {
+            ChannelTypestate::Fresh => 0,
+            ChannelTypestate::Active => 1,
+            ChannelTypestate::Closed | ChannelTypestate::Drained | ChannelTypestate::Moved => 2,
+        }
+    }
+    if rank(a) <= rank(b) {
+        a
+    } else {
+        b
+    }
+}
+
+/// A `Lit bool` condition's taken path (`if true`/`if false`), parens
+/// stripped; `None` for non-literal conditions.
+fn lit_bool(e: &Expr) -> Option<bool> {
+    let mut e = e;
+    while let Expr::Paren { inner, .. } = e {
+        e = inner.as_ref();
+    }
+    if let Expr::Lit {
+        kind: LitKind::Bool(b),
+        ..
+    } = e
+    {
+        Some(*b)
+    } else {
+        None
     }
 }
