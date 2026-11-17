@@ -30,12 +30,12 @@ use std::collections::{HashMap, HashSet};
 /// Read-only / non-map-mutating builtin call targets that can never insert or
 /// delete on a map argument — the A3 callee scan fails closed on everything
 /// else (#111). (`delete` is checked explicitly by `check_delete_conflict`.)
-const A3_PURE_FNS: &[&str] = &[
+pub(crate) const A3_PURE_FNS: &[&str] = &[
     "len", "cap", "print", "println", "append", "copy", "make", "new", "close", "panic", "recover",
 ];
 /// Read-only packages (`fmt.println(m)`, `strings.split(...)`) — their
 /// methods receive values without storing to them (#111).
-const A3_PURE_PKGS: &[&str] = &["fmt", "strings", "strconv", "math", "unicode"];
+pub(crate) const A3_PURE_PKGS: &[&str] = &["fmt", "strings", "strconv", "math", "unicode"];
 
 /// First segment of a dotted path (`e.services` -> `e`): the binding whose
 /// storage the path reaches through.
@@ -48,7 +48,7 @@ fn path_root(path: &str) -> &str {
 /// may-share graph (`alias := m`, shallow copies, closures) or the
 /// single-parent alias chain. Used instead of string equality so an insert
 /// through a peer of the loaned map fires the same E3102 as a direct one.
-fn a3_paths_conflict(st: &FnState, loan_path: &str, event_path: &str) -> bool {
+pub(crate) fn a3_paths_conflict(st: &FnState, loan_path: &str, event_path: &str) -> bool {
     let lr = path_root(loan_path);
     let er = path_root(event_path);
     if lr == er {
@@ -237,6 +237,7 @@ impl<'a> Checker<'a> {
                     }
                     _ => {}
                 }
+                self.check_a2_package_call(st, cr, idx, &pkg, &method);
             }
             Resolved::Method {
                 root,
@@ -247,9 +248,11 @@ impl<'a> Checker<'a> {
                 self.check_call_const_writes(st, cr, &HashSet::new());
                 self.record_callee_param_stores(st, cr);
                 let Some(tname) = receiver_type_name(&recv) else {
+                    self.check_a2_method_call(st, cr, idx, &root, &recv, &method);
                     self.check_a3_method_call(st, cr, idx, &root, &recv, &method);
                     return;
                 };
+                self.check_a2_foreign_method_closure_args(st, cr, idx);
                 // #2200: a handle whose binding is vendored in `runtime/go/`
                 // has a FINITE method surface, and Go rejects every other name
                 // at `go build` (`doc.Get undefined (type jsonbinding.Value has
@@ -387,6 +390,7 @@ impl<'a> Checker<'a> {
                 }
                 self.check_call_const_writes(st, cr, &HashSet::new());
                 self.record_callee_param_stores(st, cr);
+                self.check_a2_fn_call(st, cr, idx, &name);
                 if self.fns.contains_key(&name) {
                     // A3 #111: the callee may insert/delete through the
                     // argument — that event runs inside THIS call site's
@@ -414,6 +418,7 @@ impl<'a> Checker<'a> {
             Resolved::None => {
                 self.check_call_const_writes(st, cr, &HashSet::new());
                 self.record_callee_param_stores(st, cr);
+                self.check_a2_indirect_call(st, cr, idx);
                 self.check_a3_inline_or_unknown_call(st, cr, idx);
             }
         }
@@ -421,7 +426,7 @@ impl<'a> Checker<'a> {
 
     /// HYB-E3101 (A2): a mutating-mode call conflicts with any live
     /// borrow-mode loan on the same handle (or an alias / may-share peer).
-    fn check_a2_conflict(&mut self, st: &FnState, cr: &CallRef, root: &str, idx: usize) {
+    pub(crate) fn check_a2_conflict(&mut self, st: &FnState, cr: &CallRef, root: &str, idx: usize) {
         let conflict = st.loans.iter().find(|l| {
             let eff_last = self.effective_loan_last(st, l);
             matches!(
@@ -432,6 +437,13 @@ impl<'a> Checker<'a> {
         });
         let Some(loan) = conflict else { return };
         let msg = format!("mutating call on `{}` while a borrow loan is live", root);
+        if self
+            .diags
+            .iter()
+            .any(|d| d.code == "HYB-E3101" && d.span == cr.span && d.message == msg)
+        {
+            return;
+        }
         let notes = vec![
             format!(
                 "the borrow-mode loan on `{}` was created at {} ({}:{}) and is live until its last use — for a loop-header loan that is the whole loop body (O7, non-lexical window)",
