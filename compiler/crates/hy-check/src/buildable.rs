@@ -2860,7 +2860,20 @@ impl<'a> Collector<'a> {
             }
             PlaceKind::Field { base, name } => {
                 let bk = self.kind_of_place(base);
-                self.check_field_selector_kind(&base.render(), name, &bk, p.span);
+                let set_elem = match &base.kind {
+                    PlaceKind::Ident(ident_name) => {
+                        let elem_from_scopes = self.set_elem_scopes.iter().rev().find_map(|s| s.get(ident_name).cloned().flatten());
+                        elem_from_scopes.or_else(|| {
+                            self.lookup_type_name(ident_name).and_then(|tn| {
+                                tn.strip_prefix("set[").and_then(|r| r.strip_suffix(']')).map(|s| s.to_string())
+                            })
+                        })
+                    }
+                    _ => None,
+                };
+                if !self.check_field_selector_set(&base.render(), name, set_elem, p.span) {
+                    self.check_field_selector_kind(&base.render(), name, &bk, p.span);
+                }
                 self.check_range_copy_write(p);
                 self.place_read(p);
             }
@@ -3994,6 +4007,9 @@ impl<'a> Collector<'a> {
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
                     return k;
+                }
+                if name == "none" {
+                    return OpKind::Option(Box::new(OpKind::Unknown));
                 }
                 if name == "true" || name == "false" {
                     return OpKind::Bool;
@@ -8951,6 +8967,32 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_field_selector_set(&mut self, base_render: &str, name: &str, set_elem: Option<String>, span: Span) -> bool {
+        if let Some(elem) = set_elem {
+            if !matches!(name, "insert" | "remove" | "contains" | "len") {
+                let elem_str = if elem.is_empty() { "T".to_string() } else { elem };
+                let type_label = format!("set[{}]", elem_str);
+                let needle = format!("{}.{} undefined", base_render, name);
+                if !self.diags.iter().any(|d| (d.span == span && d.code == "HYB-E1002") || (d.code == "HYB-E1002" && d.message.contains(&needle))) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                            base_render,
+                            name,
+                            type_label,
+                            base_render,
+                            name
+                        ),
+                        "set[T] does not expose struct fields; use its methods (insert, remove, contains)",
+                    );
+                }
+            }
+            return true;
+        }
+        false
+    }
+
     fn check_field_selector(&mut self, base: &Expr, name: &str, span: Span) {
         if let Expr::Ident { name: ident_name, .. } = unwrap_parens(base) {
             if self.is_imported_pkg_root(ident_name)
@@ -8963,10 +9005,46 @@ impl<'a> Collector<'a> {
             }
         }
         let bk = self.kind_of_expr(base);
+        let set_elem = self.set_elem_of_expr(base).or_else(|| {
+            if let Expr::Ident { name: ident_name, .. } = unwrap_parens(base) {
+                self.lookup_type_name(ident_name).and_then(|tn| {
+                    tn.strip_prefix("set[").and_then(|r| r.strip_suffix(']')).map(|s| s.to_string())
+                })
+            } else {
+                None
+            }
+        });
+        if self.check_field_selector_set(&base.render(), name, set_elem, span) {
+            return;
+        }
         self.check_field_selector_kind(&base.render(), name, &bk, span);
     }
 
     fn check_field_selector_kind(&mut self, base_render: &str, name: &str, bk: &OpKind, span: Span) {
+        // #4532: prelude option[T] has no fields in Hybrid surface (SPEC-LANGUAGE T20).
+        // Only methods: is_some, is_none, unwrap, unwrap_or, expect, or.
+        // Private Go representation fields (val, ok) must be rejected.
+        if let OpKind::Option(_) = bk {
+            if !matches!(name, "is_some" | "is_none" | "unwrap" | "unwrap_or" | "expect" | "or") {
+                let needle = format!("{}.{} undefined", base_render, name);
+                if !self.diags.iter().any(|d| (d.span == span && d.code == "HYB-E1002") || (d.code == "HYB-E1002" && d.message.contains(&needle))) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                            base_render,
+                            name,
+                            bk.label(),
+                            base_render,
+                            name
+                        ),
+                        "option[T] does not expose struct fields; use its methods (is_some, is_none, unwrap)",
+                    );
+                }
+            }
+            return;
+        }
+
         if !is_fully_resolved(bk) || matches!(bk, OpKind::Interface) {
             return;
         }
