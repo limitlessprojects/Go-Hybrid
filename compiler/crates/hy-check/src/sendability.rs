@@ -1049,6 +1049,10 @@ impl<'a> Checker<'a> {
     pub(crate) fn chan_elem_shape(&self, st: &FnState, chan: &Expr) -> Option<Vec<TypeShape>> {
         match self.shape_of_expr(st, chan) {
             TypeShape::Chan(e) => Some(vec![*e]),
+            // `tx <- v` on a stamped `hy.send_cap[T]` targets T — the same
+            // element check `.send(v)` gets through `check_cap_method_call`.
+            TypeShape::OwnHandle(ref h) => crate::shape::cap_elem_arg(h, "hy.send_cap")
+                .map(|t| vec![self.shape_of_type_arg_str(t, 0)]),
             _ => None,
         }
     }
@@ -1101,7 +1105,7 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn check_send_target(&mut self, st: &FnState, chan: &Expr, span: Span) -> bool {
         match self.send_target_shape(st, chan) {
-            TypeShape::OwnHandle(ref h) if h == "hy.send_cap" => true,
+            TypeShape::OwnHandle(ref h) if h.split('[').next() == Some("hy.send_cap") => true,
             TypeShape::Chan(_) => {
                 if self
                     .diags
@@ -1176,6 +1180,82 @@ impl<'a> Checker<'a> {
                 );
                 false
             }
+        }
+    }
+
+    /// SPSC capability method call (W-026): `tx.send(v)` / `rx.recv()` /
+    /// `tx.close()` / `rx.drain()` on `hy.send_cap`/`hy.recv_cap` receivers.
+    /// These are CHANNEL operations spelled as method calls — they dispatch
+    /// through `Resolved::Method` with `CallMode::Unknown` (fail-open), so
+    /// without this check the payload argument skipped the O4 send-site
+    /// classification entirely: `tx.send(m)` on a live map was accepted
+    /// while the identical `tx <- m` rejected HYB-E3002. Method-name and
+    /// wrong-direction validation arrive free through
+    /// `foreign_method_surface` (E1002); here we pin arity and the send
+    /// payload, whose `check_site` runs against the `[T]` stamped on
+    /// `hy.send_cap[T]` by `hy.pipe[T]` — so a `map` literal into
+    /// `hy.pipe[int]` mis-fails the same way `tx <- m` does.
+    pub(crate) fn check_cap_method_call(
+        &mut self,
+        st: &mut FnState,
+        cr: &crate::walk::CallRef,
+        managed: bool,
+    ) {
+        let Expr::Field { base, name, .. } = unwrap_parens(cr.callee) else {
+            return;
+        };
+        let method = name.split('[').next().unwrap_or(name.as_str());
+        let Some(tname) = crate::shape::receiver_type_name(&self.shape_of_expr(st, base)) else {
+            return;
+        };
+        let cap_base = tname.split('[').next().unwrap_or(tname.as_str());
+        let surface = match cap_base {
+            "hy.send_cap" => &["send", "close"][..],
+            "hy.recv_cap" => &["recv", "drain"][..],
+            _ => return,
+        };
+        if !surface.contains(&method) {
+            return; // foreign_method_surface already reports E1002
+        }
+        let want = if method == "send" { 1 } else { 0 };
+        if cr.args.len() != want {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    cr.span,
+                    format!(
+                        "invalid capability method arity `{}.{}`: takes {} argument{}, got {} (HYB-E1002)",
+                        cap_base,
+                        method,
+                        want,
+                        if want == 1 { "" } else { "s" },
+                        cr.args.len()
+                    ),
+                )
+                .with_notes(vec![
+                    format!("the signature is `{}({})`", method, if want == 1 { "v" } else { "" }),
+                ]),
+            );
+            return;
+        }
+        if method == "send" {
+            let v = &cr.args[0].value;
+            let desc = format!("the send `{}`", cr.callee.render());
+            let vals: Vec<&Expr> = vec![v];
+            let targets = crate::shape::cap_elem_arg(&tname, "hy.send_cap")
+                .map(|t| vec![self.shape_of_type_arg_str(t, 0)]);
+            self.check_site(
+                st,
+                cr.span,
+                "HYB-E3002",
+                &vals,
+                managed,
+                &desc,
+                false,
+                None,
+                targets.as_deref(),
+            );
         }
     }
 

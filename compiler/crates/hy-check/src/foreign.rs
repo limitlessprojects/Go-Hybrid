@@ -96,7 +96,10 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
         return Some(TypeShape::Unknown);
     }
     match base {
-        "hy.send_cap" | "hy.recv_cap" => Some(TypeShape::OwnHandle(base.into())),
+        // Stamp the FULL written name (`hy.send_cap[int]`) so the element
+        // type T stays available to `cap_elem_arg` — `.recv()` yields T's
+        // shape and `.send(v)` can check v against T.
+        "hy.send_cap" | "hy.recv_cap" => Some(TypeShape::OwnHandle(name.into())),
         "error" => Some(TypeShape::ForeignOpaque("error".into())),
         "serde_json.value" => Some(TypeShape::OwnHandle("serde_json.value".into())),
         "serde_json.view" => Some(TypeShape::BorrowHandle("serde_json.view".into())),
@@ -119,7 +122,7 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
 /// emitter supports ranging the value handle itself); other handles (e.g.
 /// `flate2.writer`) are NOT iterable and must stay rejected (issue #411).
 pub(crate) fn is_iterable_handle(name: &str) -> bool {
-    name == "serde_json.value" || name == "hy.recv_cap"
+    name == "serde_json.value" || name.split('[').next() == Some("hy.recv_cap")
 }
 
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
@@ -637,7 +640,18 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const BUILTIN_ERROR: &[&str] = &["error"];
     const NET_ADDR: &[&str] = &["network", "string"];
     const NET_ERROR: &[&str] = &["error", "temporary", "timeout"];
-    match recv_type {
+    /// `hy.send_cap[T]` — the SPSC linear send capability (W-026): `send`
+    /// and `close` are its complete surface. The checker treats it as a
+    /// foreign handle; before this entry `tx.bogus()` passed `hyb check`
+    /// with zero diagnostics.
+    const HY_SEND_CAP: &[&str] = &["send", "close"];
+    /// `hy.recv_cap[T]` — the receive half: `recv` and `drain`.
+    const HY_RECV_CAP: &[&str] = &["recv", "drain"];
+    // Parameterized handle names (`hy.send_cap[map[string]int]`,
+    // `atomic.pointer[T]`) resolve on the base before `[` — the same
+    // spelling `fold_type_args` writes into the callee/binding name.
+    let recv_base = recv_type.split('[').next().unwrap_or(recv_type);
+    match recv_base {
         "error" | "errors.error" => Some(BUILTIN_ERROR),
         "net.addr" | "net.Addr" => Some(NET_ADDR),
         "net.error" | "net.Error" => Some(NET_ERROR),
@@ -697,6 +711,8 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         // here would break legal element code — view stays fail-open.
         "serde_json.value" => Some(SERDE_JSON_VALUE),
         "flate2.writer" => Some(FLATE2_WRITER),
+        "hy.send_cap" => Some(HY_SEND_CAP),
+        "hy.recv_cap" => Some(HY_RECV_CAP),
         // NOTE: atomics are deliberately NOT gated here, and this is a
         // deliberate regression-free choice, not an oversight.
         //
