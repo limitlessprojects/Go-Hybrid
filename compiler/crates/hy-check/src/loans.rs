@@ -287,6 +287,42 @@ impl<'a> Checker<'a> {
                         return;
                     }
                 }
+                if let Some(want) = foreign::foreign_method_arity(&tname, &method) {
+                    let spread = cr.args.iter().any(|a| a.spread);
+                    let got = cr.args.len();
+                    if spread || got != want {
+                        let msg = if spread {
+                            format!(
+                                "cannot use `...` in call to non-variadic method `{}.{}` — Go refuses `cannot use ... in call to non-variadic {}` (HYB-E1002)",
+                                tname,
+                                method,
+                                cr.callee.render()
+                            )
+                        } else {
+                            format!(
+                                "method `{}` on `{}` takes {} argument{} but is called with {} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
+                                method,
+                                tname,
+                                want,
+                                if want == 1 { "" } else { "s" },
+                                got,
+                                if got < want { "not enough" } else { "too many" },
+                                cr.callee.render()
+                            )
+                        };
+                        self.diags.push(
+                            Diagnostic::error("HYB-E1002", self.path.clone(), cr.span, msg)
+                                .with_notes(vec![format!(
+                                    "`{}.{}` takes exactly {} argument{} (the receiver is not an argument)",
+                                    tname,
+                                    method,
+                                    want,
+                                    if want == 1 { "" } else { "s" }
+                                )]),
+                        );
+                        return;
+                    }
+                }
                 let receiver_moved = self
                     .lookup_binding(st, &root)
                     .map(|b| b.moved.is_some())

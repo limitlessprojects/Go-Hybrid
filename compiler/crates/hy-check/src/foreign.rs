@@ -326,6 +326,44 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
     }
 }
 
+/// Exact Go arity of a `strings.builder` / `bytes.buffer` receiver method,
+/// or `None` when the pair is not modelled here (callers fail open).
+///
+/// `foreign_method_surface` already rejects names outside these two
+/// surfaces, but a blessed name was accepted with ANY argument count, so
+/// `b.write_string("a", "b")` or `buf.truncate()` passed `hyb check` and
+/// died at `go build` with `too many / not enough arguments in call to
+/// b.WriteString` (Row 13 BUILDABLE, HYB-E1002). Arities are the method
+/// signatures in Go's `strings` and `bytes` packages on the pinned
+/// toolchain (go1.26.9); none of these methods is variadic. Every name here
+/// must also appear in the matching `foreign_method_surface` list.
+pub(crate) fn foreign_method_arity(recv_type: &str, method: &str) -> Option<usize> {
+    match recv_type {
+        "strings.builder" | "strings.Builder" => match method {
+            // Reset(), String(), Len(), Cap()
+            "reset" | "string" | "len" | "cap" => Some(0),
+            // Write(p), WriteByte(c), WriteRune(r), WriteString(s), Grow(n)
+            "write" | "write_byte" | "write_rune" | "write_string" | "grow" => Some(1),
+            _ => None,
+        },
+        "bytes.buffer" | "bytes.Buffer" => match method {
+            // ReadByte(), ReadRune(), Reset(), String(), Bytes(), Len(),
+            // Cap(), UnreadByte(), UnreadRune()
+            "read_byte" | "read_rune" | "reset" | "string" | "bytes" | "len" | "cap"
+            | "unread_byte" | "unread_rune" => Some(0),
+            // Write(p), WriteByte(c), WriteRune(r), WriteString(s),
+            // WriteTo(w), Read(p), ReadBytes(delim), ReadFrom(r),
+            // ReadString(delim), Next(n), Grow(n), Truncate(n)
+            "write" | "write_byte" | "write_rune" | "write_string" | "write_to" | "read"
+            | "read_bytes" | "read_from" | "read_string" | "next" | "grow" | "truncate" => {
+                Some(1)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The COMPLETE method surface of a foreign handle type, or `None` when
 /// `recv_type` is not a handle this module models.
 ///
