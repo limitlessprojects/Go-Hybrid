@@ -49,7 +49,7 @@ impl Emitter {
                 self.push(&text);
                 Ok(())
             }
-            Stmt::Send { chan, value, .. } => {
+            Stmt::Send { chan, value, span, .. } => {
                 // `move` markers drop here: ownership transfer is a CHECKER
                 // concept; Go sends the value either way.
                 if Self::expr_has_hoistable_try(value) {
@@ -61,6 +61,8 @@ impl Emitter {
                 let ch = self.emit_expr(chan, 0)?;
                 let v = self.emit_expr(value, 0)?;
                 self.push(&format!("{} <- {}", ch, v));
+                self.witnesses
+                    .push(crate::witness::witness_send(chan, value, *span));
                 Ok(())
             }
             Stmt::If {
@@ -72,7 +74,7 @@ impl Emitter {
             } => self.emit_if(init.as_deref(), cond, then, otherwise.as_deref()),
             Stmt::For { kind, body, .. } => self.emit_for(kind, body),
             Stmt::Return { values, .. } => self.emit_return(values),
-            Stmt::Task { callee, args, .. } => {
+            Stmt::Task { callee, args, span, .. } => {
                 // task → go (spawn sites were checked by Tier-0; emission is
                 // a plain goroutine). Route through emit_call so argument
                 // variadic spread (`...`), pointer parameter auto-addressing,
@@ -80,6 +82,8 @@ impl Emitter {
                 self.hoist_tries_call(callee, args)?;
                 let call = self.emit_call(callee, args)?;
                 self.push(&format!("go {}", call));
+                self.witnesses
+                    .push(crate::witness::witness_task(callee, args, *span));
                 Ok(())
             }
             Stmt::Managed {
