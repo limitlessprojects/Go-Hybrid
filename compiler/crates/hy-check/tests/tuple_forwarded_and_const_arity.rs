@@ -231,3 +231,40 @@ fn valid_forwarding_and_const_destructuring_stay_accepted() {
          }\n",
     );
 }
+
+#[test]
+fn const_fn_callee_and_array_len_type_expr_multi_value_soundness() {
+    assert_e2002(
+        "const mm = fn(a int, b int) (int, int) { return a, b }\n\
+         fn main() {\n\
+             p := mm(1, 2)\n\
+             _ = p\n\
+         }\n",
+    );
+    assert_e2002(
+        "fn minmax(a int, b int) (int, int) { return a, b }\n\
+         fn id(a int, b int) int { return a + b }\n\
+         const base = minmax\n\
+         const mm = base\n\
+         fn main() {\n\
+             base := id\n\
+             _ = base\n\
+             p := mm(1, 2)\n\
+             _ = p\n\
+         }\n",
+    );
+    assert_e2002(
+        "import \"strconv\"\n\
+         fn main() {\n\
+             var a [strconv.parse_int(\"1\", 10, 64)]int\n\
+             _ = a\n\
+         }\n",
+    );
+    assert_e2002(
+        "import \"strconv\"\n\
+         fn main() {\n\
+             xs := [][strconv.parse_int(\"1\", 10, 64)]int{}\n\
+             _ = xs\n\
+         }\n",
+    );
+}

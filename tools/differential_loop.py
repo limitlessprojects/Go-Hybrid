@@ -206,14 +206,80 @@ def documented_runtime_hazard(stderr, hazards):
     return False
 
 
-def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None):
-    """Full pipeline: hyb build + run the binary. Returns (ok, detail)."""
+def documented_race(stderr, hazards):
+    """Is a race-detector report an instance of a registered RUNTIME-HAZARD?
+
+    A corpus file that declares `RUNTIME-HAZARD: concurrent map writes`
+    has already told us this program tears a map on purpose — that is what
+    `managed` means (GUARANTEES row 8: no soundness claim inside). The
+    hazard was registered against the runtime's *fatal* wording, so the
+    plain loop only ever sees it when the map tears badly enough to abort.
+
+    The race detector catches the same defect earlier and reports it
+    completely differently (`runtime.mapaccess1_faststr`, goroutine ids).
+    Failing on that would just re-report a hazard the corpus already
+    admits, and would leave --race permanently red — so a race whose
+    racing operations name the registered hazard's subject counts as
+    documented, and anything else is a genuine surprise.
+
+    Matching is deliberately narrow: the hazard's significant words must
+    appear in the racing frames, not merely anywhere in the report.
+    """
+    if not hazards:
+        return None
+    lines = stderr.splitlines()
+    start = next((i for i, l in enumerate(lines) if "DATA RACE" in l), None)
+    if start is None:
+        return None
+
+    # Match against the RACING FRAMES only — not the surrounding prose.
+    # The frames are the indented `pkg.func()` / `file:line` lines; they are
+    # what actually names the contended object.
+    frames = "\n".join(
+        l.strip().lower()
+        for l in lines[start:start + 60]
+        if l.startswith((" ", "\t")) and l.strip()
+    )
+    if not frames:
+        return None
+
+    # "concurrent" is true of every race, and the verb says HOW it was
+    # touched, not WHAT was touched — the detector writes `mapaccess1` or
+    # `mapassign`, never "writes". So match on the subject: the noun the
+    # hazard names. That is the part both vocabularies agree on.
+    qualifiers = {"concurrent", "simultaneous", "unsynchronized", "racy"}
+    verbs = {"read", "reads", "write", "writes", "access", "accesses",
+             "update", "updates", "mutation", "mutations"}
+    for hazard in hazards:
+        phrase = hazard.split("(", 1)[0].strip().lower()
+        words = [w for w in phrase.split()
+                 if w not in qualifiers and w not in verbs]
+        if words and all(w in frames for w in words):
+            return hazard
+    return None
+
+
+def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None,
+                  race=False):
+    """Full pipeline: hyb build + run the binary. Returns (ok, detail).
+
+    With race=True the program is built with `hyb build --race`, so the Go
+    race detector is linked in. That catches a failure mode the plain loop
+    cannot see: a program the CHECKER accepts, that runs to a clean exit 0
+    with matching output, and that nevertheless contains a data race.
+    BOUNTY.md's Critical tier names exactly that class ("silent data race
+    ... in accepted code"), so a race report is treated as a failure here
+    rather than a pass.
+    """
     # TimeoutExpired is a per-case harness fault like any other build/run
     # failure (pr-468): report the case, keep the corpus running, and let
     # the aggregate report carry the failure — never abort the loop.
+    build_cmd = [bin_path, "build", hy_path]
+    if race:
+        build_cmd.append("--race")
     try:
         build = subprocess.run(
-            [bin_path, "build", hy_path],
+            build_cmd,
             cwd=workdir, capture_output=True, text=True, timeout=300,
         )
     except subprocess.TimeoutExpired as exc:
@@ -233,6 +299,27 @@ def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None):
         return False, f"run timed out after {exc.timeout}s"
     except OSError as exc:
         return False, f"run could not be run: {exc}"
+    # The race detector reports on stderr and then lets the program run to
+    # a normal exit, so exit 0 does NOT mean race-free. Check the text
+    # explicitly, and check it before the exit-code branch.
+    if race and "DATA RACE" in (run.stderr or ""):
+        known = documented_race(run.stderr, hazards)
+        if known is not None:
+            # Already admitted by the corpus; say so and keep going.
+            detail = f"documented RUNTIME-HAZARD race (pre-registered: {known})"
+            if expected_output is not None:
+                stdout = run.stdout.replace("\r\n", "\n")
+                if stdout not in (expected_output, expected_output + "\n"):
+                    return False, (f"stdout mismatch: expected "
+                                   f"{expected_output[:200]!r}, "
+                                   f"got {run.stdout[:200]!r}")
+            return True, detail
+        first = next(
+            (l for l in (run.stderr or "").splitlines() if l.strip()),
+            "DATA RACE",
+        )
+        return False, f"data race detected: {first.strip()[:160]}"
+
     detail = "exit 0"
     if run.returncode != 0:
         # A Go fatal normally exits 2; GOTRACEBACK=crash aborts on Unix.
@@ -256,6 +343,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--corpus", default=DEFAULT_CORPUS)
     ap.add_argument("--bin", default=DEFAULT_BIN)
+    ap.add_argument(
+        "--race", action="store_true",
+        help="build the accept side with `hyb build --race` and fail any "
+             "program in which the Go race detector reports a race. Slower, "
+             "and needs cgo; off by default so the plain loop is unchanged.")
     args = ap.parse_args()
     # The build leg runs with cwd = a temp workspace — a relative --bin
     # or --corpus would resolve THERE (the CI failure this guard fixed).
@@ -298,7 +390,8 @@ def main():
             workdir = tempfile.mkdtemp(prefix="hydiff-")
             try:
                 ok, detail = build_and_run(
-                    bin_path, path, workdir, hazards, expected_output=expected_output
+                    bin_path, path, workdir, hazards, expected_output=expected_output,
+                    race=args.race,
                 )
             finally:
                 shutil.rmtree(workdir, ignore_errors=True)
@@ -311,7 +404,10 @@ def main():
 
     rate = f"{accept_pass}/{accept_total}"
     print("----")
-    print(f"differential accept-side (build+run): {rate}")
+    if args.race:
+        print(f"differential accept-side (build+run, -race): {rate}")
+    else:
+        print(f"differential accept-side (build+run): {rate}")
     print(f"differential reject-side (checker):   {reject_pass}/{reject_total}")
     if accept_total + reject_total == 0:
         print("differential: no registered EXPECTED-VERDICT cases in corpus",
