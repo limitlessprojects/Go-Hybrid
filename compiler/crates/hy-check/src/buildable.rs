@@ -4671,6 +4671,50 @@ impl<'a> Collector<'a> {
             }
         }
     }
+
+    fn check_context_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        // Types and variables in context package cannot be called as functions
+        if matches!(
+            member,
+            "context" | "cancel_func" | "cancel_cause_func" | "canceled" | "deadline_exceeded"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `context.{member}`: `context.{member}` is a type or package value, not a function (HYB-E1002)"),
+                &format!("`context.{member}` is an interface, type, or error variable, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            // 0 args: Background(), TODO()
+            "background" | "todo" => Some(0),
+            // 1 arg: WithCancel(parent), WithCancelCause(parent), Cause(c)
+            "with_cancel" | "with_cancel_cause" | "cause" => Some(1),
+            // 2 args: WithTimeout(parent, timeout), WithDeadline(parent, d), AfterFunc(ctx, f)
+            "with_timeout" | "with_deadline" | "after_func" => Some(2),
+            // 3 args: WithValue(parent, key, val), WithTimeoutCause(parent, timeout, cause), WithDeadlineCause(parent, d, cause)
+            "with_value" | "with_timeout_cause" | "with_deadline_cause" => Some(3),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `context.{member}` (HYB-E1002)"),
+                    &format!("`context.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`context.{member}` takes exactly {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `context.{member}`"),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -8413,6 +8457,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "context" && self.lookup_kind(pkg).is_none() {
+                        self.check_context_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
