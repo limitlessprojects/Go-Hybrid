@@ -163,6 +163,71 @@ pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
         ) => Some(0),
         ("io", "read_full" | "read_at_least" | "ReadFull" | "ReadAtLeast") => Some(1),
         ("io", "copy_buffer" | "CopyBuffer") => Some(2),
+        // `io.copy` / `io.copy_n` write into their destination (argument 0);
+        // only the buffered variant was modelled before, so the plain form
+        // passed a write to a `const` destination off as a pure read.
+        ("io", "copy" | "copy_n" | "Copy" | "CopyN") => Some(0),
+        // `encoding/hex`'s `decode` lowers to Go's `Decode(dst, src)` and
+        // writes into the destination slice (argument 0) - the same
+        // in-place write `io.read_full` models, missing from the table.
+        // `encode` is deliberately absent: the binding lowers it to the
+        // pure `EncodeToString(src)`, which writes nothing.
+        ("hex" | "encoding/hex", "decode" | "Decode") => Some(0),
+        // `strconv` append-style functions write into the destination's
+        // backing array whenever it has spare capacity (argument 0).
+        (
+            "strconv",
+            "append_bool"
+            | "append_int"
+            | "append_uint"
+            | "append_float"
+            | "append_quote"
+            | "append_quote_to_ascii"
+            | "append_quote_to_graphic"
+            | "append_quote_rune"
+            | "append_quote_rune_to_ascii"
+            | "append_quote_rune_to_graphic"
+            | "AppendBool"
+            | "AppendInt"
+            | "AppendUint"
+            | "AppendFloat"
+            | "AppendQuote"
+            | "AppendQuoteToASCII"
+            | "AppendQuoteToGraphic"
+            | "AppendQuoteRune"
+            | "AppendQuoteRuneToASCII"
+            | "AppendQuoteRuneToGraphic",
+        ) => Some(0),
+        _ => None,
+    }
+}
+
+/// The argument index a method call on a foreign handle mutates IN PLACE
+/// (T22: passing a `const` root there is a write, `HYB-E3006`). Keyed by
+/// the receiver's boundary type name, like `method_mode`. `None` = the
+/// descriptor stubs record no in-place argument write for this method.
+///
+/// The modelled surface is the reader family: `read` / `read_at` fill the
+/// caller's buffer (argument 0) - the method-call twin of `io.read_full`
+/// in `package_mutated_arg`. Before this table, method calls consulted no
+/// mutator model at all, so `reader.read(const_buf)` passed a writing
+/// call off as a pure read, and two tasks reading into one file-level
+/// `const` raced with no diagnostic.
+pub(crate) fn method_mutated_arg(recv_type: &str, method: &str) -> Option<usize> {
+    match (recv_type, method) {
+        (
+            "bufio.reader" | "bufio.Reader" | "bytes.buffer" | "bytes.Buffer" | "io.pipe_reader"
+            | "io.PipeReader" | "io.limited_reader" | "io.LimitedReader" | "gzip.reader"
+            | "gzip.Reader" | "tar.reader" | "tar.Reader",
+            "read" | "Read",
+        ) => Some(0),
+        (
+            "strings.reader" | "strings.Reader" | "bytes.reader" | "bytes.Reader"
+            | "io.section_reader" | "io.SectionReader" | "os.file" | "os.File",
+            "read" | "read_at" | "Read" | "ReadAt",
+        ) => Some(0),
+        // `json.decoder.decode(v)` unmarshals into the value behind `v`.
+        ("json.decoder" | "json.Decoder", "decode" | "Decode") => Some(0),
         _ => None,
     }
 }
@@ -183,6 +248,24 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
             TypeShape::Str
         }
         ("strings", "split") | ("strings", "fields") => TypeShape::Slice(Box::new(TypeShape::Str)),
+        // Reader/writer/buffer constructors: typing the results with their
+        // boundary names is what lets the method tables (surface, mode,
+        // mutated-arg) see calls on the handles at all - an `Unknown`
+        // result made every method call on a fresh reader invisible to
+        // them. The shapes stay fail-closed at spawn/send boundaries
+        // (`ForeignOpaque` is rejected there, like `Unknown`).
+        ("strings", "new_reader") => TypeShape::ForeignOpaque("strings.reader".into()),
+        ("bufio", "new_reader" | "new_reader_size") => {
+            TypeShape::ForeignOpaque("bufio.reader".into())
+        }
+        ("bufio", "new_writer" | "new_writer_size") => {
+            TypeShape::ForeignOpaque("bufio.writer".into())
+        }
+        ("bufio", "new_scanner") => TypeShape::ForeignOpaque("bufio.scanner".into()),
+        ("bytes", "new_buffer" | "new_buffer_string") => {
+            TypeShape::ForeignOpaque("bytes.buffer".into())
+        }
+        ("bytes", "new_reader") => TypeShape::ForeignOpaque("bytes.reader".into()),
         // `time.after(d)` returns a receive-only channel (the deadline
         // pattern, example 04); the element shape is opaque here — the
         // binding still resolves as a channel so receives on it classify.
