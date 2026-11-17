@@ -109,6 +109,7 @@ fn main() {
     _ = s.insert(7)
     _ = s.contains(7)
     _ = s.remove(7)
+    s.clear()
     o := some(3)
     if o.is_some() {
         _ = o.unwrap()

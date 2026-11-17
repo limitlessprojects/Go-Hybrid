@@ -8969,7 +8969,7 @@ impl<'a> Collector<'a> {
 
     fn check_field_selector_set(&mut self, base_render: &str, name: &str, set_elem: Option<String>, span: Span) -> bool {
         if let Some(elem) = set_elem {
-            if !matches!(name, "insert" | "remove" | "contains" | "len") {
+            if !matches!(name, "insert" | "remove" | "clear" | "contains" | "len") {
                 let elem_str = if elem.is_empty() { "T".to_string() } else { elem };
                 let type_label = format!("set[{}]", elem_str);
                 let needle = format!("{}.{} undefined", base_render, name);
@@ -8984,7 +8984,7 @@ impl<'a> Collector<'a> {
                             base_render,
                             name
                         ),
-                        "set[T] does not expose struct fields; use its methods (insert, remove, contains)",
+                        "set[T] does not expose struct fields; use its methods (insert, remove, clear, contains)",
                     );
                 }
             }
