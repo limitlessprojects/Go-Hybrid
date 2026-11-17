@@ -163,6 +163,38 @@ pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
         ) => Some(0),
         ("io", "read_full" | "read_at_least" | "ReadFull" | "ReadAtLeast") => Some(1),
         ("io", "copy_buffer" | "CopyBuffer") => Some(2),
+        (
+            "hex" | "encoding/hex",
+            "decode" | "Decode" | "encode" | "Encode",
+        ) => Some(0),
+        (
+            "rand" | "crypto/rand" | "math/rand",
+            "read" | "Read",
+        ) => Some(0),
+        _ => None,
+    }
+}
+
+/// In-place argument write of a METHOD on a foreign handle (`r.read(dst)`
+/// writes `dst`). `recv_type` is the key from `shape::receiver_type_name`.
+pub(crate) fn foreign_method_mutated_arg(recv_type: &str, method: &str) -> Option<usize> {
+    let is_reader = matches!(
+        recv_type,
+        "strings.reader"
+            | "bufio.reader"
+            | "bytes.buffer"
+            | "bytes.reader"
+            | "os.file"
+            | "net.conn"
+            | "io.reader"
+            | "io.reader_at"
+            | "io.pipe_reader"
+            | "io.limited_reader"
+            | "io.section_reader"
+    );
+    match method {
+        "read" | "Read" if is_reader => Some(0),
+        "read_at" | "ReadAt" if is_reader => Some(0),
         _ => None,
     }
 }
@@ -202,6 +234,18 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         }
         ("json" | "encoding/json", "new_encoder" | "NewEncoder") => {
             TypeShape::ForeignOpaque("json.encoder".into())
+        }
+        ("strings", "new_reader" | "NewReader") => {
+            TypeShape::ForeignOpaque("strings.reader".into())
+        }
+        ("bufio", "new_reader" | "NewReader") => {
+            TypeShape::ForeignOpaque("bufio.reader".into())
+        }
+        ("bytes", "new_reader" | "NewReader" | "new_buffer" | "NewBuffer") => {
+            TypeShape::ForeignOpaque("bytes.buffer".into())
+        }
+        ("os", "open" | "Open") => {
+            TypeShape::ForeignOpaque("os.file".into())
         }
         (
             "httptest" | "net/http/httptest",
