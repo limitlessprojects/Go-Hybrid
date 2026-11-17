@@ -2232,14 +2232,11 @@ impl<'a> Checker<'a> {
             .unwrap_or(false)
     }
 
-    /// Does `name` denote a mutable composite (including a scalar-field struct
+    /// Does `b` denote a mutable composite (including a scalar-field struct
     /// or primitive-element array whose `TypeShape` is `Primitive`) that shares
     /// backing storage when borrowed via `&x` or auto-addressed into a `*T`
     /// parameter/receiver (#131)?
-    fn binding_can_be_borrowed(&self, st: &FnState, name: &str) -> bool {
-        let Some(b) = self.lookup_binding(st, name) else {
-            return false;
-        };
+    fn binding_record_can_be_borrowed(&self, b: &Binding) -> bool {
         if self.shape_may_share(&b.shape)
             || matches!(b.shape, TypeShape::Struct(_) | TypeShape::Array(_))
         {
@@ -2261,14 +2258,28 @@ impl<'a> Checker<'a> {
         false
     }
 
+    fn binding_can_be_borrowed(&self, st: &FnState, name: &str) -> bool {
+        self.lookup_binding(st, name)
+            .is_some_and(|b| self.binding_record_can_be_borrowed(b))
+    }
+
+    fn is_pointer_type_expr(&self, ty: &hy_syntax::TypeExpr) -> bool {
+        matches!(
+            self.resolve_type_alias(ty),
+            hy_syntax::TypeExpr::Pointer { .. }
+        ) || matches!(self.shape_of_type(ty), TypeShape::Pointer(_))
+    }
+
     fn call_param_is_pointer(&self, st: &FnState, callee: &Expr, idx: usize) -> bool {
         match unwrap_parens(callee) {
             Expr::Ident { name, .. } => {
                 if let Some(b) = self.lookup_binding(st, name) {
-                    if let Some(hy_syntax::TypeExpr::Fn { params, .. }) = &b.ty {
+                    if let Some(hy_syntax::TypeExpr::Fn { params, .. }) =
+                        b.ty.as_ref().map(|t| self.resolve_type_alias(t))
+                    {
                         return params
                             .get(idx)
-                            .is_some_and(|p| matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. }));
+                            .is_some_and(|p| self.is_pointer_type_expr(&p.ty));
                     }
                     return false;
                 }
@@ -2277,7 +2288,7 @@ impl<'a> Checker<'a> {
                     .get(name.as_str())
                     .or_else(|| self.fns.get(head))
                     .and_then(|f| f.params.get(idx))
-                    .is_some_and(|p| matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. }))
+                    .is_some_and(|p| self.is_pointer_type_expr(&p.ty))
             }
             Expr::Field { base, name, .. } => {
                 let head = Self::base_named_type_str(name);
@@ -2288,7 +2299,7 @@ impl<'a> Checker<'a> {
                             return f
                                 .params
                                 .get(idx)
-                                .is_some_and(|p| matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. }));
+                                .is_some_and(|p| self.is_pointer_type_expr(&p.ty));
                         }
                     }
                 }
@@ -2311,11 +2322,11 @@ impl<'a> Checker<'a> {
                 recv_base
                     .and_then(|rb| self.method_decls.get(&(rb, head.to_string())))
                     .and_then(|f| f.params.get(idx))
-                    .is_some_and(|p| matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. }))
+                    .is_some_and(|p| self.is_pointer_type_expr(&p.ty))
             }
             Expr::FnLit { params, .. } => params
                 .get(idx)
-                .is_some_and(|p| matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })),
+                .is_some_and(|p| self.is_pointer_type_expr(&p.ty)),
             _ => false,
         }
     }
@@ -2340,7 +2351,7 @@ impl<'a> Checker<'a> {
         recv_base
             .and_then(|rb| self.method_decls.get(&(rb, head.to_string())))
             .and_then(|f| f.receiver.as_ref())
-            .is_some_and(|r| r.is_pointer || matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. }))
+            .is_some_and(|r| r.is_pointer || self.is_pointer_type_expr(&r.ty))
     }
 
     /// A projection of a call-produced value has independent storage only
@@ -3147,19 +3158,71 @@ impl<'a> Checker<'a> {
         let Some((slots, body)) = self.resolve_callee_slots_and_body(st, cr) else {
             if self.is_opaque_interproc_call(st, cr.callee) {
                 let mut roots = Vec::new();
+                let mut borrowed_roots = Vec::new();
                 if let Expr::Field { base, .. } = crate::model::unwrap_parens(cr.callee) {
                     collect_ref_roots(base, &mut roots);
-                    collect_addr_of_roots(base, &mut roots);
+                    self.collect_borrowed_roots(st, base, &mut borrowed_roots);
+                    if !matches!(self.shape_of_expr(st, base), TypeShape::Pointer(_))
+                        && !self.addr_operand_returns_fresh_copy(st, base)
+                        && self.call_receiver_is_pointer(st, cr.callee)
+                    {
+                        if let Some(r) = base.root_ident() {
+                            if self.binding_can_be_borrowed(st, r) {
+                                borrowed_roots.push(r.to_string());
+                            }
+                        }
+                    }
                 }
-                for a in cr.args {
+                for (idx, a) in cr.args.iter().enumerate() {
                     collect_ref_roots(&a.value, &mut roots);
-                    collect_addr_of_roots(&a.value, &mut roots);
+                    self.collect_borrowed_roots(st, &a.value, &mut borrowed_roots);
+                    if !matches!(crate::model::unwrap_parens(&a.value), Expr::Move { .. })
+                        && !matches!(self.shape_of_expr(st, &a.value), TypeShape::Pointer(_))
+                        && !self.addr_operand_returns_fresh_copy(st, &a.value)
+                        && self.call_param_is_pointer(st, cr.callee, idx)
+                    {
+                        if let Some(r) = a.value.root_ident() {
+                            if self.binding_can_be_borrowed(st, r) {
+                                borrowed_roots.push(r.to_string());
+                            }
+                        }
+                    }
                 }
-                let origin = cr.args.iter().find_map(|a| self.moved_non_owned_origin_in_expr(st, &a.value));
+                roots.extend(borrowed_roots.iter().cloned());
+                let origin = cr
+                    .args
+                    .iter()
+                    .find_map(|a| self.moved_non_owned_origin_in_expr(st, &a.value))
+                    .or_else(|| {
+                        borrowed_roots.iter().find_map(|r| {
+                            self.non_owned_origin_of(st, r)
+                                .map(|(o, _)| o)
+                                .or_else(|| {
+                                    self.lookup_binding(st, r)
+                                        .and_then(|b| b.non_owned_origin.clone())
+                                })
+                        })
+                    })
+                    .map(|o| {
+                        if o.starts_with("a may-share peer of ") {
+                            o
+                        } else {
+                            format!("a may-share peer of {}", o)
+                        }
+                    });
                 for d in &roots {
                     if self.binding_may_share(st, d) {
                         for s in &roots {
-                            if d != s && self.binding_may_share(st, s) {
+                            if d != s
+                                && (self.binding_may_share(st, s)
+                                    || (borrowed_roots.contains(s)
+                                        && self.lookup_binding(st, s).is_some())
+                                    || self.lookup_binding(st, s).is_some_and(|b| b.immutable)
+                                    || cr
+                                        .args
+                                        .iter()
+                                        .any(|a| self.expr_slices_addressable_array(st, &a.value, s)))
+                            {
                                 st.share_edge(d, s);
                             }
                         }
@@ -3176,6 +3239,11 @@ impl<'a> Checker<'a> {
         if slots.len() < 2 {
             return;
         }
+        let callee_captures_locals = match crate::model::unwrap_parens(cr.callee) {
+            Expr::FnLit { .. } => true,
+            Expr::Ident { name, .. } => self.lookup_binding(st, name).is_some(),
+            _ => false,
+        };
         let slots_meta: Vec<(&str, TypeShape, Option<&hy_syntax::TypeExpr>)> = slots
             .iter()
             .map(|(name, shape, ty, _)| (name.as_str(), shape.clone(), ty.as_ref()))
@@ -3185,7 +3253,7 @@ impl<'a> Checker<'a> {
             if dst_idx == src_idx {
                 continue;
             }
-            let (Some((_, _, _, dst_src)), Some((_, _, _, src_src))) =
+            let (Some((_, _, _, dst_src)), Some((_, src_slot_shape, _, src_src))) =
                 (slots.get(dst_idx), slots.get(src_idx))
             else {
                 continue;
@@ -3194,18 +3262,34 @@ impl<'a> Checker<'a> {
             match dst_src {
                 CalleeSlotSource::Arg(dst_expr) => {
                     collect_ref_roots(dst_expr, &mut dst_roots);
-                    collect_addr_of_roots(dst_expr, &mut dst_roots);
+                    self.collect_borrowed_roots(st, dst_expr, &mut dst_roots);
                 }
                 CalleeSlotSource::OuterBinding(name) => {
-                    dst_roots.push(name.clone());
+                    if callee_captures_locals || st.env_lookup(name).is_none() {
+                        dst_roots.push(name.clone());
+                    }
                 }
             }
 
             let mut src_roots = Vec::new();
+            let mut borrowed_src_roots = Vec::new();
+            let mut is_outer_src = false;
             let src_origin = match src_src {
                 CalleeSlotSource::Arg(src_expr) => {
                     collect_ref_roots(src_expr, &mut src_roots);
-                    collect_addr_of_roots(src_expr, &mut src_roots);
+                    self.collect_borrowed_roots(st, src_expr, &mut borrowed_src_roots);
+                    if matches!(src_slot_shape, TypeShape::Pointer(_))
+                        && !matches!(crate::model::unwrap_parens(src_expr), Expr::Move { .. })
+                        && !matches!(self.shape_of_expr(st, src_expr), TypeShape::Pointer(_))
+                        && !self.addr_operand_returns_fresh_copy(st, src_expr)
+                    {
+                        if let Some(r) = src_expr.root_ident() {
+                            if self.binding_can_be_borrowed(st, r) {
+                                borrowed_src_roots.push(r.to_string());
+                            }
+                        }
+                    }
+                    src_roots.extend(borrowed_src_roots.iter().cloned());
                     let mut move_ops = Vec::new();
                     crate::model::collect_move_operands(src_expr, &mut move_ops);
                     for (op, _) in move_ops {
@@ -3215,16 +3299,50 @@ impl<'a> Checker<'a> {
                             src_roots.push(r.to_string());
                         }
                     }
-                    self.moved_non_owned_origin_in_expr(st, src_expr)
+                    self.moved_non_owned_origin_in_expr(st, src_expr).or_else(|| {
+                        borrowed_src_roots
+                            .iter()
+                            .find_map(|r| {
+                                self.non_owned_origin_of(st, r)
+                                    .map(|(o, _)| o)
+                                    .or_else(|| {
+                                        self.lookup_binding(st, r)
+                                            .and_then(|b| b.non_owned_origin.clone())
+                                    })
+                            })
+                            .or_else(|| {
+                                src_roots.iter().find_map(|r| {
+                                    if self.binding_may_share(st, r)
+                                        || self.expr_slices_addressable_array(st, src_expr, r)
+                                    {
+                                        self.non_owned_origin_of(st, r)
+                                            .map(|(o, _)| o)
+                                            .or_else(|| {
+                                                self.lookup_binding(st, r)
+                                                    .and_then(|b| b.non_owned_origin.clone())
+                                            })
+                                    } else {
+                                        None
+                                    }
+                                })
+                            })
+                    })
                 }
                 CalleeSlotSource::OuterBinding(name) => {
-                    src_roots.push(name.clone());
-                    self.non_owned_origin_of(st, name)
-                        .map(|(o, _)| o)
-                        .or_else(|| {
-                            self.lookup_binding(st, name)
-                                .and_then(|b| b.non_owned_origin.clone())
-                        })
+                    if !callee_captures_locals && st.env_lookup(name).is_some() {
+                        self.consts
+                            .get(name)
+                            .and_then(|cb| cb.non_owned_origin.clone())
+                    } else {
+                        is_outer_src = true;
+                        src_roots.push(name.clone());
+                        self.non_owned_origin_of(st, name)
+                            .map(|(o, _)| o)
+                            .or_else(|| {
+                                self.lookup_binding(st, name)
+                                    .and_then(|b| b.non_owned_origin.clone())
+                            })
+                    }
                 }
             };
 
@@ -3233,15 +3351,12 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 for s in &src_roots {
-                    let is_addr_arg = matches!(src_src, CalleeSlotSource::Arg(e) if {
-                        let mut ar = Vec::new();
-                        collect_addr_of_roots(e, &mut ar);
-                        ar.contains(s)
-                    });
+                    let is_borrowed_src = is_outer_src || borrowed_src_roots.contains(s);
                     if d != s
                         && (self.binding_may_share(st, s)
-                            || (is_addr_arg && self.lookup_binding(st, s).is_some())
-                            || self.lookup_binding(st, s).is_some_and(|b| b.immutable) || matches!(src_src, CalleeSlotSource::Arg(e) if self.expr_slices_addressable_array(st, e, s)))
+                            || (is_borrowed_src && self.lookup_binding(st, s).is_some())
+                            || self.lookup_binding(st, s).is_some_and(|b| b.immutable)
+                            || matches!(src_src, CalleeSlotSource::Arg(e) if self.expr_slices_addressable_array(st, e, s)))
                     {
                         st.share_edge(d, s);
                     }
@@ -3283,6 +3398,7 @@ impl<'a> Checker<'a> {
                 for (bname, b) in scope {
                     if bound.insert(bname.clone())
                         && (self.shape_may_share(&b.shape)
+                            || self.binding_record_can_be_borrowed(b)
                             || matches!(b.shape, TypeShape::Unknown)
                             || b.immutable)
                     {
@@ -3298,6 +3414,7 @@ impl<'a> Checker<'a> {
             for (bname, b) in &st.env {
                 if bound.insert(bname.clone())
                     && (self.shape_may_share(&b.shape)
+                        || self.binding_record_can_be_borrowed(b)
                         || matches!(b.shape, TypeShape::Unknown)
                         || b.immutable)
                 {
@@ -3312,7 +3429,9 @@ impl<'a> Checker<'a> {
         }
         for (cname, cb) in &self.consts {
             if bound.insert(cname.clone())
-                && (self.shape_may_share(&cb.shape) || matches!(cb.shape, TypeShape::Unknown))
+                && (self.shape_may_share(&cb.shape)
+                    || self.binding_record_can_be_borrowed(cb)
+                    || matches!(cb.shape, TypeShape::Unknown))
             {
                 slots.push((
                     cname.clone(),
@@ -3442,10 +3561,18 @@ impl<'a> Checker<'a> {
                 bound.extend(decl.results.iter().filter_map(|r| r.name.clone()));
                 if let Some(r) = &decl.receiver {
                     bound.insert(r.name.clone());
+                    let r_ty = if r.is_pointer {
+                        hy_syntax::TypeExpr::Pointer {
+                            to: Box::new(r.ty.clone()),
+                            span: r.ty.span(),
+                        }
+                    } else {
+                        r.ty.clone()
+                    };
                     slots.push((
                         r.name.clone(),
-                        self.shape_of_type(&r.ty),
-                        Some(r.ty.clone()),
+                        self.shape_of_type(&r_ty),
+                        Some(r_ty),
                         CalleeSlotSource::Arg(base.as_ref()),
                     ));
                 }
@@ -4190,19 +4317,61 @@ impl<'a> Checker<'a> {
             if sub_dst == sub_src {
                 continue;
             }
-            let (Some((_, _, _, dst_src)), Some((_, _, _, src_src))) =
+            let (Some((_, dst_slot_shape, _, dst_src)), Some((_, src_slot_shape, _, src_src))) =
                 (sub_slots.get(sub_dst), sub_slots.get(sub_src))
             else {
                 continue;
             };
             let dst_slots = match dst_src {
-                CalleeSlotSource::Arg(dst_expr) => self.expr_slot_origins(cst, dst_expr, aliases),
+                CalleeSlotSource::Arg(dst_expr) => {
+                    let mut origins = self.expr_slot_origins(cst, dst_expr, aliases);
+                    let mut borrowed = Vec::new();
+                    self.collect_borrowed_roots(cst, dst_expr, &mut borrowed);
+                    if matches!(dst_slot_shape, TypeShape::Pointer(_))
+                        && !matches!(crate::model::unwrap_parens(dst_expr), Expr::Move { .. })
+                        && !matches!(self.shape_of_expr(cst, dst_expr), TypeShape::Pointer(_))
+                        && !self.addr_operand_returns_fresh_copy(cst, dst_expr)
+                    {
+                        if let Some(r) = dst_expr.root_ident() {
+                            if self.binding_can_be_borrowed(cst, r) {
+                                borrowed.push(r.to_string());
+                            }
+                        }
+                    }
+                    for r in borrowed {
+                        if let Some(os) = aliases.get(&r) {
+                            origins.extend(os.iter().copied());
+                        }
+                    }
+                    origins
+                }
                 CalleeSlotSource::OuterBinding(name) => {
                     aliases.get(name).cloned().unwrap_or_default()
                 }
             };
             let src_slots = match src_src {
-                CalleeSlotSource::Arg(src_expr) => self.expr_slot_origins(cst, src_expr, aliases),
+                CalleeSlotSource::Arg(src_expr) => {
+                    let mut origins = self.expr_slot_origins(cst, src_expr, aliases);
+                    let mut borrowed = Vec::new();
+                    self.collect_borrowed_roots(cst, src_expr, &mut borrowed);
+                    if matches!(src_slot_shape, TypeShape::Pointer(_))
+                        && !matches!(crate::model::unwrap_parens(src_expr), Expr::Move { .. })
+                        && !matches!(self.shape_of_expr(cst, src_expr), TypeShape::Pointer(_))
+                        && !self.addr_operand_returns_fresh_copy(cst, src_expr)
+                    {
+                        if let Some(r) = src_expr.root_ident() {
+                            if self.binding_can_be_borrowed(cst, r) {
+                                borrowed.push(r.to_string());
+                            }
+                        }
+                    }
+                    for r in borrowed {
+                        if let Some(os) = aliases.get(&r) {
+                            origins.extend(os.iter().copied());
+                        }
+                    }
+                    origins
+                }
                 CalleeSlotSource::OuterBinding(name) => {
                     aliases.get(name).cloned().unwrap_or_default()
                 }
