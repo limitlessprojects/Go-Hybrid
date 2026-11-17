@@ -96,7 +96,7 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
         return Some(TypeShape::Unknown);
     }
     match base {
-        "hy.send_cap" | "hy.recv_cap" => Some(TypeShape::OwnHandle(base.into())),
+        "hy.send_cap" | "hy.recv_cap" => Some(TypeShape::OwnHandle(name.into())),
         "error" => Some(TypeShape::ForeignOpaque("error".into())),
         "serde_json.value" => Some(TypeShape::OwnHandle("serde_json.value".into())),
         "serde_json.view" => Some(TypeShape::BorrowHandle("serde_json.view".into())),
@@ -119,7 +119,8 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
 /// emitter supports ranging the value handle itself); other handles (e.g.
 /// `flate2.writer`) are NOT iterable and must stay rejected (issue #411).
 pub(crate) fn is_iterable_handle(name: &str) -> bool {
-    name == "serde_json.value" || name == "hy.recv_cap"
+    let base = name.split('[').next().unwrap_or(name);
+    base == "serde_json.value" || base == "hy.recv_cap"
 }
 
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
@@ -320,6 +321,8 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
         // `tests/foreign_method_surface.rs` cover the checker side.
         ("serde_json.value" | "serde_json.view", "array" | "int" | "string") => CallMode::Borrow,
         ("serde_json.value" | "serde_json.view", "set" | "push_string") => CallMode::Mutate,
+        ("hy.send_cap", "send" | "close") => CallMode::Mutate,
+        ("hy.recv_cap", "recv" | "drain") => CallMode::Mutate,
         ("flate2.writer", "write") => CallMode::Mutate,
         ("flate2.writer", "finish") => CallMode::Consume,
         _ => CallMode::Unknown,
@@ -346,6 +349,8 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     /// PushString. Package-level `Parse`/`NewObject`/`NewArray`/
     /// `ToStringPretty` are functions, NOT methods, and `Get`/`Remove` are
     /// not shipped at all.
+    const HY_SEND_CAP: &[&str] = &["close", "send"];
+    const HY_RECV_CAP: &[&str] = &["drain", "recv"];
     const SERDE_JSON_VALUE: &[&str] = &["array", "int", "string", "set", "push_string"];
     /// `flate2.writer`: the A7 consume-mode fixture (deliberately unbound,
     /// see UNBOUND_RUST_CRATES — the surface is still pinned so the checker
@@ -696,6 +701,8 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         // cannot tell the two apart from the shape alone, so rejecting names
         // here would break legal element code — view stays fail-open.
         "serde_json.value" => Some(SERDE_JSON_VALUE),
+        "hy.send_cap" => Some(HY_SEND_CAP),
+        "hy.recv_cap" => Some(HY_RECV_CAP),
         "flate2.writer" => Some(FLATE2_WRITER),
         // NOTE: atomics are deliberately NOT gated here, and this is a
         // deliberate regression-free choice, not an oversight.
