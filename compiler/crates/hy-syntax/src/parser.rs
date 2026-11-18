@@ -2172,11 +2172,29 @@ impl Parser {
     }
 
     /// `map[K]V{…}` — the operand `map` and `[` are already consumed.
+    ///
+    /// Type-as-value form `map[K]V` (no braces) is the Go spelling used by
+    /// `make(map[K]V[, n])` and `new(map[K]V)`. It is encoded as an empty
+    /// `MapLit`, the same standing encoding the `{}` workaround
+    /// (`make(map[K]V{})`) already uses in hy-emit (`emit_make` / `emit_new`)
+    /// and hy-check (`classify_make_target`).
     fn parse_map_lit(&mut self, start: usize) -> PResult<Expr> {
         self.bump(); // [
         let key = Box::new(self.parse_type()?);
         self.expect_punct("]")?;
         let value = Box::new(self.parse_type()?);
+        // `make(map[K]V)` / `make(map[K]V, n)` / `new(map[K]V)` have no
+        // braces after the value type; requiring `{` made the Go-standard
+        // form a parse error (HYB-E0002) while `make(chan T, n)` and
+        // `make([]T, n)` already parse as type-as-value.
+        if !self.at_punct("{") {
+            return Ok(Expr::MapLit {
+                key,
+                value,
+                entries: Vec::new(),
+                span: self.span_from(start),
+            });
+        }
         self.expect_punct("{")?;
         let mut entries = Vec::new();
         while !self.at_punct("}") && !self.at_eof() {
@@ -3306,6 +3324,63 @@ mod tests {
                     matches!(&args[0].value, Expr::SliceLit { elem: Some(_), items, .. } if items.is_empty())
                 );
             }
+            _ => panic!("local"),
+        }
+    }
+
+    #[test]
+    fn make_and_new_map_type_as_value_parses_without_braces() {
+        // Go-standard `make(map[K]V)` / `make(map[K]V, n)` / `new(map[K]V)`
+        // used to fail with HYB-E0002 (`expected '{', found ')'` / `','`).
+        // The `{}` workaround (`make(map[K]V{})`) must still parse the same way.
+        let f = parse_src(
+            "fn main() { a := make(map[string]int) b := make(map[string]int, 8) c := new(map[int]int) d := make(map[string]int{}) e := make(map[string]map[int]int, 4) }",
+        );
+        let body = &f.fns().next().unwrap().body.as_ref().unwrap().stmts;
+        let expect_empty_map = |stmt: &Stmt, want_key: &str, want_val: &str| {
+            let Stmt::Local(LocalDecl { values, .. }) = stmt else {
+                panic!("local")
+            };
+            let Expr::Call { args, .. } = &values[0] else {
+                panic!("call")
+            };
+            match &args[0].value {
+                Expr::MapLit {
+                    key,
+                    value,
+                    entries,
+                    ..
+                } => {
+                    assert!(entries.is_empty(), "type-as-value is an empty MapLit");
+                    assert_eq!(key.render(), want_key);
+                    assert_eq!(value.render(), want_val);
+                }
+                e => panic!("map type-as-value, got {}", e.render()),
+            }
+        };
+        expect_empty_map(&body[0], "string", "int");
+        expect_empty_map(&body[1], "string", "int");
+        expect_empty_map(&body[2], "int", "int");
+        expect_empty_map(&body[3], "string", "int");
+        expect_empty_map(&body[4], "string", "map[int]int");
+        // size argument on the two-arg make is preserved
+        match &body[1] {
+            Stmt::Local(LocalDecl { values, .. }) => {
+                let Expr::Call { args, .. } = &values[0] else {
+                    panic!("call")
+                };
+                assert_eq!(args.len(), 2);
+                assert!(matches!(&args[1].value, Expr::Lit { kind: LitKind::Int(s), .. } if s == "8"));
+            }
+            _ => panic!("local"),
+        }
+        // braced map literals still parse
+        let lit = parse_src(r#"fn main() { m := map[string]int{"a": 1} }"#);
+        match first_stmt(&lit) {
+            Stmt::Local(LocalDecl { values, .. }) => match &values[0] {
+                Expr::MapLit { entries, .. } => assert_eq!(entries.len(), 1),
+                e => panic!("map literal, got {}", e.render()),
+            },
             _ => panic!("local"),
         }
     }
