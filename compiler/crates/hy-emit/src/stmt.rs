@@ -49,7 +49,12 @@ impl Emitter {
                 self.push(&text);
                 Ok(())
             }
-            Stmt::Send { chan, value, span, .. } => {
+            Stmt::Send {
+                chan,
+                value,
+                is_move,
+                span,
+            } => {
                 // `move` markers drop here: ownership transfer is a CHECKER
                 // concept; Go sends the value either way.
                 if Self::expr_has_hoistable_try(value) {
@@ -60,9 +65,11 @@ impl Emitter {
                 self.hoist_tries_expr(value)?;
                 let ch = self.emit_expr(chan, 0)?;
                 let v = self.emit_expr(value, 0)?;
-                self.push(&format!("{} <- {}", ch, v));
-                self.witnesses
-                    .push(crate::witness::witness_send(chan, value, *span));
+                let emitted = format!("{} <- {}", ch, v);
+                self.push(&emitted);
+                self.witnesses.push(crate::witness::witness_send(
+                    chan, value, *is_move, &emitted, *span,
+                ));
                 Ok(())
             }
             Stmt::If {
@@ -81,9 +88,11 @@ impl Emitter {
                 // and package/shape normalization match regular call emission.
                 self.hoist_tries_call(callee, args)?;
                 let call = self.emit_call(callee, args)?;
-                self.push(&format!("go {}", call));
-                self.witnesses
-                    .push(crate::witness::witness_task(callee, args, *span));
+                let emitted = format!("go {}", call);
+                self.push(&emitted);
+                self.witnesses.push(crate::witness::witness_task(
+                    callee, args, &emitted, *span,
+                ));
                 Ok(())
             }
             Stmt::Managed {

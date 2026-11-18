@@ -794,6 +794,52 @@ fn render_build_error(e: &BuildError) -> String {
     }
 }
 
+/// Fail-closed `--emit-proof` verifier (issue #3930 / #4560): re-reads the
+/// source from disk, re-parses, re-runs Tier-0 checks (including
+/// `--deny-managed`), re-emits both Go source and witness proof, and requires
+/// exact equality of BOTH the emitted Go source and the proof envelope before
+/// any generated artifact is written to disk.
+fn verify_emit_proof(
+    file: &str,
+    expected_go: &str,
+    expected_proof: &str,
+    deny_managed: bool,
+) -> Result<(), String> {
+    let src2 = std::fs::read_to_string(file).map_err(|e| format!("re-read failed: {}", e))?;
+    let ast2 = hy_syntax::parse_file(file, &src2).map_err(|_| "re-parse failed".to_string())?;
+    let check2 = hy_check::check_file(&ast2);
+    let errors2 = check2
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == hy_diag::Severity::Error)
+        .count();
+    if errors2 > 0 {
+        return Err(format!(
+            "re-check failed: Tier-0 rejected source ({} error(s))",
+            errors2
+        ));
+    }
+    if deny_managed && check2.managed.managed_blocks > 0 {
+        return Err(format!(
+            "re-check failed: --deny-managed policy violated ({} managed block(s))",
+            check2.managed.managed_blocks
+        ));
+    }
+    let (go2, proof2) =
+        hy_emit::emit_go_with_proof(&ast2).map_err(|e| format!("re-emit failed: {}", e.message))?;
+    if go2 != expected_go {
+        return Err(
+            "emitted Go mismatch: re-emitted Go source drifted from verified build".to_string(),
+        );
+    }
+    if proof2 != expected_proof {
+        return Err(
+            "witness mismatch: emitted Go does not correspond to the checked IR".to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn cmd_build(args: &[String]) -> ExitCode {
     const USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--emit-proof] [--race] [--deny-managed] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
     // Validate the entire invocation before touching the filesystem or the
@@ -980,9 +1026,10 @@ fn cmd_build(args: &[String]) -> ExitCode {
 
     // --- 4. Emit Go ---
     // --emit-proof (issue #3930): emit Go together with the witness proof
-    // and fail closed unless a fresh parse+emit reproduces every hash.
+    // and fail closed unless a fresh parse+check+emit reproduces both the
+    // emitted Go source and every witness hash before writing any artifacts.
     let mut proof_src: Option<String> = None;
-    let go_src = if let Some(pn) = &pkg_name {
+    let raw_go_src = if let Some(pn) = &pkg_name {
         match hy_emit::emit_go_package(&ast, pn, &binding_prefix) {
             Ok(g) => g,
             Err(e) => {
@@ -1010,6 +1057,13 @@ fn cmd_build(args: &[String]) -> ExitCode {
             }
         }
     };
+    if let Some(proof) = &proof_src {
+        if let Err(msg) = verify_emit_proof(&file, &raw_go_src, proof, deny_managed) {
+            eprintln!("emit-proof: {}", msg);
+            return ExitCode::FAILURE;
+        }
+        println!("emit-proof: verified (fail-closed)");
+    }
     // --- 3b. gofmt pass (cosmetic, semantics-preserving by definition) ---
     // The emitter emits gofmt-canonical indentation and struct alignment
     // directly (the 2026-10-14 base-indent sweep); go/printer's remaining
@@ -1018,11 +1072,11 @@ fn cmd_build(args: &[String]) -> ExitCode {
     // gofmt. Build requires the pinned go anyway (E9001), so gofmt is
     // present by definition. On any gofmt failure the unformatted source
     // proceeds unchanged (gofmt is cosmetic; go build is the real gate).
-    let go_src = match run_gofmt(&go_src) {
+    let go_src = match run_gofmt(&raw_go_src) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("notice: gofmt pass skipped ({})", e);
-            go_src
+            raw_go_src
         }
     };
 
@@ -1080,26 +1134,6 @@ fn cmd_build(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
         println!("emitted {}", proof_path);
-        // Fail-closed verifier (issue #3930): re-read the source from disk,
-        // re-parse, re-emit, recompute every witness hash. Any drift between
-        // what was checked and what was emitted is a hard error.
-        let verify = (|| -> Result<(), String> {
-            let src2 = std::fs::read_to_string(&file)
-                .map_err(|e| format!("re-read failed: {}", e))?;
-            let ast2 = hy_syntax::parse_file(&file, &src2)
-                .map_err(|_| "re-parse failed".to_string())?;
-            let (_, proof2) = hy_emit::emit_go_with_proof(&ast2)
-                .map_err(|e| format!("re-emit failed: {}", e.message))?;
-            if proof2 != *proof {
-                return Err("witness mismatch: emitted Go does not correspond to the checked IR".to_string());
-            }
-            Ok(())
-        })();
-        if let Err(msg) = verify {
-            eprintln!("emit-proof: {}", msg);
-            return ExitCode::FAILURE;
-        }
-        println!("emit-proof: verified (fail-closed)");
     }
     if emit_go_only {
         return ExitCode::SUCCESS;
@@ -2410,6 +2444,74 @@ mod tests {
             generated.contains("package newpkg"),
             "expected regenerated calc.hy.go to adopt `package newpkg`, got:\n{generated}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_emit_proof_accepts_matching_go_and_proof_and_rejects_drift() {
+        let dir = std::env::temp_dir().join(format!("hyb-prooftest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src_path = dir.join("prog.hy");
+        let valid_src = "fn worker(m map[string]int) {\n    _ = m\n}\n\nfn main() {\n    m := map[string]int{\"a\": 1}\n    ch := make(chan map[string]int, 1)\n    ch <- move m\n    got := <-ch\n    task worker(move got)\n}\n";
+        std::fs::write(&src_path, valid_src).unwrap();
+        let file = src_path.to_string_lossy().to_string();
+
+        let ast = hy_syntax::parse_file(&file, valid_src).expect("parse valid_src");
+        let (go, proof) = hy_emit::emit_go_with_proof(&ast).expect("emit valid_src");
+
+        verify_emit_proof(&file, &go, &proof, true).expect("matching go and proof should pass");
+
+        let go_drift = verify_emit_proof(&file, &format!("{go}\n// tampered\n"), &proof, true)
+            .expect_err("tampered emitted Go must fail closed");
+        assert!(
+            go_drift.contains("emitted Go mismatch"),
+            "unexpected error: {go_drift}"
+        );
+
+        let proof_drift = verify_emit_proof(&file, &go, "{}", true)
+            .expect_err("tampered proof must fail closed");
+        assert!(
+            proof_drift.contains("witness mismatch"),
+            "unexpected error: {proof_drift}"
+        );
+
+        // Mutate file on disk to drop `move` on non-copy map send -> fails Tier-0 re-check.
+        let invalid_src = valid_src.replace("ch <- move m", "ch <- m");
+        std::fs::write(&src_path, &invalid_src).unwrap();
+        let check_drift = verify_emit_proof(&file, &go, &proof, true)
+            .expect_err("Tier-0 invalid source on disk must fail closed");
+        assert!(
+            check_drift.contains("re-check failed"),
+            "unexpected error: {check_drift}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_emit_proof_enforces_deny_managed_policy() {
+        let dir = std::env::temp_dir().join(format!("hyb-proofmanaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src_path = dir.join("managed.hy");
+        let src = "fn main() {\n    managed(\"audited share\", \"mutex\") {\n        _ = 1\n    }\n}\n";
+        std::fs::write(&src_path, src).unwrap();
+        let file = src_path.to_string_lossy().to_string();
+
+        let ast = hy_syntax::parse_file(&file, src).expect("parse managed.hy");
+        let (go, proof) = hy_emit::emit_go_with_proof(&ast).expect("emit managed.hy");
+
+        verify_emit_proof(&file, &go, &proof, false)
+            .expect("managed block allowed when deny_managed is false");
+
+        let denied = verify_emit_proof(&file, &go, &proof, true)
+            .expect_err("managed block must fail closed when deny_managed is true");
+        assert!(
+            denied.contains("--deny-managed"),
+            "unexpected error: {denied}"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
