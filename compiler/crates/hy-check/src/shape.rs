@@ -93,7 +93,7 @@ impl<'a> Checker<'a> {
             return self.shape_of_type_depth(target, depth + 1);
         }
         if self.enums.contains_key(base) {
-            return TypeShape::Primitive;
+            return self.enum_shape_depth(base, depth);
         }
         // #884: the T9 prelude's `set[T]` lowers to a struct wrapping a Go
         // map (`type set[t comparable] struct { m map[t]struct{} }`), so a
@@ -117,6 +117,33 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    /// Sendability shape of a user enum: the payloads decide. A payload-less
+    /// enum is a plain discriminant (`Primitive`, as before); an enum whose
+    /// variants carry payloads has the sendability of its least-sendable
+    /// payload. A value may be any variant at runtime, so one shared-mutable
+    /// payload is enough to reject the whole enum at a spawn/send boundary —
+    /// `box.full(m)` is the same shared map as a bare `m`, and classifying
+    /// the enum `Primitive` let it cross unproven (issue #4567). An
+    /// unresolvable payload fails closed (`Unknown`, O4.9), and recursion
+    /// through nested enums is bounded by the same depth guard as every
+    /// other shape resolution.
+    fn enum_shape_depth(&self, name: &str, depth: usize) -> TypeShape {
+        let Some(payloads) = self.enum_payloads.get(name) else {
+            return TypeShape::Primitive;
+        };
+        let mut worst: Option<TypeShape> = None;
+        for payload in payloads.iter().flatten() {
+            let shape = self.shape_of_type_depth(payload, depth + 1);
+            if matches!(shape, TypeShape::Unknown) {
+                return TypeShape::Unknown;
+            }
+            if !shape.is_sendable_by_type() && worst.is_none() {
+                worst = Some(shape);
+            }
+        }
+        worst.unwrap_or(TypeShape::Primitive)
     }
 
     /// May a value of this shape share mutable GC storage with a shallow Go
