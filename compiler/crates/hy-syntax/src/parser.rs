@@ -197,6 +197,25 @@ impl Parser {
         Err(ParseErr)
     }
 
+    /// Record a parse error anchored at token `at` WITHOUT unwinding: the
+    /// caller keeps the node it already built, so recovery does not swallow
+    /// the following statement (the declaration itself is complete enough to
+    /// keep parsing; only its shape is wrong).
+    fn report_at(&mut self, at: usize, msg: impl Into<String>) {
+        let span = Span::point(self.toks[at].span.start);
+        self.diags.push(Diagnostic::error(
+            PARSE_ERR_CODE,
+            self.path.clone(),
+            span,
+            format!(
+                "parse error: {} (at {}:{})",
+                msg.into(),
+                span.start.line,
+                span.start.col
+            ),
+        ));
+    }
+
     fn expect_punct(&mut self, p: &str) -> PResult<()> {
         if self.eat_punct(p) {
             Ok(())
@@ -386,7 +405,13 @@ impl Parser {
         let start = self.pos;
         self.bump(); // const
         let name = self.expect_ident()?;
-        let ty = self.opt_type_after_name()?;
+        // The type annotation must sit on the declaration's line (LX9):
+        // `const k` / `int = 3` on the next line is not `const k int = 3`.
+        let ty = if self.same_line_as_prev() {
+            self.opt_type_after_name()?
+        } else {
+            None
+        };
         self.expect_punct("=")?;
         let value = self.parse_expr(true)?;
         Ok(ConstDecl {
@@ -734,7 +759,7 @@ impl Parser {
                 let params = self.parse_params()?;
                 self.expect_punct(")")?;
                 let mut results = Vec::new();
-                while self.is_type_start() {
+                while self.is_type_start() && self.same_line_as_prev() {
                     results.push(self.parse_type()?);
                 }
                 TypeExpr::Fn {
@@ -913,7 +938,11 @@ impl Parser {
             Tok::Kw("select") => self.parse_select(start),
             Tok::Kw("return") => {
                 self.bump();
-                let values = if self.at_punct("}") || self.at_eof() || self.at_punct(";") {
+                let values = if !self.same_line_as_prev()
+                    || self.at_punct("}")
+                    || self.at_eof()
+                    || self.at_punct(";")
+                {
                     Vec::new()
                 } else {
                     self.parse_expr_list(true)?
@@ -997,7 +1026,10 @@ impl Parser {
                 // so a bare-ident label is ambiguous with the next
                 // statement's first token — only `loop` is captured;
                 // user-named labels arrive with real loop labels.
-                let label = if self.at_kw("loop") {
+                let label = if self.at_kw("loop")
+                    && self.same_line_as_prev()
+                    && !matches!(self.nth(1), Tok::Punct("{"))
+                {
                     self.bump();
                     Some("loop".to_string())
                 } else {
@@ -1010,7 +1042,10 @@ impl Parser {
             }
             Tok::Kw("continue") => {
                 self.bump();
-                let label = if self.at_kw("loop") {
+                let label = if self.at_kw("loop")
+                    && self.same_line_as_prev()
+                    && !matches!(self.nth(1), Tok::Punct("{"))
+                {
                     self.bump();
                     Some("loop".to_string())
                 } else {
@@ -1056,8 +1091,41 @@ impl Parser {
         }
     }
 
+    /// Is `panic` (the current token) the SPEC §1.3 `PanicStmt` prefix form
+    /// `panic Expression`?
+    ///
+    /// A string literal operand was the only shape recognised, so
+    /// `panic msg`, `panic err`, `panic 42` or `panic f()` fell through to
+    /// `parse_simple_stmt`: the bare `panic` became one expression statement
+    /// and the operand a second one. `hyb check` accepted that, and the
+    /// emitter printed `panic` and the operand on two lines, which `go build`
+    /// refuses (`panic (built-in) must be called`).
+    ///
+    /// Any token that can only START an operand counts, as long as it sits on
+    /// the same source line as `panic` (statements are newline-delimited, so
+    /// a following line is a separate statement). Tokens that could continue
+    /// an expression whose operand is a user binding named `panic` (`(`,
+    /// `[`, `.`, binary operators, assignment) are left to the ordinary
+    /// statement parser, so a call `panic(x)` and a shadowed `panic` are
+    /// unchanged.
     fn panic_prefix_follows(&self) -> bool {
-        matches!(self.nth(1), Tok::StrChunk(_)) || matches!(self.nth(1), Tok::RawStr(_))
+        match self.nth(1) {
+            Tok::StrChunk(_) | Tok::RawStr(_) => true,
+            Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::CharLit(_) => {
+                self.next_on_same_line()
+            }
+            Tok::Kw(k) if matches!(*k, "true" | "false" | "move") => self.next_on_same_line(),
+            Tok::Punct("!") => self.next_on_same_line(),
+            _ => false,
+        }
+    }
+
+    /// Does the token after the current one start on the line the current
+    /// token ends on?
+    fn next_on_same_line(&self) -> bool {
+        let next = self.pos + 1;
+        next < self.toks.len()
+            && self.toks[next].span.start.line == self.toks[self.pos].span.end.line
     }
 
     /// `let`/`var`/`const` local. `let x := e` and `let x = e` both normalize
@@ -1065,10 +1133,50 @@ impl Parser {
     fn parse_local(&mut self, kind: LocalKind, start: usize) -> PResult<Stmt> {
         self.bump(); // let / var / const
         let name = self.expect_ident()?;
-        let ty = self.opt_type_after_name()?;
+        // Statements are newline-separated (LX9): a type annotation must start
+        // on the declaration's own line. Without this, `var x` followed by
+        // `fmt.println(x)` on the next line parsed as `var x fmt.println` +
+        // a parenthesized expression statement, and `var x` / `x = 1` as
+        // `var x x = 1` — `hyb check` accepted both and `go build` failed.
+        let ty = if self.same_line_as_prev() {
+            self.opt_type_after_name()?
+        } else {
+            None
+        };
         let mut values = Vec::new();
         if self.eat_punct(":=") || self.eat_punct("=") {
             values = self.parse_expr_list(true)?;
+        }
+        // SPEC-LANGUAGE §1.3: `LetDecl = "let" Ident "=" Expr`,
+        // `ConstDecl = "const" Ident [Type] "=" Expr`,
+        // `VarDecl = "var" Ident Type ["=" Expr]`. A declaration missing the
+        // part its grammar requires has no Go lowering (the emitter refuses
+        // it), so it is a parse error here rather than an accepted program
+        // that cannot build (GUARANTEES Row 13).
+        if values.is_empty() {
+            match kind {
+                LocalKind::Let => self.report_at(
+                    start,
+                    format!(
+                        "`let {name}` needs an initializer — write `let {name} = <expr>` \
+                         (or `var {name} T` for a zero-valued mutable variable)"
+                    ),
+                ),
+                LocalKind::Const => self.report_at(
+                    start,
+                    format!(
+                        "`const {name}` needs an initializer — write `const {name} = <expr>`"
+                    ),
+                ),
+                LocalKind::Var if ty.is_none() => self.report_at(
+                    start,
+                    format!(
+                        "`var {name}` needs a type or an initializer — write `var {name} T` \
+                         or `var {name} = <expr>` (the type must be on the same line)"
+                    ),
+                ),
+                _ => {}
+            }
         }
         Ok(Stmt::Local(LocalDecl {
             kind,
@@ -1539,6 +1647,12 @@ impl Parser {
             Tok::Punct("<-") => true,
             Tok::Ident(_) => match self.nth(1) {
                 Tok::Punct("<-") => true, // send arm: ch <- v:
+                // recv-define arm: v := <-ch: — a `:`/`=>` must terminate the
+                // channel expression, otherwise this is an arm-BODY statement
+                // (`v := <-m` inside a bare-recv arm's body, recv_target.rs).
+                Tok::Punct(":=") => {
+                    matches!(self.nth(2), Tok::Punct("<-")) && self.recv_arm_terminator_after(2)
+                }
                 Tok::Punct(",") => {
                     // recv-define arm: a, b := <-ch:
                     let mut k = 1;
@@ -1548,14 +1662,73 @@ impl Parser {
                             _ => break,
                         }
                     }
-                    matches!(self.nth(k), Tok::Ident(_))
-                        && matches!(self.nth(k + 1), Tok::Punct(":="))
-                        && matches!(self.nth(k + 2), Tok::Punct("<-"))
+                    // after the walk k lands on `:=` (the last name was at k-1)
+                    matches!(self.nth(k), Tok::Punct(":="))
+                        && matches!(self.nth(k + 1), Tok::Punct("<-"))
+                        && self.recv_arm_terminator_after(k + 1)
                 }
                 _ => false,
             },
             _ => false,
         }
+    }
+
+    /// Lookahead from the `<-` at offset `arrow_at`: skip the channel
+    /// expression (identifier with postfix selector/index/paren chains) and
+    /// require the select-arm terminator `:` or `=>`. Body statements like
+    /// `v := <-m` end in anything else (next statement's token), so they are
+    /// not arm heads.
+    fn recv_arm_terminator_after(&self, arrow_at: usize) -> bool {
+        let mut k = arrow_at + 1;
+        // channel expression head
+        match self.nth(k) {
+            Tok::Ident(_) => k += 1,
+            _ => return false,
+        }
+        // postfix chains: .name, [expr], (args)
+        loop {
+            match self.nth(k) {
+                Tok::Punct(".") if matches!(self.nth(k + 1), Tok::Ident(_)) => k += 2,
+                Tok::Punct("[") => {
+                    let mut depth = 0i32;
+                    loop {
+                        match self.nth(k) {
+                            Tok::Punct("[") => depth += 1,
+                            Tok::Punct("]") => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    k += 1;
+                                    break;
+                                }
+                            }
+                            Tok::Eof => return false,
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                }
+                Tok::Punct("(") => {
+                    let mut depth = 0i32;
+                    loop {
+                        match self.nth(k) {
+                            Tok::Punct("(") => depth += 1,
+                            Tok::Punct(")") => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    k += 1;
+                                    break;
+                                }
+                            }
+                            Tok::Eof => return false,
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                }
+                _ => break,
+            }
+        }
+        matches!(self.nth(k), Tok::Punct(":" | "=>"))
     }
 
     fn place_of(&mut self, e: Expr) -> PResult<Place> {
@@ -2102,7 +2275,7 @@ impl Parser {
         loop {
             // composite literal `T{…}`: attaches only to a pure type-name
             // chain at a literal-allowing position (see module docs).
-            if self.at_punct("{") && lit {
+            if self.at_punct("{") && lit && self.same_line_as_prev() {
                 if let Some(name) = type_name_chain(&e) {
                     let ty = TypeExpr::Named {
                         name,
@@ -2163,6 +2336,9 @@ impl Parser {
                     };
                 }
                 Tok::Punct("[") => {
+                    if !self.same_line_as_prev() {
+                        break;
+                    }
                     if self.peek_generic_args() {
                         // `lru_cache[k, v]{…}` / `lru_cache.new[string, int](2)`:
                         // type arguments folded into the callee name (contract gap)
@@ -3642,6 +3818,65 @@ fn main() {
     }
 
     #[test]
+    fn second_recv_define_select_arm_parses() {
+        // The arm-body terminator `looks_like_select_arm_head` recognized
+        // send arms (`ch <- v:`), bare recv arms (`<-ch:`), comma-ok
+        // recv-define arms (`v, ok := <-ch:` — and even that one with an
+        // off-by-one that made the final token check look for an Ident on
+        // `:=`), but NOT the single-name recv-define arm (`v := <-ch:`).
+        // Consequence: any select whose SECOND or later arm was a named
+        // recv-define died with "expected expression, found `:`" — the
+        // body loop swallowed the arm head as a local decl and choked on
+        // the trailing colon. Corpus 24 only ever paired one named arm
+        // with a bare arm, so the gap had zero coverage.
+        let two_named = "\
+fn main() {
+    a := make(chan int, 1)
+    b := make(chan int, 1)
+    select {
+        v := <-a:
+            fmt.println(v)
+        w := <-b:
+            fmt.println(w)
+    }
+}
+";
+        if let Err(diags) = parse_file("t.hy", two_named) {
+            panic!("two recv-define arms must parse: {:?}", diags);
+        }
+        let two_comma_ok = "\
+fn main() {
+    a := make(chan int, 1)
+    b := make(chan int, 1)
+    select {
+        v, ok := <-a:
+            fmt.println(v, ok)
+        w, ok2 := <-b:
+            fmt.println(w, ok2)
+    }
+}
+";
+        if let Err(diags) = parse_file("t.hy", two_comma_ok) {
+            panic!("two comma-ok recv-define arms must parse: {:?}", diags);
+        }
+        let named_then_comma_ok = "\
+fn main() {
+    a := make(chan int, 1)
+    b := make(chan int, 1)
+    select {
+        v := <-a:
+            fmt.println(v)
+        w, ok := <-b:
+            fmt.println(w, ok)
+    }
+}
+";
+        if let Err(diags) = parse_file("t.hy", named_then_comma_ok) {
+            panic!("named + comma-ok recv-define arms must parse: {:?}", diags);
+        }
+    }
+
+    #[test]
     fn case_select_arm_is_reserved_not_silently_fused() {
         // Go-style `case <-ch:` used to parse: `case` was an unreserved
         // ident, the same-line `<-` fusion turned `case <-ch` into a Send
@@ -4259,5 +4494,105 @@ fn main() {
         assert!(r.is_err(), "leading dot on new line must not fold into statement");
     }
 
+    #[test]
+    fn bare_return_does_not_consume_next_line_or_arm_head() {
+        let f = parse_src(
+            "fn compute() (res int) {\n\
+                 res = 42\n\
+                 return\n\
+                 res = 99\n\
+             }",
+        );
+        let body = f.fns().next().unwrap().body.as_ref().unwrap();
+        assert_eq!(body.stmts.len(), 3, "got {:?}", body.stmts);
+        assert!(
+            matches!(&body.stmts[1], Stmt::Return { values, .. } if values.is_empty()),
+            "bare return on its own line must have empty values: {:?}",
+            body.stmts[1]
+        );
+
+        let f_arms = parse_src(
+            "fn handle(opt option[int], ch chan int, quit chan bool) {\n\
+                 match opt {\n\
+                     none => return\n\
+                     some(v) => _ = v\n\
+                 }\n\
+                 select {\n\
+                     <-quit:\n\
+                         return\n\
+                     v := <-ch:\n\
+                         _ = v\n\
+                 }\n\
+             }",
+        );
+        let arms_body = f_arms.fns().next().unwrap().body.as_ref().unwrap();
+        assert_eq!(arms_body.stmts.len(), 2);
+    }
+
+    #[test]
+    fn break_and_continue_do_not_consume_next_line_loop_stmt() {
+        let f = parse_src(
+            "fn main() {\n\
+                 for i in 0..3 {\n\
+                     break\n\
+                     loop {\n\
+                         continue\n\
+                         loop {\n\
+                             break\n\
+                         }\n\
+                     }\n\
+                 }\n\
+             }",
+        );
+        let outer_for = first_stmt(&f);
+        let Stmt::For { body, .. } = outer_for else {
+            panic!("expected outer for, got {:?}", outer_for);
+        };
+        assert_eq!(body.stmts.len(), 2, "got {:?}", body.stmts);
+        assert!(
+            matches!(&body.stmts[0], Stmt::Break { label: None, .. }),
+            "plain break must not steal `loop` from next line: {:?}",
+            body.stmts[0]
+        );
+        assert!(
+            matches!(&body.stmts[1], Stmt::For { kind: ForKind::Infinite, .. }),
+            "second statement must remain an infinite loop, not a bare block: {:?}",
+            body.stmts[1]
+        );
+    }
+
+    #[test]
+    fn line_leading_bracket_and_brace_do_not_fold_into_previous_expr() {
+        let f = parse_src(
+            "fn main() {\n\
+                 xs := []int{10, 20}\n\
+                 y := xs\n\
+                 [0]\n\
+                 {\n\
+                     z := 1\n\
+                 }\n\
+             }",
+        );
+        let body = f.fns().next().unwrap().body.as_ref().unwrap();
+        assert_eq!(body.stmts.len(), 4, "got {:?}", body.stmts);
+        let Stmt::Local(y_decl) = &body.stmts[1] else {
+            panic!("expected y := xs local decl");
+        };
+        assert!(
+            matches!(&y_decl.values[0], Expr::Ident { name, .. } if name == "xs"),
+            "y := xs must not fuse with [0] on next line: {:?}",
+            y_decl.values[0]
+        );
+        assert!(
+            matches!(&body.stmts[2], Stmt::Expr { expr: Expr::SliceLit { .. }, .. }),
+            "third statement must be [0] slice literal: {:?}",
+            body.stmts[2]
+        );
+        assert!(
+            matches!(&body.stmts[3], Stmt::Block { .. }),
+            "fourth statement must be bare block: {:?}",
+            body.stmts[3]
+        );
+    }
 }
 

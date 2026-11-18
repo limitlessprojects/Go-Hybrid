@@ -141,9 +141,9 @@ def chat(messages) -> str:
 def diff_paths(d: str) -> list[str]:
     paths = []
     for line in d.splitlines():
-        if line.startswith("+++ "):
+        if line.startswith(("+++ ", "--- ")):
             p = line[4:].strip()
-            if p.startswith("b/"):
+            if p.startswith(("a/", "b/")):
                 p = p[2:]
             if p != "/dev/null":
                 paths.append(p)
@@ -152,7 +152,9 @@ def diff_paths(d: str) -> list[str]:
 
 def scope_ok(d: str) -> bool:
     ps = diff_paths(d)
-    return bool(ps) and all(p.startswith(SCOPE_PREFIXES) for p in ps)
+    return bool(ps) and all(
+        p.startswith(SCOPE_PREFIXES) and ".." not in p.split("/") and not p.startswith("/") for p in ps
+    )
 
 
 def render_messages(issue: dict, feedback: str, files: list[str]) -> list[dict]:
@@ -314,7 +316,18 @@ def run_author(issue_no: int, out: pathlib.Path, max_rounds: int,
             tr(trace, "gate-ineffective", round=rnd)
             revert_tree()
             continue
-        if expected and expected not in outp:
+        # hyb check uses 1 for a checked rejection and 2 for invocation/I/O
+        # failures. Signals and other process failures are not a verdict,
+        # even if a diagnostic was printed before the checker failed.
+        if code != 1:
+            feedback = (f"checker failed (exit {code}); expected rejection exit 1:\n"
+                        f"{outp[-800:]}")
+            tr(trace, "gate-checker-failed", round=rnd, exit=code)
+            revert_tree()
+            continue
+        if expected and not re.search(
+            rf"(?<![\w-]){re.escape(expected)}(?![\w-])", outp
+        ):
             feedback = (f"repro rejected but without the expected code {expected}; "
                         f"diagnostics tail:\n{outp[-800:]}")
             tr(trace, "gate-wrong-code", round=rnd, expected=expected)

@@ -1,0 +1,49 @@
+name: queue-sweeper
+
+# Doctrine change 2026-10-30 (owner): the 5-day auto-close sweep is RETIRED.
+# Closes are a deliberate act again — every PR gets a written reply and stays
+# open while its author is active, per the no-silent-closes rule. The schedule
+# trigger is removed; the workflow only runs when dispatched manually (use the
+# `dry` input to preview). Protected labels: triage:wildcard-hold /
+# triage:pareto / triage:keep (+ config-listed numbers).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: "Dry run only (list what would close)"
+        type: boolean
+        default: true
+      min_age:
+        description: "Min PR age in days before closing (default 5)"
+        required: false
+        default: "5"
+
+permissions:
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: queue-sweeper
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sweep the queue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SWEEPER_MIN_AGE_DAYS: ${{ inputs.min_age || '5' }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry }}" = "true" ]; then
+            ARGS="--dry"
+          fi
+          python3 tools/queue_sweeper.py $ARGS

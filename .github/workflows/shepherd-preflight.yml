@@ -68,19 +68,24 @@ jobs:
             echo "Pinned toolchains: Go $(go version | awk '{print $3}'), $(rustc --version | awk '{print $2}')"
             echo
           } > /tmp/preflight.md
-          if go build ./... ; then
+          rm -rf /tmp/gopreflight && mkdir -p /tmp/gopreflight/lib
+          printf 'module hybrid.program\n\ngo 1.26\n' > /tmp/gopreflight/go.mod
+          cp -r runtime/go/* /tmp/gopreflight/
+          if cargo build --manifest-path runtime/rust/hyrt/Cargo.toml --release --quiet && \
+             cp runtime/rust/hyrt/target/release/libhyrt.a /tmp/gopreflight/lib/ && \
+             (cd /tmp/gopreflight && go build ./...) ; then
             echo "- go build: **pass**" >> /tmp/preflight.md
           else
             echo "- go build: **FAIL**" >> /tmp/preflight.md
             exit 1
           fi
-          if go vet ./... ; then
+          if (cd /tmp/gopreflight && go vet ./...) ; then
             echo "- go vet: **pass**" >> /tmp/preflight.md
           else
             echo "- go vet: **FAIL**" >> /tmp/preflight.md
             exit 1
           fi
-          if cargo build -p hyb --quiet ; then
+          if cargo build --manifest-path compiler/Cargo.toml -p hyb --quiet ; then
             echo "- classifier build (hyb): **pass**" >> /tmp/preflight.md
           else
             echo "- classifier build (hyb): **FAIL**" >> /tmp/preflight.md

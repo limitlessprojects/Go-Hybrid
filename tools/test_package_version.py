@@ -35,7 +35,7 @@ class ReleaseVersionTests(unittest.TestCase):
 
     def test_unsafe_version_is_rejected_before_build(self):
         for version in ("../outside", "v1/../../outside", "/tmp/release",
-                        "v1\\outside", "v1 with spaces", "v1\nsecond-line", ""):
+                        "v1\\outside", "v1 with spaces", "v1\nsecond-line", "", ".", "..", "-rf", "v1..2"):
             with self.subTest(version=version):
                 result, built, dist_created = self.run_version(version)
                 self.assertNotEqual(result.returncode, 0)

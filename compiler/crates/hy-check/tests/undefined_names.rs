@@ -186,6 +186,15 @@ fn imported_package_prefix_allowed() {
 }
 
 #[test]
+fn dotted_first_segment_without_declaration_or_package_rejects_e1001() {
+    // Issue #2271: unparenthesized field bases that are not declared locals,
+    // parameters, file-level names, or packages on the curated allowlist / imports
+    // must reject with HYB-E1001 instead of surviving to go build `undefined: X`.
+    rejects_with_e1001("fn main() {\n    x := foo.bar(1)\n    _ = x\n}\n");
+    rejects_with_e1001("fn main() {\n    _ = undefined_obj.field\n}\n");
+}
+
+#[test]
 fn dotted_first_segment_curated_roots_accepted_unknown_rejected_issue_1131() {
     // Curated package roots (e.g. `hex.encode`) emit a working import and
     // pass hyb check. Unknown roots that are neither declared, imported, nor
@@ -229,3 +238,25 @@ fn m4_m5_foreign_go_name_and_curated_allowlist_resolution_issue_658() {
     );
 }
 
+#[test]
+fn self_referential_short_binding_rejects_e1001_issue_2271() {
+    // Case 2 from issue #2271: `ch := ch` must not resolve RHS against LHS binding
+    rejects_with_e1001("fn main() {\n    ch := ch\n    fmt.println(\"{ch}\")\n}\n");
+    rejects_with_e1001("fn main() {\n    x := x + 1\n    _ = x\n}\n");
+}
+
+#[test]
+fn undeclared_field_base_rejects_e1001_issue_2271() {
+    // Case 1 from issue #2271: `q.a` must reject with HYB-E1001 when base `q` is undeclared
+    rejects_with_e1001("fn main() {\n    fmt.println(\"{q.a}\")\n}\n");
+    rejects_with_e1001("fn main() {\n    _ = q.a\n}\n");
+    rejects_with_e1001("fn main() {\n    _ = (q).a\n}\n");
+}
+
+#[test]
+fn positive_controls_issue_2271() {
+    // Ordinary := still fine
+    accepts_without_e1001("fn main() {\n    ch := make(chan int, 1)\n    fmt.println(\"{ch}\")\n}\n");
+    // Declared base, field access
+    accepts_without_e1001("struct s { a int }\nfn main() {\n    q := s{a: 1}\n    fmt.println(\"{q.a}\")\n}\n");
+}

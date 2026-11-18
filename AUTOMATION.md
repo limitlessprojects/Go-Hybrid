@@ -1,13 +1,24 @@
 # Automation — how the PR backlog manages itself
 
-Review-first automation. Two hard rules are encoded everywhere and must never
-be relaxed:
+Review-first automation. One hard rule is encoded everywhere and must never
+be relaxed, plus one policy that keeps the queue honest:
 
 1. **The bot never merges.** Landing requires the manual protocol
    (merge gate -> issue repro vs main -> `cargo test --workspace` ->
    `corpus_harness.py` -> `differential_loop.py` FULL) plus a credit commit.
-2. **The bot never closes.** Closes are deliberate (credit-close with thanks,
-   or wildcard verdict). `stale.yml` is label-only (`days-before-*-close: -1`).
+2. **The queue drains itself** (doctrine change, 2026-10-24). The old rule —
+   "the bot never closes" — was written for a repo receiving a handful of
+   PRs; at ~65 arrivals/day it produced a 400+ PR review-debt pile that no
+   session could honestly work through. Now `tools/queue_sweeper.py` (daily
+   via `.github/workflows/queue-sweeper.yml`) closes unprotected PRs older
+   than `SWEEPER_MIN_AGE_DAYS` (default 5) as not-planned, with a written
+   reply on every close (the CONTRIBUTING "no silent closes" promise is
+   unchanged). A PR survives only with a protected label —
+   `triage:wildcard-hold`, `triage:pareto`, or `triage:keep` — or by being
+   listed in `triage_config.json` (wildcard holds, parked drafts). The daily
+   triage board is what earns that protection: if a PR deserves review time,
+   it must surface within its window. Closes are reopen-friendly by design;
+   merges stay human.
 
 ## What runs where
 
@@ -19,8 +30,17 @@ be relaxed:
 | `tools/triage_bot.py board --post` | `.github/workflows/triage-board.yml` | daily 04:30 UTC + manual | Rewrites the **Triage Board** issue: Pareto NOW list, land-candidates, conflicts, stale bases, duplicate clusters, new arrivals, wildcard holds. |
 | `actions/stale` | `.github/workflows/stale.yml` | daily 04:17 UTC | `triage:stale` label after 21 idle days. Never closes. Exempts `triage:wildcard-hold`, `triage:pareto`, `triage:keep`. |
 | `ci.yml` | every PR | per push | Already runs the full gate suite: census, cargo tests, corpus verdict agreement, differential loop, Go runtime hygiene, examples. |
+| `tools/queue_sweeper.py` | `.github/workflows/queue-sweeper.yml` | daily 05:15 UTC + manual | Closes unprotected PRs older than `SWEEPER_MIN_AGE_DAYS` (default 5) as not-planned, each with a reopen-path reply. Protected: the `triage:wildcard-hold` / `triage:pareto` / `triage:keep` labels plus config-listed wildcard/parked numbers. |
+| `tools/queue_sweeper.py --dry` | any run | before changes | Preview exactly what the next sweep would close — same policy, zero writes. |
 
 ## Session start (the 30-second context restore)
+
+Board posting uses `board_issue` in `tools/triage_config.json` when configured;
+this repository pins #940. The target must remain an open issue with the exact
+board marker. Without that setting, discovery requires the exact board title
+and marker plus a repository owner/member/collaborator or GitHub Actions author.
+An incomplete search or multiple eligible boards stops without writing. With
+no eligible board, the existing first-run workflow creates one.
 
 ```bash
 python3 tools/triage_bot.py scan --out /tmp/triage        # fresh queue
