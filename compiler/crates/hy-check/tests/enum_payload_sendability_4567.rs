@@ -126,6 +126,29 @@ fn respawn_of_received_enum_param_is_e3001() {
     );
 }
 
+#[test]
+fn direct_ctor_map_spawn_is_e3001() {
+    // The constructor itself at the boundary, no `get()` in between:
+    // `box.full(m)` must classify by the enum's payload shape, not fall
+    // through to Unknown (which misreported the share as unproven
+    // HYB-E3005 instead of rejected HYB-E3001). The worker here has no
+    // inner spawn, so the diagnostic can only come from this site.
+    assert_code(
+        "enum box {\n    full(map[string]int)\n    empty\n}\n\nfn worker(b box, done chan<- bool) {\n    match b {\n        full(inner): {\n            inner[\"k\"] = 1\n        }\n        empty: {\n        }\n    }\n    done <- true\n}\n\nfn main() {\n    m := map[string]int{\"k\": 0}\n    done := make(chan bool, 1)\n    task worker(box.full(m), done)\n    m[\"k\"] = 2\n    <-done\n}\n",
+        "HYB-E3001",
+    );
+}
+
+#[test]
+fn direct_ctor_map_channel_send_is_e3002() {
+    // Same constructor route at a channel boundary: the send must reject
+    // with the channel-send code, not HYB-E3005.
+    assert_code(
+        "enum box {\n    full(map[string]int)\n    empty\n}\n\nfn main() {\n    m := map[string]int{\"k\": 0}\n    ch := make(chan box, 1)\n    ch <- box.full(m)\n    m[\"k\"] = 1\n}\n",
+        "HYB-E3002",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Accepts — payload-less and sendable-payload enums keep crossing
 // ---------------------------------------------------------------------------
@@ -148,6 +171,27 @@ fn string_payload_enum_accepts() {
 fn payloadless_enum_accepts() {
     assert_accept(
         "enum color {\n    red\n    green\n    blue\n}\n\nfn get() color {\n    return color.red\n}\n\nfn worker(c color, done chan<- bool) {\n    match c {\n        red: {\n            fmt.println(\"r\")\n        }\n        green: {\n        }\n        blue: {\n        }\n    }\n    done <- true\n}\n\nfn main() {\n    done := make(chan bool, 1)\n    task worker(get(), done)\n    <-done\n}\n",
+    );
+}
+
+#[test]
+fn direct_ctor_primitive_spawn_accepts() {
+    // A primitive payload built inline at the boundary: the constructor
+    // must classify as the enum's (sendable) payload shape, not fail
+    // closed as Unknown — before the constructor fix this valid program
+    // was spuriously rejected HYB-E3005.
+    assert_accept(
+        "enum shape {\n    circle(int)\n    square(int)\n    dot\n}\n\nfn worker(s shape, done chan<- bool) {\n    done <- true\n}\n\nfn main() {\n    done := make(chan bool, 1)\n    task worker(shape.circle(3), done)\n    <-done\n}\n",
+    );
+}
+
+#[test]
+fn bare_variant_spawn_accepts() {
+    // A bare variant read off the enum name (`color.red`) is the enum
+    // value itself: payload-less, so it crosses. Same spurious-E3005
+    // hole as the constructor route before the field fix.
+    assert_accept(
+        "enum color {\n    red\n    green\n    blue\n}\n\nfn worker(c color, done chan<- bool) {\n    done <- true\n}\n\nfn main() {\n    done := make(chan bool, 1)\n    task worker(color.red, done)\n    <-done\n}\n",
     );
 }
 

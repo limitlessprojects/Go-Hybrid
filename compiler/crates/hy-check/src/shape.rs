@@ -334,6 +334,21 @@ impl<'a> Checker<'a> {
                 _ => TypeShape::Unknown,
             },
             Expr::Field { base, name, .. } => {
+                // A bare variant read off the enum name itself (`color.red`,
+                // `shape.dot`) is not a struct field: the value IS the enum,
+                // so its shape is the enum's payload shape (issue #4567).
+                // Without this the base ident resolves to nothing and the
+                // read fails closed as Unknown, so a payload-less enum
+                // crossed at a boundary was spuriously rejected HYB-E3005.
+                // A local binding of the same name shadows the enum and
+                // keeps the struct-field path below.
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, root).is_none()
+                        && self.enums.contains_key(root.as_str())
+                    {
+                        return self.named_shape(root);
+                    }
+                }
                 let base_shape = self.shape_of_expr(st, base);
                 self.field_shape(&base_shape, name)
             }
@@ -505,6 +520,18 @@ impl<'a> Checker<'a> {
                         && !st.type_params.contains(root.as_str())
                         && !self.consts.contains_key(root.as_str())
                     {
+                        // An enum constructor call (`box.full(m)`,
+                        // `shape.circle(3)`): the callee names a variant of
+                        // a declared enum, not a fn, so the call's shape is
+                        // the enum's payload shape (issue #4567). This must
+                        // precede the fn-table lookup: without it the call
+                        // fell through to Unknown, so a shared-map payload
+                        // crossed as unproven HYB-E3005 instead of rejected
+                        // HYB-E3001/E3002, and a primitive payload was
+                        // spuriously rejected instead of accepted.
+                        if self.enums.contains_key(root.as_str()) {
+                            return self.named_shape(root);
+                        }
                         let full = format!("{}.{}", root, head);
                         if let Some(f) = self.fns.get(full.as_str()) {
                             let subst = self.fn_call_shape_subst(st, f, name, None, args);
@@ -1000,6 +1027,21 @@ impl<'a> Checker<'a> {
                     let head = Self::base_named_type_str(name);
                     if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
                         if self.lookup_binding(st, root).is_none() {
+                            // An enum constructor call (`box.full(m)`): the
+                            // call's type is the enum itself, not a fn result
+                            // (issue #4567). Without this, a `:=` binding
+                            // from a constructor stayed untyped, so a later
+                            // `match` on it could not see the enum and
+                            // spuriously demanded a trailing `_` (HYB-E5001)
+                            // even when all variants were covered.
+                            if let Some(vs) = self.enums.get(root.as_str()) {
+                                if vs.iter().any(|v| v == name) {
+                                    return Some(TypeExpr::Named {
+                                        name: root.clone(),
+                                        span: *span,
+                                    });
+                                }
+                            }
                             let full = format!("{}.{}", root, head);
                             if let Some(f) = self.fns.get(full.as_str()) {
                                 return f.results.first().map(|r| r.ty.clone());
