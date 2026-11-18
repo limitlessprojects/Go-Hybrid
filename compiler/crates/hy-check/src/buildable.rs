@@ -4588,6 +4588,82 @@ impl<'a> Collector<'a> {
         }
     }
 
+    // Full `encoding/binary` call surface — every member the member table in
+    // foreign.rs blesses, with the arity of the Go name it lowers to.
+    // Calling binary package members with wrong arity or calling non-callable
+    // package variables/constants (BigEndian, LittleEndian, MaxVarintLen*)
+    // passed `hyb check` with any arity and blew up at `go build` instead
+    // (Row 13 BUILDABLE: reject fail-closed, HYB-E1002).
+    fn check_binary_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        // Package-level values, constants, and types are not callable.
+        if matches!(
+            member,
+            "big_endian"
+                | "little_endian"
+                | "native_endian"
+                | "max_varint_len16"
+                | "max_varint_len32"
+                | "max_varint_len64"
+                | "byte_order"
+                | "append_byte_order"
+        ) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`binary.{member}` is not a function — it is a package-level value/type and cannot be called (HYB-E1002)"
+                ),
+                &format!("reference `binary.{member}` directly, do not call it"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            // 1 arg: Size(v), Varint(buf), Uvarint(buf), ReadVarint(r), ReadUvarint(r)
+            "size" | "varint" | "uvarint" | "read_varint" | "read_uvarint" => Some(1),
+            // 2 args: PutVarint(buf, x), PutUvarint(buf, x)
+            "put_varint" | "put_uvarint" => Some(2),
+            // 3 args: Read(r, order, data), Write(w, order, data), Append(buf, order, data),
+            //         Encode(b, order, data), Decode(b, order, data)
+            "read" | "write" | "append" | "encode" | "decode" => Some(3),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `binary.{member}` (HYB-E1002)"),
+                    &format!("`binary.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let go_name = match member {
+                    "size" => "Size",
+                    "varint" => "Varint",
+                    "uvarint" => "Uvarint",
+                    "put_varint" => "PutVarint",
+                    "put_uvarint" => "PutUvarint",
+                    "read_varint" => "ReadVarint",
+                    "read_uvarint" => "ReadUvarint",
+                    "read" => "Read",
+                    "write" => "Write",
+                    "append" => "Append",
+                    "encode" => "Encode",
+                    "decode" => "Decode",
+                    _ => member,
+                };
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`binary.{member}` takes exactly {expected} argument{}, got {} (HYB-E1002)",
+                        if expected == 1 { "" } else { "s" },
+                        args.len()
+                    ),
+                    &format!("match the arity of the Go function this lowers to (`binary.{go_name}`)"),
+                );
+            }
+        }
+    }
+
     fn check_sort_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(member, "interface" | "int_slice" | "float64_slice" | "string_slice") {
             self.emit_e1002(
@@ -8410,6 +8486,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "strconv" && self.lookup_kind(pkg).is_none() {
                         self.check_strconv_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "binary" && self.lookup_kind(pkg).is_none() {
+                        self.check_binary_package_call(name.as_str(), args, span);
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
