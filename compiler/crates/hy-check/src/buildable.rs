@@ -2410,6 +2410,32 @@ impl<'a> Collector<'a> {
         vec![OpKind::Unknown; n]
     }
 
+    /// Declared result type NAMES of a multi-value call, parallel to
+    /// `multi_value_kinds`. The OpKind is too coarse for width checks:
+    /// `int32` and `int64` are both `OpKind::Int`, so a `kinds_conflict` test
+    /// alone accepts `a, b = pair()` when the callee returns int32 and the
+    /// targets are int64 — and the emitted Go then fails to build (#4576).
+    /// Returns None when a result type has no simple name, so the caller keeps
+    /// the kinds-only behaviour instead of guessing.
+    fn multi_value_type_names(&self, e: &Expr) -> Option<Vec<String>> {
+        let bare = unwrap_parens(e);
+        let Expr::Call { callee, .. } = bare else {
+            return None;
+        };
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+            return None;
+        };
+        let decl = self.ck.fns.get(name.as_str())?;
+        let mut out = Vec::with_capacity(decl.results.len());
+        for r in &decl.results {
+            match &r.ty {
+                TypeExpr::Named { name, .. } => out.push(name.clone()),
+                _ => return None,
+            }
+        }
+        if out.len() >= 2 { Some(out) } else { None }
+    }
+
     fn multi_value_kinds(&self, e: &Expr) -> Vec<OpKind> {
         match unwrap_parens(e) {
             Expr::Move { operand, .. } => self.multi_value_kinds(operand),
@@ -6840,14 +6866,16 @@ impl<'a> Collector<'a> {
                                 self.typed_value_type_name(&values[0]).as_deref(),
                             ))
                     {
+                        let v_name = vk.label().to_string();
+                        let t_name = tk.label().to_string();
                         self.emit_e1002(
                             span,
                             format!(
                                 "cannot assign a value of type `{}` to `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
-                                vk.label(),
+                                v_name,
                                 target.render(),
-                                tk.label(),
-                                tk.label()
+                                t_name,
+                                t_name
                             ),
                             "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
                         );
@@ -6930,18 +6958,32 @@ impl<'a> Collector<'a> {
                         );
                     } else {
                         let got_kinds = self.multi_value_kinds(&values[0]);
+                        // Declared result names (#4576): int32 -> int64 shares
+                        // OpKind::Int, so kinds_conflict alone lets it through.
+                        let got_names = self.multi_value_type_names(&values[0]);
                         if got_kinds.len() == targets.len() {
-                            for (t, vk) in targets.iter().zip(got_kinds.iter()) {
+                            for (i, (t, vk)) in targets.iter().zip(got_kinds.iter()).enumerate() {
                                 let tpk = self.kind_of_place(t);
-                                if kinds_conflict(&tpk, vk) {
+                                let name_mismatch = got_names
+                                    .as_ref()
+                                    .and_then(|ns| ns.get(i))
+                                    .zip(self.place_type_name(t))
+                                    .is_some_and(|(v, tp)| v != &tp);
+                                if kinds_conflict(&tpk, vk) || name_mismatch {
                                     self.emit_e1002(
                                         span,
                                         format!(
                                             "cannot assign a value of type `{}` to `{}` (type `{}`) in multi-value assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
-                                            vk.label(),
+                                            got_names
+                                                .as_ref()
+                                                .and_then(|ns| ns.get(i))
+                                                .cloned()
+                                                .unwrap_or_else(|| vk.label().to_string()),
                                             t.render(),
-                                            tpk.label(),
-                                            tpk.label()
+                                            self.place_type_name(t)
+                                                .unwrap_or_else(|| tpk.label().to_string()),
+                                            self.place_type_name(t)
+                                                .unwrap_or_else(|| tpk.label().to_string())
                                         ),
                                         "each target's declared type is fixed; write an explicit conversion when a conversion is intended",
                                     );
