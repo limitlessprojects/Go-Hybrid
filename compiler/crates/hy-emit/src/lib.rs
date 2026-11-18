@@ -180,7 +180,7 @@ pub fn emit_go(file: &File) -> Result<String, EmitError> {
 pub fn emit_go_with_proof(file: &File) -> Result<(String, String), EmitError> {
     let mut em = Emitter::new();
     let go = em.emit_file(file)?;
-    let proof = crate::witness::build_proof(std::mem::take(&mut em.witnesses));
+    let proof = crate::witness::build_proof_with_go(std::mem::take(&mut em.witnesses), &go);
     Ok((go, crate::witness::proof_json(&proof)))
 }
 
