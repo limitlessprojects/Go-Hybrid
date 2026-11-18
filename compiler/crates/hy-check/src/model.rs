@@ -154,6 +154,8 @@ pub(crate) struct Binding {
     /// capture, or non-channel `for ... in` element), so `move x` at a
     /// concurrency boundary cannot freeze all live aliases (O5.1/O5.2/O5.4).
     pub non_owned_origin: Option<String>,
+    /// Zero-value `var p *T` declaration not yet assigned (use-before-assign).
+    pub unassigned: bool,
     /// Defined (or re-assigned) as an O8 map-slot loan `x := &m[k]`.
     /// T24: a loan is not an addressable value — `&x` on it is
     /// HYB-E3104. A shadowing redefinition creates a fresh binding with
@@ -307,6 +309,10 @@ pub(crate) struct FnState {
     /// Active `defer <call>` sites seen prior to the current program point, paired
     /// with eager per-argument borrow flags evaluated at the `defer` statement.
     pub deferred_calls: Vec<(hy_syntax::Expr, Vec<bool>)>,
+    /// Spans of `x == nil` / `x != nil` conditions already processed this fn —
+    /// reads of a zero-initialized binding inside such a guard are exempt
+    /// (comparing against nil does not deref).
+    pub nil_cond_spans: Vec<(u32, u32)>, // (start_line, end_line)
 }
 
 impl FnState {

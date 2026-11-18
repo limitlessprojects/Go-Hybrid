@@ -1574,9 +1574,18 @@ impl<'a> Checker<'a> {
                 l.ty.as_ref()
                     .map(|t| self.shape_of_type(t))
                     .unwrap_or(TypeShape::Unknown);
+            // HYB-E3199: a zero-value pointer declaration is nil until an
+            // assignment fills it in. Track it so a use before the first
+            // assignment is rejected (deref of nil panics).
+            let unassigned = matches!(shape, TypeShape::Pointer(_));
             let ty = l.ty.clone();
             for name in &l.names {
                 self.define_binding(st, name, shape.clone(), ty.clone(), immutable, managed, is_let);
+                if unassigned {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.unassigned = true;
+                    }
+                }
             }
             return;
         }
@@ -3524,6 +3533,7 @@ impl<'a> Checker<'a> {
                     moved: None,
                     non_owned_origin: None,
                     slot_loan: false,
+                unassigned: false,
                 },
             );
             aliases.insert((*name).to_string(), HashSet::from([idx]));
@@ -3679,6 +3689,7 @@ impl<'a> Checker<'a> {
                                 moved: None,
                                 non_owned_origin: None,
                                 slot_loan: false,
+                unassigned: false,
                             },
                         );
                         aliases.remove(name);
@@ -3720,6 +3731,7 @@ impl<'a> Checker<'a> {
                                 moved: None,
                                 non_owned_origin: None,
                                 slot_loan: false,
+                unassigned: false,
                             },
                         );
                         cst.closure_defs.remove(name);
@@ -3748,6 +3760,7 @@ impl<'a> Checker<'a> {
                                 moved: None,
                                 non_owned_origin: None,
                                 slot_loan: false,
+                unassigned: false,
                             },
                         );
                         if carries && !raw.is_empty() {
@@ -3944,6 +3957,7 @@ impl<'a> Checker<'a> {
                                         moved: None,
                                         non_owned_origin: None,
                                         slot_loan: false,
+                unassigned: false,
                                     },
                                 );
                                 if carries && !raw.is_empty() {
@@ -4011,6 +4025,7 @@ impl<'a> Checker<'a> {
                                 moved: None,
                                 non_owned_origin: None,
                                 slot_loan: false,
+                unassigned: false,
                             },
                         );
                         if subj_origins.is_empty() {
@@ -6363,6 +6378,7 @@ impl<'a> Checker<'a> {
                 moved: prev_moved,
                 non_owned_origin,
                 slot_loan: prev_slot_loan,
+                unassigned: false,
             },
         );
     }
@@ -6852,6 +6868,9 @@ impl<'a> Checker<'a> {
                     }
 
                     if let Some(b) = st.env_lookup_mut(name) {
+                        // HYB-E3199: a plain assignment fills the binding —
+                        // it is no longer a zero-value unassigned pointer.
+                        b.unassigned = false;
                         if !matches!(info.shape, TypeShape::Unknown) || b.ty.is_none() {
                             b.shape = info.shape;
                         }
@@ -9570,6 +9589,7 @@ impl<'a> Checker<'a> {
             moved: None,
             non_owned_origin,
             slot_loan: false,
+                unassigned: false,
         }
     }
 }

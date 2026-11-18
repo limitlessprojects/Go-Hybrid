@@ -142,11 +142,16 @@ fn main() {
 
 #[test]
 fn test_typed_array_pointer_slice_bound_past_len_rejected() {
+    // `_ = p[:4]` on a zero-value `var p *[3]int` is a use-before-assignment
+    // (HYB-E3199): the nil check does not make the dereference valid. Assign a
+    // real array first so the bounds check is exercised on a valid pointer.
     let src = r#"
 package main
 
 fn main() {
     var p *[3]int
+    a := [3]int{1, 2, 3}
+    p = &a
     _ = p[:4]
 }
 "#;
