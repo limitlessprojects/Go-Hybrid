@@ -1122,7 +1122,7 @@ or writable from Hybrid source, preserving option soundness and constructor guar
 
 | case | verdict | rule | code | note |
 |------|---------|------|------|------|
-| prelude-option-private-field-reject | REJECT | T20 | `HYB-E1002` | `o.val` / `o.ok` are private Go fields; option surface exposes only `.unwrap()`, `.unwrap_or()`, `.is_some()`, `.is_none()` |
+| prelude-option-private-field-reject | REJECT | BUILDABLE | `HYB-E1002` | `o.val` / `o.ok` are private Go fields; option surface exposes only `.unwrap()`, `.unwrap_or()`, `.is_some()`, `.is_none()` |
 
 With this registration the corpus is **140 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 93**.
 

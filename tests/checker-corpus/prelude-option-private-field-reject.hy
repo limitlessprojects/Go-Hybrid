@@ -15,7 +15,8 @@
 //   [S1] `o.val = 42`: field selection on option[T] must reject undefined field.
 //
 // ---- Expected verdict ----
-// EXPECTED-VERDICT: REJECT HYB-E1002
+// EXPECTED-VERDICT: REJECT BUILDABLE
+// EXPECTED-DIAGNOSTIC: HYB-E1002
 //   REJECT — HYB-E1002. `option[int]` exposes `.unwrap()`, `.unwrap_or(...)`, `.is_some()`,
 //   `.is_none()`, not the private Go representation fields `val` and `ok`.
 //
