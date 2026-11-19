@@ -1060,3 +1060,15 @@
 **Scheduler status**: no agent-side cron tool in this runtime (tool calls rejected), no system cron/at, background processes die at turn end — hourly wake-ups must come from outside the sandbox; each wake runs one bounded tick script (snapshot refresh → dry-run → capped execute → verify, idempotent, quota-guarded). Ticks are cheap (~4 min, ~200 REST calls).
 
 **Next**: keep draining red-CI candidates (~261 left in snapshot; ~40/tick); conflicted-author-idle closes need a responsiveness signal that ignores label touches (suggest bot: comment last-activity stamping); wildcard-hold verdict window (config M1, due 2026-11-01) is 18 days overdue — 27 config holds + unlabeled wildcard-titled PRs need adjudication; triage_config wildcard_holds list stale (numbers ≤709 vs queue now ≥8xx); land-candidate session for the 77 green-CI+CLEAN PRs (board Pareto flow); consider promoting the runner into tools/ alongside queue_sweeper.py.
+
+## Session 189 — 2026-11-19 23:30 (+08; 15:30 UTC) — persistence + 2 more ticks
+
+**Executed: 80 closed** (2 ticks × 40, oldest-first red-CI drain; tick 2 snapshot refreshed despite a GraphQL secondary-rate-limit stall mid-survey — Retry-After handling worked). Queue 1,281 → **1,127**; cumulative across sessions 188-189: **200 closed**, all not_planned with evidence replies, zero merges. Close-candidates remaining in fresh snapshot: 178. Land candidates (green-CI + CLEAN): 15 — note this shrank from 77 as main advanced (PRs went BEHIND); board #940 remains the authority for landing order.
+
+**Persistence (maintainer request — sandbox wipes)**: the runner and surveyor are now IN the repo: `tools/pr_triage_runner.py` + `tools/queue_snapshot.py` (env-configured: TRIAGE_STATE_DIR, SURVEY_JSON; no absolute paths), documented in AUTOMATION.md ("Deliberate close runner", policy + usage). Any future session can clone and continue without this sandbox. Workspace side (limitlessprojects workspace repo, local-only): RESUME.md at root = read-first handoff; `scripts/bootstrap_after_wipe.sh` (token check → re-clone → verify → tick); token now lives in tracked `.env` (untracked `.gh_token` died in a mid-day restore — observed live) and is mirrored to `scripts/.gh_token` at runtime. Workspace kit committed locally.
+
+**Scheduler verdict (tested, not assumed)**: z.ai cron tool absent from this runtime (list + create both rejected, 4 attempts across sessions); no system cron/at binaries; background processes die at turn end. Hourly cadence requires an external wake-up running `bash scripts/triage_tick.sh --max 40` (~4-8 min/tick, ~200 REST calls, idempotent).
+
+**Ops note**: git status in a fresh clone showed 1,170 mode-only diffs after workspace restore — set `core.fileMode=false` in the clone; no content drift.
+
+**Next**: drain remaining ~178 red-CI candidates (~5 ticks); then the hard part — green-CI aged PRs need review/landing sessions, not closes; M1 wildcard adjudication still overdue (window 2026-11-01, 27 config holds + title-matched unlabeled ones protected from closes).
