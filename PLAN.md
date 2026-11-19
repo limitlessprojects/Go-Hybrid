@@ -4,7 +4,7 @@
 
 - On base `12a86bf96808ff6398e725cf73205bb0d200b904`, the CI test-registration guard credits steps and jobs with `continue-on-error: true`. Such tests cannot fail CI. The guard now requires the field to be absent or statically false, preserving the existing raw-command behavior.
 - Six new regression methods cover discovery and direct-script registration, step/job policies, metadata ordering, dynamic expressions, false controls, scope isolation and an independent enforcing run. The original implementation produces 17 failed assertions; the patched focused suite passes 57/57. The live registration guard still passes for all 40 test files.
-- Local Python tooling validation and hosted CI results are recorded in the contribution. No compiler behavior changes. Upstream review and bounty selection remain pending.
+- All 559 top-level Python tooling tests pass on Python 3.12.14 (macOS), as do registration/conflict-marker guards and the diff check. No compiler behavior changes. Hosted CI, upstream review and bounty selection remain pending.
 
 ## Contributor validation — triage board target (2026-11-06)
 
