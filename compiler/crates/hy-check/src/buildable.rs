@@ -2197,6 +2197,71 @@ impl<'a> Collector<'a> {
                         );
                     }
                 }
+            } else if l.names.len() > 1 && l.values.len() == 1 {
+                let got_kinds = self.multi_value_kinds(&l.values[0]);
+                let got_scalars = match unwrap_parens(&l.values[0]) {
+                    Expr::Call { callee, args, .. } => self.call_result_scalars(callee, args),
+                    _ => None,
+                };
+                if got_kinds.len() == l.names.len() {
+                    for (i, (name, vk)) in l.names.iter().zip(got_kinds.iter()).enumerate() {
+                        let int_float_conflict = want == OpKind::Float
+                            && *vk == OpKind::Int
+                            && !self.is_untyped_int_const(&l.values[0]);
+                        let got_scalar = got_scalars
+                            .as_ref()
+                            .and_then(|v| v.get(i).copied().flatten());
+                        let scalar_mismatch = matches!(
+                            (self.scalar_of_ty(t), got_scalar),
+                            (Some(w), Some(g)) if w != g
+                        );
+                        let array_diff = match unwrap_parens(&l.values[0]) {
+                            Expr::Call { callee, .. } => {
+                                let bare = unwrap_parens(callee);
+                                if let Expr::Ident { name: fn_name, .. } = bare {
+                                    let head = Checker::base_named_type_str(fn_name);
+                                    if let Some(fd) = self.ck.fns.get(fn_name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                                        fd.results.get(i).is_some_and(|r| {
+                                            self.sized_array_names_differ(
+                                                Some(t.render().as_str()),
+                                                Some(r.ty.render().as_str()),
+                                            )
+                                        })
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        };
+                        if kinds_conflict(&want, vk)
+                            || int_float_conflict
+                            || scalar_mismatch
+                            || array_diff
+                        {
+                            let got_label = got_scalar
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| vk.label());
+                            let want_label = self
+                                .scalar_of_ty(t)
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| want.label());
+                            self.emit_e1002(
+                                l.span,
+                                format!(
+                                    "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
+                                    name,
+                                    want_label,
+                                    got_label,
+                                    want_label
+                                ),
+                                "the declared type is fixed; write an explicit conversion when a conversion is intended",
+                            );
+                        }
+                    }
+                }
             }
         }
         // Composed resolution (pr-430 x landed pr-475): #475's track_read
