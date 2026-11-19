@@ -20,6 +20,8 @@ reference it, and fails closed on any file no reference reaches:
 
 Only explicit single-line Python invocations count. Workflow invocations
 must run from the repository root, using step > job > workflow cwd defaults.
+Their failures must also fail the step and job: continue-on-error must be
+absent or literally false; a dynamic failure policy cannot establish this.
 Block mappings and literal run blocks are supported; unknown cwd expressions
 and unsupported mapping forms cannot establish root execution. Raw command
 snippets retain their repository-root convention. Comments, echoed text,
@@ -109,6 +111,18 @@ def default_root_cwd(fields, inherited):
     return inherited if cwd is None else root_working_directory(cwd[0])
 
 
+def requires_success(fields):
+    """Only an absent or statically false continue-on-error enforces tests."""
+    policy = fields.get("continue-on-error")
+    if policy is None:
+        return True
+    value, body = policy
+    if any(line.strip() and not line.lstrip().startswith("#") for line in body):
+        return False
+    scalar = re.split(r"\s+#", value.strip(), 1)[0]
+    return re.fullmatch(r"(?i:false)|\$\{\{\s*false\s*\}\}", scalar) is not None
+
+
 def workflow_run_lines(workflow_text):
     """Yield shell lines only from steps whose effective cwd is root.
 
@@ -128,7 +142,7 @@ def workflow_run_lines(workflow_text):
     workflow_root = default_root_cwd(workflow, True)
     for job in jobs.values():
         fields = block_fields(job)
-        if fields is None:
+        if fields is None or not requires_success(fields):
             continue
         job_root = default_root_cwd(fields, workflow_root)
         steps = fields.get("steps")
@@ -152,7 +166,7 @@ def workflow_run_lines(workflow_text):
             cwd = step.get("working-directory")
             is_root = job_root if cwd is None else root_working_directory(cwd[0])
             run = step.get("run")
-            if not is_root or run is None or "<<" in step:
+            if not is_root or run is None or "<<" in step or not requires_success(step):
                 continue
             value, commands = run
             scalar = re.split(r"\s+#", value.strip(), 1)[0]

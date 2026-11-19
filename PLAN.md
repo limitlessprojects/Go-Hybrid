@@ -1,5 +1,11 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — required test failure policies (2026-11-19)
+
+- On base `12a86bf96808ff6398e725cf73205bb0d200b904`, the CI test-registration guard credits steps and jobs with `continue-on-error: true`. Such tests cannot fail CI. The guard now requires the field to be absent or statically false, preserving the existing raw-command behavior.
+- Six new regression methods cover discovery and direct-script registration, step/job policies, metadata ordering, dynamic expressions, false controls, scope isolation and an independent enforcing run. The original implementation produces 17 failed assertions; the patched focused suite passes 57/57. The live registration guard still passes for all 40 test files.
+- Local Python tooling validation and hosted CI results are recorded in the contribution. No compiler behavior changes. Upstream review and bounty selection remain pending.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.
