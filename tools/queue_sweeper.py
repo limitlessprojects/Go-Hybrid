@@ -72,7 +72,7 @@ def api(path, method="GET", body=None):
                         and not e.headers.get("Retry-After")):
                     try:
                         message = e.read(4096).decode("utf-8", errors="replace").lower()
-                    except (OSError, ValueError):
+                    except (OSError, ValueError, AttributeError):
                         message = ""
                     if not any(term in message for term in
                                ("secondary rate limit", "rate limit exceeded")):
