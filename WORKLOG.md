@@ -1044,3 +1044,19 @@
 **State**: main `6d45267d` == origin (asserted). Tests 3293, suites 508, corpus 139/139, differential FULL, examples 11/11 (examples suite now green for the first time since the s159 trim).
 
 **Scouted next**: #4380 (BP202302 tools: differential report decode), #4336 (cryptowebbuild tools: check_claims_links percent-encoding), #4333 (knk97874 test battery), #4337 (rrios13 test guard fd redirect). Full triage scan deferred (this tick spent REST on approve 40/85 + replies; scan next tick on fresh pool). seenorht family #4281/#4331/#4347/#4364 await author rebase; pending authors #4199, #4206, #4097, #4217, #4219, #743.
+
+## Session 188 — 2026-11-19 15:04 (+08; 07:04 UTC; first tick after ~7d credential gap)
+
+**Token restored** (maintainer-supplied key, identity `limitlessprojects`, full repo+workflow scopes; GraphQL 5000/5000 on arrival).
+
+**Full-queue survey (GraphQL snapshot, 40-node pages — 100-node pages exceed the per-query node-cost cap)**: 1,281 open PRs on arrival. CI rollup: 707 SUCCESS / 410 FAILURE / 164 NONE. Mergeable 738 / CONFLICTING 543. Protected (triage:pareto-hold) 65. Age>=5d unprotected 1,150 (353 red-CI, 675 green-CI, 122 no-CI). Drafts 7.
+
+**Doctrine state**: the 2026-10-30 owner change retired the 5-day sweep (`queue-sweeper.yml` schedule removed; closes deliberate again) — with sessions idle since Nov 12 the queue grew ~65/day with no closer. This session implements the deliberate closer as a local runner (sandbox-side `pr_triage_runner.py`, snapshot + REST, dry-run gated).
+
+**Close policy (quality-first, conservative vs the retired sweeper)**: close as not_planned ONLY if ALL hold — unprotected (no hold labels, not config-listed); age>=5d; hard evidence: CI rollup FAILURE, or CONFLICTING (idle>=10d — currently ineffective because daily bot labels touch every thread's updatedAt; author-comment check used instead); NOT wildcard-titled (M1 protection catches unlabeled wildcard submissions, e.g. #1889/#4268 skipped); author not active in last 3d (comment-thread check); no reopen within window. Green-CI and no-CI PRs are NEVER closed; 77 green-CI+CLEAN land candidates exported for a future landing session. Every close: PR-specific evidence reply + reopen path, `state_reason: not_planned` (issues API only — pulls-API PATCH silently drops the reason; already-closed PRs need a reopen→reclose transition, one-time fixup applied).
+
+**Executed: 120 closed** (3 ticks × 40, oldest-first, reopen/author guards active — e.g. #4431/#4425/#4420/#4417/#4397/#4392/#4380/#4379 survived on reopen-recency). Queue 1,281 → 1,201. REST ~600 calls total, no rate-limit stalls.
+
+**Scheduler status**: no agent-side cron tool in this runtime (tool calls rejected), no system cron/at, background processes die at turn end — hourly wake-ups must come from outside the sandbox; each wake runs one bounded tick script (snapshot refresh → dry-run → capped execute → verify, idempotent, quota-guarded). Ticks are cheap (~4 min, ~200 REST calls).
+
+**Next**: keep draining red-CI candidates (~261 left in snapshot; ~40/tick); conflicted-author-idle closes need a responsiveness signal that ignores label touches (suggest bot: comment last-activity stamping); wildcard-hold verdict window (config M1, due 2026-11-01) is 18 days overdue — 27 config holds + unlabeled wildcard-titled PRs need adjudication; triage_config wildcard_holds list stale (numbers ≤709 vs queue now ≥8xx); land-candidate session for the 77 green-CI+CLEAN PRs (board Pareto flow); consider promoting the runner into tools/ alongside queue_sweeper.py.
