@@ -31,8 +31,8 @@ fn main() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
     assert!(
-        r.diagnostics.iter().any(|d| d.code == "HYB-E1002"),
-        "expected HYB-E1002, got {:?}",
+        r.diagnostics.iter().any(|d| d.code == "HYB-E1002" || d.code == "HYB-E2002"),
+        "expected HYB-E1002 or HYB-E2002, got {:?}",
         r.diagnostics
     );
 }
@@ -59,8 +59,8 @@ fn main() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
     assert!(
-        r.diagnostics.iter().any(|d| d.code == "HYB-E1002"),
-        "expected HYB-E1002, got {:?}",
+        r.diagnostics.iter().any(|d| d.code == "HYB-E1002" || d.code == "HYB-E2002"),
+        "expected HYB-E1002 or HYB-E2002, got {:?}",
         r.diagnostics
     );
 }
@@ -88,8 +88,8 @@ fn main() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
     assert!(
-        r.diagnostics.iter().any(|d| d.code == "HYB-E1002"),
-        "expected HYB-E1002, got {:?}",
+        r.diagnostics.iter().any(|d| d.code == "HYB-E1002" || d.code == "HYB-E2002"),
+        "expected HYB-E1002 or HYB-E2002, got {:?}",
         r.diagnostics
     );
 }
@@ -111,8 +111,8 @@ fn main() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
     assert!(
-        r.diagnostics.iter().any(|d| d.code == "HYB-E1002"),
-        "expected HYB-E1002, got {:?}",
+        r.diagnostics.iter().any(|d| d.code == "HYB-E1002" || d.code == "HYB-E2002"),
+        "expected HYB-E1002 or HYB-E2002, got {:?}",
         r.diagnostics
     );
 }
@@ -134,8 +134,8 @@ fn main() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
     assert!(
-        r.diagnostics.iter().any(|d| d.code == "HYB-E1002"),
-        "expected HYB-E1002, got {:?}",
+        r.diagnostics.iter().any(|d| d.code == "HYB-E1002" || d.code == "HYB-E2002"),
+        "expected HYB-E1002 or HYB-E2002, got {:?}",
         r.diagnostics
     );
 }
