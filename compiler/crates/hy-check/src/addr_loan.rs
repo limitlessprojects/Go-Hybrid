@@ -303,6 +303,7 @@ impl<'a> Checker<'a> {
                                 is_write: false,
                                 via_move: true,
                                 via_addr: false,
+                                via_deref: false,
                             }],
                         );
                     }
@@ -399,6 +400,7 @@ impl<'a> Checker<'a> {
                                             is_write: false,
                                             via_move: true,
                                             via_addr: false,
+                                            via_deref: false,
                                         }],
                                     );
                                 }

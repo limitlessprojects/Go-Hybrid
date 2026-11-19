@@ -911,15 +911,6 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             }
 
             Stmt::If { cond, .. } => {
-                // Nil-guard exemption for zero-value bindings: comparing a
-                // binding against nil never dereferences it, so reads inside
-                // `x == nil` / `x != nil` conditions stay legal.
-                if let Expr::Binary { op: hy_syntax::BinOp::Eq | hy_syntax::BinOp::Ne, .. } =
-                    crate::model::unwrap_parens(cond)
-                {
-                    st.nil_cond_spans
-                        .push((cond.span().start.line, cond.span().end.line));
-                }
                 ck.mark_move_in_value(&mut st, cond, format!("the condition `{}`", cond.render()));
             }
 

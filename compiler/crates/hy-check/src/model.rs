@@ -309,10 +309,6 @@ pub(crate) struct FnState {
     /// Active `defer <call>` sites seen prior to the current program point, paired
     /// with eager per-argument borrow flags evaluated at the `defer` statement.
     pub deferred_calls: Vec<(hy_syntax::Expr, Vec<bool>)>,
-    /// Spans of `x == nil` / `x != nil` conditions already processed this fn —
-    /// reads of a zero-initialized binding inside such a guard are exempt
-    /// (comparing against nil does not deref).
-    pub nil_cond_spans: Vec<(u32, u32)>, // (start_line, end_line)
 }
 
 impl FnState {

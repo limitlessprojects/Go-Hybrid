@@ -108,11 +108,11 @@ impl<'a> Checker<'a> {
         let mut stmt_moves: Vec<(String, String, MoveInfo)> = Vec::new();
         for u in uses {
             if let Some(b) = self.lookup_binding(st, &u.name) {
-                if b.unassigned && !u.is_write && !u.via_move
-                    && !st.nil_cond_spans.iter().any(|(lo, hi)| {
-                        u.span.start.line >= *lo && u.span.start.line <= *hi
-                    })
-                {
+                // Zero-initialized pointer bindings are nil until first real
+                // assignment: only a dereference (`x.f`, `x[i]`, `x[a:b]`,
+                // including as a write target) or a move/addr-take is a
+                // soundness hazard. Nil comparisons and plain copies stay legal.
+                if b.unassigned && u.via_deref && !u.via_move {
                     if reported.insert(format!("unassigned@{}:{}", u.span.start.line, u.span.start.col)) {
                         self.emit_use_before_assign(st, u);
                     }
