@@ -167,3 +167,72 @@ fn main() {
 "#;
     accepts(src);
 }
+
+// ---------------------------------------------------------------------------
+// Known non-string format expressions (issue addendum: #4087 only rejected
+// non-string *literals* — `fmt.printf(x)` with `x := 42` passed check and
+// died in `go build` because the emitted `fmt.Printf(x)` does not compile).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_fmt_printf_int_local_rejects() {
+    rejects_e1002("import \"fmt\"\nfn main() {\n    x := 42\n    fmt.printf(x)\n}\n");
+}
+
+#[test]
+fn test_fmt_printf_int_binop_rejects() {
+    rejects_e1002("import \"fmt\"\nfn main() {\n    fmt.printf(42 * 1)\n}\n");
+}
+
+#[test]
+fn test_fmt_printf_float_binop_rejects() {
+    rejects_e1002("import \"fmt\"\nfn main() {\n    fmt.printf(1.5 + 2.5)\n}\n");
+}
+
+#[test]
+fn test_fmt_sprintf_int_local_rejects() {
+    rejects_e1002("import \"fmt\"\nfn main() {\n    x := 42\n    s := fmt.sprintf(x)\n    _ = s\n}\n");
+}
+
+#[test]
+fn test_fmt_eprintf_int_local_rejects() {
+    rejects_e1002("import \"fmt\"\nfn main() {\n    x := 42\n    fmt.eprintf(x)\n}\n");
+}
+
+#[test]
+fn test_fmt_errorf_int_local_rejects() {
+    rejects_e1002("import \"fmt\"\nfn main() {\n    x := 42\n    err := fmt.errorf(x)\n    _ = err\n}\n");
+}
+
+#[test]
+fn test_fmt_fprintf_int_local_format_rejects() {
+    let src = r#"
+import "fmt"
+import "os"
+
+fn main() {
+    x := 42
+    fmt.fprintf(os.stdout, x)
+}
+"#;
+    rejects_e1002(src);
+}
+
+#[test]
+fn test_fmt_known_kind_accepts_stay_accepted() {
+    let src = r#"
+import "fmt"
+
+fn main() {
+    s := "hello"
+    fmt.printf(s)
+    fmt.printf("a" + "b")
+    a := any(1)
+    fmt.printf(a)
+    f := "fmt %s"
+    v := fmt.sprintf(f, 1)
+    _ = v
+}
+"#;
+    accepts(src);
+}
