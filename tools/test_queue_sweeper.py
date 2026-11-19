@@ -5,6 +5,7 @@ Every API call is a fixture — the suite never touches the network, and in
 dry mode it hard-fails on any non-GET request, which is the sweeper's
 "safe to run locally" promise."""
 import contextlib
+from email.message import Message
 from datetime import datetime, timedelta, timezone
 import importlib.util
 import io
@@ -177,6 +178,60 @@ class ReviewWindowPolicyTests(unittest.TestCase):
                 comment = self.writes[1][2]["body"]
                 self.assertIn(f"review window ({window} days)", comment)
                 self.assertNotIn("20 days", comment)
+
+
+
+class GitHubApiRateLimitTests(unittest.TestCase):
+    """Offline API errors: ordinary 403 must not burn the retry budget."""
+
+    def run_error(self, code, *, headers=None, body=b""):
+        attempts = []
+        sleeps = []
+
+        def blocked(*args, **kwargs):
+            attempts.append(True)
+            response_headers = Message()
+            for name, value in (headers or {}).items():
+                response_headers[name] = value
+            raise SWEEPER.urllib.error.HTTPError(
+                "https://api.github.com/repos/example/project/pulls",
+                code, "fixture", response_headers, io.BytesIO(body)
+            )
+
+        with patch.object(SWEEPER.urllib.request, "urlopen", side_effect=blocked), \
+             patch.object(SWEEPER.time, "sleep", side_effect=sleeps.append):
+            result = SWEEPER.api("/repos/example/project/pulls")
+        return result, len(attempts), sleeps
+
+    def test_permission_denied_403_fails_fast(self):
+        result, attempts, sleeps = self.run_error(
+            403, body=b'{"message":"Resource not accessible by integration"}'
+        )
+        self.assertEqual(result, (403, None))
+        self.assertEqual(attempts, 1)
+        self.assertEqual(sleeps, [])
+
+    def test_primary_rate_limit_403_still_retries(self):
+        result, attempts, sleeps = self.run_error(
+            403, headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "0"}
+        )
+        self.assertEqual(attempts, 4)
+        self.assertEqual(len(sleeps), 4)
+        self.assertTrue(all(seconds >= 10 for seconds in sleeps))
+
+    def test_secondary_rate_limit_403_without_headers_still_retries(self):
+        result, attempts, sleeps = self.run_error(
+            403, body=b'{"message":"You have exceeded a secondary rate limit"}'
+        )
+        self.assertEqual(attempts, 4)
+        self.assertEqual(sleeps, [180] * 4)
+
+    def test_429_still_retries(self):
+        result, attempts, sleeps = self.run_error(429)
+        self.assertEqual(attempts, 4)
+        self.assertEqual(sleeps, [180] * 4)
+
+
 
 
 if __name__ == "__main__":
