@@ -295,12 +295,12 @@
     {
       "id": 12,
       "surface": "`context.Context` cancellation trees",
-      "does": "Not modeled; the value itself is classified like any other at a check-site",
-      "claim": "**No claim** about cancellation semantics — the claim is about value sharing, not protocol liveness",
+      "does": "Not in the curated surface today; not modeled; unreachable until `context` joins the curated allowlist",
+      "claim": "**No claim** — and `context` is outside the M5 curated allowlist today, so the shape is unreachable until it joins the curated surface",
       "strength": "no-claim",
       "rules": [],
       "fixtures": [],
-      "evidence_md": "§9.2 scope"
+      "evidence_md": "§9.2 scope; outside M5 curated allowlist today"
     },
     {
       "id": 13,
