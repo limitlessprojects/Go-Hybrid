@@ -362,6 +362,20 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        for m in &members {
+            for (s_env, _, _) in st.closure_scoped_envs.values_mut() {
+                if let Some(sb) = s_env.get_mut(m) {
+                    if sb.moved.is_none() {
+                        sb.moved = Some(MoveInfo {
+                            span,
+                            kind,
+                            desc: desc.clone(),
+                            moved_name: name.to_string(),
+                        });
+                    }
+                }
+            }
+        }
     }
 
     /// Process a place expression (assignment target) that may carry a move
