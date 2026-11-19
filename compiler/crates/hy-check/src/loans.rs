@@ -1885,6 +1885,15 @@ impl<'a> Checker<'a> {
                     },
                     _ => false,
                 };
+                // HYB-E3199: `let q = p` copies a zero-value (nil) pointer —
+                // the copy is just as unassigned as its source, so a use of
+                // `q` before `p`'s first assignment is the same nil deref.
+                let rhs_unassigned = match unwrap_parens(value) {
+                    Expr::Ident { name: src, .. } => {
+                        self.lookup_binding(&pre_st, src).is_some_and(|b| b.unassigned)
+                    }
+                    _ => false,
+                };
                 if move_operand_ident(value).is_some()
                     || matches!(unwrap_parens(value), Expr::Move { .. })
                 {
@@ -1969,6 +1978,11 @@ impl<'a> Checker<'a> {
                 if rhs_slot_loan {
                     if let Some(b) = st.env_lookup_mut(name) {
                         b.slot_loan = true;
+                    }
+                }
+                if rhs_unassigned {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.unassigned = true;
                     }
                 }
                 if let Some(origin) = &moved_non_owned {
