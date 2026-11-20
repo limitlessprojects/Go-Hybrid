@@ -273,24 +273,30 @@
     },
     {
       "id": 11,
-      "surface": "`sync/atomic` (`atomic.Pointer[T]`, …)",
-      "does": "**[TBD]** joins the curated surface post-MVP; when it lands, atomic-typed values become sendable-by-type (class 2). Until then: unproven → rejected",
-      "claim": "**No claim yet**; the growth path is pre-designed, not improvised",
-      "strength": "no-claim",
+      "surface": "`sync/atomic` scalar atomics (`atomic.int64`, …)",
+      "does": "Class 2 **only behind `&`**: an atomic crosses soundly as `&x` against `*atomic.T` (OQ6) — the receiver operates on the SAME instance. A bare atomic value is rejected at a spawn/send (`HYB-E3001`/`HYB-E3002`): a by-value crossing copies the instance, so every write the receiver makes dies at its return (`go vet` copylocks agrees). `atomic.Pointer[T]`/`atomic.Value` stay fail-closed unproven (`HYB-E3005`)",
+      "claim": "**Guaranteed**: an accepted crossing never loses a write to a copy (issue #4457); no claim on the contents behind a `*.Pointer[T]`",
+      "strength": "guaranteed",
       "rules": [
+        "HYB-E3001",
+        "HYB-E3002",
         "HYB-E3005"
       ],
       "fixtures": [
         {
-          "path": "tests/checker-corpus/atomic-pointer-fail-closed-reject.hy",
+          "path": "tests/checker-corpus/atomic-value-by-value-reject.hy",
           "expect": "reject"
         },
         {
-          "path": "tests/checker-corpus/17-atomic-channel-immutable.hy",
+          "path": "tests/checker-corpus/atomic-value-by-reference-accept.hy",
           "expect": "accept"
+        },
+        {
+          "path": "tests/checker-corpus/atomic-pointer-fail-closed-reject.hy",
+          "expect": "reject"
         }
       ],
-      "evidence_md": "§8.4 C8; [atomic pointer fail-closed corpus](tests/checker-corpus/atomic-pointer-fail-closed-reject.hy)"
+      "evidence_md": "§8.4 C8, OQ6; [by-value reject](tests/checker-corpus/atomic-value-by-value-reject.hy), [by-reference accept](tests/checker-corpus/atomic-value-by-reference-accept.hy), [atomic pointer fail-closed](tests/checker-corpus/atomic-pointer-fail-closed-reject.hy)"
     },
     {
       "id": 12,

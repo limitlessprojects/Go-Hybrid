@@ -50,6 +50,7 @@ def consistent_tree(total=3, accept=1, managed=0, reject=2):
     files["STATUS.md"] = f"- Phase: something — corpus {total}/{total}, differential FULL\n"
     files["GUARANTEES.md"] = (
         f"  {total} programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were\n"
+        f"  first. Current census: **{reject} REJECT / {accept} ACCEPT / {managed} ACCEPT-MANAGED**,\n"
     )
     files["compiler/crates/hy-syntax/src/ast.rs"] = (
         f"//! Scope: the surface exercised by tests/checker-corpus/*.hy ({total} programs),\n"
@@ -105,9 +106,36 @@ class DriftTests(_ProblemsMixin, unittest.TestCase):
         self.assertIn("says 99", hits[0])
 
     def test_stale_guarantees_line_is_named(self):
-        hits = self._problems_with("GUARANTEES.md", "  99 programs, each with an `EXPECTED-VERDICT` header.\n")
+        hits = self._problems_with(
+            "GUARANTEES.md",
+            "  99 programs, each with an `EXPECTED-VERDICT` header.\n"
+            "  first. Current census: **2 REJECT / 1 ACCEPT / 0 ACCEPT-MANAGED**,\n",
+        )
         self.assertEqual(len(hits), 1)
         self.assertIn("says 99", hits[0])
+
+    def test_stale_guarantees_breakdown_is_named(self):
+        # issue #3724 settled that no breakdown claim may drift uncovered; the
+        # GUARANTEES evidence inventory restates one and had already drifted.
+        hits = self._problems_with(
+            "GUARANTEES.md",
+            "  3 programs, each with an `EXPECTED-VERDICT` header.\n"
+            "  first. Current census: **1 REJECT / 2 ACCEPT / 0 ACCEPT-MANAGED**,\n",
+        )
+        self.assertEqual(len(hits), 1)
+        self.assertIn("REJECT 1", hits[0])
+        self.assertIn("REJECT 2", hits[0])
+
+    def test_guarantees_breakdown_that_does_not_sum_to_its_total_is_named(self):
+        # the shipped breakage: a breakdown that cannot add up to the total
+        # stated in the same paragraph.
+        hits = self._problems_with(
+            "GUARANTEES.md",
+            "  3 programs, each with an `EXPECTED-VERDICT` header.\n"
+            "  first. Current census: **1 REJECT / 1 ACCEPT / 0 ACCEPT-MANAGED**,\n",
+        )
+        self.assertEqual(len(hits), 1)
+        self.assertIn("breakdown says REJECT 1, corpus holds REJECT 2", hits[0])
 
     def test_stale_ast_scope_note_is_named(self):
         hits = self._problems_with(
