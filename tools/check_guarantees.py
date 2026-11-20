@@ -222,7 +222,10 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
         if code in claimed_codes:
             continue
         if code in unclaimed:
-            if not str(unclaimed[code]).strip():
+            reason = unclaimed[code]
+            if not isinstance(reason, str):
+                problems.append(f"coverage: {code} has an invalid `unclaimed` reason; expected a non-empty string")
+            elif not reason.strip():
                 problems.append(f"coverage: {code} is listed in `unclaimed` with an empty reason")
             continue
         problems.append(
