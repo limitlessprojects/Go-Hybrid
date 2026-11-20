@@ -1,5 +1,12 @@
 # Hybrid Language: Development Plan
 
+## Contributor: balanced evidence destinations (2026-11-13)
+
+- Scope: `tools/check_claims_links.py` inline destinations with balanced/escaped parentheses. At main `b1627e83b437bfc948292f17a8ce4183cef23130`, `[evidence](missing(notes).md)` is silently skipped and a corpus path containing parentheses is truncated before verdict validation. No affected citation was observed in the current claims table.
+- Added four CLI regressions (seven failing baseline subcases); all 15 claims-link tests now pass. The 25 `check_guarantees` tests, test-registration guard, conflict-marker guard and `git diff --check` pass. Current live claims report stays 20 rows / 14 links / 1 inline ref / 0 issues.
+- Compiler/runtime untouched; Rust/Go compiler suites were not run. Hosted CI, maintainer review and bounty selection/payment remain pending. Reference-style links (#4390), percent decoding (#4334) and verdict-header validation (#3332) are separate existing reports.
+
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.
