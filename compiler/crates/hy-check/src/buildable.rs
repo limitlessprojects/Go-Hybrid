@@ -4743,6 +4743,62 @@ impl<'a> Collector<'a> {
         );
     }
 
+    fn is_non_struct_foreign_lit_type(name: &str) -> bool {
+        [
+            "bufio.split_func", "error", "filepath.walk_func", "fmt.formatter", "fmt.go_stringer",
+            "fmt.scan_state", "fmt.scanner", "fmt.state", "fmt.stringer", "hex.invalid_byte_error",
+            "http.close_notifier", "http.conn_state", "http.cookie_jar", "http.dir", "http.file",
+            "http.file_system", "http.flusher", "http.handler", "http.handler_func",
+            "http.hijacker", "http.pusher", "http.response_writer", "http.round_tripper",
+            "http.same_site", "io.byte_reader", "io.byte_scanner", "io.byte_writer", "io.closer",
+            "io.read_closer", "io.read_seek_closer", "io.read_seeker", "io.read_write_closer",
+            "io.read_write_seeker", "io.read_writer", "io.reader", "io.reader_at",
+            "io.reader_from", "io.rune_reader", "io.rune_scanner", "io.seeker", "io.string_writer",
+            "io.write_closer", "io.write_seeker", "io.writer", "io.writer_at", "io.writer_to",
+            "json.delim", "json.marshaler", "json.number", "json.unmarshaler", "net.addr",
+            "net.conn", "net.error", "net.invalid_addr_error", "net.listener", "net.packet_conn",
+            "net.unknown_network_error", "os.dir_entry", "os.file_info", "os.file_mode",
+            "os.signal", "sort.interface", "sync.locker", "time.duration", "time.month",
+            "time.weekday", "url.escape_error", "url.invalid_host_error",
+        ]
+        .contains(&name)
+    }
+
+    fn is_invalid_composite_lit_type<'b>(&'b self, mut ty: &'b TypeExpr) -> bool {
+        let mut seen = HashSet::new();
+        while let TypeExpr::Named { name, .. } = ty {
+            let b = Checker::base_named_type_str(name.trim());
+            if self.fn_type_params.contains(b) {
+                return true;
+            }
+            let is_decl = self.ck.structs.contains_key(b)
+                || self.ck.struct_type_params.contains_key(b)
+                || self.ck.enums.contains_key(b)
+                || self.ck.pkg_names.get(b) == Some(&"struct");
+            if is_decl {
+                return false;
+            }
+            if let Some(next) = self.ck.type_aliases.get(b) {
+                if !seen.insert(b) {
+                    return false;
+                }
+                ty = next;
+                continue;
+            }
+            if matches!(b, "option" | "set") {
+                return false;
+            }
+            return b == "comparable"
+                || match self.kind_of_named(b, 0) {
+                    OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str => true,
+                    OpKind::Interface => true,
+                    OpKind::Foreign(fname) => Self::is_non_struct_foreign_lit_type(&fname),
+                    _ => false,
+                };
+        }
+        matches!(ty, TypeExpr::Pointer { .. } | TypeExpr::Fn { .. } | TypeExpr::Chan { .. })
+    }
+
     fn check_struct_literal(
         &mut self,
         ty: Option<&TypeExpr>,
@@ -4753,6 +4809,20 @@ impl<'a> Collector<'a> {
             self.check_single_value_position(&f.value, "a struct literal field", false);
         }
         let Some(t) = ty else { return };
+        if matches!(t, TypeExpr::Chan { .. }) {
+            return;
+        }
+        if self.is_invalid_composite_lit_type(t) {
+            let lit = t.render();
+            let msg = format!(
+                "invalid composite literal type `{lit}` — Go refuses \
+                 `invalid composite literal type {lit}` (HYB-E1002)"
+            );
+            let note = "composite literal syntax `T{...}` is only valid for \
+                        structs, slices, arrays, maps, options, and sets";
+            self.emit_e1002(Span::new(t.span().start, span.end), msg, note);
+            return;
+        }
         let sk = self.kind_of_ty(t, 0);
         let Some(full_name) = self.struct_name(&sk) else {
             return;
@@ -4868,7 +4938,6 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        let _ = span;
     }
 
     /// #682 U13 — a type conversion takes exactly one argument. Go refuses
