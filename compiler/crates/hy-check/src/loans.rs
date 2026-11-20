@@ -124,9 +124,32 @@ fn root_ident_span(expr: &Expr) -> Option<Span> {
 }
 
 impl<'a> Checker<'a> {
+    fn resolve_assoc_fn(
+        &self,
+        st: &FnState,
+        base: &Expr,
+        method_name: &str,
+    ) -> Option<(String, &'a FnDecl)> {
+        let Expr::Ident { name: root, .. } = unwrap_parens(base) else {
+            return None;
+        };
+        if self.lookup_binding(st, root).is_some() || st.type_params.contains(root.as_str()) {
+            return None;
+        }
+        let head = Self::base_named_type_str(method_name);
+        let full = format!("{}.{}", root, head);
+        self.fns
+            .get(full.as_str())
+            .copied()
+            .map(|decl| (full, decl))
+    }
+
     fn resolve_call(&self, st: &FnState, cr: &CallRef) -> Resolved {
         match cr.callee {
             Expr::Field { base, name, .. } => {
+                if let Some((full, _)) = self.resolve_assoc_fn(st, base, name) {
+                    return Resolved::Fn { name: full };
+                }
                 if let Expr::Ident { name: b, .. } = &**base {
                     if self.lookup_binding(st, b).is_none() && self.known_package(b) {
                         return Resolved::Package {
@@ -1104,9 +1127,30 @@ impl<'a> Checker<'a> {
                 // passing the parameter fails closed
                 cr.args.iter().any(&arg_root_is_param)
             }
-            Expr::Field { base, .. } => {
-                if let Expr::Ident { name: pkg, .. } = &**base {
+            Expr::Field {
+                base,
+                name: method_name,
+                ..
+            } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
                     if A3_PURE_PKGS.contains(&pkg.as_str()) {
+                        return false;
+                    }
+                    let full = format!("{}.{}", pkg, Self::base_named_type_str(method_name));
+                    if let Some(decl) = self.fns.get(full.as_str()) {
+                        for (i, a) in cr.args.iter().enumerate() {
+                            if !arg_root_is_param(a) {
+                                continue;
+                            }
+                            match decl.params.get(i) {
+                                Some(p) => {
+                                    if self.fn_mutates_param(decl, &p.name, depth + 1) {
+                                        return true;
+                                    }
+                                }
+                                None => return true,
+                            }
+                        }
                         return false;
                     }
                 }
@@ -1197,8 +1241,16 @@ impl<'a> Checker<'a> {
                     return;
                 }
                 let mut mutated_roots = HashSet::new();
-                if let Expr::Ident { name: fn_name, .. } = unwrap_parens(callee) {
-                    if let Some(decl) = self.fns.get(fn_name) {
+                let decl_opt = match unwrap_parens(callee) {
+                    Expr::Ident { name: fn_name, .. } => self.fns.get(fn_name).copied(),
+                    Expr::Field {
+                        base,
+                        name: fn_name,
+                        ..
+                    } => self.resolve_assoc_fn(st, base, fn_name).map(|(_, d)| d),
+                    _ => None,
+                };
+                if let Some(decl) = decl_opt {
                         for (i, a) in args.iter().enumerate() {
                             let mutates = match decl.params.get(i) {
                                 Some(p) => self.fn_mutates_param(decl, &p.name, 0),
@@ -3130,6 +3182,9 @@ impl<'a> Checker<'a> {
         match crate::model::unwrap_parens(callee) {
             Expr::Ident { name, .. } => self.lookup_binding(st, name).is_some(),
             Expr::Field { base, name, .. } => {
+                if self.resolve_assoc_fn(st, base, name).is_some() {
+                    return false;
+                }
                 !matches!(crate::model::unwrap_parens(base), Expr::Ident { name: p, .. } if self.lookup_binding(st, p).is_none() && self.known_package(p))
                     && receiver_type_name(&self.shape_of_expr(st, base)).is_none()
                     && (!matches!(name.as_str(), "insert" | "contains" | "remove" | "len" | "pop")
@@ -3401,6 +3456,32 @@ impl<'a> Checker<'a> {
                 name: method_name,
                 ..
             } => {
+                if let Some((_, decl)) = self.resolve_assoc_fn(st, base, method_name) {
+                    let body = decl.body.as_ref()?;
+                    let mut slots = Vec::new();
+                    let mut bound: HashSet<String> =
+                        decl.params.iter().map(|p| p.name.clone()).collect();
+                    bound.extend(decl.results.iter().filter_map(|r| r.name.clone()));
+                    for (i, p) in decl.params.iter().enumerate() {
+                        let arg_opt = cr.args.get(i).or_else(|| {
+                            if cr.args.len() == 1 && decl.params.len() > 1 {
+                                cr.args.first()
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(arg) = arg_opt {
+                            slots.push((
+                                p.name.clone(),
+                                self.shape_of_type(&p.ty),
+                                Some(p.ty.clone()),
+                                CalleeSlotSource::Arg(&arg.value),
+                            ));
+                        }
+                    }
+                    self.append_outer_binding_slots(st, &mut bound, false, &mut slots);
+                    return Some((slots, std::borrow::Cow::Borrowed(body)));
+                }
                 if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
                     if self.lookup_binding(st, pkg).is_none() && self.known_package(pkg) {
                         return None;
@@ -4821,6 +4902,20 @@ impl<'a> Checker<'a> {
                 name: method_name,
                 ..
             } => {
+                if let Some((_, decl)) = self.resolve_assoc_fn(st, base, method_name) {
+                    let body = decl.body.as_ref()?;
+                    let params = decl
+                        .params
+                        .iter()
+                        .map(|p| (p.name.clone(), Some(p.ty.clone())))
+                        .collect();
+                    let results = decl
+                        .results
+                        .iter()
+                        .map(|r| (r.name.clone().unwrap_or_default(), Some(r.ty.clone())))
+                        .collect();
+                    return Some((params, results, body));
+                }
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
                     if self.lookup_binding(st, pkg).is_none() && self.known_package(pkg) {
                         return None;
@@ -8154,7 +8249,33 @@ impl<'a> Checker<'a> {
                         }
                         _ => false,
                     };
-                    if is_pkg {
+                    if let Some((_, decl)) = self.resolve_assoc_fn(st, base, method_name) {
+                        if cr.args.len() == 1 && decl.params.len() > 1 {
+                            let is_ptr = decl.params.iter().any(|p| {
+                                matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                    || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
+                            });
+                            let mutates = decl.params.iter().any(|p| {
+                                let ps = self.shape_of_type(&p.ty);
+                                (self.shape_may_share(&ps)
+                                    || matches!(ps, TypeShape::Unknown | TypeShape::Pointer(_)))
+                                    && self.fn_mutates_const_param(decl, &p.name, 0)
+                            });
+                            (is_ptr, mutates)
+                        } else {
+                            match decl.params.get(i) {
+                                Some(p) => {
+                                    let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                        || matches!(
+                                            self.shape_of_type(&p.ty),
+                                            TypeShape::Pointer(_)
+                                        );
+                                    (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
+                                }
+                                None => (false, true),
+                            }
+                        }
+                    } else if is_pkg {
                         let mutates = match crate::model::unwrap_parens(base) {
                             Expr::Ident { name: pkg, .. } => {
                                 foreign::package_mutated_arg(pkg, method_name) == Some(i)
@@ -8591,6 +8712,37 @@ impl<'a> Checker<'a> {
                 name: method_name,
                 ..
             } => {
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    let full = format!("{}.{}", root, Self::base_named_type_str(method_name));
+                    if let Some(decl) = self.fns.get(full.as_str()) {
+                        if let Some(body) = &decl.body {
+                            let slots: Vec<(&str, TypeShape, Option<&hy_syntax::TypeExpr>)> = decl
+                                .params
+                                .iter()
+                                .map(|p| (p.name.as_str(), self.shape_of_type(&p.ty), Some(&p.ty)))
+                                .collect();
+                            for (dst_idx, src_idx) in
+                                self.collect_callee_param_stores(&slots, body, 0)
+                            {
+                                if dst_idx < cr.args.len()
+                                    && src_idx < cr.args.len()
+                                    && Self::expr_reaches_const_aliases(
+                                        &cr.args[src_idx].value,
+                                        aliases,
+                                    )
+                                {
+                                    if let Some(dst_root) =
+                                        crate::model::unwrap_parens(&cr.args[dst_idx].value)
+                                            .root_ident()
+                                    {
+                                        aliases.insert(dst_root.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        return;
+                    }
+                }
                 for ((_, m), decl) in &self.method_decls {
                     if m != method_name {
                         continue;
@@ -8802,8 +8954,25 @@ impl<'a> Checker<'a> {
                 name: method_name,
                 ..
             } => {
-                if let Expr::Ident { name: pkg, .. } = &**base {
+                if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
                     if A3_PURE_PKGS.contains(&pkg.as_str()) {
+                        return false;
+                    }
+                    let full = format!("{}.{}", pkg, Self::base_named_type_str(method_name));
+                    if let Some(decl) = self.fns.get(full.as_str()) {
+                        for (i, a) in cr.args.iter().enumerate() {
+                            if !arg_reaches_alias(a) {
+                                continue;
+                            }
+                            match decl.params.get(i) {
+                                Some(p) => {
+                                    if self.fn_mutates_const_param(decl, &p.name, depth + 1) {
+                                        return true;
+                                    }
+                                }
+                                None => return true,
+                            }
+                        }
                         return false;
                     }
                 }
@@ -10386,5 +10555,94 @@ fn main() {
             "expected HYB-E3006 when mutating slice alias y := xs followed by [0] on next line"
         );
     }
+#[test]
+    fn associated_fn_enforces_const_return_store_multi_pair_and_loans() {
+        let src_const_and_move = "\
+import \"fmt\"
+struct ns { tag int }
+const shared = map[string]int{\"k\": 1}
+fn ns.get_shared() map[string]int { return shared }
+fn ns.mutate(m map[string]int) { m[\"k\"] = 99 }
+fn worker(m map[string]int, done chan<- bool) { m[\"k\"] = 2\n done <- true }
+fn main() {
+    ns.mutate(shared)
+    m1 := ns.get_shared()
+    m2 := ns.get_shared()
+    done := make(chan bool, 1)
+    task worker(move m1, done)
+    m2[\"k\"] = 3
+    <-done
+    fmt.println(m2[\"k\"])
 }
+";
+        let codes1 = check_codes(src_const_and_move);
+        assert!(codes1.iter().any(|c| c == "HYB-E3006"), "got {:?}", codes1);
+        assert!(codes1.iter().any(|c| c == "HYB-E3004"), "got {:?}", codes1);
+        assert!(codes1.iter().any(|c| c == "HYB-E3003"), "got {:?}", codes1);
+
+        let src_store_and_pair = "\
+import \"fmt\"
+struct holder { tag int }
+fn holder.insert(b map[string]map[string]int, m map[string]int) { b[\"a\"] = m }
+fn holder.pop() (map[string]int, map[string]int) {
+    m := map[string]int{\"k\": 0}
+    return m, m
+}
+fn worker_b(b map[string]map[string]int, done chan<- bool) { b[\"a\"][\"k\"] = 2\n done <- true }
+fn worker_m(m map[string]int, done chan<- bool) { m[\"k\"] = 2\n done <- true }
+fn main() {
+    done := make(chan bool, 2)
+    b := map[string]map[string]int{}
+    local_m := map[string]int{\"k\": 0}
+    holder.insert(b, local_m)
+    task worker_b(move b, done)
+    local_m[\"k\"] = 4
+    x, y := holder.pop()
+    task worker_m(move x, done)
+    y[\"k\"] = 5
+    <-done
+    <-done
+    fmt.println(local_m[\"k\"], y[\"k\"])
+}
+";
+        let codes2 = check_codes(src_store_and_pair);
+        assert_eq!(
+            codes2.iter().filter(|c| *c == "HYB-E3003").count(),
+            2,
+            "got {:?}",
+            codes2
+        );
+
+        let src_a3 = "\
+import \"fmt\"
+struct svc { n int }
+struct box { m map[string]svc }
+fn box.rehash(b box) { b.m[\"b\"] = svc{n: 2} }
+fn main() {
+    m := map[string]svc{\"a\": svc{n: 1}}
+    s := &m[\"a\"]
+    box.rehash(box{m: m})
+    s.n = 99
+    fmt.println(s.n)
+}
+";
+        let codes3 = check_codes(src_a3);
+        assert!(codes3.iter().any(|c| c == "HYB-E3102"), "got {:?}", codes3);
+
+        let src_escape = "\
+struct ns { tag int }
+fn ns.put(dst map[string]*int, src *int) { dst[\"k\"] = src }
+fn leak() (out map[string]*int) {
+    out = map[string]*int{}
+    x := 1
+    defer ns.put(out, &x)
+    return out
+}
+fn main() {
+    _ = leak()
+}
+";
+        let codes5 = check_codes(src_escape);
+        assert!(codes5.iter().any(|c| c == "HYB-E3104"), "got {:?}", codes5);
+    }}
 
