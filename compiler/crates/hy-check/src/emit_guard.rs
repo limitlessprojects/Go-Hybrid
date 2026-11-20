@@ -1029,24 +1029,26 @@ impl<'a> Checker<'a> {
     /// in any of those kinds, is `X redeclared in this block` — the
     /// emitted module would not build (issue #201-C).
     pub(crate) fn declare_pkg_name(&mut self, name: &str, kind: &'static str, span: Span) {
-        if let Some(spec) = reserved_go_primitive_spec_name(name) {
-            self.diags.push(
-                Diagnostic::error(
-                    "HYB-E1002",
-                    self.path.clone(),
-                    span,
-                    format!(
-                        "`{name}` cannot be used as a package-level {kind} — it is a Go primitive type name reserved for compiler lowering (HYB-E1002)"
-                    ),
-                )
-                .with_notes(vec![
-                    format!(
-                        "why: Hybrid lowers `{spec}` to Go `{name}` — declaring a package-level {kind} named `{name}` shadows the Go type and causes unbuildable or corrupted emitted Go (issue #728)"
-                    ),
-                    format!("fix: choose a different {kind} name"),
-                ]),
-            );
-            return;
+        if kind == "const" {
+            if let Some(spec) = reserved_go_primitive_spec_name(name) {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        span,
+                        format!(
+                            "`{name}` cannot be used as a package-level const — it is a Go primitive type name reserved for compiler lowering (HYB-E1002)"
+                        ),
+                    )
+                    .with_notes(vec![
+                        format!(
+                            "why: Hybrid lowers `{spec}` to Go `{name}` — declaring a package-level const named `{name}` shadows the Go type and causes unbuildable emitted Go (issue #728)"
+                        ),
+                        format!("fix: choose a different const name"),
+                    ]),
+                );
+                return;
+            }
         }
 
         if name == "hy_pop" {

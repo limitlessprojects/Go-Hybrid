@@ -64,22 +64,6 @@ fn assert_accepts(src: &str, what: &str) {
 // ===========================================================================
 
 #[test]
-fn top_level_fn_named_float64_rejects_e1002() {
-    assert_rejects_e1002(
-        "fn float64(x int) int { return x }\nfn main() { _ = float64(1) }",
-        "top-level fn float64",
-    );
-}
-
-#[test]
-fn top_level_fn_named_int64_rejects_e1002() {
-    assert_rejects_e1002(
-        "fn int64(x int) int { return x }\nfn main() { _ = int64(1) }",
-        "top-level fn int64",
-    );
-}
-
-#[test]
 fn top_level_const_named_int64_rejects_e1002() {
     assert_rejects_e1002(
         "const int64 = 42\nfn main() { _ = int64 }",
@@ -88,24 +72,36 @@ fn top_level_const_named_int64_rejects_e1002() {
 }
 
 #[test]
-fn top_level_struct_named_uint8_rejects_e1002() {
+fn top_level_const_named_float32_rejects_e1002() {
     assert_rejects_e1002(
+        "const float32 = 3.14\nfn main() { _ = float32 }",
+        "top-level const float32",
+    );
+}
+
+#[test]
+fn top_level_fn_named_primitive_accepts() {
+    assert_accepts(
+        "fn int8(n int) int { return n }\nfn main() { _ = int8(1000) }",
+        "top-level fn int8",
+    );
+    assert_accepts(
+        "fn float64(x int) int { return x }\nfn main() { _ = float64(1) }",
+        "top-level fn float64",
+    );
+}
+
+#[test]
+fn top_level_struct_enum_type_alias_named_primitive_accepts() {
+    assert_accepts(
         "struct uint8 { val int }\nfn main() {\n    var s uint8\n    _ = s.val\n}",
         "top-level struct uint8",
     );
-}
-
-#[test]
-fn top_level_enum_named_int32_rejects_e1002() {
-    assert_rejects_e1002(
+    assert_accepts(
         "enum int32 { a, b }\nfn main() {\n    var x int32 = int32.a\n    _ = x\n}",
         "top-level enum int32",
     );
-}
-
-#[test]
-fn top_level_type_alias_named_uint64_rejects_e1002() {
-    assert_rejects_e1002(
+    assert_accepts(
         "type uint64 = int\nfn main() {\n    var x uint64 = 1\n    _ = x\n}",
         "top-level type alias uint64",
     );
@@ -215,6 +211,22 @@ fn local_const_uintptr_rejects_e1002() {
     );
 }
 
+#[test]
+fn local_closure_named_primitive_accepts() {
+    assert_accepts(
+        "fn main() {\n    float64 := fn(x int) float64 { return 2.0 }\n    _ = 1.0 / float64(0)\n}",
+        "local closure float64 :=",
+    );
+    assert_accepts(
+        "fn main() {\n    int := fn(x int) int { return 2 }\n    _ = 10 / int(0)\n}",
+        "local closure int :=",
+    );
+    assert_accepts(
+        "fn main() {\n    let uint8 = fn() int { return 1 }\n    _ = uint8()\n}",
+        "local let closure uint8",
+    );
+}
+
 // ===========================================================================
 // 6. Function parameters, receivers, and named results
 // ===========================================================================
@@ -224,6 +236,14 @@ fn fn_param_named_float64_rejects_e1002() {
     assert_rejects_e1002(
         "fn f(float64 int) int { return float64 }\nfn main() { _ = f(1) }",
         "param named float64",
+    );
+}
+
+#[test]
+fn fn_param_closure_type_named_primitive_accepts() {
+    assert_accepts(
+        "fn f(float64 fn(int) float64) float64 { return float64(0) }\nfn main() { _ = f(fn(x int) float64 { return 1.0 }) }",
+        "param of function type named float64",
     );
 }
 
