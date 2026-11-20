@@ -693,6 +693,8 @@ pub(crate) struct Checker<'a> {
     pub struct_type_params: HashMap<String, Vec<hy_syntax::TypeParam>>,
     /// enum name -> declared variant names in source order (T13/T14 HYB-E5001).
     pub enums: HashMap<String, Vec<String>>,
+    /// Enums with at least one payload-carrying variant (T16: no `==`).
+    pub data_enums: HashSet<String>,
     /// enum name -> whether the first variant is payload-free (N3 HYB-E4002).
     pub enum_has_zero_value: HashMap<String, bool>,
     /// type alias name -> target TypeExpr.
@@ -758,6 +760,7 @@ impl<'a> Checker<'a> {
             structs: HashMap::new(),
             struct_type_params: HashMap::new(),
             enums: HashMap::new(),
+            data_enums: HashSet::new(),
             enum_has_zero_value: HashMap::new(),
             type_aliases: HashMap::new(),
             fns: HashMap::new(),
