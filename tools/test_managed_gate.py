@@ -142,6 +142,40 @@ class ManagedGateTests(unittest.TestCase):
         found = self.audit(src, [block('reviewed')])
         self.assertEqual([key.rsplit(':', 1)[1] for key in found], ['6'])
 
+    def test_interpolated_strings_do_not_spoof_or_mask_managed_lines(self):
+        # Issue #1844: string interpolations `"…{expr}…"` switch the lexer to
+        # code mode inside `{...}` and back to string mode on the matching `}`.
+        # Inner string literals mentioning `managed(` must stay masked, and
+        # inner escaped quotes or backticks must not desynchronize quote state
+        # and swallow a subsequent real `managed(...)` block.
+        src = '\n'.join([
+            'fn f(s string) -> string { return s }',
+            'fn main() {',
+            '  a := "hello {f("managed(\\"spoof\\", \\"other\\")")}"',
+            '  b := "world {f("\\"")}"',
+            '  c := "raw {f(`"`)}"',
+            '  d := "esc {{managed(\\"literal_braces\\", \\"other\\")}}"',
+            '  managed("real", "other") {}',
+            '}',
+        ])
+        self.assertEqual(gate.scan_managed_lines(src), [7])
+        found = self.audit(src, [block('real')])
+        self.assertEqual([key.rsplit(':', 1)[1] for key in found], ['7'])
+
+    def test_managed_block_inside_interpolation_with_nested_braces_is_detected(self):
+        # Issue #1844: code inside `{...}` is real code; nested braces inside an
+        # interpolation expression must track brace depth before returning to
+        # the outer string segment.
+        src = '\n'.join([
+            'fn main() {',
+            '  s := "prefix {fn() -> string { managed("in_interp", "other") {} return "ok" }()} suffix managed("not_code", "other")"',
+            '  managed("after", "other") {}',
+            '}',
+        ])
+        self.assertEqual(gate.scan_managed_lines(src), [2, 3])
+        found = self.audit(src, [block('in_interp'), block('after')])
+        self.assertEqual([key.rsplit(':', 1)[1] for key in found], ['2', '3'])
+
     def test_moving_block_below_comment_changes_baseline_key(self):
         # Issue #119 reproducer: moving a spaced `managed (...)` block while a
         # preceding comment mentions `managed(` must change the recorded line.
