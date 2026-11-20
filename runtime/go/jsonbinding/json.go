@@ -21,16 +21,19 @@ var (
 // BOUND below the guard — the guard proves headroom at ENTRY and nothing
 // after. serde_json RECURSES on value nesting (parse: remaining_depth=128;
 // clone/drop/serialize walk the tree), so every fn that can touch a nested
-// value is DEEP-class regardless of input shape; O(1) table/leaf ops are
-// SMALL-class (<= 1 KiB argued bound, guard 1024).
+// value is DEEP-class regardless of input shape; O(1) leaf reads are
+// SMALL-class (<= 1 KiB, guard 1024); fns that can GROW the handle table or
+// an array are DEFAULT-class (guard 4096): a Vec realloc drags libc malloc's
+// frames onto the caller's stack and MEASURES 1.1-1.2 KiB (see
+// stack_budget_test.go), above the SMALL guard.
 //
 //   DEEP  (CrossDeep* — pooled 1 MiB guarded stack): Parse, GetArray (clone),
 //         ArrayGet (clone), Set (drop of the REPLACED value), Release (drop),
 //         ToStringPretty/valueText (serialize) — plus the cleanup goroutine's
 //         release, which runs on an arbitrary goroutine.
-//   SMALL (Cross*S — guard 1024): NewObject, NewArray, GetInt, GetString
-//         (string clone is a heap copy, not a tree walk), ArrayLen,
-//         PushString — all O(1), no recursion on the value tree.
+//   DEFAULT (Cross* — guard 4096): NewObject, NewArray, GetString, PushString
+//         — O(1), no tree recursion, but they allocate (table/Vec growth).
+//   SMALL (Cross*S — guard 1024): GetInt, ArrayLen — pure reads, no allocation.
 //
 // SOUNDNESS NOTE (found while classifying, fixed by this table): routing
 // Parse through the default 4096-guard fast path was UNSOUND for deep
@@ -94,13 +97,13 @@ func Parse(data []byte) (Value, error) {
 // NewObject / NewArray: fresh containers.
 func NewObject() Value {
 	var id uint64
-	hybridge.Cross1S(FnNewObject, uintptr(unsafe.Pointer(&id))) // SMALL: table insert, O(1)
+	hybridge.Cross1(FnNewObject, uintptr(unsafe.Pointer(&id))) // DEFAULT: table insert (Vec growth allocates)
 	return wrap(id)
 }
 
 func NewArray() Value {
 	var id uint64
-	hybridge.Cross1S(FnNewArray, uintptr(unsafe.Pointer(&id))) // SMALL: table insert, O(1)
+	hybridge.Cross1(FnNewArray, uintptr(unsafe.Pointer(&id))) // DEFAULT: table insert (Vec growth allocates)
 	return wrap(id)
 }
 
@@ -164,8 +167,9 @@ func (v Value) String(key string) (string, error) {
 	var sid uint64
 	kptr, klen, pin, kb := pinCrossKey(key)
 	pin.Pin(&sid)
-	// SMALL: string clone is a heap copy, not a tree walk.
-	st := hybridge.Cross4S(FnGetString, uintptr(v.h.id), kptr, klen, uintptr(unsafe.Pointer(&sid)))
+	// DEFAULT: string clone is a heap copy, not a tree walk, but the clone and
+	// the table insert allocate — measured 1.2 KiB, above the SMALL guard.
+	st := hybridge.Cross4(FnGetString, uintptr(v.h.id), kptr, klen, uintptr(unsafe.Pointer(&sid)))
 	pin.Unpin()
 	runtime.KeepAlive(pin)
 	runtime.KeepAlive(kb)
@@ -183,7 +187,7 @@ func (v Value) PushString(s string) error {
 		return ErrJSON
 	}
 	sptr, slen, pin, sb := pinCrossKey(s)
-	st := hybridge.Cross3S(FnPushString, uintptr(v.h.id), sptr, slen) // SMALL: Vec push + heap copy
+	st := hybridge.Cross3(FnPushString, uintptr(v.h.id), sptr, slen) // DEFAULT: Vec push + heap copy (allocates)
 	pin.Unpin()
 	runtime.KeepAlive(pin)
 	runtime.KeepAlive(sb)
