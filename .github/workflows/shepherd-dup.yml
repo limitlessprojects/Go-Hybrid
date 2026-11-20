@@ -67,4 +67,4 @@ jobs:
 
       - name: W7 session log
         if: always()
-        run: python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event dup-pass --note "phase A/B pass complete"
+        run: python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event dup-pass --verdict "ok" --note "phase A/B pass complete" --job-status "${{ job.status }}"
