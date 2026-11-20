@@ -718,3 +718,133 @@ fn main() {
         res.diagnostics
     );
 }
+
+// ===========================================================================
+// Issue #4416 regression tests: function parameter capabilities
+// ===========================================================================
+
+#[test]
+fn test_issue_4416_repro1_unclosed_sender_reject() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(42)
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task worker(move tx)
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E4004"),
+        "Expected HYB-E4004 for unclosed sender param: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_issue_4416_repro2_double_move_param_reject() {
+    let src = r#"
+fn sub(tx hy.send_cap[int]) {
+    tx.close()
+}
+
+fn forwarder(tx hy.send_cap[int]) {
+    task sub(move tx)
+    task sub(move tx)
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task forwarder(move tx)
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for double move of param: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_issue_4416_repro3_use_after_move_param_reject() {
+    let src = r#"
+fn sub(tx hy.send_cap[int]) {
+    tx.close()
+}
+
+fn forwarder(tx hy.send_cap[int]) {
+    task sub(move tx)
+    tx.send(10)
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task forwarder(move tx)
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for use after move of param: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_issue_4416_repro4_undrained_recv_param_reject() {
+    let src = r#"
+fn receiver(rx hy.recv_cap[int]) {
+    v := rx.recv()
+    _ = v
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    tx.close()
+    task receiver(move rx)
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E4005"),
+        "Expected HYB-E4005 for undrained recv param: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_issue_4416_repro5_unmoved_task_capture_param_reject() {
+    let src = r#"
+fn sub(tx hy.send_cap[int]) {
+    tx.close()
+}
+
+fn forwarder(tx hy.send_cap[int]) {
+    task sub(tx)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task forwarder(move tx)
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3002"),
+        "Expected HYB-E3002 for unmoved capture of param: {:?}",
+        res.diagnostics
+    );
+}

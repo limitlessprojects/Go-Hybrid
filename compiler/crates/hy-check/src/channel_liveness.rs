@@ -95,10 +95,69 @@ impl ChannelLivenessChecker {
         }
     }
 
+    fn register_send_cap(&mut self, tx_name: String, def_span: Span) {
+        let pipe = PipeInfo {
+            tx: tx_name.clone(),
+            rx: String::new(),
+            tx_state: ChannelTypestate::Fresh,
+            rx_state: ChannelTypestate::Drained,
+            def_span,
+        };
+
+        let p_idx = self.pipes_all.len();
+        self.pipes_all.push(pipe.clone());
+        self.cap_to_pipe.insert(tx_name, p_idx);
+
+        if let Some(cur) = self.scope_stack.last_mut() {
+            cur.pipes.push(pipe);
+        }
+    }
+
+    fn register_recv_cap(&mut self, rx_name: String, def_span: Span) {
+        let pipe = PipeInfo {
+            tx: String::new(),
+            rx: rx_name.clone(),
+            tx_state: ChannelTypestate::Closed,
+            rx_state: ChannelTypestate::Fresh,
+            def_span,
+        };
+
+        let p_idx = self.pipes_all.len();
+        self.pipes_all.push(pipe.clone());
+        self.cap_to_pipe.insert(rx_name, p_idx);
+
+        if let Some(cur) = self.scope_stack.last_mut() {
+            cur.pipes.push(pipe);
+        }
+    }
+
+    fn is_send_cap_ty(ty: &TypeExpr) -> bool {
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                let head = name.split('[').next().unwrap_or(name.as_str()).trim();
+                head == "hy.send_cap" || head == "send_cap"
+            }
+            _ => false,
+        }
+    }
+
+    fn is_recv_cap_ty(ty: &TypeExpr) -> bool {
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                let head = name.split('[').next().unwrap_or(name.as_str()).trim();
+                head == "hy.recv_cap" || head == "recv_cap"
+            }
+            _ => false,
+        }
+    }
+
     fn check_terminal_invariants(&mut self, scope: &ScopeState) {
         for pipe in &scope.pipes {
             // Check send capability terminal state
-            if !scope.moved_caps.contains(&pipe.tx) && pipe.tx_state != ChannelTypestate::Closed {
+            if !pipe.tx.is_empty()
+                && !scope.moved_caps.contains(&pipe.tx)
+                && pipe.tx_state != ChannelTypestate::Closed
+            {
                 self.diags.push(Diagnostic::error(
                     "HYB-E4004",
                     &self.file_path,
@@ -112,7 +171,10 @@ impl ChannelLivenessChecker {
 
             // Check receive capability terminal state
             // If rx was moved into a subtask, the subtask assumed lifecycle responsibility
-            if !scope.moved_caps.contains(&pipe.rx) && pipe.rx_state != ChannelTypestate::Drained {
+            if !pipe.rx.is_empty()
+                && !scope.moved_caps.contains(&pipe.rx)
+                && pipe.rx_state != ChannelTypestate::Drained
+            {
                 self.diags.push(Diagnostic::error(
                     "HYB-E4005",
                     &self.file_path,
@@ -128,6 +190,13 @@ impl ChannelLivenessChecker {
 
     fn check_fn(&mut self, f: &FnDecl) {
         self.push_scope();
+        for p in &f.params {
+            if Self::is_send_cap_ty(&p.ty) {
+                self.register_send_cap(p.name.clone(), p.span);
+            } else if Self::is_recv_cap_ty(&p.ty) {
+                self.register_recv_cap(p.name.clone(), p.span);
+            }
+        }
         if let Some(body) = &f.body {
             for stmt in &body.stmts {
                 self.check_stmt(stmt);
@@ -269,6 +338,8 @@ impl ChannelLivenessChecker {
                             *span,
                             format!("use of moved linear capability '{}'", cap),
                         ));
+                    } else {
+                        self.mark_tx_active(&cap);
                     }
                 }
                 self.check_expr(value);
@@ -396,8 +467,15 @@ impl ChannelLivenessChecker {
             Expr::Try { operand, .. } => {
                 self.check_expr(operand);
             }
-            Expr::FnLit { body, .. } => {
+            Expr::FnLit { params, body, .. } => {
                 self.push_scope();
+                for p in params {
+                    if Self::is_send_cap_ty(&p.ty) {
+                        self.register_send_cap(p.name.clone(), p.span);
+                    } else if Self::is_recv_cap_ty(&p.ty) {
+                        self.register_recv_cap(p.name.clone(), p.span);
+                    }
+                }
                 for s in &body.stmts {
                     self.check_stmt(s);
                 }
@@ -437,13 +515,6 @@ impl ChannelLivenessChecker {
                 for a in args {
                     self.check_expr(&a.value);
                 }
-            }
-            Expr::FnLit { body, .. } => {
-                self.push_scope();
-                for s in &body.stmts {
-                    self.check_stmt(s);
-                }
-                self.pop_scope();
             }
             Expr::Receive { chan, span } => {
                 if let Some(cap) = self.get_cap_name(chan) {
@@ -540,6 +611,13 @@ impl ChannelLivenessChecker {
     }
 
     fn is_cap(&self, name: &str) -> bool {
+        for scope in self.scope_stack.iter().rev() {
+            for p in &scope.pipes {
+                if (!p.tx.is_empty() && p.tx == name) || (!p.rx.is_empty() && p.rx == name) {
+                    return true;
+                }
+            }
+        }
         self.cap_to_pipe.contains_key(name)
     }
 
