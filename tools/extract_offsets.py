@@ -18,6 +18,22 @@ import subprocess
 import sys
 
 
+def _parse_dwarf_name(raw):
+    if raw.startswith("(") and "):" in raw:
+        return raw.rsplit("):", 1)[1].strip()
+    return raw
+
+
+def _parse_member_offset(line):
+    uconst = re.search(r"DW_OP_plus_uconst:\s*(\d+)", line)
+    if uconst is not None:
+        return int(uconst.group(1))
+    direct = re.search(r"DW_AT_data_member_location\s*:\s*(\d+)\s*$", line)
+    if direct is not None:
+        return int(direct.group(1))
+    return None
+
+
 def main(binpath):
     proc = subprocess.run(["readelf", "--debug-dump=info", binpath],
                           capture_output=True, text=True, timeout=600)
@@ -34,24 +50,30 @@ def main(binpath):
     dies = []
     cur = None
     for line in out.splitlines():
-        h = re.match(r"\s*<(\d+)><[0-9a-f]+>: Abbrev Number: \d+ \((DW_TAG_\w+)\)", line)
+        h = re.match(r"\s*<(\d+)><[0-9a-f]+>: Abbrev Number: (\d+)(?: \((DW_TAG_\w+)\))?", line)
         if h:
-            cur = {"depth": int(h.group(1)), "tag": h.group(2)}
-            dies.append(cur)
+            if h.group(2) == "0" or h.group(3) is None:
+                dies.append({"depth": int(h.group(1)), "tag": "NULL"})
+                cur = None
+            else:
+                cur = {"depth": int(h.group(1)), "tag": h.group(3)}
+                dies.append(cur)
             continue
         if cur is None:
             continue
         nm = re.search(r"DW_AT_name\s*:\s*(.+?)\s*$", line)
-        off = re.search(r"DW_AT_data_member_location\s*:\s*(\d+)", line)
         sz = re.search(r"DW_AT_byte_size\s*:\s*(\d+)", line)
         if nm is not None:
-            cur["name"] = nm.group(1)
-        if off is not None:
-            cur["off"] = int(off.group(1))
+            cur["name"] = _parse_dwarf_name(nm.group(1))
+        if "DW_AT_data_member_location" in line:
+            off_val = _parse_member_offset(line)
+            if off_val is not None:
+                cur["off"] = off_val
         if sz is not None:
             cur["size"] = int(sz.group(1))
 
     def members_of(struct_name):
+        fallback = (None, None)
         for i, d in enumerate(dies):
             if d["tag"] == "DW_TAG_structure_type" and d.get("name") == struct_name:
                 base = d["depth"]
@@ -61,8 +83,10 @@ def main(binpath):
                         break
                     if e["tag"] == "DW_TAG_member" and "name" in e:
                         mem[e["name"]] = e.get("off")
-                return d.get("size"), mem
-        return None, None
+                if mem:
+                    return d.get("size"), mem
+                fallback = (d.get("size"), mem)
+        return fallback
 
     gsize, g = members_of("runtime.g")
     msize, m = members_of("runtime.m")
