@@ -41,20 +41,35 @@ var (
 // Value is a Rust-owned JSON value handle. Zero id = released/moved.
 type Value struct{ h *handle }
 
-type handle struct{ id uint64 }
+type handle struct {
+	id      uint64
+	cleanup runtime.Cleanup
+}
 
 func wrap(id uint64) Value {
 	h := &handle{id: id}
 	// Late release is safe (hyrt's release is idempotent + generation-
-	// checked); a MOVED value zeroes its id first, so this releases nothing.
+	// checked); a MOVED value zeroes its id and stops cleanup first.
 	// DEEP class: drop recurses on the value tree; cleanup goroutines run
 	// on arbitrary stacks.
-	runtime.AddCleanup(h, func(id uint64) {
+	h.cleanup = runtime.AddCleanup(h, func(id uint64) {
 		if id != 0 {
 			hybridge.CrossDeep1(FnRelease, uintptr(id))
 		}
 	}, id)
 	return Value{h: h}
+}
+
+// Release deterministically drops the Rust-side JSON value handle, stops
+// its associated runtime cleanup, and zeroes the handle ID.
+func (v Value) Release() {
+	if v.h == nil || v.h.id == 0 {
+		return
+	}
+	id := v.h.id
+	v.h.cleanup.Stop()
+	v.h.id = 0
+	hybridge.CrossDeep1(FnRelease, uintptr(id))
 }
 
 // pinCrossKey: the copy-small pinned borrow for a key/string argument.
@@ -119,16 +134,28 @@ func (v Value) Array(key string) ([]Value, error) {
 	pin.Unpin()
 	runtime.KeepAlive(pin)
 	runtime.KeepAlive(kb)
+	runtime.KeepAlive(v.h)
 	if st != statusOK {
 		return nil, ErrJSON
 	}
 	var n uint64
-	hybridge.Cross2S(FnArrayLen, uintptr(arrID), uintptr(unsafe.Pointer(&n))) // SMALL: len read
+	st = hybridge.Cross2S(FnArrayLen, uintptr(arrID), uintptr(unsafe.Pointer(&n))) // SMALL: len read
+	if st != statusOK {
+		hybridge.CrossDeep1(FnRelease, uintptr(arrID))
+		return nil, ErrJSON
+	}
 	out := make([]Value, n)
 	for i := range out {
 		var eid uint64
 		// DEEP class: elem.clone() recurses on the element's nesting.
-		hybridge.CrossDeep3(FnArrayGet, uintptr(arrID), uintptr(i), uintptr(unsafe.Pointer(&eid)))
+		st := hybridge.CrossDeep3(FnArrayGet, uintptr(arrID), uintptr(i), uintptr(unsafe.Pointer(&eid)))
+		if st != statusOK {
+			for j := 0; j < i; j++ {
+				out[j].Release()
+			}
+			hybridge.CrossDeep1(FnRelease, uintptr(arrID))
+			return nil, ErrJSON
+		}
 		out[i] = wrap(eid)
 	}
 	// The temporary array handle dies with the materialized slice.
@@ -149,6 +176,7 @@ func (v Value) Int(key string) (int64, error) {
 	pin.Unpin()
 	runtime.KeepAlive(pin)
 	runtime.KeepAlive(kb)
+	runtime.KeepAlive(v.h)
 	if st != statusOK {
 		return 0, ErrJSON
 	}
@@ -169,6 +197,7 @@ func (v Value) String(key string) (string, error) {
 	pin.Unpin()
 	runtime.KeepAlive(pin)
 	runtime.KeepAlive(kb)
+	runtime.KeepAlive(v.h)
 	if st != statusOK {
 		return "", ErrJSON
 	}
@@ -187,6 +216,7 @@ func (v Value) PushString(s string) error {
 	pin.Unpin()
 	runtime.KeepAlive(pin)
 	runtime.KeepAlive(sb)
+	runtime.KeepAlive(v.h)
 	if st != statusOK {
 		return ErrJSON
 	}
@@ -211,7 +241,11 @@ func (v Value) Set(key string, val any) error {
 	if err != nil {
 		return err
 	}
-	return v.setHandle(key, bv)
+	if err := v.setHandle(key, bv); err != nil {
+		bv.Release()
+		return err
+	}
+	return nil
 }
 
 func (v Value) setHandle(key string, val Value) error {
@@ -225,10 +259,13 @@ func (v Value) setHandle(key string, val Value) error {
 	pin.Unpin()
 	runtime.KeepAlive(pin)
 	runtime.KeepAlive(kb)
+	runtime.KeepAlive(v.h)
+	runtime.KeepAlive(val.h)
 	if st != statusOK {
 		return ErrJSON
 	}
-	val.h.id = 0 // moved: the handle's payload now lives inside v
+	val.h.cleanup.Stop() // cancel registered cleanup on moved handle
+	val.h.id = 0         // moved: the handle's payload now lives inside v
 	return nil
 }
 
@@ -250,10 +287,12 @@ func ToStringPretty(v Value) (string, error) {
 		p.Unpin()
 		runtime.KeepAlive(&p)
 		runtime.KeepAlive(buf)
+		runtime.KeepAlive(v.h)
 		if st == statusOK {
 			return string(buf[:need]), nil
 		}
 	}
+	runtime.KeepAlive(v.h)
 	if st != statusOK {
 		return "", ErrJSON
 	}
