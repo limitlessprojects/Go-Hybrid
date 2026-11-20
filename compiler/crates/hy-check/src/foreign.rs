@@ -417,6 +417,23 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     ];
     const TIME_TICKER: &[&str] = &["stop", "reset"];
     const TIME_TIMER: &[&str] = &["stop", "reset"];
+    /// `time.Duration` — #4041: the curated `time.duration` handle had no arm,
+    /// so `d.totally_fake_method()` reached `ForeignOpaque` and passed
+    /// `hyb check` while `go build` said "type time.Duration has no field or
+    /// method totally_fake_method". Exactly the method set `go doc time.Duration`
+    /// publishes, spelled lowercased like the rest of this table.
+    const TIME_DURATION: &[&str] = &[
+        "abs",
+        "hours",
+        "microseconds",
+        "milliseconds",
+        "minutes",
+        "nanoseconds",
+        "round",
+        "seconds",
+        "string",
+        "truncate",
+    ];
     /// `bufio.Reader` — Go standard library buffered reader methods.
     const BUFIO_READER: &[&str] = &[
         "buffered",
@@ -652,6 +669,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "sync.map" | "sync.Map" => Some(SYNC_MAP),
         "time.ticker" | "time.Ticker" => Some(TIME_TICKER),
         "time.timer" | "time.Timer" => Some(TIME_TIMER),
+        "time.duration" | "time.Duration" => Some(TIME_DURATION),
         "bufio.reader" | "bufio.Reader" => Some(BUFIO_READER),
         "bufio.writer" | "bufio.Writer" => Some(BUFIO_WRITER),
         "bufio.scanner" | "bufio.Scanner" => Some(BUFIO_SCANNER),
