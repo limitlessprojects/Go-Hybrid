@@ -720,7 +720,35 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     }
 }
 
-/// Result shape of a method call on a typed receiver.
+/// The COMPLETE FIELD surface of a foreign handle type, or `None` when the
+/// handle's binding is not modelled here.
+///
+/// The method half of this hole is #2200, fixed by `foreign_method_surface`.
+/// The field half is #2203: `doc := serde_json.parse(...)?; doc.totally_fake`
+/// passed `hyb check` with 0 diagnostics and died at `go build` with
+/// `doc.TotallyFakeField undefined (type jsonbinding.Value has no field or
+/// method TotallyFakeField)`. Row 13 BUILDABLE.
+///
+/// Only handles whose Go binding is vendored in `runtime/go/` (or is a
+/// predeclared Go type) get a surface; everything else keeps the old
+/// fail-open behaviour. An EMPTY slice means the type has no exported fields
+/// at all — which is the truth for every vendored handle here.
+pub(crate) fn foreign_field_surface(recv_type: &str) -> Option<&'static [&'static str]> {
+    /// `jsonbinding.Value` is a Go interface-ish struct with NO exported
+    /// fields; every access goes through a method. Verified against
+    /// `runtime/go/jsonbinding`.
+    const NO_FIELDS: &[&str] = &[];
+    match recv_type {
+        "serde_json.value" | "serde_json.view" => Some(NO_FIELDS),
+        "flate2.writer" => Some(NO_FIELDS),
+        "sync.mutex" | "sync.Mutex" | "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => {
+            Some(NO_FIELDS)
+        }
+        _ => None,
+    }
+}
+
+/// Human-readable M5 curated package allowlist string for HYB-E1001 diagnostics (#658).
 pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
     match (recv_type, method) {
         ("serde_json.value" | "serde_json.view", "array") => {
