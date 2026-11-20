@@ -169,10 +169,46 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
         },
     ),
     (
-        // 10: t0 from time.now() — typed so since(t0) chains cleanly; no
-        // members the pinned surface uses yet.
+        // 10: t0 from time.now() — typed so since(t0) chains cleanly;
+        // #3933 fills the single-return value-method surface so `hy-check`
+        // can fail closed on phantoms (`s.t.totally_fake()`) and chains like
+        // `s.t.utc().unix()` lower to the exact Go spellings. Multi-return
+        // methods (Date/Clock/ISOWeek/Zone/ZoneBounds) stay out — no
+        // multi-value method lowering — and hy-check's TIME_TIME surface is
+        // kept a subset of THIS table by hand (same contract as sync.mutex).
         "time.time",
-        TypeShape { members: &[] },
+        TypeShape {
+            members: &[
+                ("format", method("Format", None)),
+                ("add", method("Add", Some("time.time"))),
+                ("sub", method("Sub", Some("time.duration"))),
+                ("add_date", method("AddDate", Some("time.time"))),
+                ("round", method("Round", Some("time.time"))),
+                ("truncate", method("Truncate", Some("time.time"))),
+                ("before", method("Before", None)),
+                ("after", method("After", None)),
+                ("equal", method("Equal", None)),
+                ("compare", method("Compare", None)),
+                ("is_zero", method("IsZero", None)),
+                ("unix", method("Unix", None)),
+                ("unix_milli", method("UnixMilli", None)),
+                ("unix_micro", method("UnixMicro", None)),
+                ("unix_nano", method("UnixNano", None)),
+                ("utc", method("UTC", Some("time.time"))),
+                ("local", method("Local", Some("time.time"))),
+                ("in", method("In", Some("time.time"))),
+                ("year", method("Year", None)),
+                ("month", method("Month", None)),
+                ("day", method("Day", None)),
+                ("hour", method("Hour", None)),
+                ("minute", method("Minute", None)),
+                ("second", method("Second", None)),
+                ("nanosecond", method("Nanosecond", None)),
+                ("year_day", method("YearDay", None)),
+                ("weekday", method("Weekday", None)),
+                ("string", method("String", None)),
+            ],
+        },
     ),
     (
         // 05: methods on a serde_json handle value (all Methods — Go's
