@@ -718,3 +718,107 @@ fn main() {
         res.diagnostics
     );
 }
+
+
+#[test]
+fn test_issue_4330_struct_lit_use_after_move_reject() {
+    let src = r#"
+struct packet {
+    cap hy.send_cap[int]
+}
+
+fn worker(tx hy.send_cap[int]) {
+    tx.send(1)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task worker(move tx)
+    p := packet{ cap: tx }
+    _ = p
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for use of moved cap in struct literal: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_issue_4330_map_lit_double_move_reject() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(1)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    m := map[string]hy.send_cap[int]{ "a": move tx, "b": move tx }
+    _ = m
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for double move in map literal: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_issue_4330_interp_use_after_move_reject() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(1)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task worker(move tx)
+    msg := "sending on {tx}"
+    _ = msg
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for use of moved cap in string interpolation: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_issue_4330_addrof_use_after_move_reject() {
+    let src = r#"
+fn worker(tx hy.send_cap[int]) {
+    tx.send(1)
+    tx.close()
+}
+
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task worker(move tx)
+    ptr := &tx
+    _ = ptr
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+        "Expected HYB-E3001 for address-of moved cap: {:?}",
+        res.diagnostics
+    );
+}
