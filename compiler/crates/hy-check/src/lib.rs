@@ -749,33 +749,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         expr,
                         format!("the loop header `{}`", expr.render()),
                     );
-                    let is_chan = matches!(ck.shape_of_expr(&st, expr), TypeShape::Chan(_));
-                    let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
-                    let var_tys = ck.iterate_var_tys(&st, expr, vars.len());
-                    for ((name, shape), var_ty) in vars.iter().zip(shapes).zip(var_tys) {
-                        let is_ref = shape.is_reference_alias();
-                        let may_share = ck.shape_may_share(&shape);
-                        ck.define_binding(&mut st, name, shape, var_ty, false, managed, false);
-                        if !is_chan {
-                            if may_share {
-                                ck.record_may_share(&mut st, name, expr);
-                            }
-                            if is_ref {
-                                if let Some(root) = expr.root_ident() {
-                                    if ck.lookup_binding(&st, root).is_some() {
-                                        st.aliases.insert(name.clone(), root.to_string());
-                                    }
-                                }
-                            }
-                            if let Some(b) = st.env_lookup_mut(name) {
-                                b.non_owned_origin = Some(format!(
-                                    "range variable `{}` iterating `{}` (the collection still holds the element)",
-                                    name,
-                                    expr.render()
-                                ));
-                            }
-                        }
-                    }
+                    ck.bind_iterate_vars(&mut st, vars, expr, managed);
                 }
                 ForKind::Range { var, lo, hi, .. } => {
                     ck.mark_move_in_value(

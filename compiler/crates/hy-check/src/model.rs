@@ -366,6 +366,26 @@ impl FnState {
                 }
             }
         };
+        let outer_depth_after_pop =
+            |name: &str,
+             env: &HashMap<String, Binding>,
+             scopes: &[HashMap<String, Binding>]|
+             -> Option<usize> {
+                for (i, layer) in scopes[..scopes.len().saturating_sub(1)]
+                    .iter()
+                    .enumerate()
+                    .rev()
+                {
+                    if layer.contains_key(name) {
+                        return Some(i + 1);
+                    }
+                }
+                if env.contains_key(name) {
+                    Some(0)
+                } else {
+                    None
+                }
+            };
 
         // Propagate non_owned_origin from popped-scope bindings (e.g. range vars,
         // match arm bindings, self-shadowed params) to any surviving outer binding
@@ -440,17 +460,147 @@ impl FnState {
                 }
             }
         }
+        // Preserve may-share links and freeze moves back to shadowed outer
+        // targets when an inner binding (e.g. `b` in `for a, b in a`) carried
+        // `shadow_links` across a differently-named shadow (`a`) (#811).
+        let mut shadow_root_moves: Vec<(String, usize, MoveInfo)> = Vec::new();
+        for (k, links) in &self.shadow_links {
+            let mut surviving_targets: Vec<(String, usize)> = Vec::new();
+            for (t_name, t_depth) in links {
+                if *t_depth < self.scopes.len()
+                    && outer_depth_after_pop(t_name, &self.env, &self.scopes) == Some(*t_depth)
+                {
+                    surviving_targets.push((t_name.clone(), *t_depth));
+                }
+            }
+            if surviving_targets.is_empty() {
+                continue;
+            }
+            let mut comp: HashSet<String> = self.share_group(k);
+            comp.insert(k.clone());
+            let seed: Vec<String> = comp.iter().cloned().collect();
+            for m in seed {
+                let r = crate::freeze::resolve_alias(self, &m);
+                comp.insert(r.clone());
+                for (ak, av) in &self.aliases {
+                    if av == &m || av == &r || crate::freeze::resolve_alias(self, ak) == r {
+                        comp.insert(ak.clone());
+                    }
+                }
+            }
+            for m in &comp {
+                if let Some(om) = to_outer_name(m, &self.aliases, &self.env, &self.scopes) {
+                    for (t_name, _) in &surviving_targets {
+                        if &om != t_name {
+                            inner_outer_shares.push((om.clone(), t_name.clone()));
+                        }
+                    }
+                }
+                if let Some(mv) = self.env_lookup(m).and_then(|b| b.moved.clone()) {
+                    for (t_name, t_depth) in &surviving_targets {
+                        shadow_root_moves.push((t_name.clone(), *t_depth, mv.clone()));
+                    }
+                }
+            }
+        }
+        let cur_shadows = std::mem::take(&mut self.shadow_links);
+        let cur_aliases = std::mem::take(&mut self.aliases);
+        let cur_share = std::mem::take(&mut self.may_share);
         self.scopes.pop();
+        let candidate_keys: HashSet<String> = self
+            .env
+            .keys()
+            .chain(self.scopes.iter().flat_map(|s| s.keys()))
+            .filter(|k| !popped_scope.contains_key(*k))
+            .cloned()
+            .collect();
+        let moved_outer: HashSet<String> = candidate_keys
+            .into_iter()
+            .filter(|k| self.env_lookup(k).is_some_and(|b| b.moved.is_some()))
+            .collect();
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
+            // Do not resurrect pre-block shadow links onto an enclosing binding
+            // that exits the block already moved after severing them (e.g.
+            // `for xs in xs { xs = []int{...}; task w(move xs) }` before loop exit).
+            for k in &moved_outer {
+                if let Some(cur) = cur_shadows.get(k) {
+                    self.shadow_links.insert(k.clone(), cur.clone());
+                } else {
+                    self.shadow_links.remove(k);
+                }
+            }
+        } else {
+            self.shadow_links = cur_shadows;
+        }
+        for (t_name, t_depth, mv) in shadow_root_moves {
+            if let Some(bt) = self.binding_at_depth_mut(&t_name, t_depth) {
+                if bt.moved.is_none() {
+                    bt.moved = Some(mv);
+                }
+            }
         }
         if let Some(outer_aliases) = self.alias_scopes.pop() {
             self.aliases = outer_aliases;
+            for k in &moved_outer {
+                if let Some(cur) = cur_aliases.get(k) {
+                    self.aliases.insert(k.clone(), cur.clone());
+                } else {
+                    self.aliases.remove(k);
+                }
+            }
+            let stale_incoming: Vec<String> = self
+                .aliases
+                .iter()
+                .filter(|(a, target)| {
+                    moved_outer.contains(*target)
+                        && !popped_scope.contains_key(*a)
+                        && cur_aliases.get(*a) != Some(*target)
+                })
+                .map(|(a, _)| a.clone())
+                .collect();
+            for a in stale_incoming {
+                if let Some(cur) = cur_aliases.get(&a) {
+                    self.aliases.insert(a, cur.clone());
+                } else {
+                    self.aliases.remove(&a);
+                }
+            }
             if let Some(outer_share) = self.share_scopes.pop() {
                 self.may_share = outer_share;
+                for k in &moved_outer {
+                    let cur_peers = cur_share.get(k);
+                    let severed_peers: Vec<String> = self
+                        .may_share
+                        .get(k)
+                        .into_iter()
+                        .flatten()
+                        .filter(|p| {
+                            !popped_scope.contains_key(*p)
+                                && cur_peers.is_none_or(|cp| !cp.contains(*p))
+                        })
+                        .cloned()
+                        .collect();
+                    for p in severed_peers {
+                        if let Some(ps) = self.may_share.get_mut(k) {
+                            ps.remove(&p);
+                        }
+                        if self.may_share.get(k).is_some_and(|ps| ps.is_empty()) {
+                            self.may_share.remove(k);
+                        }
+                        if let Some(ps) = self.may_share.get_mut(&p) {
+                            ps.remove(k);
+                        }
+                        if self.may_share.get(&p).is_some_and(|ps| ps.is_empty()) {
+                            self.may_share.remove(&p);
+                        }
+                    }
+                }
                 for (a, b) in inner_outer_shares {
                     self.share_edge(&a, &b);
                 }
+            } else {
+                self.may_share = cur_share;
             }
             for (oa, orig) in inner_outer_origins {
                 if let Some(bo) = self.env_lookup_mut(&oa) {
