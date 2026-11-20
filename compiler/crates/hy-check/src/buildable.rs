@@ -4671,6 +4671,44 @@ impl<'a> Collector<'a> {
             }
         }
     }
+
+    fn check_flate2_crate_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if member == "writer" {
+            self.emit_e1002(
+                span,
+                "cannot call `flate2.writer`: `flate2.writer` is a struct type, not a function (HYB-E1002)".to_string(),
+                "`flate2.writer` is a type name, not a callable function",
+            );
+            return;
+        }
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `flate2.{member}` (HYB-E1002)"),
+                &format!("`flate2.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_writer" => Some(1),
+            "write" => Some(2),
+            "finish" => Some(1),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`flate2.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `flate2.{member}`"),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -8413,6 +8451,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if (pkg == "flate2" || pkg == "rust/flate2") && self.lookup_kind(pkg).is_none() {
+                        self.check_flate2_crate_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
