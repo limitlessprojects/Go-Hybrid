@@ -3744,7 +3744,7 @@ impl Emitter {
         }
     }
 
-    fn expr_mentions_ident(e: &Expr, target: &str) -> bool {
+    pub(crate) fn expr_mentions_ident(e: &Expr, target: &str) -> bool {
         match e {
             Expr::Ident { name, .. } => name == target,
             Expr::Lit { .. } => false,
