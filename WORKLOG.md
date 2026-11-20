@@ -1072,3 +1072,15 @@
 **Ops note**: git status in a fresh clone showed 1,170 mode-only diffs after workspace restore — set `core.fileMode=false` in the clone; no content drift.
 
 **Next**: drain remaining ~178 red-CI candidates (~5 ticks); then the hard part — green-CI aged PRs need review/landing sessions, not closes; M1 wildcard adjudication still overdue (window 2026-11-01, 27 config holds + title-matched unlabeled ones protected from closes).
+
+## Session 190 — 2026-11-20 23:20 (+08; 16:20 UTC) — scheduler armed (flappy), tick hardening, 60 closed
+
+**Executed: 60 closed** (oldest-first red-CI drain, verified closed=60 skipped=0 rest=302). Cumulative: **260**. Queue: 1,127 → fresh survey **1,089** (38 PRs closed by their own authors since yesterday) → **~1,029** after this tick. Close-candidates remaining: **146**. Land candidates (green-CI + CLEAN): **11**. Zero merges.
+
+**Scheduler**: z.ai cron tool is FLAPPY in this runtime — it allowed exactly one call per window (a `list` in session-189's turn, a `create` in this one), rejecting every call in between with "No such tool available" for minutes at a time. **Job_id 540028 IS registered** (hourly expr) but the platform caps executions at **3/day** ("excess triggers will be ignored") → at most 3 unpredictable firings daily. Target state (next open window): replace with expr="0 7 1,9,17 * * ?" + --max 60, delete 540028 only after the replacement is confirmed; verify firing with a one_time probe appending to scripts/scheduler_probe.log. Full protocol in workspace RESUME.md.
+
+**Token incident**: GH_TOKEN vanished from the working-tree .env after commit 571bb60 (still in git history) — restored, verified valid (login limitlessprojects). Restore one-liner documented in RESUME.md.
+
+**Tick hardening** (driven by live failures): survey timeout 420→900s (GraphQL secondary rate limits with 120s sleeps are now routine — the survey needs ~14 min); skip survey when a snapshot <60 min exists; ABORT when no snapshot at all (post-wipe first run); fix `grep -c || echo 0` double-zero bug; guard the verify step against a missing runner log. Tick 190a was a clean no-op (wiped snapshot + rate-limited survey → abort path worked); 190b closed 60.
+
+**Next**: swap 540028 to the 3×/day schedule; drain remaining ~146 candidates (~3 ticks of 60); landing session for the 11 green-CI+CLEAN candidates; M1 wildcard adjudication still overdue.
