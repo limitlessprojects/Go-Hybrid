@@ -203,6 +203,27 @@ class CliTests(unittest.TestCase):
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertIn("none", res.stdout)
 
+    def test_workflow_mapping_colon_requires_separation(self):
+        for key in ("name", "'name'", '"name"'):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as td:
+                workflow = Path(td, ".github", "workflows", "ci.yml")
+                workflow.parent.mkdir(parents=True)
+                workflow.write_text(key + ":ci\n", encoding="utf-8")
+                res = self._run(td)
+                self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+                self.assertIn("ci.yml:1:", res.stderr)
+                self.assertIn("column zero", res.stderr)
+
+    def test_workflow_mapping_colon_accepts_space_tab_or_empty_value(self):
+        for key in ("name", "'name'", '"name"'):
+            for value in (" ci", "\tci", ""):
+                with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as td:
+                    workflow = Path(td, ".github", "workflows", "ci.yml")
+                    workflow.parent.mkdir(parents=True)
+                    workflow.write_text(key + ":" + value + "\n", encoding="utf-8")
+                    res = self._run(td)
+                    self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
     def test_marker_exits_one_and_names_the_file(self):
         with tempfile.TemporaryDirectory() as td:
             Path(td, "broken.yml").write_text(
