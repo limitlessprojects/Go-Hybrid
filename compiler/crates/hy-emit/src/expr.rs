@@ -747,6 +747,13 @@ impl Emitter {
                     }
                     Expr::Field { base, name, .. } => {
                         let (head, _) = split_type_args(name);
+                        if head == "recv" && args.is_empty() {
+                            if let Expr::Ident { name: rx_name, .. } = Self::unwrap_parens(base) {
+                                if let Some(elem) = self.chan_elem_ty.get(rx_name) {
+                                    return self.resolve_to_struct_name(elem);
+                                }
+                            }
+                        }
                         if let Some(recv_sn) = self.user_struct_name_of(base) {
                             if let Some(sn) = self.fn_ret_struct.get(&format!("{recv_sn}.{head}")) {
                                 return Some(sn.as_str());
@@ -876,6 +883,15 @@ impl Emitter {
                     }
                     Expr::Field { base, name, .. } => {
                         let (head, _) = split_type_args(name);
+                        if head == "recv" && args.is_empty() {
+                            if let Expr::Ident { name: rx_name, .. } = Self::unwrap_parens(base) {
+                                if let Some(elem) = self.chan_elem_ty.get(rx_name) {
+                                    if let Some((k, _)) = super::shapes::SHAPES.iter().find(|(k, _)| *k == elem.as_str()) {
+                                        return Some(k);
+                                    }
+                                }
+                            }
+                        }
                         if let Some(recv_sn) = self.user_struct_name_of(base) {
                             if let Some((_, _, Some(BindingKind::ForeignTy(t)), _)) = self.fn_shapes.get(&format!("{recv_sn}.{head}")) { return Some(t); }
                         }
@@ -1037,6 +1053,20 @@ impl Emitter {
             if let Some(alloc) = self.n5_new(args) {
                 return Ok(alloc);
             }
+        }
+
+        // --- SPSC channel capabilities: hy.pipe[T]() / hy.new_pipe[T]() (issue #4464) ---
+        if let Some(go_ty) = self.extract_pipe_call(callee)? {
+            let mut arg_texts = Vec::new();
+            for a in args {
+                let s = self.emit_call_arg(a)?;
+                if !matches!(a.value, Expr::Lit { kind: LitKind::Int(_), .. }) {
+                    arg_texts.push(format!("int({})", s));
+                } else {
+                    arg_texts.push(s);
+                }
+            }
+            return Ok(format!("hy_pipe[{}](<args>)", go_ty).replace("<args>", &arg_texts.join(", ")));
         }
 
         // --- package-qualified calls ---
@@ -1637,7 +1667,7 @@ impl Emitter {
 }
 
 /// `new[string, int]` → ("new", Some("[string, int]")).
-fn split_type_args(name: &str) -> (&str, Option<&str>) {
+pub(crate) fn split_type_args(name: &str) -> (&str, Option<&str>) {
     match name.find('[') {
         Some(i) => (&name[..i], Some(&name[i..])),
         None => (name, None),
@@ -1649,6 +1679,141 @@ fn split_type_args(name: &str) -> (&str, Option<&str>) {
 // ---------------------------------------------------------------------------
 
 impl Emitter {
+    fn extract_pipe_call(&mut self, callee: &Expr) -> Result<Option<String>, EmitError> {
+        let bare = Self::unwrap_parens(callee);
+        match bare {
+            Expr::Index { base, index, .. } => {
+                let base_bare = Self::unwrap_parens(base.as_ref());
+                if let Expr::Field { base: pkg, name, .. } = base_bare {
+                    let pkg_bare = Self::unwrap_parens(pkg.as_ref());
+                    if let Expr::Ident { name: pkg_name, .. } = pkg_bare {
+                        if pkg_name == "hy"
+                            && (name == "pipe" || name == "new_pipe")
+                            && !self.local_vars.contains("hy")
+                        {
+                            let go_ty = self.expr_to_type_text(index)?;
+                            return Ok(Some(go_ty));
+                        }
+                    }
+                }
+                if let Expr::Ident { name, .. } = base_bare {
+                    if (name == "pipe" || name == "new_pipe")
+                        && !self.local_vars.contains(name)
+                        && !self.fn_shapes.contains_key(name.as_str())
+                    {
+                        let go_ty = self.expr_to_type_text(index)?;
+                        return Ok(Some(go_ty));
+                    }
+                }
+            }
+            Expr::Field { base: pkg, name, .. } => {
+                let pkg_bare = Self::unwrap_parens(pkg.as_ref());
+                if let Expr::Ident { name: pkg_name, .. } = pkg_bare {
+                    if pkg_name == "hy" && !self.local_vars.contains("hy") {
+                        let (head, ta) = split_type_args(name);
+                        if head == "pipe" || head == "new_pipe" {
+                            if let Some(inner) = ta {
+                                if inner.starts_with('[') && inner.ends_with(']') {
+                                    let inner_ty = &inner[1..inner.len() - 1];
+                                    let go_ty = self.go_type_name(inner_ty);
+                                    return Ok(Some(go_ty));
+                                }
+                            }
+                            return Ok(Some("any".to_string()));
+                        }
+                    }
+                }
+            }
+            Expr::Ident { name, .. } => {
+                let (head, ta) = split_type_args(name);
+                if (head == "pipe" || head == "new_pipe")
+                    && !self.local_vars.contains(head)
+                    && !self.fn_shapes.contains_key(head)
+                {
+                    if let Some(inner) = ta {
+                        if inner.starts_with('[') && inner.ends_with(']') {
+                            let inner_ty = &inner[1..inner.len() - 1];
+                            let go_ty = self.go_type_name(inner_ty);
+                            return Ok(Some(go_ty));
+                        }
+                    }
+                    return Ok(Some("any".to_string()));
+                }
+            }
+            _ => {}
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn expr_to_type_text(&mut self, e: &Expr) -> Result<String, EmitError> {
+        let e = Self::unwrap_parens(e);
+        match e {
+            Expr::Ident { name, .. } => Ok(self.go_type_name(name)),
+            Expr::Field { base, name, .. } => {
+                if let Some(s) = Self::assoc_index_type_arg(e) {
+                    Ok(self.go_type_name(&s))
+                } else {
+                    let b = self.expr_to_type_text(base)?;
+                    Ok(format!("{}.{}", b, to_go_name(name)))
+                }
+            }
+            Expr::Index { base, index, .. } => {
+                if let Some(s) = Self::assoc_index_type_arg(e) {
+                    Ok(self.go_type_name(&s))
+                } else {
+                    let b = self.expr_to_type_text(base)?;
+                    let i = self.expr_to_type_text(index)?;
+                    Ok(format!("{}[{}]", b, i))
+                }
+            }
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                ..
+            } if items.is_empty() => {
+                if e.as_array_lit().is_some() {
+                    Ok(self.type_text(t))
+                } else {
+                    Ok(format!("[]{}", self.type_text(t)))
+                }
+            }
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } if entries.is_empty() => {
+                Ok(format!(
+                    "map[{}]{}",
+                    self.type_text(key),
+                    self.type_text(value)
+                ))
+            }
+            Expr::StructLit {
+                ty: Some(t), fields, ..
+            } if fields.is_empty() => Ok(self.type_text(t)),
+            Expr::AddrOf { operand, .. } => {
+                let inner = self.expr_to_type_text(operand)?;
+                Ok(format!("*{}", inner))
+            }
+            Expr::Unary {
+                op: hy_syntax::UnOp::Addr,
+                operand,
+                ..
+            } => {
+                let inner = self.expr_to_type_text(operand)?;
+                Ok(format!("*{}", inner))
+            }
+            other => {
+                if let Some(name) = Self::assoc_index_type_arg(other) {
+                    Ok(self.go_type_name(&name))
+                } else {
+                    self.emit_expr(other, 0)
+                }
+            }
+        }
+    }
+
     /// Expression text for contexts that cannot hold a `?`/match (array
     /// lengths, etc.). Falls back to the AST's lossy `render()` — a
     /// description, never a wrong emission.
