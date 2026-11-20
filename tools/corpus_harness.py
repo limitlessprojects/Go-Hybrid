@@ -176,7 +176,14 @@ def run_checker(bin_path, hy_path, report_managed=False):
         # Parse failures have no managed report. A report that is present
         # must carry the usize counters emitted by hy_diag::ManagedReport;
         # silently defaulting malformed counters to zero hides audit drift.
-        if managed is not None:
+        # An accepted program must carry a managed report when requested.
+        if managed is None:
+            if verdict == "accept":
+                raise RuntimeError(
+                    f"checker managed report missing for {hy_path}: "
+                    "accepted program omitted summary.managed"
+                )
+        else:
             if not isinstance(managed, dict):
                 raise RuntimeError(f"checker managed report invalid for {hy_path}: expected an object")
             for field in ("managed_blocks", "sites_via_managed", "total_sites"):
