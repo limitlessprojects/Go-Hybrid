@@ -938,6 +938,7 @@ impl<'a> Checker<'a> {
         }
         None
     }
+    fn is_const_unbounded_append(&self, sa: &StateAt, mut e: &Expr) -> bool { loop { match unwrap_parens_and_move(e) { Expr::Ident { name, .. } => return self.lookup_binding(&sa.st, name).is_some_and(|b| b.immutable) || sa.orig.iter().rev().find_map(|m| m.get(name).map(|(sp, _)| *sp)).is_some_and(|dsp| self.enclosing_fn(dsp).and_then(|f| f.body.as_ref()).is_some_and(|b| crate::walk::flatten(b).stmts.iter().any(|(s, _)| matches!(s, Stmt::Local(l) if l.span == dsp && matches!(l.kind, hy_syntax::LocalKind::Const))))), Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::Slice { base, hi: None, .. } => e = base, _ => return false } } }
     fn call_mutates_captured<'b>(&self, sa: &StateAt, callee: &Expr, args: &[hy_syntax::CallArg], scopes: &[ScopeMap], local_fns: &HashMap<String, LocalFn<'b>>, dep: usize, esc_span: Span, seed_origins: &[(Orig, Orig)], strict: bool, frames: &[CallerFrame]) -> Option<Orig> {
         let sc = scopes.last().unwrap();
         let map_hit = |origs: Origs| origs.into_iter().find_map(|o| seed_origins.iter().find_map(|(k, v)| (*k == o).then(|| v.clone())).or_else(|| (!strict && !span_contains(esc_span, o.1)).then_some(o)));
@@ -952,7 +953,7 @@ impl<'a> Checker<'a> {
             let mut os = Vec::new(); self.collect_shared_origins(sa, b, &mut os); map_hit(os)
         };
         match unwrap_parens(callee) {
-            Expr::Ident { name, .. } if !sc.contains_key(name.as_str()) && !self.fns.contains_key(name.as_str()) && matches!(name.as_str(), "delete" | "clear" | "copy") => return args.first().and_then(|a| ref_of(&a.value)),
+            Expr::Ident { name, .. } if !sc.contains_key(name.as_str()) && !self.fns.contains_key(name.as_str()) && matches!(name.as_str(), "delete" | "clear" | "copy" | "append") => return args.first().filter(|a| name != "append" || !self.is_const_unbounded_append(sa, &a.value)).and_then(|a| ref_of(&a.value)),
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) { if !sc.contains_key(pkg.as_str()) && self.lookup_binding(&sa.st, pkg).is_none() && (self.packages.contains(pkg.as_str()) || self.known_package(pkg)) { return if matches!(crate::foreign::package_mode(pkg, name), crate::foreign::CallMode::Mutate | crate::foreign::CallMode::Consume) { args.first().and_then(|a| ref_of(&a.value)) } else { crate::foreign::package_mutated_arg(pkg, name).and_then(|idx| args.get(idx)).and_then(|a| ref_of(&a.value)) }; } }
                 if matches!(name.as_str(), "insert" | "remove" | "pop" | "set" | "push_string" | "array_push_string" | "write" | "finish") { return ref_of(unwrap_parens(base)); }
