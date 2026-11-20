@@ -1056,6 +1056,47 @@ impl<'a> Collector<'a> {
                 None
             }
             Expr::StructLit { ty: Some(t), .. } => Self::set_elem_of_ty(t),
+            // `p := &s` — a pointer to a set keeps the element type (Go's
+            // method set of `*set[T]` takes the same `T`).
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => self.set_elem_of_expr(operand),
+            // `x.seen` where `struct g { seen set[T] }` (also through a
+            // pointer, generic substitution, or `seen *set[T]`): the declared field type.
+            Expr::Field { base, name, .. } => {
+                let k = self.kind_of_expr(base);
+                let field_ty = self.struct_field_type_name(&k, name)?;
+                let clean = field_ty.strip_prefix('*').unwrap_or(&field_ty);
+                clean
+                    .strip_prefix("set[")
+                    .and_then(|r| r.strip_suffix(']'))
+                    .map(|t| t.to_string())
+            }
+            // `new(set[T])` — the builtin `new` over the prelude set type
+            // (neither `new` nor `set` shadowed by a binding/declaration).
+            Expr::Call { callee, args, .. }
+                if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if name == "new")
+                    && args.len() == 1
+                    && self.lookup_kind("new").is_none()
+                    && !self.ck.fns.contains_key("new") =>
+            {
+                // The parser folds the type argument into one identifier
+                // (`Ident { name: "set[int]" }`).
+                match unwrap_parens(&args[0].value) {
+                    Expr::Ident { name, .. }
+                        if self.lookup_kind("set").is_none()
+                            && !self.ck.structs.contains_key("set") =>
+                    {
+                        name.strip_prefix("set[")
+                            .and_then(|r| r.strip_suffix(']'))
+                            .map(|t| t.to_string())
+                    }
+                    _ => None,
+                }
+            }
             // `mk()` where `fn mk() set[T]` — the declared single result.
             Expr::Call { callee, .. } => match unwrap_parens(callee) {
                 Expr::Ident { name, .. } if self.lookup_kind(name).is_none() => self
