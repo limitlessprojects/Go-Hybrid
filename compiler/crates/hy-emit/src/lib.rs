@@ -705,6 +705,7 @@ pub(crate) struct ScopeSnapshot {
     var_struct: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
     loan_aliases: BTreeMap<String, BTreeSet<String>>,
+    closure_shapes: BTreeMap<String, (usize, bool)>,
 }
 
 impl Emitter {
@@ -764,6 +765,7 @@ impl Emitter {
             var_struct: self.var_struct.clone(),
             pointer_vars: self.pointer_vars.clone(),
             loan_aliases: self.loan_aliases.clone(),
+            closure_shapes: self.closure_shapes.clone(),
         }
     }
 
@@ -774,6 +776,7 @@ impl Emitter {
         self.var_struct = saved.var_struct;
         self.pointer_vars = saved.pointer_vars;
         self.loan_aliases = saved.loan_aliases;
+        self.closure_shapes = saved.closure_shapes;
     }
 
     pub(crate) fn shadow_local_name(&mut self, name: &str) {
@@ -896,7 +899,7 @@ impl Emitter {
             .collect();
         self.ptr_returning_fns = file
             .fns()
-            .filter(|f| f.results.first().is_some_and(|r| self.is_pointer_ty(&r.ty)))
+            .filter(|f| f.receiver.is_none() && f.results.first().is_some_and(|r| self.is_pointer_ty(&r.ty)))
             .map(|f| f.name.clone())
             .collect();
         self.fn_ret_struct = file
@@ -953,7 +956,10 @@ impl Emitter {
                     Some(recv) => base_ty_name(&recv.ty)
                         .and_then(|n| self.resolve_to_struct_name(&n))
                         .map(|sn| format!("{sn}.{}", f.name))
-                        .unwrap_or_else(|| f.name.clone()),
+                        .unwrap_or_else(|| {
+                            let r_name = base_ty_name(&recv.ty).unwrap_or_default();
+                            format!("{r_name}.{}", f.name)
+                        }),
                     None => f.name.clone(),
                 };
                 (key, (value_count, err, kind, ptr_params))
@@ -1775,7 +1781,7 @@ impl Emitter {
             Expr::Ident { name, .. } => self.pointer_vars.contains(name),
             Expr::Call { callee, .. } => {
                 if let Expr::Ident { name, .. } = callee.as_ref() {
-                    self.ptr_returning_fns.contains(name)
+                    !self.local_vars.contains(name) && self.ptr_returning_fns.contains(name)
                 } else {
                     false
                 }
