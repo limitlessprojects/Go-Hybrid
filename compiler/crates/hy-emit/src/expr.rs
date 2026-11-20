@@ -1130,6 +1130,21 @@ impl Emitter {
         };
         if let Some((base, head, type_args)) = assoc_field_and_ta {
             if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base) {
+                if root == "hy"
+                    && !self.local_vars.contains("hy")
+                    && !self.bindings.contains_key("hy")
+                    && matches!(head, "pipe" | "new_pipe")
+                {
+                    let translated_ta = type_args
+                        .as_deref()
+                        .map(|ta| self.translate_type_args_suffix(ta))
+                        .unwrap_or_default();
+                    let mut parts = Vec::new();
+                    for a in args {
+                        parts.push(self.emit_call_arg(a)?);
+                    }
+                    return Ok(format!("hy_pipe{}({})", translated_ta, parts.join(", ")));
+                }
                 if !self.is_unshadowed_pkg_root(root) && !self.bindings.contains_key(root) {
                     let full = format!("{}.{}", root, head);
                     if self.assoc_fns.contains(&full) {
