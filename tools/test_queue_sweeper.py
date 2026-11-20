@@ -179,5 +179,158 @@ class ReviewWindowPolicyTests(unittest.TestCase):
                 self.assertNotIn("20 days", comment)
 
 
+SNAPSHOT_SPEC = importlib.util.spec_from_file_location(
+    "queue_snapshot", Path(__file__).with_name("queue_snapshot.py"))
+SNAPSHOT = importlib.util.module_from_spec(SNAPSHOT_SPEC)
+SNAPSHOT_SPEC.loader.exec_module(SNAPSHOT)
+
+RUNNER_SPEC = importlib.util.spec_from_file_location(
+    "pr_triage_runner", Path(__file__).with_name("pr_triage_runner.py"))
+RUNNER = importlib.util.module_from_spec(RUNNER_SPEC)
+RUNNER_SPEC.loader.exec_module(RUNNER)
+
+
+class TriageRunnerNonGateCheckTests(unittest.TestCase):
+    """Regressions for non-gate housekeeping checks (e.g. `board`) poisoning
+    GitHub's statusCheckRollup on otherwise green fork PRs."""
+
+    @staticmethod
+    def make_pr(number=2851, *, raw_state="FAILURE", contexts=None,
+                mergeable="MERGEABLE", merge_state="UNSTABLE", age_days=18.0):
+        pr = {
+            "number": number,
+            "title": "fix(hy-check): regression fixture",
+            "_labels": [],
+            "_age_days": age_days,
+            "_idle_days": age_days,
+            "_ci_rollup": raw_state,
+            "_suite_concls": {},
+            "mergeable": mergeable,
+            "mergeStateStatus": merge_state,
+        }
+        if contexts is not None:
+            pr["commits"] = {
+                "nodes": [{
+                    "commit": {
+                        "statusCheckRollup": {
+                            "state": raw_state,
+                            "contexts": {"nodes": contexts},
+                        }
+                    }
+                }]
+            }
+        return pr
+
+    def test_snapshot_ignores_board_failure_when_gates_are_green(self):
+        rollup = {
+            "state": "FAILURE",
+            "contexts": {
+                "nodes": [
+                    {"__typename": "CheckRun", "name": "compiler", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                    {"__typename": "CheckRun", "name": "quick", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                    {"__typename": "CheckRun", "name": "preflight", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                    {"__typename": "CheckRun", "name": "board", "status": "COMPLETED", "conclusion": "FAILURE"},
+                ]
+            },
+        }
+        state, failed, ignored = SNAPSHOT.summarize_ci(rollup)
+        self.assertEqual(state, "SUCCESS")
+        self.assertEqual(failed, {})
+        self.assertEqual(ignored, {"board": "FAILURE"})
+
+    def test_snapshot_ignores_board_cancelled_when_gates_are_green(self):
+        rollup = {
+            "state": "FAILURE",
+            "contexts": {
+                "nodes": [
+                    {"__typename": "CheckRun", "name": "compiler", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                    {"__typename": "CheckRun", "name": "quick", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                    {"__typename": "CheckRun", "name": "board", "status": "COMPLETED", "conclusion": "CANCELLED"},
+                ]
+            },
+        }
+        state, failed, ignored = SNAPSHOT.summarize_ci(rollup)
+        self.assertEqual(state, "SUCCESS")
+        self.assertEqual(failed, {})
+        self.assertEqual(ignored, {"board": "CANCELLED"})
+
+    def test_snapshot_reports_real_gate_failure_with_check_name(self):
+        rollup = {
+            "state": "FAILURE",
+            "contexts": {
+                "nodes": [
+                    {"__typename": "CheckRun", "name": "compiler", "status": "COMPLETED", "conclusion": "FAILURE"},
+                    {"__typename": "CheckRun", "name": "quick", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                    {"__typename": "CheckRun", "name": "board", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                ]
+            },
+        }
+        state, failed, ignored = SNAPSHOT.summarize_ci(rollup)
+        self.assertEqual(state, "FAILURE")
+        self.assertEqual(failed, {"compiler": "FAILURE"})
+        self.assertEqual(ignored, {"board": "SUCCESS"})
+
+    def test_runner_skips_and_surfaces_land_candidate_when_only_board_failed(self):
+        pr = self.make_pr(
+            raw_state="FAILURE",
+            merge_state="UNSTABLE",
+            contexts=[
+                {"__typename": "CheckRun", "name": "compiler", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"__typename": "CheckRun", "name": "quick", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"__typename": "CheckRun", "name": "preflight", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"__typename": "CheckRun", "name": "board", "status": "COMPLETED", "conclusion": "FAILURE"},
+            ],
+        )
+        with patch.object(RUNNER, "config_protected", return_value=set()):
+            action, evidence, extra = RUNNER.decide(pr)
+            self.assertEqual((action, evidence, extra), ("skip", [], ""))
+            self.assertTrue(RUNNER.is_land_candidate(pr))
+
+    def test_runner_closes_and_names_failing_gate_when_compiler_failed(self):
+        pr = self.make_pr(
+            raw_state="FAILURE",
+            contexts=[
+                {"__typename": "CheckRun", "name": "compiler", "status": "COMPLETED", "conclusion": "FAILURE"},
+                {"__typename": "CheckRun", "name": "quick", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"__typename": "CheckRun", "name": "board", "status": "COMPLETED", "conclusion": "FAILURE"},
+            ],
+        )
+        with patch.object(RUNNER, "config_protected", return_value=set()):
+            action, evidence, extra = RUNNER.decide(pr)
+            self.assertEqual((action, evidence, extra), ("close", ["ci-failure"], ""))
+            self.assertFalse(RUNNER.is_land_candidate(pr))
+            reply = RUNNER.reply_for(pr, evidence)
+            self.assertIn("compiler=FAILURE", reply)
+            self.assertNotIn("board=", reply)
+
+    def test_live_gate_check_failure_protects_board_only_failure_on_legacy_snapshot(self):
+        def fake_rest(path, method="GET", body=None):
+            if path == "/repos/example/project/pulls/2851":
+                return 200, {"head": {"sha": "abc123"}}
+            if path == "/repos/example/project/commits/abc123/check-runs?per_page=100":
+                return 200, {
+                    "check_runs": [
+                        {"name": "compiler", "status": "completed", "conclusion": "success"},
+                        {"name": "quick", "status": "completed", "conclusion": "success"},
+                        {"name": "preflight", "status": "completed", "conclusion": "success"},
+                        {"name": "board", "status": "completed", "conclusion": "failure"},
+                    ]
+                }
+            raise AssertionError(f"unexpected path: {path}")
+
+        with patch.object(RUNNER, "REPO", "example/project"), \
+             patch.object(RUNNER, "rest", side_effect=fake_rest):
+            failed, details = RUNNER.live_gate_check_failure(2851)
+        self.assertFalse(failed)
+        self.assertEqual(details, {})
+
+    def test_live_gate_check_failure_fails_open_on_http_error(self):
+        with patch.object(RUNNER, "REPO", "example/project"), \
+             patch.object(RUNNER, "rest", return_value=(503, None)):
+            failed, details = RUNNER.live_gate_check_failure(2851)
+        self.assertFalse(failed)
+        self.assertEqual(details, {})
+
+
 if __name__ == "__main__":
     unittest.main()
