@@ -854,7 +854,10 @@ impl<'a> Checker<'a> {
             // `[N]T` is comparable exactly when `T` is.
             TypeShape::Array(elem) => self.incomparable_rec(elem, seen),
             TypeShape::Struct(Some(name)) => {
-                if Self::base_named_type_str(name) == "set" && !self.structs.contains_key("set") {
+                if Self::base_named_type_str(name) == "set"
+                    && !self.structs.contains_key("set")
+                    && !self.struct_type_params.contains_key("set")
+                {
                     return Some("set");
                 }
                 if seen.iter().any(|n| n == name) {
@@ -956,7 +959,9 @@ impl<'a> Checker<'a> {
                 Some("a method receiver must be a defined (named) type, not a type alias")
             }
             TypeExpr::Named { name, .. }
-                if !self.structs.contains_key(name) && is_primitive_receiver(name) =>
+                if !self.structs.contains_key(name)
+                    && !self.struct_type_params.contains_key(name)
+                    && is_primitive_receiver(name) =>
             {
                 Some("a method receiver must be a defined (named) type, not a primitive or interface")
             }
