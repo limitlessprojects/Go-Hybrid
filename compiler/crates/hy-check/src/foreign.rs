@@ -292,6 +292,7 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
         ) => Some(2),
         ("net", "split_host_port" | "SplitHostPort") => Some(3),
         ("hex", "decode_string" | "DecodeString") => Some(2),
+        ("tar" | "archive/tar", "file_info_header" | "FileInfoHeader") => Some(2),
         ("regex", "compile" | "match_string" | "Compile" | "MatchString") => Some(2),
         _ => None,
     }
@@ -1796,14 +1797,34 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
         ),
         "tar" => matches!(
             m,
-            "err_header"
+            "type_reg"
+                | "type_reg_a"
+                | "type_link"
+                | "type_symlink"
+                | "type_char"
+                | "type_block"
+                | "type_dir"
+                | "type_fifo"
+                | "type_cont"
+                | "type_x_header"
+                | "type_x_global_header"
+                | "type_gnu_sparse"
+                | "type_gnu_long_name"
+                | "type_gnu_long_link"
+                | "err_header"
                 | "err_write_too_long"
                 | "err_field_too_long"
                 | "err_write_after_close"
                 | "err_insecure_path"
+                | "format"
+                | "format_unknown"
+                | "format_ustar"
+                | "format_pax"
+                | "format_gnu"
                 | "header"
                 | "reader"
                 | "writer"
+                | "file_info_names"
                 | "new_reader"
                 | "new_writer"
                 | "file_info_header"
