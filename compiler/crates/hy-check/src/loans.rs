@@ -914,8 +914,9 @@ impl<'a> Checker<'a> {
         let flat = walk::flatten(block);
         let mut alias_stack: Vec<HashSet<String>> = vec![[param.to_string()].into_iter().collect()];
         let mut locals_stack: Vec<HashSet<String>> = vec![HashSet::new()];
-        for (stmt, idx) in &flat.stmts {
-            if let Some(evs) = flat.events.get(idx) {
+        let mut guards = flat.match_guards.clone();
+        for idx in 0..=flat.next {
+            if let Some(evs) = flat.events.get(&idx) {
                 for ev in evs {
                     match ev {
                         walk::ScopeEvent::Push => {
@@ -934,16 +935,32 @@ impl<'a> Checker<'a> {
                             }
                         }
                         walk::ScopeEvent::MatchBind { name, subject } => {
-                            let mut sroots = Vec::new();
-                            collect_ref_roots(subject, &mut sroots);
-                            if sroots.iter().any(|r| alias_stack.last().unwrap().contains(r)) {
-                                alias_stack.last_mut().unwrap().insert(name.to_string());
+                            if *name != "_" {
+                                let mut sroots = Vec::new();
+                                collect_ref_roots(subject, &mut sroots);
+                                let cur = alias_stack.last().unwrap();
+                                if sroots.iter().any(|r| cur.contains(r)) {
+                                    alias_stack.last_mut().unwrap().insert(name.to_string());
+                                } else {
+                                    alias_stack.last_mut().unwrap().remove(*name);
+                                }
+                            }
+                            if let (Some(ge), _) = walk::pop_guard(&mut guards, idx) {
+                                let cur = alias_stack.last().unwrap();
+                                let mut gc = Vec::new();
+                                walk::expr_calls(ge, &mut gc);
+                                let hit = cur.iter().any(|p| {
+                                    self.expr_fnlit_mutates_param(ge, p, depth)
+                                        || gc.iter().any(|c| self.call_mutates_param(c, p, depth))
+                                });
+                                if hit { return true; }
                             }
                         }
                         _ => {}
                     }
                 }
             }
+            let Some((stmt, _)) = flat.stmts.get(idx) else { break };
 
             // Check if stmt mutates any active alias of param
             match stmt {
@@ -976,12 +993,18 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                Stmt::Match { subject, .. } => {
+                    let cur = alias_stack.last().unwrap();
+                    if cur.iter().any(|p| self.expr_fnlit_mutates_param(subject, p, depth)) {
+                        return true;
+                    }
+                }
                 _ => {}
             }
 
             // Check calls in this statement
             let mut calls = Vec::new();
-            walk::own_calls(stmt, &mut calls);
+            walk::stmt_calls_pre(stmt, &mut calls);
             for cr in &calls {
                 if alias_stack.last().unwrap().iter().any(|p| self.call_mutates_param(cr, p, depth)) {
                     return true;
@@ -1255,8 +1278,10 @@ impl<'a> Checker<'a> {
         };
 
         let flat = walk::flatten(body);
-        for (stmt, idx) in &flat.stmts {
-            if let Some(evs) = flat.events.get(idx) {
+        let mut guards = flat.match_guards.clone();
+        for idx in 0..=flat.next {
+            let mut guard_calls = Vec::new();
+            if let Some(evs) = flat.events.get(&idx) {
                 for ev in evs {
                     match ev {
                         walk::ScopeEvent::Push => {
@@ -1277,16 +1302,29 @@ impl<'a> Checker<'a> {
                             }
                         }
                         walk::ScopeEvent::MatchBind { name, subject } => {
-                            let mut sroots = Vec::new();
-                            collect_ref_roots(subject, &mut sroots);
-                            sroots.retain(|r| !bound.contains(r));
-                            let current_shadows = shadow_stack.last().unwrap();
-                            let current_aliases = alias_stack.last().unwrap();
-                            for sr in sroots {
-                                if let Some(target) = resolve(&sr, current_aliases, current_shadows) {
-                                    match_aliases.entry(name.to_string()).or_default().push(target.clone());
-                                    alias_stack.last_mut().unwrap().insert(name.to_string(), target);
-                                    break;
+                            if *name != "_" {
+                                locals_stack.last_mut().unwrap().insert(name.to_string());
+                                let mut sroots = Vec::new();
+                                collect_ref_roots(subject, &mut sroots);
+                                let ca = alias_stack.last().unwrap();
+                                let cs = shadow_stack.last().unwrap();
+                                if let Some(t) = sroots.iter().find_map(|sr| resolve(sr, ca, cs)) {
+                                    shadow_stack.last_mut().unwrap().remove(*name);
+                                    let ma = match_aliases.entry(name.to_string()).or_default();
+                                    ma.push(t.clone());
+                                    alias_stack.last_mut().unwrap().insert(name.to_string(), t);
+                                } else {
+                                    alias_stack.last_mut().unwrap().remove(*name);
+                                    shadow_stack.last_mut().unwrap().insert(name.to_string());
+                                }
+                            }
+                            if let (Some(ge), _) = walk::pop_guard(&mut guards, idx) {
+                                let mut gc = Vec::new();
+                                walk::expr_calls(ge, &mut gc);
+                                let ca = alias_stack.last().unwrap().clone();
+                                let cs = shadow_stack.last().unwrap().clone();
+                                for cr in gc {
+                                    guard_calls.push((cr, ca.clone(), cs.clone()));
                                 }
                             }
                         }
@@ -1294,6 +1332,13 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            let stmt_opt = flat.stmts.get(idx).map(|(s, _)| *s);
+            if stmt_opt.is_none() && guard_calls.is_empty() {
+                break;
+            }
+            let empty_b = Block { stmts: Vec::new(), span: body.span };
+            let empty_blk = Stmt::Block { block: empty_b, span: body.span };
+            let stmt = stmt_opt.unwrap_or(&empty_blk);
 
             let current_shadows = shadow_stack.last_mut().unwrap();
             let current_aliases = alias_stack.last_mut().unwrap();
@@ -1332,23 +1377,6 @@ impl<'a> Checker<'a> {
                                 current_aliases.remove(name.as_str());
                                 current_shadows.insert(name.clone());
                             }
-                        }
-                    }
-                }
-                Stmt::Match { subject, arms, .. } => {
-                    let mut sroots = Vec::new();
-                    collect_ref_roots(subject, &mut sroots);
-                    sroots.retain(|r| !bound.contains(r));
-                    for arm in arms {
-                        if let hy_syntax::MatchPattern::Path {
-                            binding: Some(bname),
-                            ..
-                        } = &arm.pattern
-                        {
-                            match_aliases
-                                .entry(bname.clone())
-                                .or_default()
-                                .extend(sroots.iter().cloned());
                         }
                     }
                 }
@@ -1394,8 +1422,11 @@ impl<'a> Checker<'a> {
             }
             // calls in this statement
             let mut calls = Vec::new();
-            walk::own_calls(stmt, &mut calls);
-            for cr in &calls {
+            walk::stmt_calls_pre(stmt, &mut calls);
+            let (ca0, cs0) = (current_aliases.clone(), current_shadows.clone());
+            let tail = calls.into_iter().map(|c| (c, ca0.clone(), cs0.clone()));
+            for (ref cr, ref ca, ref cs) in guard_calls.into_iter().chain(tail) {
+                let (current_aliases, current_shadows) = (ca, cs);
                 match cr.callee {
                     Expr::Ident { name, .. } => {
                         if name == "delete" || name == "clear" {
@@ -1471,13 +1502,23 @@ impl<'a> Checker<'a> {
                         }
                     }
                     _ => {
+                        if let Expr::FnLit {
+                            params: fp, results: fr, body: fb, ..
+                        } = unwrap_parens(cr.callee)
+                        {
+                            let mut ib: HashSet<_> = fp.iter().map(|p| p.name.clone()).collect();
+                            ib.extend(fr.iter().filter_map(|r| r.name.clone()));
+                            for ir in self.collect_mutation_roots(st, fb, &ib) {
+                                if let Some(r) = resolve(&ir, current_aliases, current_shadows) {
+                                    out.insert(r);
+                                }
+                            }
+                        }
                         for a in cr.args {
                             let mut roots = Vec::new();
                             collect_ref_roots(&a.value, &mut roots);
                             for root in roots {
-                                if let Some(r) =
-                                    resolve(&root, current_aliases, current_shadows)
-                                {
+                                if let Some(r) = resolve(&root, current_aliases, current_shadows) {
                                     out.insert(r);
                                 }
                             }
@@ -3652,7 +3693,7 @@ impl<'a> Checker<'a> {
         {
             walk::expr_calls(expr, &mut calls);
         } else {
-            walk::own_calls(stmt, &mut calls);
+            walk::stmt_calls_pre(stmt, &mut calls);
         }
         for cr in &calls {
             self.walk_call_param_stores(cr, cst, aliases, param_names, depth, out);
@@ -4013,10 +4054,18 @@ impl<'a> Checker<'a> {
                                 slot_loan: false,
                             },
                         );
-                        if subj_origins.is_empty() {
+                        if subj_origins.is_empty() || bname == "_" {
                             arm_aliases.remove(bname);
                         } else {
                             arm_aliases.insert(bname.clone(), subj_origins.clone());
+                        }
+                    }
+                    if let Some(g) = &arm.guard {
+                        let mut gc = Vec::new();
+                        walk::expr_calls(g, &mut gc);
+                        for cr in &gc {
+                            let (pn, aa) = (param_names, &mut arm_aliases);
+                            self.walk_call_param_stores(cr, &arm_cst, aa, pn, depth, out);
                         }
                     }
                     self.walk_scoped_block_param_stores(
@@ -6379,6 +6428,9 @@ impl<'a> Checker<'a> {
         subject: &Expr,
         managed: bool,
     ) {
+        if name == "_" {
+            return;
+        }
         let shape = self.shape_of_expr(st, subject);
         let ty = match self.ty_of_expr(st, subject) {
             Some(hy_syntax::TypeExpr::Option { elem, .. }) => Some(*elem),
@@ -7304,13 +7356,21 @@ impl<'a> Checker<'a> {
         let flat = walk::flatten_with_results(body, &cst.named_results);
         cst.last_use = flat.last_use.clone();
         let mut active_loops: Vec<(usize, usize, &Block)> = Vec::new();
-        for (stmt, idx) in &flat.stmts {
-            let idx = *idx;
+        let mut match_guards = flat.match_guards.clone();
+        for idx in 0..=flat.next {
             if let Some(evs) = flat.events.get(&idx) {
                 for ev in evs {
                     match ev {
                         walk::ScopeEvent::Push => cst.scope_push(),
-                        walk::ScopeEvent::Pop => cst.scope_pop(),
+                        walk::ScopeEvent::Pop => {
+                            while let Some(&(for_idx, od, lb)) = active_loops.last() {
+                                let td = od + 1 + usize::from(!lb.stmts.is_empty());
+                                if idx <= for_idx || cst.scopes.len() != td { break; }
+                                active_loops.pop();
+                                if check_writes { self.replay_const_backedge(&cst, od, lb); }
+                            }
+                            cst.scope_pop();
+                        }
                         walk::ScopeEvent::SelectRecv { names, chan } => {
                             let elem = match self.shape_of_expr(&cst, chan) {
                                 TypeShape::Chan(e) => *e,
@@ -7355,7 +7415,7 @@ impl<'a> Checker<'a> {
                                         false,
                                         false,
                                     );
-                                } else {
+                                } else if *name != "_" {
                                     cst.aliases.insert(name.to_string(), cr.clone());
                                     cst.share_edge(name, cr);
                                 }
@@ -7372,9 +7432,17 @@ impl<'a> Checker<'a> {
                                 cst.aliases.remove(*name);
                                 cst.share_clear(name);
                             }
+                            if let (Some(g), _) = walk::pop_guard(&mut match_guards, idx) {
+                                self.scan_const_match_guard(st, &mut cst, g, check_writes);
+                            }
                         }
                     }
                 }
+            }
+            let Some((stmt, _)) = flat.stmts.get(idx) else { break };
+            let stmt: &Stmt = stmt;
+            if let Stmt::For { body: lbody, .. } = stmt {
+                active_loops.push((idx, cst.scopes.len().saturating_sub(1), lbody));
             }
 
             if check_writes {
@@ -7386,7 +7454,7 @@ impl<'a> Checker<'a> {
                 {
                     walk::expr_calls(expr, &mut calls);
                 } else {
-                    walk::own_calls(stmt, &mut calls);
+                    walk::stmt_calls_pre(stmt, &mut calls);
                 }
                 for cr in &calls {
                     self.check_delete_const(&cst, cr, &HashSet::new());
@@ -7608,7 +7676,7 @@ impl<'a> Checker<'a> {
             }
 
             let mut fnlits = Vec::new();
-            walk::own_fnlits(stmt, &mut fnlits);
+            walk::stmt_fnlits_pre(stmt, &mut fnlits);
             for flit in fnlits {
                 let mut merged = cst.clone();
                 let sp = flit.span();
@@ -7645,21 +7713,38 @@ impl<'a> Checker<'a> {
                 }
                 self.scan_closure_body(&mut merged, flit, &HashSet::new());
             }
-            if let Stmt::For { body: lbody, .. } = stmt {
-                let outer_depth = cst.scopes.len().saturating_sub(1);
-                active_loops.push((flat.loop_end_of(idx), outer_depth, lbody));
-            }
-            while let Some(&(loop_end, outer_depth, lbody)) = active_loops.last() {
-                if loop_end != idx {
-                    break;
-                }
-                active_loops.pop();
-                if check_writes {
-                    self.replay_const_backedge(&cst, outer_depth, lbody);
-                }
-            }
         }
         cst
+    }
+
+    fn scan_const_match_guard(&mut self, st: &FnState, cst: &mut FnState, g: &Expr, cw: bool) {
+        if cw {
+            self.check_addr_of_const_loan(cst, g);
+            let mut gc = Vec::new();
+            walk::expr_calls(g, &mut gc);
+            for cr in &gc {
+                cr.args.iter().for_each(|a| self.check_addr_of_const_loan(cst, &a.value));
+                self.check_delete_const(cst, cr, &HashSet::new());
+                self.check_call_const_writes(cst, cr, &HashSet::new());
+                if matches!(unwrap_parens(cr.callee), Expr::Ident { name, .. } if name == "copy") {
+                    self.record_copy_may_share(cst, cr);
+                }
+                self.record_callee_param_stores(cst, cr);
+            }
+        }
+        let mut gfl = Vec::new();
+        walk::expr_fnlits(g, &mut gfl);
+        for flit in gfl {
+            let (mut merged, sp) = (cst.clone(), flit.span());
+            if let Some((se, sa, ss)) =
+                st.closure_scoped_envs.get(&(sp.start.line as usize, sp.start.col as usize))
+            {
+                for (k, v) in se { merged.env.entry(k.clone()).or_insert_with(|| v.clone()); }
+                for (k, v) in sa { merged.aliases.entry(k.clone()).or_insert_with(|| v.clone()); }
+                ss.iter().for_each(|(k, ps)| ps.iter().for_each(|p| merged.share_edge(k, p)));
+            }
+            self.scan_closure_body(&mut merged, flit, &HashSet::new());
+        }
     }
 
     /// T22 across loop iterations (#2309): a const alias created late in a
@@ -8417,7 +8502,9 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => {
+            Stmt::Expr { expr, .. }
+            | Stmt::Defer { call: expr, .. }
+            | Stmt::Match { subject: expr, .. } => {
                 if self.expr_fnlit_mutates_const_param(expr, aliases, depth) {
                     return true;
                 }
@@ -8425,7 +8512,7 @@ impl<'a> Checker<'a> {
             _ => {}
         }
         let mut calls = Vec::new();
-        walk::own_calls(stmt, &mut calls);
+        walk::stmt_calls_pre(stmt, &mut calls);
         for cr in &calls {
             if self.call_mutates_const_param(cr, aliases, depth) {
                 return true;
@@ -8512,6 +8599,19 @@ impl<'a> Checker<'a> {
                             arm_aliases.insert(bname.clone());
                         } else {
                             arm_aliases.remove(bname);
+                        }
+                    }
+                    if let Some(g) = &arm.guard {
+                        let mut gc = Vec::new();
+                        walk::expr_calls(g, &mut gc);
+                        if self.expr_fnlit_mutates_const_param(g, &arm_aliases, depth) {
+                            return true;
+                        }
+                        for cr in &gc {
+                            if self.call_mutates_const_param(cr, &arm_aliases, depth) {
+                                return true;
+                            }
+                            self.record_call_const_alias_stores(cr, &mut arm_aliases);
                         }
                     }
                     if self.block_mutates_const_param(&arm.body, &mut arm_aliases, depth) {
@@ -9343,10 +9443,14 @@ fn collect_capture_idents_stmt(
         hy_syntax::Stmt::Match { subject, arms, .. } => {
             collect_capture_idents_expr(subject, bound, out);
             for arm in arms {
-                if let Some(g) = &arm.guard {
-                    collect_capture_idents_expr(g, bound, out);
+                let mut ab = bound.clone();
+                if let hy_syntax::MatchPattern::Path { binding: Some(b), .. } = &arm.pattern {
+                    if b != "_" { ab.insert(b.clone()); }
                 }
-                collect_capture_idents_block(&arm.body, bound, out);
+                if let Some(g) = &arm.guard {
+                    collect_capture_idents_expr(g, &mut ab, out);
+                }
+                collect_capture_idents_block(&arm.body, &mut ab, out);
             }
         }
         hy_syntax::Stmt::Defer { call, .. } => collect_capture_idents_expr(call, bound, out),

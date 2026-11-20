@@ -21,7 +21,7 @@
 use crate::model::as_addr_of;
 use hy_diag::Span;
 use hy_syntax::{Block, CallArg, Expr, ForKind, InterpPart, Place, PlaceKind, SelectArmKind, Stmt};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 // ---------------------------------------------------------------------------
 // Flat statement list + structural facts (Pass A)
@@ -60,7 +60,8 @@ pub(crate) struct FlatInfo<'a> {
     /// end at the same index) are preserved in sequence so every `Push`
     /// has a matching `Pop`.
     pub events: HashMap<usize, Vec<ScopeEvent<'a>>>,
-    next: usize,
+    pub match_guards: HashMap<usize, VecDeque<(Option<&'a Expr>, usize)>>,
+    pub(crate) next: usize,
 }
 
 impl<'a> FlatInfo<'a> {
@@ -160,7 +161,7 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt, named_results: &[String]
     out.stmts.push((stmt, idx));
 
     let mut uses = Vec::new();
-    own_uses_with_results(stmt, named_results, &mut uses);
+    stmt_uses_pre(stmt, named_results, &mut uses);
     for u in uses {
         let e = out.last_use.entry(u.name).or_insert(idx);
         if *e < idx {
@@ -200,31 +201,29 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt, named_results: &[String]
         }
         Stmt::Match { subject, arms, .. } => {
             for arm in arms {
+                if arm.body.stmts.is_empty() && arm.guard.is_none() {
+                    continue;
+                }
                 let first = out.next;
-                let mut ran = false;
-                for s in &arm.body.stmts {
-                    if !ran {
-                        out.mark_event(first, ScopeEvent::Push);
-                        if let hy_syntax::MatchPattern::Path {
-                            binding: Some(name),
-                            ..
-                        } = &arm.pattern
-                        {
-                            out.mark_event(
-                                first,
-                                ScopeEvent::MatchBind {
-                                    name: name.as_str(),
-                                    subject,
-                                },
-                            );
-                        }
-                        ran = true;
+                out.mark_event(first, ScopeEvent::Push);
+                let name = match &arm.pattern {
+                    hy_syntax::MatchPattern::Path { binding: Some(n), .. } => n.as_str(),
+                    _ => "_",
+                };
+                out.mark_event(first, ScopeEvent::MatchBind { name, subject });
+                out.match_guards.entry(first).or_default().push_back((arm.guard.as_ref(), idx));
+                if let Some(g) = &arm.guard {
+                    let mut g_uses = Vec::new();
+                    expr_uses(g, &mut g_uses);
+                    for u in g_uses.into_iter().filter(|u| u.name != name) {
+                        let e = out.last_use.entry(u.name).or_insert(idx);
+                        *e = (*e).max(idx);
                     }
+                }
+                for s in &arm.body.stmts {
                     walk_one(out, s, named_results);
                 }
-                if ran {
-                    out.mark_event(out.next, ScopeEvent::Pop);
-                }
+                out.mark_event(out.next, ScopeEvent::Pop);
             }
         }
         Stmt::Block { block, .. } => scoped_block(out, block, named_results),
@@ -970,4 +969,24 @@ fn place_is_index_free(p: &Place) -> bool {
 pub(crate) fn addr_of_index_base_path(value: &Expr) -> Option<String> {
     let (base, _) = peel_slot_loan_index(value)?;
     expr_path(base)
+}
+
+pub(crate) fn pop_guard<'a>(
+    guards: &mut HashMap<usize, VecDeque<(Option<&'a Expr>, usize)>>,
+    idx: usize,
+) -> (Option<&'a Expr>, usize) {
+    guards.get_mut(&idx).and_then(|q| q.pop_front()).unwrap_or((None, idx))
+}
+pub(crate) fn stmt_uses_pre(stmt: &Stmt, nr: &[String], out: &mut Vec<Use>) {
+    if let Stmt::Match { subject, .. } = stmt {
+        expr_uses(subject, out);
+    } else {
+        own_uses_with_results(stmt, nr, out);
+    }
+}
+pub(crate) fn stmt_calls_pre<'a>(s: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
+    if let Stmt::Match { subject, .. } = s { expr_calls(subject, out) } else { own_calls(s, out) }
+}
+pub(crate) fn stmt_fnlits_pre<'a>(s: &'a Stmt, out: &mut Vec<&'a Expr>) {
+    if let Stmt::Match { subject, .. } = s { expr_fnlits(subject, out) } else { own_fnlits(s, out) }
 }

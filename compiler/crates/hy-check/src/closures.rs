@@ -427,9 +427,13 @@ fn collect_place_direct_fnlits<'a>(place: &'a hy_syntax::Place, out: &mut Vec<&'
 
 fn check_stmt_own_uses(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
     let mut uses = Vec::new();
-    crate::walk::own_uses_with_results(stmt, &st.named_results, &mut uses);
-    if !managed {
-        for u in &uses {
+    crate::walk::stmt_uses_pre(stmt, &st.named_results, &mut uses);
+    check_uses_in_closure(ck, st, &uses, managed);
+}
+
+fn check_uses_in_closure(ck: &mut Checker<'_>, st: &mut FnState, u: &[crate::walk::Use], m: bool) {
+    if !m {
+        for u in u {
             if u.via_move && !st.scopes.iter().any(|s| s.contains_key(&u.name)) {
                 if let Some(b) = st.env.get_mut(&u.name) {
                     if b.moved.is_none()
@@ -451,7 +455,7 @@ fn check_stmt_own_uses(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, mana
             }
         }
     }
-    ck.check_uses(st, &uses);
+    ck.check_uses(st, u);
 }
 
 fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a Stmt, managed: bool, nested: &mut Vec<NestedClosure<'a>>) {
@@ -489,7 +493,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
     {
         crate::walk::expr_calls(expr, &mut calls);
     } else {
-        crate::walk::own_calls(stmt, &mut calls);
+        crate::walk::stmt_calls_pre(stmt, &mut calls);
     }
     for cr in &calls {
         if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
@@ -1169,33 +1173,40 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             );
             sync_nested_moves(st, nested);
             collect_expr_direct_fnlits(subject, st, nested);
-            for arm in arms {
-                if let Some(g) = &arm.guard {
-                    ck.mark_move_in_value(
-                        st,
-                        g,
-                        format!("the match guard `{}`", g.render()),
-                    );
-                }
-            }
             ck.check_match(st, subject, arms, *span);
+            let mut guard_mv: Option<crate::model::MoveInfo> = None;
             for arm in arms {
                 st.scope_push();
-                if let hy_syntax::MatchPattern::Path {
-                    binding: Some(name),
-                    ..
-                } = &arm.pattern
-                {
+                let mut arm_name = None;
+                if let hy_syntax::MatchPattern::Path { binding: Some(name), .. } = &arm.pattern {
+                    arm_name = Some(name.as_str());
                     mark_nested_overwritten(st, name, nested);
                     ck.bind_match_arm(st, name, subject, managed);
+                    if let (Some(mv), Some(b)) = (&guard_mv, st.env_lookup_mut(name)) {
+                        if b.moved.is_none() && !b.shape.is_sendable_by_type() {
+                            b.moved = Some(mv.clone());
+                        }
+                    }
                     sync_nested_moves(st, nested);
                 }
                 if let Some(g) = &arm.guard {
-                    ck.mark_move_in_value(
-                        st,
-                        g,
-                        format!("the match guard `{}`", g.render()),
-                    );
+                    let (mut g_uses, mut gc) = (Vec::new(), Vec::new());
+                    crate::walk::expr_uses(g, &mut g_uses);
+                    check_uses_in_closure(ck, st, &g_uses, managed);
+                    crate::walk::expr_calls(g, &mut gc);
+                    for cr in &gc {
+                        if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
+                            if name == "copy" {
+                                ck.record_copy_may_share(st, cr);
+                            }
+                        }
+                        ck.record_callee_param_stores(st, cr);
+                    }
+                    ck.mark_move_in_value(st, g, format!("the match guard `{}`", g.render()));
+                    let b_mv = arm_name.and_then(|n| st.env_lookup(n)?.moved.clone());
+                    if let Some(mv) = b_mv {
+                        guard_mv.get_or_insert(mv);
+                    }
                     sync_nested_moves(st, nested);
                     collect_expr_direct_fnlits(g, st, nested);
                 }
@@ -1306,8 +1317,33 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
     let saved_loans = std::mem::take(&mut st.loans);
     let saved_aliases = st.aliases.clone();
     let saved_may_share = st.may_share.clone();
-    for (stmt, idx) in &flat.stmts {
-        let idx = *idx;
+    let mut guards = flat.match_guards.clone();
+    for idx in 0..=flat.next {
+        if let Some(evs) = flat.events.get(&idx) {
+            for ev in evs {
+                match ev {
+                    walk::ScopeEvent::Push => st.scope_push(),
+                    walk::ScopeEvent::Pop => st.scope_pop(),
+                    walk::ScopeEvent::MatchBind { name, subject } => {
+                        ck.bind_match_arm(st, name, subject, false);
+                        if *name != "_" {
+                            let mut sroots = Vec::new();
+                            crate::model::collect_ref_roots(subject, &mut sroots);
+                            sroots.iter().for_each(|r| st.share_edge(name, r));
+                        }
+                        if let (Some(g), m_idx) = walk::pop_guard(&mut guards, idx) {
+                            let mut gc = Vec::new();
+                            walk::expr_calls(g, &mut gc);
+                            for cr in &gc {
+                                ck.process_call(st, cr, m_idx, None, &mut Vec::new());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let Some((stmt, _)) = flat.stmts.get(idx) else { break };
         if let Stmt::Break { label: Some(_), span, .. }
         | Stmt::Continue { label: Some(_), span, .. } = stmt
         {
@@ -1327,7 +1363,7 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
             }
         }
         let mut calls = Vec::new();
-        walk::own_calls(stmt, &mut calls);
+        walk::stmt_calls_pre(stmt, &mut calls);
         for cr in calls {
             let mut dummy_consumes = Vec::new();
             ck.process_call(st, &cr, idx, None, &mut dummy_consumes);
@@ -1365,6 +1401,10 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             if let Expr::Ident { name: src, .. } = crate::model::unwrap_parens(val) {
                                 st.aliases.insert(name.clone(), src.clone());
                                 st.share_edge(name, src);
+                            } else {
+                                let mut roots = Vec::new();
+                                crate::model::collect_ref_roots(val, &mut roots);
+                                roots.iter().for_each(|r| st.share_edge(name, r));
                             }
                         }
                     }
