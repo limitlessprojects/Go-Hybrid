@@ -546,7 +546,7 @@ impl<'a> Checker<'a> {
             other => other,
         };
         match shape {
-            TypeShape::OwnHandle(ref h) if h == "hy.recv_cap" => true,
+            TypeShape::OwnHandle(ref h) if h.split('[').next() == Some("hy.recv_cap") => true,
             TypeShape::Chan(_) => {
                 if let Some(ty) = proj_ty {
                     let resolved = self.resolve_type_alias(&ty);

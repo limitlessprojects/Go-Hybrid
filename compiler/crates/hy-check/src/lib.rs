@@ -617,12 +617,14 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             walk::expr_calls(expr, &mut calls);
             for cr in calls {
                 ck.process_call(&mut st, &cr, idx, Some(loop_end), &mut stmt_consumes);
+                ck.check_cap_method_call(&mut st, &cr, managed);
             }
         } else {
             let mut calls = Vec::new();
             walk::own_calls(stmt, &mut calls);
             for cr in calls {
                 ck.process_call(&mut st, &cr, idx, None, &mut stmt_consumes);
+                ck.check_cap_method_call(&mut st, &cr, managed);
             }
         }
         if !stmt_consumes.is_empty() {
