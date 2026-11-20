@@ -45,6 +45,7 @@
 //! every rejection teaches (O17 — fix-its come from the hy-diag registry);
 //! diagnostics are returned in source order.
 
+mod a2_interproc;
 mod addr_loan;
 mod addressable;
 mod arith;
