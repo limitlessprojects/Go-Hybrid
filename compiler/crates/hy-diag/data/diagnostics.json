@@ -72,6 +72,22 @@
       "tier0_rule_id": "MANAGED"
     },
     {
+      "code": "HYB-E0005",
+      "name": "managed-contract-violation",
+      "category": "parse",
+      "severity": "error",
+      "title": "managed synchronization contract violated or unverifiable",
+      "summary": "A `managed` block that declares a synchronization contract (`guard:`, `protects:`) — or any verifiable category under `--require-managed-contracts` — must satisfy its declared discipline fail-closed (#4297). For `\"mutex\"`, `guard:` must resolve to a `sync.mutex` / `sync.rw_mutex` and every access to `protects:` inside the block and its spawned tasks must sit inside a balanced `guard.lock()` ... `guard.unlock()` critical section without uncontracted boundary escapes or reference aliasing. For `\"atomic\"`, every access to `protects:` must go through `atomic.*` operations or atomic methods.",
+      "fixits": [
+        "for `\"mutex\"`: declare `guard: <mutex_path>, protects: <target>` and bracket every access to `<target>` with `<mutex_path>.lock()` and `<mutex_path>.unlock()`",
+        "for `\"atomic\"`: declare `protects: <target>` (without `guard:`) and access `<target>` exclusively through `atomic.*` operations or atomic methods",
+        "ensure every non-sendable value crossing a `task` or channel-send boundary inside the contracted block is listed in `protects:`"
+      ],
+      "example": "managed(\"pool stats\", \"mutex\", guard: stats.mu, protects: stats) { p := stats.processed }   // reject: HYB-E0005 — `stats.processed` read outside `stats.mu.lock()`",
+      "rule": "MANAGED",
+      "tier0_rule_id": "MANAGED"
+    },
+    {
       "code": "HYB-E1001",
       "name": "unresolved-name",
       "category": "resolve",

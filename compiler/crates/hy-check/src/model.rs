@@ -736,6 +736,9 @@ pub(crate) struct Checker<'a> {
     /// An A5 escape site (`HYB-E3013`) inside `managed` is the declared escape
     /// hatch and is permitted, so the check reads this counter.
     pub managed_depth: usize,
+    /// #4297 (`--require-managed-contracts`): reject uncontracted `managed` blocks
+    /// outside `"interop"` and `"finalizer"`.
+    pub require_managed_contracts: bool,
 }
 
 /// Row 14 (discussion #4): the CLOSED category set — the invariant a
@@ -775,6 +778,7 @@ impl<'a> Checker<'a> {
             managed_audit: Vec::new(),
             closure_bound: Vec::new(),
             managed_depth: 0,
+            require_managed_contracts: false,
         }
     }
 
