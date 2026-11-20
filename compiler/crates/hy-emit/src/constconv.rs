@@ -272,13 +272,26 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
                     let v = const_int_expr(&args[0].value)?;
                     return Some(WideInt::from_i128(v.truncate_to_width(bits, signed)));
                 }
-            } else if name == "len" && args.len() == 1 && !args[0].spread {
+            } else if (name == "len" || name == "cap") && args.len() == 1 && !args[0].spread {
                 let mut a = &args[0].value;
                 while let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = a {
                     a = inner;
                 }
                 if let Expr::Lit { kind: LitKind::Str(st) | LitKind::RawStr(st), .. } = a {
-                    return Some(WideInt::from_i128(st.len() as i128));
+                    if name == "len" {
+                        return Some(WideInt::from_i128(st.len() as i128));
+                    }
+                }
+                if let Some((len, _, _)) = a.as_array_lit() {
+                    return match len {
+                        Some(len) => const_int_expr(len),
+                        None => {
+                            let Expr::SliceLit { items, .. } = a else {
+                                return None;
+                            };
+                            Some(WideInt::from_i128(items.len() as i128))
+                        }
+                    };
                 }
             } else if (name == "min" || name == "max") && !args.is_empty() && args.iter().all(|a| !a.spread) {
                 let mut acc = const_int_expr(&args[0].value)?;
@@ -448,5 +461,12 @@ mod tests {
         assert_eq!(fold_constant(&operand, "i8"), Some(-44));
         let operand = operand_of("fn main() { b := int8((300)) }");
         assert_eq!(fold_constant(&operand, "int8"), Some(44));
+    }
+
+    #[test]
+    fn array_literal_len_and_cap_fold() {
+        let operand = operand_of("fn main() { a := u8(len([300]int{})) }");
+        assert_eq!(const_int_expr(&operand).and_then(WideInt::to_i128), Some(300));
+        assert_eq!(fold_constant(&operand, "u8"), Some(44));
     }
 }
