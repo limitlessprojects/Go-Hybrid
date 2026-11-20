@@ -281,14 +281,18 @@ impl<'a> Checker<'a> {
             }
             Expr::Field { base, .. } => self.check_expr_builtin_args(st, base),
             Expr::StructLit { ty, fields, span } => {
-                if let Some(t @ hy_syntax::TypeExpr::Chan { .. }) = ty {
-                    let ty_str = t.render();
-                    self.emit_builtin(
-                        *span,
-                        format!(
-                            "channel type `{ty_str}` is not a value expression — construct a channel with `make({ty_str})` (HYB-E2005)"
-                        ),
-                    );
+                if let Some(t) = ty {
+                    let is_chan = matches!(t, hy_syntax::TypeExpr::Chan { .. })
+                        || matches!(t, hy_syntax::TypeExpr::Named { name, .. } if !self.structs.contains_key(Self::base_named_type_str(name)) && matches!(self.resolve_type_alias(t), hy_syntax::TypeExpr::Chan { .. }));
+                    if is_chan {
+                        let ty_str = t.render();
+                        self.emit_builtin(
+                            *span,
+                            format!(
+                                "channel type `{ty_str}` is not a value expression — construct a channel with `make({ty_str})` (HYB-E2005)"
+                            ),
+                        );
+                    }
                 }
                 for f in fields {
                     self.check_expr_builtin_args(st, &f.value);
@@ -508,7 +512,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn classify_make_target(&self, e: &Expr) -> MakeTargetKind {
+    fn classify_make_target(&self, st: &FnState, e: &Expr) -> MakeTargetKind {
         let unwrapped = unwrap_parens(e);
         match unwrapped {
             Expr::SliceLit {
@@ -522,18 +526,24 @@ impl<'a> Checker<'a> {
                 fields,
                 ..
             } if fields.is_empty() => MakeTargetKind::Chan(*dir),
-            Expr::Ident { name, .. } => {
+            Expr::Ident { name, span } => {
                 let base = Self::base_named_type_str(name);
-                if let Some(ty) = self.type_aliases.get(base) {
-                    match self.resolve_type_alias(ty) {
-                        hy_syntax::TypeExpr::Slice { .. } => MakeTargetKind::Slice,
-                        hy_syntax::TypeExpr::Map { .. } => MakeTargetKind::Map,
-                        hy_syntax::TypeExpr::Chan { dir, .. } => MakeTargetKind::Chan(dir),
-                        _ => MakeTargetKind::Invalid,
+                if self.is_unshadowed_in_make(base, Some(st))
+                    && !self.const_values.contains_key(base)
+                    && !self.structs.contains_key(base)
+                    && !st.type_params.contains(base)
+                    && self.resolve_local_binding_at(base, span.start).is_none()
+                {
+                    if let Some(ty) = self.type_aliases.get(base) {
+                        return match self.resolve_type_alias(ty) {
+                            hy_syntax::TypeExpr::Slice { .. } => MakeTargetKind::Slice,
+                            hy_syntax::TypeExpr::Map { .. } => MakeTargetKind::Map,
+                            hy_syntax::TypeExpr::Chan { dir, .. } => MakeTargetKind::Chan(dir),
+                            _ => MakeTargetKind::Invalid,
+                        };
                     }
-                } else {
-                    MakeTargetKind::Invalid
                 }
+                MakeTargetKind::Invalid
             }
             _ => MakeTargetKind::Invalid,
         }
@@ -548,7 +558,7 @@ impl<'a> Checker<'a> {
             );
             return;
         }
-        let target = self.classify_make_target(&args[0].value);
+        let target = self.classify_make_target(st, &args[0].value);
         match target {
             MakeTargetKind::Invalid => {
                 self.emit_builtin(
@@ -803,7 +813,7 @@ impl<'a> Checker<'a> {
         if dep > 16 { return false; }
         let e = unwrap_parens_and_move(expr); if proj.is_empty() && self.is_foreign_escape_callee(&sa.st, e) { return true; }
         match e {
-            Expr::AddrOf { operand: o, .. } | Expr::Unary { op: UnOp::Addr, operand: o, .. } => self.callee_reaches_foreign(sa, cspan, o, proj, bound, dep + 1, seen),
+            Expr::AddrOf { operand: o, .. } | Expr::Unary { op: UnOp::Addr, operand: o, .. } | Expr::Try { operand: o, .. } | Expr::Receive { chan: o, .. } => self.callee_reaches_foreign(sa, cspan, o, proj, bound, dep + 1, seen),
             Expr::Ident { name, .. } => {
                 if let Some(cv) = self.const_values.get(name.as_str()) { return self.callee_reaches_foreign(sa, cspan, cv, proj, bound, dep + 1, seen); }
                 let Some((sp, ef)) = cspan.and_then(|sp| self.enclosing_fn(sp).map(|f| (sp, f))) else { return false; };
@@ -824,6 +834,7 @@ impl<'a> Checker<'a> {
             Expr::MapLit { entries, .. } => match proj.first() { None => entries.iter().any(|(_, v)| self.callee_reaches_foreign(sa, cspan, v, &[], bound, dep + 1, seen)), Some(Proj::Index(pk)) => entries.iter().filter(|(k, _)| pk.as_deref().map_or(true, |pk| const_idx(k).map_or(true, |ck| ck == pk))).any(|(_, v)| self.callee_reaches_foreign(sa, cspan, v, &proj[1..], bound, dep + 1, seen)), _ => false },
             Expr::Field { base, name, .. } => self.callee_reaches_foreign(sa, cspan, base, &prepend_proj(Proj::Field(name.clone()), proj), bound, dep + 1, seen),
             Expr::Index { base, index, .. } => self.callee_reaches_foreign(sa, cspan, base, &prepend_proj(Proj::Index(const_idx(index)), proj), bound, dep + 1, seen),
+            Expr::Slice { base, lo, .. } => self.callee_reaches_foreign(sa, cspan, base, &slice_proj(lo.as_deref(), proj), bound, dep + 1, seen),
             Expr::Call { callee: inner_c, args: inner_args, .. } => {
                 let c = unwrap_parens_and_move(inner_c);
                 if let Expr::Ident { name, .. } = c { if self.lookup_binding(&sa.st, name).is_none() && !self.fns.contains_key(name.as_str()) {
@@ -889,13 +900,14 @@ impl<'a> Checker<'a> {
         let (mut init, dep, esc_span, seed_origins, strict, mut sa, frames) = seeded.unwrap_or_else(|| (HashMap::new(), 0, fn_span(params, results, body), Vec::new(), false, self.enclosing_fn(body.span).map_or_else(|| StateAt::new(st.clone()), |ef| self.state_at(ef, Some(body.span))), Vec::new()));
         self.push_fn_sig(&mut sa, params, results, Some(&mut init)); let (mut scopes, mut local_fns) = (vec![init], HashMap::<String, LocalFn<'_>>::new());
         let map_hit = |origs: Origs| origs.into_iter().find_map(|o| seed_origins.iter().find_map(|(k, v)| (*k == o).then(|| v.clone())).or_else(|| (!strict && !span_contains(esc_span, o.1)).then_some(o)));
-        let classify = |val: Option<&Expr>, sc: &ScopeMap, sa: &StateAt| -> Option<(Orig, bool)> {
-            let e = unwrap_parens_and_move(val?); let (sh, (inner, is_addr)) = (self.shape_of_expr(&sa.st, e), match crate::model::as_addr_of(e) { Some(op) => (unwrap_parens_and_move(op), true), None => (e, false) });
+        let classify = |val: Option<&Expr>, sh_ov: Option<TypeShape>, sc: &ScopeMap, sa: &StateAt| -> Option<(Orig, bool)> {
+            let e = unwrap_parens_and_move(val?); let (sh, (inner, is_addr)) = (sh_ov.unwrap_or_else(|| self.shape_of_expr(&sa.st, e)), match crate::model::as_addr_of(e) { Some(op) => (unwrap_parens_and_move(op), true), None => (e, false) });
             if let Some(r) = inner.root_ident() {
                 if r == "_" { return None; }
                 if let Some(entry) = sc.get(r) { let (cap, wp) = entry.as_ref()?; return if strict && is_addr { (*wp || self.expr_traverses_shared(&sa.st, inner)).then(|| (cap.clone(), true)) } else if strict { self.may_share_or_unk(&sh).then(|| (cap.clone(), matches!(sh, TypeShape::Pointer(_)))) } else { (is_addr || self.may_share_or_unk(&sh)).then(|| (cap.clone(), is_addr || *wp || matches!(sh, TypeShape::Pointer(_)))) }; }
                 return (is_addr || (!matches!(sh, TypeShape::Closure) && self.may_share_or_unk(&sh))).then(|| map_hit(sa.lookup_orig(self, r)).map(|o| (o, is_addr || matches!(sh, TypeShape::Pointer(_))))).flatten();
             }
+            if !is_addr && (matches!(sh, TypeShape::Closure) || !self.may_share_or_unk(&sh)) { return None; }
             let mut os = Vec::new(); if is_addr { self.collect_addr_origins(sa, inner, &mut os); } else { self.collect_shared_origins(sa, e, &mut os); } Some((map_hit(os)?, is_addr || matches!(sh, TypeShape::Pointer(_))))
         };
         let flat = crate::walk::flatten(body);
@@ -904,35 +916,51 @@ impl<'a> Checker<'a> {
                 crate::walk::ScopeEvent::Push => { sa.push(); scopes.push(scopes.last().cloned().unwrap_or_default()); }
                 crate::walk::ScopeEvent::Pop if scopes.len() > 1 => { sa.pop(); scopes.pop(); }
                 crate::walk::ScopeEvent::SelectRecv { names, chan } => { self.bind_select_recv(&mut sa, names, chan); for (i, n) in names.iter().enumerate() { scopes.last_mut().unwrap().insert(n.clone(), (i == 0).then(|| map_hit(sa.lookup_orig(self, n)).map(|o| (o, matches!(self.lookup_binding(&sa.st, n).map(|b| &b.shape), Some(TypeShape::Pointer(_)))))).flatten()); } }
-                crate::walk::ScopeEvent::MatchBind { name, subject } => { let info = classify(Some(subject), scopes.last().unwrap(), &sa); self.bind_match_subj(&mut sa, name, subject); scopes.last_mut().unwrap().insert((*name).to_string(), info); }
+                crate::walk::ScopeEvent::MatchBind { name, subject } => { let info = classify(Some(subject), None, scopes.last().unwrap(), &sa); self.bind_match_subj(&mut sa, name, subject); scopes.last_mut().unwrap().insert((*name).to_string(), info); }
                 _ => {}
             } }
             let mut calls = Vec::new(); crate::walk::own_calls(stmt, &mut calls); if let Stmt::For { kind: ForKind::Iterate { expr, .. }, .. } = stmt { crate::walk::expr_calls(expr, &mut calls); }
             for cr in calls { if let Some(hit) = self.call_mutates_captured(&sa, cr.callee, cr.args, &scopes, &local_fns, dep, esc_span, &seed_origins, strict, &frames) { return Some(hit); } }
             match stmt {
                 Stmt::Local(l) => {
-                    let infos: Vec<_> = l.names.iter().enumerate().map(|(i, n)| (n, classify(l.values.get(i).or_else(|| l.values.first()), scopes.last().unwrap(), &sa))).collect();
+                    let msh = (l.names.len() > 1 && l.values.len() == 1).then(|| self.multi_value_shapes(&sa.st, &l.values[0], l.names.len()));
+                    let infos: Vec<_> = l.names.iter().enumerate().map(|(i, n)| (n, classify(l.values.get(i).or_else(|| l.values.first()), msh.as_ref().and_then(|v| v.get(i).cloned()), scopes.last().unwrap(), &sa))).collect();
                     for (i, n) in l.names.iter().enumerate() { if let Some(Expr::FnLit { params, results, body, .. }) = l.values.get(i).or_else(|| l.values.first()).map(unwrap_parens_and_move) { local_fns.insert(n.clone(), (params, results, body, scopes.clone(), sa.clone())); } else { local_fns.remove(n); } }
                     self.bind_local_stmt(&mut sa, l); for (n, info) in infos { scopes.last_mut().unwrap().insert(n.clone(), info); }
                 }
                 Stmt::Assign { targets, op, values, span } => {
+                    let msh = (targets.len() > 1 && values.len() == 1).then(|| self.multi_value_shapes(&sa.st, &values[0], targets.len()));
                     for (i, t) in targets.iter().enumerate() {
                         let Some(root) = place_root(t) else { continue };
                         let Some(alias) = scopes.last().unwrap().get(root).cloned() else { if let Some(orig) = map_hit(sa.lookup_orig(self, root)) { return Some(orig); } continue; };
+                        let sh_ov = msh.as_ref().and_then(|v| v.get(i).cloned());
                         match &t.kind {
                             PlaceKind::Ident(name) if matches!(op, hy_syntax::AssignOp::Assign) => {
                                 let v = values.get(i).or_else(|| values.first()); if let Some(Expr::FnLit { params, results, body, .. }) = v.map(unwrap_parens_and_move) { local_fns.insert(name.clone(), (params, results, body, scopes.clone(), sa.clone())); } else { local_fns.remove(name); }
-                                let info = classify(v, scopes.last().unwrap(), &sa); if info.is_some() || !flat.in_loop(*idx) { scopes.last_mut().unwrap().insert(name.clone(), info.clone()); }
+                                let info = classify(v, sh_ov, scopes.last().unwrap(), &sa); if info.is_some() || !flat.in_loop(*idx) { scopes.last_mut().unwrap().insert(name.clone(), info.clone()); }
                                 if info.is_some() { for sm in scopes.iter_mut().rev().take_while(|sm| sm.contains_key(name)) { sm.insert(name.clone(), info.clone()); } }
                             }
                             PlaceKind::Index { .. } | PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } if alias.as_ref().is_some_and(|(_, p)| self.place_writes_shared(&sa.st, t, *p)) => return alias.map(|(c, _)| c),
-                            PlaceKind::Field { .. } | PlaceKind::Index { .. } if alias.is_none() => if let Some((c, _)) = classify(values.get(i).or_else(|| values.first()), scopes.last().unwrap(), &sa) { for sm in scopes.iter_mut().rev().take_while(|sm| sm.contains_key(root)) { sm.insert(root.to_string(), Some((c.clone(), false))); } },
+                            PlaceKind::Field { .. } | PlaceKind::Index { .. } if alias.is_none() => if let Some((c, _)) = classify(values.get(i).or_else(|| values.first()), sh_ov, scopes.last().unwrap(), &sa) { for sm in scopes.iter_mut().rev().take_while(|sm| sm.contains_key(root)) { sm.insert(root.to_string(), Some((c.clone(), false))); } },
                             _ => {}
                         }
                     }
                     self.bind_assign_origs(&mut sa, targets, *op, values, *span, flat.in_loop(*idx));
                 }
-                Stmt::For { kind, span, .. } => self.bind_for_kind(&mut sa, kind, *span, Some(scopes.last_mut().unwrap())),
+                Stmt::For { kind, span, .. } => {
+                    let iter_cap = match kind { ForKind::Iterate { expr, .. } => classify(Some(expr), None, scopes.last().unwrap(), &sa).map(|(c, _)| c), _ => None };
+                    self.bind_for_kind(&mut sa, kind, *span, Some(scopes.last_mut().unwrap()));
+                    if let ForKind::Iterate { vars, .. } = kind {
+                        for v in vars {
+                            let sh = self.lookup_binding(&sa.st, v).map(|b| b.shape.clone()).unwrap_or(TypeShape::Unknown);
+                            if !matches!(sh, TypeShape::Closure) && self.may_share_or_unk(&sh) {
+                                if let Some(o) = map_hit(sa.lookup_orig(self, v)).or_else(|| iter_cap.clone()) {
+                                    scopes.last_mut().unwrap().insert(v.clone(), Some((o, matches!(sh, TypeShape::Pointer(_)))));
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1001,7 +1029,12 @@ impl<'a> Checker<'a> {
         }
     }
     fn enclosing_fn(&self, sp: Span) -> Option<&'a hy_syntax::FnDecl> { self.file.fns().find(|f| f.body.as_ref().is_some_and(|b| span_contains(b.span, sp))) }
-    fn may_share_or_unk(&self, sh: &TypeShape) -> bool { self.shape_may_share(sh) || matches!(sh, TypeShape::Unknown) }
+    fn may_share_or_unk(&self, sh: &TypeShape) -> bool {
+        match sh {
+            TypeShape::Chan(e) => !matches!(**e, TypeShape::Closure) && self.may_share_or_unk(e),
+            _ => self.shape_may_share(sh) || matches!(sh, TypeShape::Unknown),
+        }
+    }
     fn push_fn_sig(&self, sa: &mut StateAt, params: &[hy_syntax::Param], results: &[hy_syntax::FnResult], mut init: Option<&mut ScopeMap>) {
         sa.push(); for p in params { if let Some(m) = init.as_deref_mut() { m.entry(p.name.clone()).or_insert(None); } self.define_binding(&mut sa.st, &p.name, self.shape_of_type(&p.ty), Some(p.ty.clone()), false, false, false); sa.def_orig(&p.name, p.span, vec![(p.name.clone(), p.span)]); }
         for r in results { if let Some(n) = r.name.as_deref().filter(|&n| n != "_") { if let Some(m) = init.as_deref_mut() { m.insert(n.to_string(), None); } self.define_binding(&mut sa.st, n, self.shape_of_type(&r.ty), Some(r.ty.clone()), false, false, false); sa.def_orig(n, r.ty.span(), vec![(n.to_string(), r.ty.span())]); } }
@@ -1024,19 +1057,21 @@ impl<'a> Checker<'a> {
     }
     fn rhs_origs(&self, sa: &StateAt, rhs: Option<&Expr>, sh: &TypeShape) -> Origs { let mut os = Vec::new(); if let Some(e) = rhs.map(unwrap_parens_and_move) { if let Some(op) = crate::model::as_addr_of(e) { self.collect_addr_origins(sa, op, &mut os); } else if !matches!(sh, TypeShape::Closure) && self.may_share_or_unk(sh) { self.collect_shared_origins(sa, e, &mut os); } } os }
     fn bind_local_stmt(&self, sa: &mut StateAt, l: &hy_syntax::LocalDecl) {
-        let multi = (l.names.len() > 1 && l.values.len() == 1).then(|| match unwrap_parens_and_move(&l.values[0]) { Expr::Call { callee, args, .. } => (self.call_result_shapes(&sa.st, callee, args), self.call_result_tys(&sa.st, callee)), _ => (None, None) });
+        let multi = (l.names.len() > 1 && l.values.len() == 1).then(|| (self.multi_value_shapes(&sa.st, &l.values[0], l.names.len()), self.multi_value_tys(&sa.st, &l.values[0], l.names.len())));
         let defs: Vec<_> = l.names.iter().enumerate().map(|(i, n)| {
-            let (val, ty) = (l.values.get(i), l.ty.clone().or_else(|| l.values.get(i).and_then(|e| self.ty_of_expr(&sa.st, e))).or_else(|| multi.as_ref().and_then(|(_, ts)| ts.as_ref()?.get(i).cloned())));
-            let sh = l.ty.as_ref().map(|t| self.shape_of_type(t)).or_else(|| val.map(|e| self.shape_of_expr(&sa.st, e))).or_else(|| multi.as_ref().and_then(|(ss, _)| ss.as_ref()?.get(i).cloned())).or_else(|| ty.as_ref().map(|t| self.shape_of_type(t))).unwrap_or(TypeShape::Unknown);
+            let (val, ty) = (l.values.get(i), l.ty.clone().or_else(|| multi.as_ref().and_then(|(_, ts)| ts.get(i).cloned().flatten())).or_else(|| l.values.get(i).and_then(|e| self.ty_of_expr(&sa.st, e))));
+            let sh = l.ty.as_ref().map(|t| self.shape_of_type(t)).or_else(|| multi.as_ref().and_then(|(ss, _)| ss.get(i).cloned())).or_else(|| val.map(|e| self.shape_of_expr(&sa.st, e))).or_else(|| ty.as_ref().map(|t| self.shape_of_type(t))).unwrap_or(TypeShape::Unknown);
             let mut os = self.rhs_origs(sa, val.or_else(|| multi.is_some().then(|| &l.values[0])), &sh); if os.is_empty() { os.push((n.clone(), l.span)); } (n, sh, ty, os)
         }).collect();
         for (n, sh, ty, os) in defs { self.define_binding(&mut sa.st, n, sh, ty, false, false, false); if n != "_" { sa.def_orig(n, l.span, os); } }
     }
     fn bind_assign_origs(&self, sa: &mut StateAt, targets: &[Place], op: hy_syntax::AssignOp, values: &[Expr], span: Span, in_loop: bool) {
         if !matches!(op, hy_syntax::AssignOp::Assign) { return; }
+        let msh = (targets.len() > 1 && values.len() == 1).then(|| self.multi_value_shapes(&sa.st, &values[0], targets.len()));
         let updates: Vec<_> = targets.iter().enumerate().filter_map(|(i, t)| {
             let (root, v) = (place_root(t)?.to_string(), values.get(i).or_else(|| (values.len() == 1 && targets.len() > 1).then(|| &values[0])));
-            let mut os = self.rhs_origs(sa, v, &self.place_shape(&sa.st, t).or_else(|| v.map(|e| self.shape_of_expr(&sa.st, e))).unwrap_or(TypeShape::Unknown));
+            let sh = self.place_shape(&sa.st, t).or_else(|| msh.as_ref().and_then(|ss| ss.get(i).cloned())).or_else(|| v.map(|e| self.shape_of_expr(&sa.st, e))).unwrap_or(TypeShape::Unknown);
+            let mut os = self.rhs_origs(sa, v, &sh);
             if matches!(t.kind, PlaceKind::Ident(_)) { if os.is_empty() { os.push((root.clone(), span)); } Some((root, os, in_loop)) } else { (!os.is_empty()).then_some((root, os, true)) }
         }).collect();
         for (root, os, ext) in updates { sa.assign_orig(&root, os, ext); }
@@ -1065,25 +1100,30 @@ impl<'a> Checker<'a> {
     }
     fn collect_shared_origins(&self, sa: &StateAt, e: &Expr, out: &mut Origs) {
         let e = unwrap_parens_and_move(e); if let Some(op) = crate::model::as_addr_of(e) { return self.collect_addr_origins(sa, op, out); }
-        let sh = self.shape_of_expr(&sa.st, e); if matches!(sh, TypeShape::Closure) || (!matches!(e, Expr::StructLit { .. }) && !self.may_share_or_unk(&sh)) { return; }
+        let sh = self.shape_of_expr(&sa.st, e);
+        let call_shares = match match e { Expr::Try { operand, .. } => unwrap_parens_and_move(operand), other => other } {
+            Expr::Call { callee, args, .. } => self.call_result_shapes(&sa.st, callee, args).is_some_and(|rs| rs.iter().any(|r| !matches!(r, TypeShape::Closure) && self.may_share_or_unk(r))),
+            _ => false,
+        };
+        if matches!(sh, TypeShape::Closure) || (!matches!(e, Expr::StructLit { .. }) && !self.may_share_or_unk(&sh) && !call_shares) { return; }
         if let Some(r) = e.root_ident() { if r != "_" { extend_origs(out, sa.lookup_orig(self, r)); } return; }
         match e {
             Expr::StructLit { fields, .. } => for f in fields { self.collect_shared_origins(sa, &f.value, out); },
             Expr::SliceLit { items, .. } => for it in items { self.collect_shared_origins(sa, it, out); },
             Expr::MapLit { entries, .. } => for (k, v) in entries { self.collect_shared_origins(sa, k, out); self.collect_shared_origins(sa, v, out); },
-            Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::Slice { base, .. } | Expr::Try { operand: base, .. } => self.collect_shared_origins(sa, base, out),
+            Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::Slice { base, .. } | Expr::Try { operand: base, .. } | Expr::Receive { chan: base, .. } => self.collect_shared_origins(sa, base, out),
             Expr::Call { callee, args, .. } => { self.collect_shared_origins(sa, callee, out); for a in args { self.collect_shared_origins(sa, &a.value, out); } }
             _ => {}
         }
     }
     fn place_writes_shared(&self, st: &FnState, p: &Place, root_ptr: bool) -> bool { match &p.kind { PlaceKind::Ident(_) => root_ptr, PlaceKind::AddrOf { base } => self.place_writes_shared(st, base, root_ptr), PlaceKind::Field { base, .. } => matches!(self.place_shape(st, base), Some(TypeShape::Pointer(_) | TypeShape::Unknown) | None) || self.place_writes_shared(st, base, root_ptr), PlaceKind::Index { base, .. } => !matches!(self.place_shape(st, base), Some(TypeShape::Array(_))) || self.place_writes_shared(st, base, root_ptr) } }
-    fn expr_traverses_shared(&self, st: &FnState, expr: &Expr) -> bool { match unwrap_parens_and_move(expr) { Expr::Field { base, .. } => matches!(self.shape_of_expr(st, base), TypeShape::Pointer(_) | TypeShape::Unknown) || self.expr_traverses_shared(st, base), Expr::Index { base, .. } | Expr::Slice { base, .. } => !matches!(self.shape_of_expr(st, base), TypeShape::Array(_) | TypeShape::Str) || self.expr_traverses_shared(st, base), Expr::Try { operand, .. } => self.expr_traverses_shared(st, operand), _ => false } }
+    fn expr_traverses_shared(&self, st: &FnState, expr: &Expr) -> bool { match unwrap_parens_and_move(expr) { Expr::Field { base, .. } => matches!(self.shape_of_expr(st, base), TypeShape::Pointer(_) | TypeShape::Unknown) || self.expr_traverses_shared(st, base), Expr::Index { base, .. } | Expr::Slice { base, .. } => !matches!(self.shape_of_expr(st, base), TypeShape::Array(_) | TypeShape::Str) || self.expr_traverses_shared(st, base), Expr::Try { operand, .. } => self.expr_traverses_shared(st, operand), Expr::Receive { .. } => true, _ => false } }
     fn resolve_method_decl(&self, st: &FnState, base: &Expr, name: &str) -> Option<(&'a hy_syntax::FnDecl, bool, TypeShape)> {
         let vsh = peel_ptr(self.shape_of_expr(st, base)); let rb = match &vsh { TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(s).to_string()), _ => self.ty_of_expr(st, base).map(|t| self.resolve_type_alias(&t)).and_then(|t| Self::base_named_type(&t)) }?;
         let d = *self.method_decls.get(&(rb, name.to_string()))?; Some((d, d.receiver.as_ref()?.is_pointer || matches!(self.resolve_type_alias(&d.receiver.as_ref()?.ty), hy_syntax::TypeExpr::Pointer { .. }), vsh))
     }
     fn recv_root_origs(&self, sa: &StateAt, mut cur: &Expr) -> Origs {
-        while let Some(next) = match unwrap_parens_and_move(cur) { Expr::Try { operand: o, .. } | Expr::AddrOf { operand: o, .. } | Expr::Unary { op: UnOp::Addr, operand: o, .. } => Some(o), Expr::Field { base: b, .. } | Expr::Index { base: b, .. } | Expr::Slice { base: b, .. } => Some(b), Expr::Ident { name, .. } => return if name != "_" { sa.lookup_orig(self, name) } else { Vec::new() }, e => { cur = e; None } } { cur = next; }
+        while let Some(next) = match unwrap_parens_and_move(cur) { Expr::Try { operand: o, .. } | Expr::Receive { chan: o, .. } | Expr::AddrOf { operand: o, .. } | Expr::Unary { op: UnOp::Addr, operand: o, .. } => Some(o), Expr::Field { base: b, .. } | Expr::Index { base: b, .. } | Expr::Slice { base: b, .. } => Some(b), Expr::Ident { name, .. } => return if name != "_" { sa.lookup_orig(self, name) } else { Vec::new() }, e => { cur = e; None } } { cur = next; }
         let mut os = Vec::new(); self.collect_shared_origins(sa, cur, &mut os); os
     }
     fn expr_escape_root(&self, sa: &StateAt, cspan: Option<Span>, expr: &Expr, dep: usize) -> Option<String> { self.resolve_esc_hits(sa, cspan, expr, &[], dep, None, &[], false, &[]).map(|(r, _)| r) }
@@ -1103,7 +1143,7 @@ impl<'a> Checker<'a> {
     fn expr_method_escape(&self, sa: &StateAt, cspan: Option<Span>, expr: &Expr, proj: &[Proj], dep: usize, octx: Option<OuterCtx>, seen: &mut EscapeSeen, out: &mut Vec<EscapeHit>) {
         if dep > 24 { return; }
         match unwrap_parens_and_move(expr) {
-            Expr::AddrOf { operand: o, .. } | Expr::Unary { op: UnOp::Addr, operand: o, .. } => self.expr_method_escape(sa, cspan, o, proj, dep + 1, octx, seen, out),
+            Expr::AddrOf { operand: o, .. } | Expr::Unary { op: UnOp::Addr, operand: o, .. } | Expr::Try { operand: o, .. } | Expr::Receive { chan: o, .. } => self.expr_method_escape(sa, cspan, o, proj, dep + 1, octx, seen, out),
             Expr::FnLit { params, results, body, .. } if proj.is_empty() => { let gsp = fn_span(params, results, body); let sd = match octx { Some((so, st_f, Some(es), frs)) if span_contains(es, gsp) => (HashMap::new(), dep + 1, es, so.to_vec(), st_f, sa.clone(), frs.to_vec()), _ => (HashMap::new(), 0, gsp, Vec::new(), false, sa.clone(), Vec::new()) }; if let Some(o) = self.closure_writes_captured(&sa.st, params, results, body, Some(sd)) { push_hit(out, EscapeHit::Root(o)); } }
             Expr::Ident { name, .. } => if let Some(cv) = self.const_values.get(name.as_str()) { self.expr_method_escape(sa, cspan, cv, proj, dep + 1, octx, seen, out); } else if let Some((sp, ef)) = cspan.and_then(|sp| self.enclosing_fn(sp).map(|f| (sp, f))) { self.flow_var_in_fn(sa, ef, sp, name, proj, dep + 1, octx, seen, out); },
             Expr::StructLit { fields, .. } => match proj.first() { None => for f in fields { self.expr_method_escape(sa, cspan, &f.value, &[], dep + 1, octx, seen, out); }, Some(Proj::Field(k)) => for f in fields.iter().filter(|f| f.name == *k) { self.expr_method_escape(sa, cspan, &f.value, &proj[1..], dep + 1, octx, seen, out); }, _ => {} },
@@ -1130,6 +1170,7 @@ impl<'a> Checker<'a> {
                 self.expr_method_escape(sa, cspan, b, &prepend_proj(Proj::Field(name.clone()), proj), dep + 1, octx, seen, out);
             }
             Expr::Index { base, index, .. } => self.expr_method_escape(sa, cspan, base, &prepend_proj(Proj::Index(const_idx(index)), proj), dep + 1, octx, seen, out),
+            Expr::Slice { base, lo, .. } => self.expr_method_escape(sa, cspan, base, &slice_proj(lo.as_deref(), proj), dep + 1, octx, seen, out),
             Expr::Call { callee, args, .. } => {
                 let c = unwrap_parens_and_move(callee);
                 if let Expr::Ident { name, .. } = c { if self.lookup_binding(&sa.st, name).is_none() && !self.fns.contains_key(name.as_str()) {
@@ -1250,6 +1291,7 @@ fn extend_origs(out: &mut Origs, os: impl IntoIterator<Item = Orig>) { for o in 
 fn push_hit(out: &mut Vec<EscapeHit>, h: EscapeHit) { if !out.contains(&h) { out.push(h); } }
 fn fn_span(ps: &[hy_syntax::Param], rs: &[hy_syntax::FnResult], b: &hy_syntax::Block) -> Span { ps.iter().map(|p| p.span).chain(rs.iter().map(|r| r.ty.span())).fold(b.span, Span::to) }
 fn prepend_proj(h: Proj, tail: &[Proj]) -> Vec<Proj> { let mut v = Vec::with_capacity(tail.len() + 1); v.push(h); v.extend_from_slice(tail); v }
+fn slice_proj(lo: Option<&Expr>, proj: &[Proj]) -> Vec<Proj> { match proj.first() { Some(Proj::Index(idx)) => prepend_proj(Proj::Index(idx.as_deref().and_then(|k| k.parse::<usize>().ok()).zip(match lo { Some(e) => const_idx(e).and_then(|s| s.parse::<usize>().ok()), None => Some(0) }).map(|(k, o)| (k + o).to_string())), &proj[1..]), _ => proj.to_vec() } }
 fn place_steps(mut p: &Place) -> Option<Vec<Proj>> { let mut s = Vec::new(); loop { match &p.kind { PlaceKind::Ident(_) => { s.reverse(); return Some(s); } PlaceKind::Field { base, name } => { s.push(Proj::Field(name.clone())); p = base; } PlaceKind::Index { base, index } => { s.push(Proj::Index(const_idx(index))); p = base; } PlaceKind::AddrOf { base } => p = base } } }
 fn peel_ptr(mut sh: TypeShape) -> TypeShape { while let TypeShape::Pointer(i) = sh { sh = *i; } sh }
 fn span_contains(outer: Span, inner: Span) -> bool { outer.start <= inner.start && inner.end <= outer.end }
