@@ -41,6 +41,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import triage_bot as tb  # reuse Gh, load_token, log — the prior, not a replacement
@@ -144,34 +145,80 @@ def cmd_labels(args):
     tb.log("bot palette ensured (%d calls)" % gh.calls)
 
 
+STATE_BUCKET_MAP = {
+    "LAND-CANDIDATE": "bot:land-candidate",
+    "CONFLICTS": "bot:conflict",
+    "STALE-BASE": "bot:stale-base",
+}
+STATE_LABELS = frozenset(STATE_BUCKET_MAP.values())
+
+
+def plan_sync_labels(it, have_labels=None):
+    """Pure state-label reconciler for a TRIAGE.json item (#986).
+
+    Computes `(to_add, to_remove)` across the three mutually-exclusive
+    structural bucket labels (`bot:land-candidate`, `bot:conflict`,
+    `bot:stale-base`) against the item's `current_labels`. Parked PRs
+    (`wildcard_hold` or `draft_parked`) are left untouched `([], [])`.
+    """
+    if it.get("wildcard_hold") or it.get("draft_parked"):
+        return [], []
+    want = STATE_BUCKET_MAP.get(it.get("bucket"))
+    raw_have = have_labels if have_labels is not None else it.get("current_labels")
+    have = set(raw_have or [])
+    to_add = [want] if (want and want not in have) else []
+    to_remove = sorted((have & STATE_LABELS) - ({want} if want else set()))
+    return to_add, to_remove
+
+
 def cmd_sync_labels(args):
     """Structural bot:* labels, straight from classify()'s buckets (plan §2:
-    state lives in labels; the board is a view). Idempotent POST per PR."""
+    state lives in labels; the board is a view). Reconciles only the delta
+    (adding missing `want` and removing stale state labels) to avoid the #986
+    one-way `bot:conflict` ratchet and prevent unconditional POST rate-limit
+    burn on every shepherd-board run."""
     cfg = load_cfg()
     gh = tb.Gh(cfg["repo"], tb.load_token(args))
-    ensure_palette(gh, cfg)
+    if not args.dry:
+        ensure_palette(gh, cfg)
     items = json.loads(Path(args.from_scan).read_text())["items"]
-    mapping = {"LAND-CANDIDATE": "bot:land-candidate",
-               "CONFLICTS": "bot:conflict",
-               "STALE-BASE": "bot:stale-base"}
-    n = 0
+    changed = skipped = 0
     for it in items:
-        want = mapping.get(it["bucket"])
-        if not want or it.get("wildcard_hold") or it.get("draft_parked"):
+        if it.get("wildcard_hold") or it.get("draft_parked"):
             continue
-        n += 1
+        have_labels = it.get("current_labels")
+        if have_labels is None and not args.dry:
+            try:
+                _, raw = gh.req("GET", "/repos/%s/issues/%d/labels?per_page=100"
+                                % (gh.repo, it["number"]))
+                have_labels = [l["name"] for l in (raw or []) if l.get("name")]
+            except (RuntimeError, tb.RateGuard) as e:
+                tb.log("  FAIL #%d: %s" % (it["number"], e))
+                if isinstance(e, tb.RateGuard):
+                    break
+                continue
+        to_add, to_remove = plan_sync_labels(it, have_labels=have_labels)
+        if not to_add and not to_remove:
+            skipped += 1
+            continue
+        changed += 1
         if args.dry:
-            tb.log("  #%d -> %s" % (it["number"], want))
+            ops = ([f"+{l}" for l in to_add] + [f"-{l}" for l in to_remove])
+            tb.log("  #%d -> %s" % (it["number"], ", ".join(ops)))
             continue
         try:
-            gh.post("/repos/%s/issues/%d/labels" % (gh.repo, it["number"]),
-                    {"labels": [want]})
+            if to_add:
+                gh.post("/repos/%s/issues/%d/labels" % (gh.repo, it["number"]),
+                        {"labels": to_add})
+            for stale in to_remove:
+                gh.req("DELETE", "/repos/%s/issues/%d/labels/%s"
+                       % (gh.repo, it["number"], quote(stale, safe="")))
         except (RuntimeError, tb.RateGuard) as e:
             tb.log("  FAIL #%d: %s" % (it["number"], e))
             if isinstance(e, tb.RateGuard):
                 break
-    tb.log("sync-labels: %d candidates, %d calls, %s remaining"
-           % (n, gh.calls, gh.remaining))
+    tb.log("sync-labels: %d changed, %d already current, %d calls, %s remaining"
+           % (changed, skipped, gh.calls, gh.remaining))
 
 
 # ------------------------------------------------------------------ W2 rebase
@@ -183,11 +230,15 @@ def cmd_rebase(args):
     main_sha = gh.get("/repos/%s/commits/main" % gh.repo)["sha"]
     prs = gh.paginate("/repos/%s/pulls?state=open&per_page=100" % gh.repo)
     exempt = set(rc["exempt_labels"])
+    # Do not filter out `bot:conflict` before checking live `mergeable` (#986):
+    # if an author force-pushed a conflict away, live `mergeable=True` clears
+    # the stale `bot:conflict` label and restores rebase eligibility.
+    hard_exempt = exempt - {"bot:conflict"}
 
     cands = []
     for pr in prs:
         labels = {l["name"] for l in pr.get("labels", [])}
-        if pr.get("draft") or (labels & exempt):
+        if pr.get("draft") or (labels & hard_exempt):
             continue
         cands.append(pr)
     # oldest first: the most-behind branches are the most-stale ones
@@ -198,9 +249,20 @@ def cmd_rebase(args):
     scored = []
     for pr in cands[:rc["scan_window"]]:
         n = pr["number"]
+        pr_labels = {l["name"] for l in pr.get("labels", [])}
         full = gh.get("/repos/%s/pulls/%d" % (gh.repo, n))
         if full.get("mergeable") is not True:
             continue  # conflicted PRs go through the W4/W5 human path, not rebase
+        if "bot:conflict" in pr_labels:
+            if args.dry:
+                tb.log("  DRY would clear stale bot:conflict on #%d (mergeable=True)" % n)
+            else:
+                try:
+                    gh.req("DELETE", "/repos/%s/issues/%d/labels/%s"
+                           % (gh.repo, n, quote("bot:conflict", safe="")))
+                    tb.log("  #%d cleared stale bot:conflict (mergeable=True)" % n)
+                except (RuntimeError, tb.RateGuard) as e:
+                    tb.log("  #%d clear bot:conflict failed: %s" % (n, e))
         cmp = gh.get("/repos/%s/compare/%s...%s" % (gh.repo, main_sha,
                                                     full["head"]["sha"]))
         behind = (cmp or {}).get("behind_by", 0) or 0
