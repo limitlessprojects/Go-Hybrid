@@ -394,7 +394,20 @@ impl Emitter {
         // closure literal and the call writes a dead copy. Collect the
         // captures before emitting (the decl may rebind a loan name).
         let captured = self.closure_captured_loans(l);
+        let depths = self.local_fn_return_depths(l);
         self.emit_local_in_seq_inner(l, rest)?;
+        if l.kind != LocalKind::Const {
+            for (name, depth) in depths {
+                self.set_fn_return_depth(&name, depth);
+                if l.kind == LocalKind::Var && !self.pointer_vars.contains(&name) {
+                    for (k, aliases) in &mut self.loan_aliases {
+                        if !k.is_empty() && k != "\x01" {
+                            aliases.remove(&name);
+                        }
+                    }
+                }
+            }
+        }
         for (alias_name, loan_root) in captured {
             self.loan_aliases
                 .entry(loan_root)
@@ -404,52 +417,243 @@ impl Emitter {
         Ok(())
     }
 
-    /// `(closure name, loan name)` for every name this declaration binds to
-    /// a function literal whose body mentions an active slot loan (or one of
-    /// its aliases) in the current loan frames.
-
-    /// Leading identifier of a call's callee (`mk()` -> `mk`,
-    /// `ns.mk()` -> None), used to recognise a second-order closure (#3227).
-    fn call_callee_ident(e: &Expr) -> Option<String> {
-        match Self::peel_parens(e) {
-            Expr::Call { callee, .. } => match Self::peel_parens(callee) {
-                Expr::Ident { name, .. } => Some(name.clone()),
-                _ => None,
-            },
-            _ => None,
+    fn fn_return_depth_of_var(&self, name: &str) -> u8 {
+        if self.loan_aliases.get("\x01").is_some_and(|s| s.contains(name)) {
+            2
+        } else if self.loan_aliases.get("").is_some_and(|s| s.contains(name)) {
+            1
+        } else {
+            0
         }
+    }
+
+    fn set_fn_return_depth(&mut self, name: &str, depth: u8) {
+        if let Some(s) = self.loan_aliases.get_mut("") {
+            s.remove(name);
+        }
+        if let Some(s) = self.loan_aliases.get_mut("\x01") {
+            s.remove(name);
+        }
+        if depth >= 1 {
+            self.loan_aliases.entry(String::new()).or_default().insert(name.to_string());
+        }
+        if depth >= 2 {
+            self.loan_aliases.entry("\x01".to_string()).or_default().insert(name.to_string());
+        }
+    }
+
+    fn type_may_hold_fn(&self, ty: &TypeExpr) -> bool {
+        self.type_may_hold_fn_inner(ty, &mut BTreeSet::new())
+    }
+
+    fn type_may_hold_fn_inner(&self, ty: &TypeExpr, seen: &mut BTreeSet<String>) -> bool {
+        match ty {
+            TypeExpr::Fn { .. } => true,
+            TypeExpr::Pointer { to: inner, .. }
+            | TypeExpr::Slice { elem: inner, .. }
+            | TypeExpr::Array { elem: inner, .. }
+            | TypeExpr::Chan { elem: inner, .. }
+            | TypeExpr::Option { elem: inner, .. } => self.type_may_hold_fn_inner(inner, seen),
+            TypeExpr::Map { key, value, .. } => {
+                self.type_may_hold_fn_inner(key, seen) || self.type_may_hold_fn_inner(value, seen)
+            }
+            TypeExpr::Named { name, .. } => {
+                if let Some(aliased) = self.n5_aliases.get(name) {
+                    return seen.insert(format!("a:{name}"))
+                        && self.type_may_hold_fn_inner(aliased, seen);
+                }
+                if matches!(name.as_str(), "any" | "interface{}") || name.contains("fn(") {
+                    return true;
+                }
+                let base = name.split('[').next().unwrap_or(name);
+                self.n5_structs
+                    .get(base)
+                    .or_else(|| self.n5_generic_structs.get(base).map(|(_, fs)| fs))
+                    .is_some_and(|fs| {
+                        seen.insert(format!("s:{base}"))
+                            && fs.iter().any(|f| self.type_may_hold_fn_inner(&f.ty, seen))
+                    })
+            }
+        }
+    }
+
+    fn type_fn_return_depth(&self, ty: &TypeExpr) -> u8 {
+        match self.resolve_type_alias(ty) {
+            TypeExpr::Fn { results, .. } => {
+                if results.iter().any(|r| self.type_fn_return_depth(r) >= 1) {
+                    2
+                } else if results.iter().any(|r| self.type_may_hold_fn(r)) {
+                    1
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    fn expr_fn_return_depth(&self, e: &Expr) -> u8 {
+        match e {
+            Expr::FnLit { results, .. } => {
+                if results.iter().any(|r| self.type_fn_return_depth(&r.ty) >= 1) {
+                    2
+                } else if results.iter().any(|r| self.type_may_hold_fn(&r.ty)) {
+                    1
+                } else {
+                    0
+                }
+            }
+            Expr::Ident { name, .. } => self.fn_return_depth_of_var(name),
+            Expr::Paren { inner, .. }
+            | Expr::Move { operand: inner, .. }
+            | Expr::Try { operand: inner, .. } => self.expr_fn_return_depth(inner),
+            Expr::Call { callee, .. } => match Self::peel_parens(callee) {
+                Expr::FnLit { results, .. } => {
+                    if results.iter().any(|r| self.type_fn_return_depth(&r.ty) >= 1) {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                Expr::Ident { name, .. } => u8::from(self.fn_return_depth_of_var(name) >= 2),
+                _ => 0,
+            },
+            _ => 0,
+        }
+    }
+
+    fn local_fn_return_depths(&self, l: &LocalDecl) -> Vec<(String, u8)> {
+        if l.kind == LocalKind::Const {
+            return Vec::new();
+        }
+        let ty_d = l.ty.as_ref().map_or(0, |t| self.type_fn_return_depth(t));
+        l.names
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.as_str() != "_")
+            .map(|(i, n)| {
+                let vd = (l.names.len() == l.values.len())
+                    .then(|| l.values.get(i))
+                    .flatten()
+                    .map_or(0, |e| self.expr_fn_return_depth(e));
+                (n.clone(), ty_d.max(vd))
+            })
+            .collect()
+    }
+
+    fn is_closure_loan_alias(&self, loan: &str, ident: &str) -> bool {
+        !self.pointer_vars.contains(ident)
+            && self.loan_aliases.get(loan).is_some_and(|a| a.contains(ident))
+    }
+
+    fn fnlit_captures_loan(&self, fn_lit: &Expr, loan: &str) -> bool {
+        Self::expr_mentions_ident(fn_lit, loan)
+            || self
+                .loan_aliases
+                .get(loan)
+                .is_some_and(|a| a.iter().any(|x| Self::expr_mentions_ident(fn_lit, x)))
+    }
+
+    fn struct_field_ty(&self, base: &Expr, field: &str) -> Option<&TypeExpr> {
+        let sn = self.user_struct_name_of(base)?;
+        let fs = self
+            .n5_structs
+            .get(sn)
+            .or_else(|| self.n5_generic_structs.get(sn).map(|(_, fs)| fs))?;
+        fs.iter().find(|f| f.name == field).map(|f| &f.ty)
+    }
+
+    /// True when `e` yields a closure (or composite holding a closure) that
+    /// captures active slot loan `loan`. Plain value reads (`snap := p.val + 0`,
+    /// `first := item{val: p.val}`, `n := get()` returning `int`) return false
+    /// so O8 store-backs flush at `loan`'s non-lexical `last_use` window.
+    fn expr_captures_closure_loan(&self, e: &Expr, loan: &str) -> bool {
+        match e {
+            Expr::FnLit { .. } => self.fnlit_captures_loan(e, loan),
+            Expr::Ident { name, .. } => self.is_closure_loan_alias(loan, name),
+            Expr::Paren { inner, .. }
+            | Expr::Move { operand: inner, .. }
+            | Expr::Try { operand: inner, .. }
+            | Expr::AddrOf { operand: inner, .. }
+            | Expr::Unary { op: UnOp::Addr, operand: inner, .. } => {
+                self.expr_captures_closure_loan(inner, loan)
+            }
+            Expr::StructLit { fields, .. } => {
+                fields.iter().any(|f| self.expr_captures_closure_loan(&f.value, loan))
+            }
+            Expr::SliceLit { items, .. } => {
+                items.iter().any(|i| self.expr_captures_closure_loan(i, loan))
+            }
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                self.expr_captures_closure_loan(k, loan) || self.expr_captures_closure_loan(v, loan)
+            }),
+            Expr::Field { base, name, .. } => {
+                self.expr_captures_closure_loan(base, loan)
+                    && self.struct_field_ty(base, name).map_or(true, |t| self.type_may_hold_fn(t))
+            }
+            Expr::Index { base, .. } | Expr::Slice { base, .. } => {
+                self.expr_captures_closure_loan(base, loan)
+            }
+            Expr::Call { callee, args, .. } => {
+                let c = Self::peel_parens(callee);
+                if let Expr::FnLit { results, .. } = c {
+                    return results.iter().any(|r| self.type_may_hold_fn(&r.ty))
+                        && (self.fnlit_captures_loan(c, loan)
+                            || args.iter().any(|a| self.expr_captures_closure_loan(&a.value, loan)));
+                }
+                let returns_closure = match c {
+                    Expr::Ident { name, .. } => {
+                        self.is_closure_loan_alias(loan, name)
+                            && self.fn_return_depth_of_var(name) >= 1
+                    }
+                    Expr::Field { base, name, .. } if matches!(name.as_str(), "unwrap" | "or") => {
+                        self.expr_captures_closure_loan(base, loan)
+                            || args.iter().any(|a| self.expr_captures_closure_loan(&a.value, loan))
+                    }
+                    Expr::Field { base, name, .. } => {
+                        self.expr_captures_closure_loan(base, loan)
+                            && self
+                                .struct_field_ty(base, name)
+                                .is_some_and(|t| self.type_fn_return_depth(t) >= 1)
+                    }
+                    _ => self.expr_captures_closure_loan(c, loan) && self.expr_fn_return_depth(c) >= 1,
+                };
+                returns_closure
+                    || matches!(c, Expr::Ident { name, .. }
+                        if (name == "some" || name == "append") && !self.local_vars.contains(name))
+                        && args.iter().any(|a| self.expr_captures_closure_loan(&a.value, loan))
+            }
+            _ => false,
+        }
+    }
+
+    fn active_loans_captured_by_closure(&self, e: &Expr, skip_root: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        if skip_root == "_" {
+            return out;
+        }
+        for frame in &self.loan_frames {
+            for (loan, _) in frame {
+                if !loan.is_empty()
+                    && loan != "\x01"
+                    && loan != skip_root
+                    && self.expr_captures_closure_loan(e, loan)
+                {
+                    out.push(loan.clone());
+                }
+            }
+        }
+        out
     }
 
     fn closure_captured_loans(&self, l: &LocalDecl) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        if l.names.len() != l.values.len() {
+        if l.kind == LocalKind::Const || l.names.len() != l.values.len() {
             return out;
         }
         for (name, v) in l.names.iter().zip(l.values.iter()) {
-            if name == "_" {
-                continue;
-            }
-            for frame in &self.loan_frames {
-                for (loan, _) in frame {
-                    if loan.is_empty() || loan == name {
-                        continue;
-                    }
-                    // #3227: also treat the binding as an alias of the loan
-                    // when its value CALLS a binding already known to be an
-                    // alias of that loan (`h := mk()` where `mk` returns the
-                    // writer). A literal-only test misses that shape, and the
-                    // store-back would then flush before the writer runs.
-                    let aliases = self.loan_aliases.get(loan);
-                    let mentions = Self::expr_mentions_ident(v, loan)
-                        || aliases.is_some_and(|a| {
-                            a.iter().any(|x| Self::expr_mentions_ident(v, x))
-                        })
-                        || Self::call_callee_ident(v)
-                            .is_some_and(|c| aliases.is_some_and(|a| a.contains(&c)));
-                    if mentions {
-                        out.push((name.clone(), loan.clone()));
-                    }
-                }
+            for loan in self.active_loans_captured_by_closure(v, name) {
+                out.push((name.clone(), loan));
             }
         }
         out
@@ -1546,6 +1750,15 @@ impl Emitter {
                     .or_default()
                     .insert(alias_name);
             }
+            for (name, v) in names.iter().zip(values.iter()) {
+                if name == "_" || Self::as_slot_loan_operand(v).is_some() {
+                    continue;
+                }
+                self.set_fn_return_depth(name, self.expr_fn_return_depth(v));
+                for loan in self.active_loans_captured_by_closure(v, name) {
+                    self.loan_aliases.entry(loan).or_default().insert(name.clone());
+                }
+            }
             self.push(&format!("{} = {}", names.join(", "), rhs_texts.join(", ")));
             if let Some(frame) = self.loan_frames.last_mut() {
                 frame.extend(new_loans);
@@ -1571,40 +1784,52 @@ impl Emitter {
                 .enumerate()
                 .map(|(i, v)| alias_assigns[i].is_some() || self.expr_is_pointer(v))
                 .collect();
-            for (((t, is_ptr), alias), v) in targets.iter().zip(ptr_flags).zip(alias_assigns.iter()).zip(values.iter()) {
+            let captured_assigns: Vec<(Vec<String>, u8)> = targets
+                .iter()
+                .zip(values.iter())
+                .map(|(t, v)| {
+                    let loans = self.active_loans_captured_by_closure(v, t.root());
+                    let depth = if matches!(&t.kind, PlaceKind::Ident(_)) {
+                        self.expr_fn_return_depth(v)
+                    } else {
+                        0
+                    };
+                    (loans, depth)
+                })
+                .collect();
+            for (((t, is_ptr), alias), (loans, depth)) in targets
+                .iter()
+                .zip(ptr_flags)
+                .zip(alias_assigns.iter())
+                .zip(captured_assigns)
+            {
                 if let PlaceKind::Ident(name) = &t.kind {
                     if name != "_" {
                         for aliases in self.loan_aliases.values_mut() {
                             aliases.remove(name);
                         }
+                        self.set_fn_return_depth(name, depth);
                         if let Some((loan_root, _)) = alias {
                             self.loan_aliases
                                 .entry(loan_root.clone())
                                 .or_default()
                                 .insert(name.clone());
-                        } else if matches!(Self::peel_parens(v), Expr::FnLit { .. }) {
-                            for frame in &self.loan_frames {
-                                for (loan, _) in frame {
-                                    if loan.is_empty() || loan == name {
-                                        continue;
-                                    }
-                                    let mentions = Self::expr_mentions_ident(v, loan)
-                                        || self.loan_aliases.get(loan).is_some_and(|aliases| {
-                                            aliases.iter().any(|a| Self::expr_mentions_ident(v, a))
-                                        });
-                                    if mentions {
-                                        self.loan_aliases
-                                            .entry(loan.clone())
-                                            .or_default()
-                                            .insert(name.clone());
-                                    }
-                                }
+                        } else {
+                            for loan in loans {
+                                self.loan_aliases.entry(loan).or_default().insert(name.clone());
                             }
                         }
                         if is_ptr {
                             self.pointer_vars.insert(name.clone());
                         } else {
                             self.pointer_vars.remove(name);
+                        }
+                    }
+                } else {
+                    let root = t.root();
+                    if root != "_" {
+                        for loan in loans {
+                            self.loan_aliases.entry(loan).or_default().insert(root.to_string());
                         }
                     }
                 }
@@ -3096,7 +3321,10 @@ impl Emitter {
             return Some((name.clone(), !self.pointer_vars.contains(name)));
         }
         for (loan_root, aliases) in &self.loan_aliases {
-            if aliases.contains(name) && is_active_loan(loan_root) {
+            if self.pointer_vars.contains(name)
+                && aliases.contains(name)
+                && is_active_loan(loan_root)
+            {
                 return Some((loan_root.clone(), false));
             }
         }
