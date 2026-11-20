@@ -8988,7 +8988,16 @@ impl<'a> Collector<'a> {
             .as_ref()
             .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn.clone(), name.to_string())));
 
-        let is_struct_like = matches!(bk, OpKind::Struct(_) | OpKind::Pointer(_));
+        // Go auto-dereferences a selector only through a pointer to a struct.
+        // A pointer to a scalar, string, slice, array, map, or channel
+        // (`p := &n; p.foo`) has no fields at all, so it takes the
+        // non-struct path below instead of failing open on the missing
+        // struct name. Multi-level pointers keep their existing handling.
+        let is_struct_like = match bk {
+            OpKind::Struct(_) => true,
+            OpKind::Pointer(inner) => matches!(**inner, OpKind::Struct(_) | OpKind::Pointer(_)),
+            _ => false,
+        };
         let struct_known = if is_struct_like {
             sn_opt.as_ref().is_some_and(|sn| self.ck.structs.contains_key(sn))
         } else {
