@@ -95,10 +95,28 @@ impl ChannelLivenessChecker {
         }
     }
 
+    fn register_param_cap(&mut self, name: String, is_send: bool, def_span: Span) {
+        let pipe = PipeInfo {
+            tx: if is_send { name.clone() } else { String::new() },
+            rx: if !is_send { name.clone() } else { String::new() },
+            tx_state: if is_send { ChannelTypestate::Fresh } else { ChannelTypestate::Closed },
+            rx_state: if !is_send { ChannelTypestate::Fresh } else { ChannelTypestate::Drained },
+            def_span,
+        };
+
+        let p_idx = self.pipes_all.len();
+        self.pipes_all.push(pipe.clone());
+        self.cap_to_pipe.insert(name, p_idx);
+
+        if let Some(cur) = self.scope_stack.last_mut() {
+            cur.pipes.push(pipe);
+        }
+    }
+
     fn check_terminal_invariants(&mut self, scope: &ScopeState) {
         for pipe in &scope.pipes {
             // Check send capability terminal state
-            if !scope.moved_caps.contains(&pipe.tx) && pipe.tx_state != ChannelTypestate::Closed {
+            if !pipe.tx.is_empty() && !scope.moved_caps.contains(&pipe.tx) && pipe.tx_state != ChannelTypestate::Closed {
                 self.diags.push(Diagnostic::error(
                     "HYB-E4004",
                     &self.file_path,
@@ -112,7 +130,7 @@ impl ChannelLivenessChecker {
 
             // Check receive capability terminal state
             // If rx was moved into a subtask, the subtask assumed lifecycle responsibility
-            if !scope.moved_caps.contains(&pipe.rx) && pipe.rx_state != ChannelTypestate::Drained {
+            if !pipe.rx.is_empty() && !scope.moved_caps.contains(&pipe.rx) && pipe.rx_state != ChannelTypestate::Drained {
                 self.diags.push(Diagnostic::error(
                     "HYB-E4005",
                     &self.file_path,
@@ -127,7 +145,19 @@ impl ChannelLivenessChecker {
     }
 
     fn check_fn(&mut self, f: &FnDecl) {
+        self.scope_stack.clear();
+        self.cap_to_pipe.clear();
+        self.pipes_all.clear();
         self.push_scope();
+
+        for param in &f.params {
+            if is_send_cap(&param.ty) {
+                self.register_param_cap(param.name.clone(), true, param.span);
+            } else if is_recv_cap(&param.ty) {
+                self.register_param_cap(param.name.clone(), false, param.span);
+            }
+        }
+
         if let Some(body) = &f.body {
             for stmt in &body.stmts {
                 self.check_stmt(stmt);
@@ -396,8 +426,15 @@ impl ChannelLivenessChecker {
             Expr::Try { operand, .. } => {
                 self.check_expr(operand);
             }
-            Expr::FnLit { body, .. } => {
+            Expr::FnLit { params, body, .. } => {
                 self.push_scope();
+                for param in params {
+                    if is_send_cap(&param.ty) {
+                        self.register_param_cap(param.name.clone(), true, param.span);
+                    } else if is_recv_cap(&param.ty) {
+                        self.register_param_cap(param.name.clone(), false, param.span);
+                    }
+                }
                 for s in &body.stmts {
                     self.check_stmt(s);
                 }
@@ -437,13 +474,6 @@ impl ChannelLivenessChecker {
                 for a in args {
                     self.check_expr(&a.value);
                 }
-            }
-            Expr::FnLit { body, .. } => {
-                self.push_scope();
-                for s in &body.stmts {
-                    self.check_stmt(s);
-                }
-                self.pop_scope();
             }
             Expr::Receive { chan, span } => {
                 if let Some(cap) = self.get_cap_name(chan) {
@@ -600,5 +630,23 @@ impl ChannelLivenessChecker {
                 }
             }
         }
+    }
+}
+
+fn is_send_cap(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Named { name, .. } => {
+            name.starts_with("hy.send_cap") || name.starts_with("send_cap")
+        }
+        _ => false,
+    }
+}
+
+fn is_recv_cap(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Named { name, .. } => {
+            name.starts_with("hy.recv_cap") || name.starts_with("recv_cap")
+        }
+        _ => false,
     }
 }
