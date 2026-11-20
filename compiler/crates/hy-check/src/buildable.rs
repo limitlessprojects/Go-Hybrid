@@ -564,7 +564,9 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Foreign(_), other) if !matches!(other, Unknown | Foreign(_)) => true,
         (other, Foreign(_)) if !matches!(other, Unknown | Interface | Foreign(_)) => true,
 
-        // Struct targets: Go forbids converting non-structs to structs.
+        // Struct targets: Go forbids converting non-structs to structs, and
+        // forbids converting between distinct named structs.
+        (Struct(Some(target_name)), Struct(Some(arg_name))) if target_name != arg_name => true,
         (Struct(_), other) if !matches!(other, Unknown | Struct(_)) => true,
 
         // Bool target: only bool can convert to bool.
