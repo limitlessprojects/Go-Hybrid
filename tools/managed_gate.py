@@ -84,7 +84,7 @@ def scan_managed_lines(src: str) -> list[int]:
     masked = _mask_comments_and_strings(src)
     return [
         1 + masked.count("\n", 0, m.start())
-        for m in re.finditer(r"\bmanaged\s*\(", masked)
+        for m in re.finditer(r"(?<!\.)\bmanaged\s*\(", masked)
     ]
 
 
@@ -122,9 +122,20 @@ def audit(hyb, prog):
         sys.exit(2)
     blocks = []
     for b in reported:
-        category = b.get("category") if isinstance(b, dict) else None
+        if not isinstance(b, dict):
+            print(f"GATE ERROR: {prog}: reported block must be an object, got {type(b).__name__}")
+            sys.exit(2)
+        category = b.get("category")
         if not isinstance(category, str) or category not in VALID:
             print(f"GATE ERROR: {prog}: category {category!r} outside the closed set")
+            sys.exit(2)
+        reason = b.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            print(f"GATE ERROR: {prog}: block missing non-empty reason string")
+            sys.exit(2)
+        tickets = b.get("tickets")
+        if tickets is not None and (not isinstance(tickets, list) or not all(isinstance(t, str) and t.strip() for t in tickets)):
+            print(f"GATE ERROR: {prog}: block tickets must be a list of non-empty strings")
             sys.exit(2)
         blocks.append(b)
     # line numbers: lexically scan the source for `managed (` tokens outside
@@ -184,6 +195,25 @@ def main():
     if not isinstance(base, dict):
         print(f"GATE ERROR: {baseline_path}: baseline blocks must be a JSON object, got {type(base).__name__}")
         sys.exit(2)
+    for k, v in base.items():
+        if not isinstance(k, str) or ":" not in k or not k.rsplit(":", 1)[1].isdigit():
+            print(f"GATE ERROR: {baseline_path}: malformed baseline key {k!r}, expected '<file>:<line>'")
+            sys.exit(2)
+        if not isinstance(v, dict):
+            print(f"GATE ERROR: {baseline_path}: baseline block {k!r} must be a JSON object, got {type(v).__name__}")
+            sys.exit(2)
+        b_cat = v.get("category")
+        if b_cat is not None and (not isinstance(b_cat, str) or b_cat not in VALID):
+            print(f"GATE ERROR: {baseline_path}: baseline block {k!r} has invalid category {b_cat!r}")
+            sys.exit(2)
+        b_reason = v.get("reason")
+        if not isinstance(b_reason, str) or not b_reason.strip():
+            print(f"GATE ERROR: {baseline_path}: baseline block {k!r} missing non-empty reason string")
+            sys.exit(2)
+        b_tickets = v.get("tickets")
+        if b_tickets is not None and (not isinstance(b_tickets, list) or not all(isinstance(t, str) and t.strip() for t in b_tickets)):
+            print(f"GATE ERROR: {baseline_path}: baseline block {k!r} tickets must be a list of non-empty strings")
+            sys.exit(2)
 
     current = {}
     for prog in progs:

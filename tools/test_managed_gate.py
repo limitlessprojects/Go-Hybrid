@@ -318,6 +318,59 @@ class ManagedGateTests(unittest.TestCase):
                         self.assertIn('rebaseline:' if rebaseline else 'managed gate: PASS',
                                       output.getvalue())
 
+    def test_method_calls_do_not_spoof_managed_block(self):
+        script = pathlib.Path(__file__).with_name('managed_gate.py')
+        spec = importlib.util.spec_from_file_location('managed_gate', script)
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+        src = 'fn main() {\n  cfg.managed("x", "other")\n  self.managed("y", "other")\n  managed("real", "other") {}\n}'
+        lines = gate.scan_managed_lines(src)
+        self.assertEqual(lines, [4])
+
+    def test_audit_missing_or_empty_reason_fails_closed(self):
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as error:
+            self.audit('managed("a", "other") {}', [{'category': 'other'}])
+        self.assertEqual(error.exception.code, 2)
+
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as error:
+            self.audit('managed("a", "other") {}', [{'category': 'other', 'reason': '   '}])
+        self.assertEqual(error.exception.code, 2)
+
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as error:
+            self.audit('managed("a", "other") {}', [{'category': 'other', 'reason': 'ok', 'tickets': 'not-a-list'}])
+        self.assertEqual(error.exception.code, 2)
+
+    def test_malformed_baseline_entries_fail_closed(self):
+        script = pathlib.Path(__file__).with_name('managed_gate.py')
+        spec = importlib.util.spec_from_file_location('managed_gate', script)
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+        with tempfile.TemporaryDirectory() as directory:
+            prog = pathlib.Path(directory) / 'prog.hy'
+            prog.write_text('fn main() {}\n', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            # non-dict block entry
+            baseline.write_text('{"version": 1, "blocks": {"prog.hy:1": "not-a-dict"}}\n', encoding='utf-8')
+            output = io.StringIO()
+            with patch.object(gate.sys, 'argv', ['managed_gate.py', 'hyb', str(baseline), str(prog)]), \
+                 patch.object(gate, 'audit', return_value={}), \
+                 contextlib.redirect_stdout(output), \
+                 self.assertRaises(SystemExit) as error:
+                gate.main()
+            self.assertEqual(error.exception.code, 2)
+            self.assertIn('must be a JSON object', output.getvalue())
+
+            # malformed key (not <file>:<line>)
+            baseline.write_text('{"version": 1, "blocks": {"invalid_key": {"reason": "r", "category": "other"}}}\n', encoding='utf-8')
+            output = io.StringIO()
+            with patch.object(gate.sys, 'argv', ['managed_gate.py', 'hyb', str(baseline), str(prog)]), \
+                 patch.object(gate, 'audit', return_value={}), \
+                 contextlib.redirect_stdout(output), \
+                 self.assertRaises(SystemExit) as error:
+                gate.main()
+            self.assertEqual(error.exception.code, 2)
+            self.assertIn('malformed baseline key', output.getvalue())
+
 
 class AtomicBaselineTests(unittest.TestCase):
     def setUp(self):
