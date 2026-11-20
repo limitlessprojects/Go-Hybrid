@@ -23,7 +23,10 @@
 //! struct, alias, and const names, struct fields, for-in and range
 //! variables, select-receive names, match bindings, and closure params.
 //!
-//! Enum variants are left alone: their emission is a separate surface.
+//! Enum variants are checked since #4190: variant names and payload types
+//! reach the emitted Go as declarations (previously the whole `Decl::Enum`
+//! arm was skipped, so `enum default { … }` and `fn box.default()` passed
+//! check and failed build).
 //!
 //! The same pass also rejects a declaration named `none`. SPEC LX3 lists
 //! `none` as a predeclared identifier (shadowable with a lint), but hy-emit
@@ -69,7 +72,12 @@ impl<'a> Checker<'a> {
                 }
                 Decl::Fn(f) => {
                     let what = if f.receiver.is_some() { "method" } else { "fn" };
-                    self.kw_name(&f.name, what, f.span);
+                    // Associated functions produce dotted names (`box.default`,
+                    // `default.build`) — check each segment, not the whole string
+                    // (#4190: `"box.default" != "default"` bypassed the detector).
+                    for segment in f.name.split('.') {
+                        self.kw_name(segment, what, f.span);
+                    }
                     if let Some(r) = &f.receiver {
                         self.kw_name(&r.name, "receiver", f.span);
                         self.kw_type(&r.ty);
@@ -81,7 +89,27 @@ impl<'a> Checker<'a> {
                         self.kw_block(b);
                     }
                 }
-                Decl::Import { .. } | Decl::Enum(_) => {}
+                Decl::Enum(e) => {
+                    // Enums were skipped entirely (#4190): enum names, variant
+                    // names, and payload types can carry `default` / `none`.
+                    self.kw_name(&e.name, "enum", e.span);
+                    for v in &e.variants {
+                        self.kw_name(&v.name, "enum variant", v.span);
+                        if let Some(ty) = &v.payload {
+                            self.kw_type(ty);
+                        }
+                    }
+                }
+                Decl::Import { path, span } => {
+                    // Non-Rust imports register the last path segment as the Go
+                    // package identifier (lib.rs rsplit), so `import "x/default"`
+                    // emits `default.Member()` — unparseable Go (Row 13).
+                    if !path.starts_with("rust/") {
+                        if let Some(root) = path.rsplit('/').next() {
+                            self.kw_name(root, "package import", *span);
+                        }
+                    }
+                }
             }
         }
     }
