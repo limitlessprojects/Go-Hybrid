@@ -355,8 +355,18 @@ fn cmd_generate(args: &[String]) -> ExitCode {
                             continue;
                         }
                         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                        if name.starts_with('.') || name == "hybridrt" || name == "vendor" {
-                            continue; // no tools' dirs, no the vendored runtime
+                        // The directories `go build ./...` / `go generate ./...`
+                        // never enter: leading '.' or '_', testdata, vendor, and
+                        // any nested module (own go.mod — covers the vendored
+                        // hybridrt). Explicit roots are still honoured above.
+                        if name.starts_with('.')
+                            || name.starts_with('_')
+                            || name == "testdata"
+                            || name == "hybridrt"
+                            || name == "vendor"
+                            || p.join("go.mod").exists()
+                        {
+                            continue;
                         }
                         stack.push(p);
                     } else if p.extension().map(|x| x == "hy").unwrap_or(false) {
