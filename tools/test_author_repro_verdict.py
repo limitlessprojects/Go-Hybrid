@@ -415,5 +415,234 @@ class AutolandReproVerdictTests(unittest.TestCase):
         self.assertEqual(logs[0][-2:], ["--pr", "123"])
 
 
+class AuthorStageBoundaryTests(unittest.TestCase):
+    """Regression pins for author-stage scope, --out boundary, and HEAD accept-controls."""
+
+    def setUp(self):
+        self.parent_tmp = tempfile.TemporaryDirectory(prefix="author-boundary-")
+        self.addCleanup(self.parent_tmp.cleanup)
+        self.parent = Path(self.parent_tmp.name)
+        self.root = self.parent / "repo"
+        self.root.mkdir()
+        self.queue = self.root / "automation/land-queue"
+        self.out = self.queue / "author-123"
+        self.blocked = self.root / "target/author-blocked"
+        self.repro_dir = self.root / "compiler/target/author-stage"
+        self.git("init", "-q")
+        self.git("config", "user.name", "Test Fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        self.write(".gitignore", "target/\ncompiler/target/\n")
+        self.write("compiler/example.rs", "// before\n-- old note\n")
+        self.write("GUARANTEES.md", "# Guarantees\n")
+        self.write(".github/workflows/ci.yml", "name: ci\n")
+        self.write(CONTROL, "fn main() {}\n")
+        self.commit()
+
+    def git(self, *args):
+        return subprocess.run(
+            ["git", *args], cwd=self.root, check=True, capture_output=True,
+            text=True, timeout=10,
+        )
+
+    def write(self, path, content):
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    def commit(self):
+        self.git("add", ".")
+        self.git("commit", "-qm", "fixture")
+
+    def run_with_diff(self, diff_text, *, controls=None, out_dir=None):
+        original_sh = AUTHOR.sh
+        if os.name == "nt":
+            checker_bin = self.root / "target/fake-hyb.cmd"
+            checker_bin.parent.mkdir(parents=True, exist_ok=True)
+            checker_bin.write_text(
+                f'@"{sys.executable}" -c "import sys; '
+                f'sys.exit(0 if \'control-\' in sys.argv[2] else 1)" %*\r\n',
+                encoding="utf-8",
+            )
+        else:
+            checker_bin = self.root / "target/fake-hyb"
+            checker_bin.parent.mkdir(parents=True, exist_ok=True)
+            checker_bin.write_text(
+                "#!" + sys.executable + "\nimport sys\n"
+                "if 'control-' in sys.argv[2]:\n    sys.exit(0)\n"
+                "print('error[HYB-E6002]: rejected', flush=True)\n"
+                "sys.exit(1)\n",
+                encoding="utf-8",
+            )
+            checker_bin.chmod(0o755)
+
+        def shell(args, **kwargs):
+            if args[:2] == ["cargo", "build"]:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if os.name == "nt" and args and str(args[0]) == str(checker_bin):
+                target_arg = args[2] if len(args) > 2 else ""
+                if "control-" in str(target_arg):
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                return subprocess.CompletedProcess(args, 1, "error[HYB-E6002]: rejected\n", "")
+            return original_sh(args, **kwargs)
+
+        with contextlib.ExitStack() as stack:
+            for name, value in {
+                "ROOT": self.root,
+                "COMPILER": self.root / "compiler",
+                "QUEUE": self.queue,
+                "BLOCKED_DIR": self.blocked,
+                "REPRO_DIR": self.repro_dir,
+                "ACCEPT_CONTROLS": [CONTROL] if controls is None else controls,
+                "HYB": checker_bin,
+            }.items():
+                stack.enter_context(patch.object(AUTHOR, name, value))
+            stack.enter_context(patch.dict(os.environ, {
+                "AUTHOR_API_BASE": "https://fixture.invalid",
+                "AUTHOR_MODEL": "offline-test-stub",
+            }))
+            stack.enter_context(patch.object(AUTHOR, "sh", side_effect=shell))
+            stack.enter_context(patch.object(AUTHOR, "api_get", return_value={
+                "number": 123,
+                "title": "fixture",
+                "body": "```hy\nfn main() {}\n```\nHYB-E6002",
+            }))
+            stack.enter_context(patch.object(
+                AUTHOR, "chat", return_value="```diff\n" + diff_text + "```"
+            ))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            return AUTHOR.run_author(123, out_dir or self.out, 1)
+
+    def test_copy_to_workflow_outside_scope_is_rejected(self):
+        sneaky = (
+            "diff --git a/compiler/example.rs b/compiler/example.rs\n"
+            "--- a/compiler/example.rs\n"
+            "+++ b/compiler/example.rs\n"
+            "@@ -1,2 +1,2 @@\n"
+            "-// before\n"
+            "+// after\n"
+            " -- old note\n"
+            "diff --git a/compiler/example.rs b/.github/workflows/pwn.yml\n"
+            "similarity index 100%\n"
+            "copy from compiler/example.rs\n"
+            "copy to .github/workflows/pwn.yml\n"
+        )
+        self.assertFalse(AUTHOR.scope_ok(sneaky))
+        rc = self.run_with_diff(sneaky)
+        self.assertEqual(rc, 3)
+        self.assertFalse(self.out.exists())
+        self.assertFalse((self.root / ".github/workflows/pwn.yml").exists())
+
+    def test_header_only_delete_outside_scope_is_rejected(self):
+        sneaky = (
+            "diff --git a/compiler/example.rs b/compiler/example.rs\n"
+            "--- a/compiler/example.rs\n"
+            "+++ b/compiler/example.rs\n"
+            "@@ -1,2 +1,2 @@\n"
+            "-// before\n"
+            "+// after\n"
+            " -- old note\n"
+            "diff --git a/GUARANTEES.md b/GUARANTEES.md\n"
+            "deleted file mode 100644\n"
+        )
+        self.assertFalse(AUTHOR.scope_ok(sneaky))
+        rc = self.run_with_diff(sneaky)
+        self.assertEqual(rc, 3)
+        self.assertFalse(self.out.exists())
+        self.assertTrue((self.root / "GUARANTEES.md").is_file())
+
+    def test_symlink_mode_in_scope_is_rejected(self):
+        symlink_diff = (
+            "diff --git a/compiler/link.rs b/compiler/link.rs\n"
+            "new file mode 120000\n"
+            "--- /dev/null\n"
+            "+++ b/compiler/link.rs\n"
+            "@@ -0,0 +1 @@\n"
+            "+../GUARANTEES.md\n"
+            "\\ No newline at end of file\n"
+        )
+        self.assertFalse(AUTHOR.scope_ok(symlink_diff))
+
+    def test_tab_timestamp_dotdot_traversal_is_rejected(self):
+        tab_traversal = (
+            "--- a/compiler/..\t2026-11-15 00:00:00 +0000\n"
+            "+++ b/compiler/..\t2026-11-15 00:00:00 +0000\n"
+            "@@ -1 +1 @@\n"
+            "-a\n"
+            "+b\n"
+        )
+        self.assertFalse(AUTHOR.scope_ok(tab_traversal))
+
+    def test_non_ab_p1_prefix_spoof_is_rejected(self):
+        # git apply defaults to -p1 (strip first path component regardless of name):
+        # `compiler/.github/workflows/ci.yml` would apply directly to `.github/workflows/ci.yml`.
+        spoof = (
+            "--- compiler/.github/workflows/ci.yml\n"
+            "+++ compiler/.github/workflows/ci.yml\n"
+            "@@ -1 +1 @@\n"
+            "-name: ci\n"
+            "+name: pwned\n"
+        )
+        self.assertFalse(AUTHOR.scope_ok(spoof))
+        rc = self.run_with_diff(spoof)
+        self.assertEqual(rc, 3)
+        self.assertEqual((self.root / ".github/workflows/ci.yml").read_text(), "name: ci\n")
+
+    def test_c_quoted_path_escape_is_rejected(self):
+        quoted_escape = (
+            '--- "a/compiler/\\056\\056/GUARANTEES.md"\n'
+            '+++ "b/compiler/\\056\\056/GUARANTEES.md"\n'
+            "@@ -1 +1 @@\n"
+            "-# Guarantees\n"
+            "+# Tampered\n"
+        )
+        self.assertFalse(AUTHOR.scope_ok(quoted_escape))
+
+    def test_hunk_removed_double_dash_line_in_scope_is_allowed(self):
+        legit = (
+            "diff --git a/compiler/example.rs b/compiler/example.rs\n"
+            "--- a/compiler/example.rs\n"
+            "+++ b/compiler/example.rs\n"
+            "@@ -1,2 +1,2 @@\n"
+            " // before\n"
+            "--- old note\n"
+            "+// new note\n"
+        )
+        self.assertTrue(AUTHOR.scope_ok(legit))
+        rc = self.run_with_diff(legit)
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.out / "fix.patch").is_file())
+
+    def test_missing_accept_control_at_head_blocks_author_stage(self):
+        legit = (
+            "diff --git a/compiler/example.rs b/compiler/example.rs\n"
+            "--- a/compiler/example.rs\n"
+            "+++ b/compiler/example.rs\n"
+            "@@ -1,2 +1,2 @@\n"
+            "-// before\n"
+            "+// after\n"
+            " -- old note\n"
+        )
+        rc = self.run_with_diff(legit, controls=["tests/checker-corpus/does-not-exist.hy"])
+        self.assertEqual(rc, 3)
+        self.assertFalse(self.out.exists())
+
+    def test_out_traversal_and_sibling_prefix_rejected(self):
+        legit = (
+            "diff --git a/compiler/example.rs b/compiler/example.rs\n"
+            "--- a/compiler/example.rs\n"
+            "+++ b/compiler/example.rs\n"
+            "@@ -1,2 +1,2 @@\n"
+            "-// before\n"
+            "+// after\n"
+            " -- old note\n"
+        )
+        traversal_out = Path(str(self.root) + os.sep + ".." + os.sep + "escaped-bundle")
+        sibling_out = self.parent / "repo-sibling" / "bundle"
+        self.assertEqual(self.run_with_diff(legit, out_dir=traversal_out), 2)
+        self.assertFalse(traversal_out.resolve().exists())
+        self.assertEqual(self.run_with_diff(legit, out_dir=sibling_out), 2)
+        self.assertFalse(sibling_out.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
