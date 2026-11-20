@@ -1,0 +1,44 @@
+functions in the object-code call graph : 4824
+functions with a .stack_sizes record    : 1992
+
+functions WITHOUT a stack record, by archive member:
+   1227  std-44675f186029a4cd
+    538  compiler_builtins-2ae2df7d631cccc2
+    534  core-667b96598095cbda
+    136  gimli-ccadb29741f100ae
+    112  alloc-a8d2bee804de7f49
+     99  object-3804a19dce00e58e
+     59  rustc_demangle-f424ec8139a3c700
+     35  memchr-a82e71cb639e1c05
+     18  miniz_oxide-a9ecb409b41a7a16
+     12  libc-00ed1c777b5c740b
+
+shortest cycle reachable from hy_json_new_object (proof that the alloc-error path is recursive in the artifact):
+  _RNvCsdtSMxSA38aw_7___rustc14___rust_dealloc
+  _RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc
+  _RNvXs_NvMs_NtNtCs1C1lLj4PWSY_5alloc3ffi5c_strNtB9_7CString3newRShNtB4_11SpecNewImpl13spec_new_impl
+  _RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error
+  _RNvCsdtSMxSA38aw_7___rustc14___rust_dealloc
+
+per-export forcing facts:
+  hy_json_array_get              bytes=   176 recursion=True  indirect=True  missing= 25 external=  4
+  hy_json_array_len              bytes=    64 recursion=True  indirect=True  missing=  5 external=  4
+  hy_json_array_push_string      bytes=   128 recursion=True  indirect=True  missing= 19 external=  6
+  hy_json_get_array              bytes=   784 recursion=True  indirect=True  missing= 23 external=  5
+  hy_json_get_int                bytes=   752 recursion=True  indirect=True  missing= 12 external=  4
+  hy_json_get_string             bytes=   768 recursion=True  indirect=True  missing= 13 external=  5
+  hy_json_live_count             bytes=    48 recursion=True  indirect=True  missing=  7 external=  5
+  hy_json_new_array              bytes=    80 recursion=True  indirect=True  missing=  6 external=  5
+  hy_json_new_object             bytes=    80 recursion=True  indirect=True  missing=  5 external=  4
+  hy_json_parse                  bytes=   224 recursion=True  indirect=True  missing= 26 external=  7
+  hy_json_release                bytes=    64 recursion=True  indirect=True  missing=  6 external=  4
+  hy_json_set                    bytes=   208 recursion=True  indirect=True  missing= 18 external=  5
+  hy_json_to_string_pretty       bytes=   176 recursion=True  indirect=True  missing= 20 external=  6
+  hy_json_value_text             bytes=   144 recursion=True  indirect=True  missing=  5 external=  4
+  hy_nop                         bytes=     0 recursion=False indirect=False missing=  0 external=  0
+  hy_regex_is_match              bytes=   272 recursion=True  indirect=True  missing= 26 external=  7
+  hy_regex_is_valid              bytes=    64 recursion=True  indirect=True  missing=  5 external=  4
+  hy_sha3_digest256              bytes=   800 recursion=True  indirect=True  missing=  6 external=  5
+  hy_sha3_stream_checksum        bytes=   408 recursion=True  indirect=True  missing=  6 external=  4
+  hyrt_abi_word                  bytes=     0 recursion=False indirect=False missing=  0 external=  0
+  hyrt_stack_alignment_probe     bytes=     0 recursion=False indirect=False missing=  0 external=  0

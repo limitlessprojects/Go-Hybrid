@@ -1,0 +1,92 @@
+{
+  "coverage": {
+    "call_sites": 36,
+    "consumed_by_go": 19,
+    "consumed_with_signature": 21,
+    "exports": 21,
+    "exports_with_signature": 21
+  },
+  "diagnostics": [
+    {
+      "code": "HYB-E7001",
+      "symbol": "hyrt_abi_word",
+      "why": "jsonbinding/broker.go: Cross1 passes 1 args, artifact says 0"
+    },
+    {
+      "code": "HYB-E7001",
+      "symbol": "hyrt_abi_word",
+      "why": "overheadbench/bench.go: Cross1 passes 1 args, artifact says 0"
+    },
+    {
+      "code": "HYB-E7001",
+      "symbol": "hy_nop",
+      "why": "overheadbench/guardclass_test.go: Cross2S passes 2 args, artifact says 1"
+    },
+    {
+      "code": "HYB-E7001",
+      "symbol": "hyrt_stack_alignment_probe",
+      "why": "overheadbench/guardclass_test.go: Cross1S passes 1 args, artifact says 0"
+    },
+    {
+      "code": "HYB-E7001",
+      "symbol": "hyrt_stack_alignment_probe",
+      "why": "overheadbench/guardclass_test.go: Cross2S passes 2 args, artifact says 0"
+    },
+    {
+      "code": "HYB-E7001",
+      "symbol": "hyrt_stack_alignment_probe",
+      "why": "overheadbench/guardclass_test.go: CrossDeep1 passes 1 args, artifact says 0"
+    },
+    {
+      "code": "HYB-E7001",
+      "symbol": "hyrt_abi_word",
+      "why": "regexbinding/broker.go: Cross1 passes 1 args, artifact says 0"
+    },
+    {
+      "code": "HYB-E7001",
+      "symbol": "hyrt_abi_word",
+      "why": "sha3binding/sha3.go: Cross1S passes 1 args, artifact says 0"
+    },
+    {
+      "code": "HYB-E7002",
+      "symbol": "hy_json_array_len",
+      "why": "binding routes through SMALL (guard 1024 B); artifact class DEEP (64 B over resolvable frames, forced by: recursion, indirect-dispatch, missing-frame x5, external-callee x4)"
+    },
+    {
+      "code": "HYB-E7002",
+      "symbol": "hy_json_array_push_string",
+      "why": "binding routes through SMALL (guard 1024 B); artifact class DEEP (128 B over resolvable frames, forced by: recursion, indirect-dispatch, missing-frame x19, external-callee x6)"
+    },
+    {
+      "code": "HYB-E7002",
+      "symbol": "hy_json_get_int",
+      "why": "binding routes through SMALL (guard 1024 B); artifact class DEEP (752 B over resolvable frames, forced by: recursion, indirect-dispatch, missing-frame x12, external-callee x4)"
+    },
+    {
+      "code": "HYB-E7002",
+      "symbol": "hy_json_get_string",
+      "why": "binding routes through SMALL (guard 1024 B); artifact class DEEP (768 B over resolvable frames, forced by: recursion, indirect-dispatch, missing-frame x13, external-callee x5)"
+    },
+    {
+      "code": "HYB-E7002",
+      "symbol": "hy_json_new_array",
+      "why": "binding routes through SMALL (guard 1024 B); artifact class DEEP (80 B over resolvable frames, forced by: recursion, indirect-dispatch, missing-frame x6, external-callee x5)"
+    },
+    {
+      "code": "HYB-E7002",
+      "symbol": "hy_json_new_object",
+      "why": "binding routes through SMALL (guard 1024 B); artifact class DEEP (80 B over resolvable frames, forced by: recursion, indirect-dispatch, missing-frame x5, external-callee x4)"
+    },
+    {
+      "code": "HYB-E7002",
+      "symbol": "hy_sha3_digest256",
+      "why": "binding routes through SMALL (guard 1024 B); artifact class DEEP (800 B over resolvable frames, forced by: recursion, indirect-dispatch, missing-frame x6, external-callee x5)"
+    },
+    {
+      "code": "HYB-E7002",
+      "symbol": "hy_sha3_stream_checksum",
+      "why": "binding routes through SMALL (guard 1024 B); artifact class DEEP (408 B over resolvable frames, forced by: recursion, indirect-dispatch, missing-frame x6, external-callee x4)"
+    }
+  ],
+  "gaps": []
+}
