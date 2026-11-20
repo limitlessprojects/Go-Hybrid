@@ -971,3 +971,37 @@ pub(crate) fn addr_of_index_base_path(value: &Expr) -> Option<String> {
     let (base, _) = peel_slot_loan_index(value)?;
     expr_path(base)
 }
+
+/// #4026: the base path of `&x.f` when the address-of has **no** index hop at
+/// all. `addr_of_index_base_path` requires an `Expr::Index`, so a direct
+/// struct-field address-of (`f := &a.bal`) returned `None`, the loan was never
+/// marked, and `p := &f` slipped past E3104 while the index form `&m["a"]` was
+/// rejected. Requires at least one field hop, so a plain `&x` stays out of this
+/// path (that is the ordinary pointer case, not a slot loan).
+pub(crate) fn addr_of_field_base_path(value: &Expr) -> Option<String> {
+    let mut cur = value;
+    while let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = cur {
+        cur = inner;
+    }
+    let mut cur = as_addr_of(cur)?;
+    loop {
+        match cur {
+            Expr::Index { .. } => return None, // the index path owns that shape
+            Expr::Field { base, .. } => {
+                // Require the field chain to bottom out at an ident, so the
+                // shape is `&<ident>.f...` and `expr_path` has a root to report.
+                let mut probe = base.as_ref();
+                while let Expr::Paren { inner, .. } = probe {
+                    probe = inner;
+                }
+                match probe {
+                    Expr::Ident { .. } => return expr_path(base),
+                    Expr::Field { .. } => cur = base,
+                    _ => return None,
+                }
+            }
+            Expr::Paren { inner, .. } => cur = inner,
+            _ => return None,
+        }
+    }
+}
