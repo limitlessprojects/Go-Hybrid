@@ -718,3 +718,109 @@ fn main() {
         res.diagnostics
     );
 }
+
+#[test]
+fn test_issue_4537_repro() {
+    let src = r#"
+fn worker(rx hy.recv_cap[map[string]int]) {
+    m := rx.recv()
+    m["w"] = 1
+    rx.drain()
+}
+
+fn main() {
+    tx, rx := hy.pipe[map[string]int]()
+    m := map[string]int{}
+    task worker(move rx)
+    tx.send(m)
+    m["x"] = 2
+    tx.close()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3002"),
+        "Expected HYB-E3002 for un-sendable map payload in tx.send(m): {:?}",
+        res.diagnostics
+    );
+}
+
+
+
+#[test]
+fn test_issue_4537_surface_bogus() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    tx.bogus(1)
+    tx.close()
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E1002" && d.message.contains("has no method `bogus`")),
+        "Expected HYB-E1002 for tx.bogus: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_issue_4537_wrong_type() {
+    let src = r#"
+fn worker(rx hy.recv_cap[int]) { rx.drain() }
+fn main() {
+    tx, rx := hy.pipe[int]()
+    task worker(move rx)
+    tx.send(map[string]int{})
+    tx.close()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3002" || d.code == "HYB-E1002" || d.code == "HYB-E3011"),
+        "Expected diagnostic for element type mismatch or non-sendable map: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_issue_4537_surface_arities() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    tx.send()
+    tx.close()
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E1002" && d.message.contains("takes 1 argument but is called with 0")),
+        "Expected HYB-E1002 for 0-arg send: {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn test_issue_4537_recv_arity() {
+    let src = r#"
+fn main() {
+    tx, rx := hy.pipe[int]()
+    _ = rx.recv(9)
+    tx.close()
+    rx.drain()
+}
+"#;
+    let res = check_src(src);
+    assert_eq!(res.verdict, Verdict::Reject);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E1002" && d.message.contains("takes 0 arguments but is called with 1")),
+        "Expected HYB-E1002 for 1-arg recv: {:?}",
+        res.diagnostics
+    );
+}

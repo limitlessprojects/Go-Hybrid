@@ -1101,7 +1101,7 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn check_send_target(&mut self, st: &FnState, chan: &Expr, span: Span) -> bool {
         match self.send_target_shape(st, chan) {
-            TypeShape::OwnHandle(ref h) if h == "hy.send_cap" => true,
+            TypeShape::OwnHandle(ref h) if h == "hy.send_cap" || h.starts_with("hy.send_cap[") => true,
             TypeShape::Chan(_) => {
                 if self
                     .diags

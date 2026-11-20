@@ -1544,7 +1544,7 @@ impl<'a> Checker<'a> {
     ) -> Vec<TypeShape> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
-            let unwrap_pipe = |call_e: &Expr| -> bool {
+            let unwrap_pipe = |call_e: &Expr| -> Option<String> {
                 if let Expr::Call { callee, .. } = call_e {
                     let mut base = callee.as_ref();
                     while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
@@ -1554,23 +1554,28 @@ impl<'a> Checker<'a> {
                         if let Expr::Ident { name: pkg_name, .. } = pkg.as_ref() {
                             let head = name.split('[').next().unwrap_or(name.as_str());
                             if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") {
-                                return true;
+                                return Some(name.clone());
                             }
                         }
                     }
                     if let Expr::Ident { name, .. } = base {
                         let head = name.split('[').next().unwrap_or(name.as_str());
                         if head == "pipe" || head == "new_pipe" {
-                            return true;
+                            return Some(name.clone());
                         }
                     }
                 }
-                false
+                None
             };
-            if unwrap_pipe(v) {
+            if let Some(pipe_name) = unwrap_pipe(v) {
+                let inner = if let Some(idx) = pipe_name.find('[') {
+                    format!("[{}", &pipe_name[idx+1..])
+                } else {
+                    "".to_string()
+                };
                 return vec![
-                    TypeShape::OwnHandle("hy.send_cap".into()),
-                    TypeShape::OwnHandle("hy.recv_cap".into()),
+                    TypeShape::OwnHandle(format!("hy.send_cap{}", inner)),
+                    TypeShape::OwnHandle(format!("hy.recv_cap{}", inner)),
                 ];
             }
             if let Expr::Index { base, .. } = v {
@@ -1617,7 +1622,7 @@ impl<'a> Checker<'a> {
     ) -> Vec<Option<TypeExpr>> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
-            let unwrap_pipe = |call_e: &Expr| -> bool {
+            let unwrap_pipe = |call_e: &Expr| -> Option<String> {
                 if let Expr::Call { callee, .. } = call_e {
                     let mut base = callee.as_ref();
                     while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
@@ -1627,27 +1632,32 @@ impl<'a> Checker<'a> {
                         if let Expr::Ident { name: pkg_name, .. } = pkg.as_ref() {
                             let head = name.split('[').next().unwrap_or(name.as_str());
                             if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") {
-                                return true;
+                                return Some(name.clone());
                             }
                         }
                     }
                     if let Expr::Ident { name, .. } = base {
                         let head = name.split('[').next().unwrap_or(name.as_str());
                         if head == "pipe" || head == "new_pipe" {
-                            return true;
+                            return Some(name.clone());
                         }
                     }
                 }
-                false
+                None
             };
-            if unwrap_pipe(v) {
+            if let Some(pipe_name) = unwrap_pipe(v) {
+                let inner = if let Some(idx) = pipe_name.find('[') {
+                    format!("[{}", &pipe_name[idx+1..])
+                } else {
+                    "".to_string()
+                };
                 return vec![
                     Some(TypeExpr::Named {
-                        name: "hy.send_cap".into(),
+                        name: format!("hy.send_cap{}", inner),
                         span: v.span(),
                     }),
                     Some(TypeExpr::Named {
-                        name: "hy.recv_cap".into(),
+                        name: format!("hy.recv_cap{}", inner),
                         span: v.span(),
                     }),
                 ];
