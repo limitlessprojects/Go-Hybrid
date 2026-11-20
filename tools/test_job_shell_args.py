@@ -131,5 +131,77 @@ class KaggleShellArgumentTests(unittest.TestCase):
         self.assertNotIn("| tail -2", src)
         self.assertIn("shlex.quote(repo)", src)
 
+
+WORKER_SPEC = importlib.util.spec_from_file_location("worker_script", ROOT / "worker/script.py")
+worker_script = importlib.util.module_from_spec(WORKER_SPEC)
+WORKER_SPEC.loader.exec_module(worker_script)
+
+
+class WorkerScriptFailClosedTests(unittest.TestCase):
+    def run_worker(self, payload, summary_content=None, runner_rc=0):
+        with tempfile.TemporaryDirectory(prefix="hybrid worker space ") as tmp:
+            work = Path(tmp) / "work dir's path"
+            commands = []
+
+            def fake_sh(cmd, timeout=600, cwd=None):
+                commands.append(cmd)
+                if "runner.py" in cmd:
+                    if summary_content is not None:
+                        res = work / "results"
+                        res.mkdir(parents=True, exist_ok=True)
+                        (res / "summary.json").write_text(summary_content, encoding="utf-8")
+                    return runner_rc, "runner done"
+                return 0, "ok"
+
+            old_cwd = Path.cwd()
+            try:
+                with mock.patch.object(worker_script, "WORK", str(work)), \
+                     mock.patch.object(worker_script, "JOB_JSON", payload), \
+                     mock.patch.object(worker_script, "sh", side_effect=fake_sh), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit) as stopped:
+                        worker_script.main()
+            finally:
+                import os
+                os.chdir(old_cwd)
+            return stopped.exception.code, commands, work
+
+    def test_runner_invocation_quotes_job_path_and_results_dir_with_spaces(self):
+        summary = json.dumps({"job": "smoke", "ok": True, "wall_clock_s": 1.2, "steps": []})
+        code, commands, work = self.run_worker(
+            json.dumps({"job": "smoke", "sha": "HEAD"}),
+            summary_content=summary,
+        )
+        self.assertEqual(code, 0)
+        runner_cmd = next(c for c in commands if "runner.py" in c)
+        self.assertIn(shlex.quote(str(work / "job.json")), runner_cmd)
+        self.assertIn(shlex.quote(str(work / "results")), runner_cmd)
+
+    def test_invalid_job_json_or_unsafe_repo_and_sha_fail_closed_before_clone(self):
+        bad_payloads = [
+            "{not-json",
+            "[]",
+            json.dumps({"job": "x", "repo": "--upload-pack=evil"}),
+            json.dumps({"job": "x", "sha": "-f"}),
+            json.dumps({"job": "x", "sha": "../outside"}),
+            json.dumps({"job": "x", "sha": "HEAD; echo pwn"}),
+        ]
+        for payload in bad_payloads:
+            with self.subTest(payload=payload):
+                code, commands, _ = self.run_worker(payload)
+                self.assertEqual(code, 2)
+                self.assertFalse(any("git clone" in c or "runner.py" in c for c in commands))
+
+    def test_missing_or_failed_summary_json_fails_closed_even_when_runner_exits_zero(self):
+        for summary in (None, "{broken", "[]", json.dumps({"job": "x", "ok": False})):
+            with self.subTest(summary=summary):
+                code, _, _ = self.run_worker(
+                    json.dumps({"job": "x", "sha": "HEAD"}),
+                    summary_content=summary,
+                    runner_rc=0,
+                )
+                self.assertEqual(code, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

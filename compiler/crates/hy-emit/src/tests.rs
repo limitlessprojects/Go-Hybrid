@@ -1203,28 +1203,79 @@ fn single_var_iterate_over_make_slice_variable_binds_element() {
 }
 
 #[test]
-fn single_var_iterate_over_map_variable_does_not_lower_as_channel() {
-    let go = emit("fn f() {\n    m := map[string]int{}\n    for k in m {\n        _ = k\n    }\n}\n");
+fn single_var_iterate_over_map_variable_binds_key() {
+    // SPEC LX13: `for k in m` over a map ranges the KEYS (#2945). Go's
+    // single-var `for k := range m` is exactly that; the old
+    // `for _, k := range m` bound the value.
+    let go = emit("fn f() {
+    m := map[string]int{}
+    for k in m {
+        _ = k
+    }
+}
+");
     assert!(
-        go.contains("for _, k := range m {"),
-        "map variable must not be lowered as channel:\n{}",
+        go.contains("for k := range m {"),
+        "single-var range over a map must bind the key:
+{}",
         go
     );
     assert!(
-        !go.contains("for k := range m {"),
-        "map variable single-var range must not be lowered as channel range:\n{}",
+        !go.contains("for _, k := range m {"),
+        "single-var range over a map must not bind the value:
+{}",
         go
     );
 }
 
 #[test]
-fn single_var_iterate_over_make_map_literal_does_not_lower_as_channel() {
-    let go = emit("fn f() {\n    m := make(map[string]int{})\n    for k in m {\n        _ = k\n    }\n}\n");
+fn single_var_iterate_over_make_map_literal_binds_key() {
+    let go = emit("fn f() {
+    m := make(map[string]int{})
+    for k in m {
+        _ = k
+    }
+}
+");
     assert!(
-        go.contains("for _, k := range m {"),
-        "make(map) variable must not be lowered as channel:\n{}",
+        go.contains("for k := range m {"),
+        "make(map) single-var range must bind the key:
+{}",
         go
     );
+}
+
+#[test]
+fn single_var_iterate_over_map_param_and_call_binds_key() {
+    let go = emit("fn mk() map[string]int {
+    return map[string]int{}
+}
+
+fn f(m map[string]int) {
+    for k in m {
+        _ = k
+    }
+    for j in mk() {
+        _ = j
+    }
+}
+");
+    assert!(go.contains("for k := range m {"), "map param key range:
+{}", go);
+    assert!(go.contains("for j := range mk() {"), "map-returning call key range:
+{}", go);
+}
+
+#[test]
+fn single_var_iterate_over_slice_still_binds_element() {
+    let go = emit("fn f(s []string) {
+    for x in s {
+        _ = x
+    }
+}
+");
+    assert!(go.contains("for _, x := range s {"), "slice single-var range binds the element:
+{}", go);
 }
 
 
