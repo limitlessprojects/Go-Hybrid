@@ -21,6 +21,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from urllib.parse import unquote
 
 TABLE_HEADING = "## The claims table"
 ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|")
@@ -57,7 +58,7 @@ def table_rows(text):
 def is_checkable(target):
     if not target or target.startswith(("#", "http://", "https://", "mailto:")):
         return False
-    path = target.split("#", 1)[0]
+    path = unquote(target.split("#", 1)[0])
     if not path:
         return False
     return "/" in path or Path(path).suffix.lower() in CHECKED_SUFFIXES
@@ -104,7 +105,9 @@ def check(root):
             if not is_checkable(target):
                 continue
             links += 1
-            path = target.split("#", 1)[0]
+            # Split the URI fragment before decoding so an encoded '#' stays
+            # part of the filename. Decode once, including encoded suffixes.
+            path = unquote(target.split("#", 1)[0])
             resolved = root / path
             if not resolved.is_file():
                 issues.append({"row": row_number, "kind": "missing", "target": path})

@@ -87,6 +87,55 @@ class CheckClaimsLinksTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(json.loads(result.stdout)["links"], 4)
 
+    def test_percent_encoded_evidence_paths_are_resolved(self):
+        cases = (
+            ("evidence notes.md", "evidence%20notes.md"),
+            ("evidence#notes.md", "evidence%23notes.md#details"),
+            ("evidence%20notes.md", "evidence%2520notes.md"),
+            ("résumé.md", "r%C3%A9sum%C3%A9.md"),
+        )
+        for filename, destination in cases:
+            with self.subTest(destination=destination):
+                path = self.root / filename
+                path.write_text("# evidence\n", encoding="utf-8")
+                claims = CLAIMS.replace("(SPEC-LANGUAGE.md)", f"({destination})")
+                (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+                result = self.run_tool()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(json.loads(result.stdout)["links"], 4)
+
+                path.unlink()
+                result = self.run_tool()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(
+                    {"row": 1, "kind": "missing", "target": filename},
+                    json.loads(result.stdout)["issues"],
+                )
+
+    def test_missing_evidence_with_encoded_suffix_is_not_skipped(self):
+        claims = CLAIMS.replace("(SPEC-LANGUAGE.md)", "(missing%2Emd)")
+        (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["links"], 4)
+        self.assertIn({"row": 1, "kind": "missing", "target": "missing.md"}, report["issues"])
+
+    def test_percent_encoded_corpus_link_checks_decoded_file_verdict(self):
+        target = "tests/checker-corpus/01-bad.hy"
+        claims = CLAIMS.replace(f"]({target})", "](tests/checker-corpus/01-bad%2Ehy#L1)")
+        (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["links"], 4)
+
+        (self.root / target).write_text("// EXPECTED-VERDICT: ACCEPT\n", encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        mismatches = [i for i in json.loads(result.stdout)["issues"] if i["kind"] == "verdict-mismatch"]
+        self.assertEqual(len(mismatches), 1)
+        self.assertEqual(mismatches[0]["target"], target)
+
     def test_angle_delimited_corpus_link_still_checks_verdict(self):
         target = "tests/checker-corpus/01-bad.hy"
         claims = CLAIMS.replace(f"]({target})", f'](<{target}> "Reject evidence")')
