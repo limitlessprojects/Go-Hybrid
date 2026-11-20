@@ -1,0 +1,9 @@
+[warrant]
+code = "HYB-E6006"
+tier0_rule = "BUILDABLE"
+summary = "constant operand invalid for type conversion (overflow)"
+provenance = "Issue #4408 Warrant Synthesis"
+
+[expectations]
+reject_first_error = "HYB-E6006"
+near_miss_verdict = "ACCEPT"
