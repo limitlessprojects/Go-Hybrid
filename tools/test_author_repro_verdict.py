@@ -319,6 +319,8 @@ class AutolandReproVerdictTests(unittest.TestCase):
                 "status": "ready",
             }) + "\n",
         )
+        self.git("add", "automation/land-queue/author-123/meta.json")
+        self.git("commit", "-qm", "prepare bundle metadata")
         original_sh = AUTOLAND.sh
         checker_calls = []
         logged_cmds = []
@@ -362,7 +364,6 @@ class AutolandReproVerdictTests(unittest.TestCase):
             out_buf = io.StringIO()
             stack.enter_context(contextlib.redirect_stdout(out_buf))
             rc = AUTOLAND.run_bundle("author-123", live=live, token_env="GITHUB_TOKEN")
-            AUTOLAND.revert_on_failure()
         return rc, out_buf.getvalue(), logged_cmds, battery_called, land_called
 
     def test_baseline_exit_one_is_stale_premise(self):
@@ -390,6 +391,8 @@ class AutolandReproVerdictTests(unittest.TestCase):
         self.assertIn("AUTOLAND-CHECKER-FAILED", out)
         self.assertEqual(battery, [])
         self.assertEqual(land, [])
+        self.assertEqual((self.root / "compiler/example.rs").read_text(), "// before\n")
+        self.assertEqual(self.git("status", "--porcelain").stdout, "")
 
     def test_patched_signal_with_expected_code_blocks_before_battery(self):
         rc, out, logs, battery, land = self.run_autoland(patched=(-15, "error[HYB-E6002]: sigterm"))
@@ -413,6 +416,121 @@ class AutolandReproVerdictTests(unittest.TestCase):
         self.assertEqual(land, ["author-123"])
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0][-2:], ["--pr", "123"])
+
+
+class AutolandWorktreeSafetyTests(unittest.TestCase):
+    """The real CLI must preserve edits that predate this invocation.
+
+    All Git operations, including the old destructive cleanup, are confined
+    to a fresh temporary repository. No compiler, model, or network is used.
+    """
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="autoland-worktree-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.git("init", "-q")
+        self.git("config", "user.name", "Test Fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        (self.root / "tools").mkdir()
+        self.script = self.root / "tools/autoland.py"
+        self.script.write_bytes(Path(AUTOLAND.__file__).read_bytes())
+        (self.root / "tracked.txt").write_text("original\n", encoding="utf-8")
+        self.git("add", ".")
+        self.git("commit", "-qm", "fixture")
+
+    def git(self, *args):
+        return subprocess.run(
+            ["git", *args], cwd=self.root, check=True, capture_output=True,
+            timeout=10,
+        )
+
+    def run_cli(self, *args, live=False):
+        return subprocess.run(
+            [sys.executable, str(self.script), "run", *args],
+            cwd=self.root, capture_output=True, text=True, timeout=10,
+            env={**os.environ, "SHEPHERD_MODE": "live" if live else "dry-run"},
+        )
+
+    def test_missing_bundle_preserves_unstaged_edits_and_untracked_files(self):
+        (self.root / "tracked.txt").write_text("caller edit\n", encoding="utf-8")
+        note = self.root / "untracked-notes.txt"
+        note.write_text("caller notes\n", encoding="utf-8")
+        before = self.git("status", "--porcelain").stdout
+        result = self.run_cli("--slug", "missing")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual((self.root / "tracked.txt").read_text(), "caller edit\n")
+        self.assertEqual(note.read_text(), "caller notes\n")
+        self.assertEqual(self.git("status", "--porcelain").stdout, before)
+        self.assertIn("AUTOLAND-DIRTY-WORKTREE", result.stdout)
+
+    def test_live_run_preserves_staged_and_unstaged_versions(self):
+        tracked = self.root / "tracked.txt"
+        tracked.write_text("staged version\n", encoding="utf-8")
+        self.git("add", "tracked.txt")
+        tracked.write_text("working version\n", encoding="utf-8")
+        result = self.run_cli("--slug", "missing", live=True)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(tracked.read_text(), "working version\n")
+        self.assertEqual(self.git("show", ":tracked.txt").stdout, b"staged version\n")
+        self.assertIn("AUTOLAND-DIRTY-WORKTREE", result.stdout)
+
+    def test_missing_bundle_preserves_untracked_file_without_tracked_edits(self):
+        note = self.root / "draft.txt"
+        note.write_text("not owned by autoland\n", encoding="utf-8")
+        result = self.run_cli("--slug", "missing")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(note.read_text(), "not owned by autoland\n")
+        self.assertIn("AUTOLAND-DIRTY-WORKTREE", result.stdout)
+
+    def test_empty_all_run_does_not_clean_callers_untracked_file(self):
+        note = self.root / "draft.txt"
+        note.write_text("keep me\n", encoding="utf-8")
+        result = self.run_cli("--all")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(note.read_text(), "keep me\n")
+
+    def test_all_metadata_error_preserves_callers_files(self):
+        bundle = self.root / "automation/land-queue/broken"
+        bundle.mkdir(parents=True)
+        metadata = bundle / "meta.json"
+        metadata.write_text("not JSON\n", encoding="utf-8")
+        note = self.root / "draft.txt"
+        note.write_text("keep me\n", encoding="utf-8")
+        result = self.run_cli("--all")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("AUTOLAND-ERROR", result.stdout)
+        self.assertEqual(note.read_text(), "keep me\n")
+        self.assertEqual(metadata.read_text(), "not JSON\n")
+
+    def test_clean_missing_bundle_keeps_original_no_bundle_verdict(self):
+        result = self.run_cli("--slug", "missing")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("AUTOLAND-NO-BUNDLE", result.stdout)
+        self.assertEqual(self.git("status", "--porcelain").stdout, b"")
+
+    def test_non_repository_fails_before_build_and_preserves_files(self):
+        (self.root / ".git").rename(self.root / ".fixture-git")
+        result = self.run_cli("--slug", "missing")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("AUTOLAND-WORKTREE-FAILED", result.stdout)
+        self.assertEqual((self.root / "tracked.txt").read_text(), "original\n")
+
+    def test_direct_bundle_call_stops_before_build_or_cleanup_on_dirty_tree(self):
+        note = self.root / "draft.txt"
+        note.write_text("caller draft\n", encoding="utf-8")
+        output = io.StringIO()
+        with patch.object(AUTOLAND, "ROOT", self.root), \
+             patch.object(AUTOLAND, "QUEUE", self.root / "automation/land-queue"), \
+             patch.object(AUTOLAND, "build") as build, \
+             patch.object(AUTOLAND, "revert_on_failure") as cleanup, \
+             contextlib.redirect_stdout(output):
+            result = AUTOLAND.run_bundle("missing", live=True, token_env="GITHUB_TOKEN")
+        self.assertEqual(result, 2)
+        self.assertIn("AUTOLAND-DIRTY-WORKTREE", output.getvalue())
+        build.assert_not_called()
+        cleanup.assert_not_called()
+        self.assertEqual(note.read_text(), "caller draft\n")
 
 
 if __name__ == "__main__":
