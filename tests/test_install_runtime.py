@@ -56,7 +56,7 @@ class LauncherRuntimeTests(unittest.TestCase):
 
         temporary = tempfile.TemporaryDirectory(prefix="hybrid-installer-test-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.install = self.root / "installed hybrid"
         self.bin_dir = self.root / "launcher bin"
         release = self.root / "release"
