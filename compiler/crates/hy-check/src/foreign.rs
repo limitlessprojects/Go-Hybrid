@@ -498,6 +498,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     ];
     const HTTP_REQUEST: &[&str] = &[
         "add_cookie",
+        "basic_auth",
         "clone",
         "context",
         "cookie",
@@ -511,6 +512,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "post_form_value",
         "proto_at_least",
         "referer",
+        "set_basic_auth",
         "set_path_value",
         "user_agent",
         "with_context",
