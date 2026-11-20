@@ -142,8 +142,11 @@ pub fn check_file(file: &File) -> CheckResult {
     // left of one `:=` are rejected fail-closed as HYB-E1002.
     buildable::check_buildable(&mut ck);
 
-    let cl_diags =
-        channel_liveness::ChannelLivenessChecker::new(file.path.clone()).check_file(file);
+    let shadowed_hy_pipe_spans = ck.shadowed_hy_pipe_call_spans();
+    let cl_diags = channel_liveness::ChannelLivenessChecker::with_shadowed_hy_spans(
+        shadowed_hy_pipe_spans,
+        || channel_liveness::ChannelLivenessChecker::new(file.path.clone()).check_file(file),
+    );
     ck.diags.extend(cl_diags);
 
     let mut diags = ck.diags;

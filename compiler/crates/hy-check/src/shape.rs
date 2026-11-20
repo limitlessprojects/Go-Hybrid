@@ -1534,6 +1534,274 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// True iff `call_e` is a direct call to the built-in `hy.pipe` /
+    /// `hy.new_pipe` SPSC linear capability constructor and `hy` is not
+    /// shadowed by a lexical binding, type parameter, or file-level declaration.
+    pub(crate) fn is_hy_pipe_call(&self, st: &FnState, call_e: &Expr) -> bool {
+        let Expr::Call { callee, .. } = crate::model::unwrap_parens(call_e) else {
+            return false;
+        };
+        let mut base = callee.as_ref();
+        while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
+            base = inner.as_ref();
+        }
+        if let Expr::Field { base: pkg, name, .. } = base {
+            if let Expr::Ident { name: pkg_name, .. } = crate::model::unwrap_parens(pkg) {
+                let head = name.split('[').next().unwrap_or(name.as_str());
+                if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") {
+                    let hy_shadowed = self.lookup_binding(st, "hy").is_some()
+                        || self.pkg_names.contains_key("hy")
+                        || st.type_params.contains("hy")
+                        || self.fns.contains_key(&format!("hy.{head}"));
+                    return !hy_shadowed;
+                }
+            }
+        }
+        false
+    }
+
+    /// Collect `(line, col)` start positions of `hy.pipe` / `hy.new_pipe` call
+    /// expressions where `hy` is lexically shadowed by a value, type, or
+    /// associated function declaration so `ChannelLivenessChecker` does not
+    /// misregister user calls as linear SPSC pipes.
+    pub(crate) fn shadowed_hy_pipe_call_spans(&self) -> std::collections::HashSet<(u32, u32)> {
+        use hy_syntax::{Decl, ForKind, InterpPart, MatchPattern, Place, PlaceKind, SelectArmKind, Stmt};
+
+        fn walk_place(p: &Place, hy_bound: bool, assoc_hy: &(bool, bool), out: &mut std::collections::HashSet<(u32, u32)>) {
+            match &p.kind {
+                PlaceKind::Ident(_) => {}
+                PlaceKind::Index { base, index } => {
+                    walk_place(base, hy_bound, assoc_hy, out);
+                    walk_expr(index, hy_bound, assoc_hy, out);
+                }
+                PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                    walk_place(base, hy_bound, assoc_hy, out);
+                }
+            }
+        }
+
+        fn walk_expr(e: &Expr, hy_bound: bool, assoc_hy: &(bool, bool), out: &mut std::collections::HashSet<(u32, u32)>) {
+            match e {
+                Expr::Ident { .. } | Expr::Lit { .. } => {}
+                Expr::Interp { parts, .. } => {
+                    for part in parts {
+                        if let InterpPart::Expr(sub) = part {
+                            walk_expr(sub, hy_bound, assoc_hy, out);
+                        }
+                    }
+                }
+                Expr::Binary { lhs, rhs, .. } => {
+                    walk_expr(lhs, hy_bound, assoc_hy, out);
+                    walk_expr(rhs, hy_bound, assoc_hy, out);
+                }
+                Expr::Unary { operand, .. }
+                | Expr::AddrOf { operand, .. }
+                | Expr::Move { operand, .. }
+                | Expr::Try { operand, .. }
+                | Expr::Receive { chan: operand, .. }
+                | Expr::Field { base: operand, .. }
+                | Expr::Paren { inner: operand, .. } => {
+                    walk_expr(operand, hy_bound, assoc_hy, out);
+                }
+                Expr::Index { base, index, .. } => {
+                    walk_expr(base, hy_bound, assoc_hy, out);
+                    walk_expr(index, hy_bound, assoc_hy, out);
+                }
+                Expr::Slice { base, lo, hi, .. } => {
+                    walk_expr(base, hy_bound, assoc_hy, out);
+                    if let Some(l) = lo {
+                        walk_expr(l, hy_bound, assoc_hy, out);
+                    }
+                    if let Some(h) = hi {
+                        walk_expr(h, hy_bound, assoc_hy, out);
+                    }
+                }
+                Expr::Call { callee, args, span } => {
+                    let mut base = callee.as_ref();
+                    while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
+                        base = inner.as_ref();
+                    }
+                    if let Expr::Field { base: pkg, name, .. } = base {
+                        if let Expr::Ident { name: pkg_name, .. } = crate::model::unwrap_parens(pkg) {
+                            let head = name.split('[').next().unwrap_or(name.as_str());
+                            let assoc = (head == "pipe" && assoc_hy.0) || (head == "new_pipe" && assoc_hy.1);
+                            if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") && (hy_bound || assoc) {
+                                out.insert((span.start.line, span.start.col));
+                            }
+                        }
+                    }
+                    walk_expr(callee, hy_bound, assoc_hy, out);
+                    for a in args {
+                        walk_expr(&a.value, hy_bound, assoc_hy, out);
+                    }
+                }
+                Expr::StructLit { fields, .. } => {
+                    for f in fields {
+                        walk_expr(&f.value, hy_bound, assoc_hy, out);
+                    }
+                }
+                Expr::SliceLit { items, .. } => {
+                    for it in items {
+                        walk_expr(it, hy_bound, assoc_hy, out);
+                    }
+                }
+                Expr::MapLit { entries, .. } => {
+                    for (k, v) in entries {
+                        walk_expr(k, hy_bound, assoc_hy, out);
+                        walk_expr(v, hy_bound, assoc_hy, out);
+                    }
+                }
+                Expr::FnLit { params, results, body, .. } => {
+                    let binds_hy = hy_bound
+                        || params.iter().any(|p| p.name == "hy")
+                        || results.iter().any(|r| r.name.as_deref() == Some("hy"));
+                    walk_stmts(&body.stmts, binds_hy, assoc_hy, out);
+                }
+            }
+        }
+
+        fn walk_stmts(stmts: &[Stmt], mut hy_bound: bool, assoc_hy: &(bool, bool), out: &mut std::collections::HashSet<(u32, u32)>) {
+            for stmt in stmts {
+                match stmt {
+                    Stmt::Local(decl) => {
+                        for v in &decl.values {
+                            walk_expr(v, hy_bound, assoc_hy, out);
+                        }
+                        if decl.names.iter().any(|n| n == "hy") {
+                            hy_bound = true;
+                        }
+                    }
+                    Stmt::Assign { targets, values, .. } => {
+                        for t in targets {
+                            walk_place(t, hy_bound, assoc_hy, out);
+                        }
+                        for v in values {
+                            walk_expr(v, hy_bound, assoc_hy, out);
+                        }
+                    }
+                    Stmt::Expr { expr, .. } => walk_expr(expr, hy_bound, assoc_hy, out),
+                    Stmt::Return { values, .. } => {
+                        for v in values {
+                            walk_expr(v, hy_bound, assoc_hy, out);
+                        }
+                    }
+                    Stmt::Defer { call, .. } => walk_expr(call, hy_bound, assoc_hy, out),
+                    Stmt::Task { callee, args, .. } => {
+                        walk_expr(callee, hy_bound, assoc_hy, out);
+                        for a in args {
+                            walk_expr(&a.value, hy_bound, assoc_hy, out);
+                        }
+                    }
+                    Stmt::Send { chan, value, .. } => {
+                        walk_expr(chan, hy_bound, assoc_hy, out);
+                        walk_expr(value, hy_bound, assoc_hy, out);
+                    }
+                    Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
+                        walk_stmts(&block.stmts, hy_bound, assoc_hy, out);
+                    }
+                    Stmt::If { init, cond, then, otherwise, .. } => {
+                        let mut if_hy = hy_bound;
+                        if let Some(init_stmt) = init {
+                            if let Stmt::Local(decl) = init_stmt.as_ref() {
+                                for v in &decl.values {
+                                    walk_expr(v, if_hy, assoc_hy, out);
+                                }
+                                if decl.names.iter().any(|n| n == "hy") {
+                                    if_hy = true;
+                                }
+                            } else {
+                                walk_stmts(std::slice::from_ref(init_stmt.as_ref()), if_hy, assoc_hy, out);
+                            }
+                        }
+                        walk_expr(cond, if_hy, assoc_hy, out);
+                        walk_stmts(&then.stmts, if_hy, assoc_hy, out);
+                        if let Some(eb) = otherwise {
+                            walk_stmts(std::slice::from_ref(eb.as_ref()), if_hy, assoc_hy, out);
+                        }
+                    }
+                    Stmt::For { kind, body, .. } => {
+                        let mut loop_hy = hy_bound;
+                        match kind {
+                            ForKind::Infinite => {}
+                            ForKind::While { cond } => walk_expr(cond, hy_bound, assoc_hy, out),
+                            ForKind::Range { var, lo, hi, .. } => {
+                                walk_expr(lo, hy_bound, assoc_hy, out);
+                                walk_expr(hi, hy_bound, assoc_hy, out);
+                                if var == "hy" {
+                                    loop_hy = true;
+                                }
+                            }
+                            ForKind::Iterate { vars, expr } => {
+                                walk_expr(expr, hy_bound, assoc_hy, out);
+                                if vars.iter().any(|v| v == "hy") {
+                                    loop_hy = true;
+                                }
+                            }
+                        }
+                        walk_stmts(&body.stmts, loop_hy, assoc_hy, out);
+                    }
+                    Stmt::Match { subject, arms, .. } => {
+                        walk_expr(subject, hy_bound, assoc_hy, out);
+                        for arm in arms {
+                            let mut arm_hy = hy_bound;
+                            if let MatchPattern::Path { segments, binding } = &arm.pattern {
+                                if binding.as_deref() == Some("hy")
+                                    || (binding.is_none() && segments.len() == 1 && segments[0] == "hy")
+                                {
+                                    arm_hy = true;
+                                }
+                            }
+                            if let Some(g) = &arm.guard {
+                                walk_expr(g, arm_hy, assoc_hy, out);
+                            }
+                            walk_stmts(&arm.body.stmts, arm_hy, assoc_hy, out);
+                        }
+                    }
+                    Stmt::Select { arms, .. } => {
+                        for arm in arms {
+                            let mut arm_hy = hy_bound;
+                            match &arm.kind {
+                                SelectArmKind::Send { chan, value, .. } => {
+                                    walk_expr(chan, hy_bound, assoc_hy, out);
+                                    walk_expr(value, hy_bound, assoc_hy, out);
+                                }
+                                SelectArmKind::Recv { names, chan } => {
+                                    walk_expr(chan, hy_bound, assoc_hy, out);
+                                    if names.iter().any(|n| n == "hy") {
+                                        arm_hy = true;
+                                    }
+                                }
+                                SelectArmKind::Default => {}
+                            }
+                            walk_stmts(&arm.body.stmts, arm_hy, assoc_hy, out);
+                        }
+                    }
+                    Stmt::Break { .. } | Stmt::Continue { .. } => {}
+                }
+            }
+        }
+
+        let mut out = std::collections::HashSet::new();
+        let file_hy = self.pkg_names.contains_key("hy");
+        let assoc_hy = (
+            self.fns.contains_key("hy.pipe"),
+            self.fns.contains_key("hy.new_pipe"),
+        );
+        for d in &self.file.decls {
+            if let Decl::Fn(f) = d {
+                let fn_hy = file_hy
+                    || f.type_params.iter().any(|tp| tp.name == "hy")
+                    || f.receiver.as_ref().is_some_and(|r| r.name == "hy")
+                    || f.params.iter().any(|p| p.name == "hy")
+                    || f.results.iter().any(|r| r.name.as_deref() == Some("hy"));
+                if let Some(body) = &f.body {
+                    walk_stmts(&body.stmts, fn_hy, &assoc_hy, &mut out);
+                }
+            }
+        }
+        out
+    }
+
     /// Shapes for a multi-name define/assign from one value (`v, ok := m[k]`,
     /// `v, ok := <-ch`, `a, b := f()`, `a, b = f()?`).
     pub(crate) fn multi_value_shapes(
@@ -1544,30 +1812,7 @@ impl<'a> Checker<'a> {
     ) -> Vec<TypeShape> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
-            let unwrap_pipe = |call_e: &Expr| -> bool {
-                if let Expr::Call { callee, .. } = call_e {
-                    let mut base = callee.as_ref();
-                    while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
-                        base = inner.as_ref();
-                    }
-                    if let Expr::Field { base: pkg, name, .. } = base {
-                        if let Expr::Ident { name: pkg_name, .. } = pkg.as_ref() {
-                            let head = name.split('[').next().unwrap_or(name.as_str());
-                            if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") {
-                                return true;
-                            }
-                        }
-                    }
-                    if let Expr::Ident { name, .. } = base {
-                        let head = name.split('[').next().unwrap_or(name.as_str());
-                        if head == "pipe" || head == "new_pipe" {
-                            return true;
-                        }
-                    }
-                }
-                false
-            };
-            if unwrap_pipe(v) {
+            if self.is_hy_pipe_call(st, v) {
                 return vec![
                     TypeShape::OwnHandle("hy.send_cap".into()),
                     TypeShape::OwnHandle("hy.recv_cap".into()),
@@ -1617,30 +1862,7 @@ impl<'a> Checker<'a> {
     ) -> Vec<Option<TypeExpr>> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
-            let unwrap_pipe = |call_e: &Expr| -> bool {
-                if let Expr::Call { callee, .. } = call_e {
-                    let mut base = callee.as_ref();
-                    while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
-                        base = inner.as_ref();
-                    }
-                    if let Expr::Field { base: pkg, name, .. } = base {
-                        if let Expr::Ident { name: pkg_name, .. } = pkg.as_ref() {
-                            let head = name.split('[').next().unwrap_or(name.as_str());
-                            if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") {
-                                return true;
-                            }
-                        }
-                    }
-                    if let Expr::Ident { name, .. } = base {
-                        let head = name.split('[').next().unwrap_or(name.as_str());
-                        if head == "pipe" || head == "new_pipe" {
-                            return true;
-                        }
-                    }
-                }
-                false
-            };
-            if unwrap_pipe(v) {
+            if self.is_hy_pipe_call(st, v) {
                 return vec![
                     Some(TypeExpr::Named {
                         name: "hy.send_cap".into(),
