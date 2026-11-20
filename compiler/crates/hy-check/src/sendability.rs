@@ -1757,6 +1757,14 @@ impl<'a> Checker<'a> {
         if first_span != Some(trigger_stmt.span()) {
             return;
         }
+        self.run_file_close_and_range_directions();
+    }
+
+    pub(crate) fn run_file_close_and_range_directions(&mut self) {
+        if self.ran_file_chan_dir {
+            return;
+        }
+        self.ran_file_chan_dir = true;
         let mut const_env = ChanDirEnv::new();
         let const_decls: Vec<&'a hy_syntax::ConstDecl> = self
             .file
