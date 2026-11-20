@@ -69,7 +69,17 @@ elif tool == "hyb" and args[0] == "build":
 else:
     sys.exit(0)
 output.parent.mkdir(parents=True, exist_ok=True)
-output.write_text("#!/bin/sh\\nprintf '%s\\\\n' 'run " + output.name + "' >> \\\"$TRACE\\\"\\n")
+rows = {
+    "wl-go": ["load p50=10ns p99=22ns mean=12.5ns n=100", "alloc p50=5ns p99=8ns mean=6.0ns n=100"],
+    "workloads": ["alloc p50=3ns p99=9ns mean=5.1ns n=100", "load p50=9ns p99=20ns mean=11.4ns n=100"],
+    "wl-hy-load": ["load p50=11ns p99=24ns mean=14ns n=100"],
+    "wl-hy-alloc": ["alloc p50=4ns p99=9ns mean=6ns n=100"],
+}[output.name]
+if output.name == "wl-hy-alloc" and "ALLOC_ROW" in os.environ:
+    rows = [os.environ["ALLOC_ROW"]]
+output.write_text("#!/bin/sh\\nprintf '%s\\\\n' 'run " + output.name + "' >> \\\"$TRACE\\\"\\n"
+                  + "".join("echo '" + row + "'\\n" for row in rows)
+                  + ("exit 17\\n" if output.name == os.environ.get("FAIL_RUN") else ""))
 output.chmod(0o755)
 '''
         for tool in ("go", "cargo", "hyb"):
@@ -101,6 +111,43 @@ output.chmod(0o755)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("run wl-hy-load", trace)
         self.assertIn("run wl-hy-alloc", trace)
+
+    def test_csv_contains_measurements_from_all_three_languages(self):
+        destination = self.root / "benchmark results.csv"
+        run = subprocess.run(["bash", str(self.runner), destination.name], cwd=self.root,
+                             env=self.triplet_env(), capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("load p50=9ns p99=20ns mean=11.4ns n=100", run.stdout)
+        header, *rows = destination.read_text().splitlines()
+        self.assertEqual(header, "lang,workload,p50_ns,p99_ns,mean_ns,n")
+        self.assertCountEqual(rows, [
+            "go,load,10,22,12.5,100", "go,alloc,5,8,6.0,100",
+            "rust,alloc,3,9,5.1,100", "rust,load,9,20,11.4,100",
+            "hybrid,load,11,24,14,100", "hybrid,alloc,4,9,6,100",
+        ])
+
+    def test_unusable_results_preserve_existing_csv(self):
+        destination = self.root / "previous.csv"
+        destination.write_text("previous complete report\n")
+        for row in ("", "alloc p50=?ns p99=9ns mean=6ns n=100",
+                    "load p50=11ns p99=24ns mean=14ns n=100"):
+            with self.subTest(row=row):
+                env = self.triplet_env()
+                env["ALLOC_ROW"] = row
+                run = subprocess.run(["bash", str(self.runner), str(destination)], cwd=self.root,
+                                     env=env, capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("hybrid", run.stderr.lower())
+                self.assertEqual(destination.read_text(), "previous complete report\n")
+
+    def test_failed_benchmark_is_not_masked_when_collecting_csv(self):
+        destination = self.root / "results.csv"
+        env = self.triplet_env()
+        env["FAIL_RUN"] = "workloads"
+        run = subprocess.run(["bash", str(self.runner), str(destination)], cwd=self.root,
+                             env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 17, run.stdout + run.stderr)
+        self.assertFalse(destination.exists())
 
     def test_load_build_failure_stops_before_alloc_build(self):
         result, trace = self.run_triplet("hyb build load")
