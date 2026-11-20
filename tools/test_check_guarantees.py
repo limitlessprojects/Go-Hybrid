@@ -220,6 +220,49 @@ class Fixtures(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.assertIn("does not exist", joined(problems_of(root)))
 
+    def test_evidence_link_with_a_section_fragment_resolves(self):
+        # A fragment names a place inside the file, so existence is about the file:
+        # a section link to a file that is on disk must not read as a miss.
+        tmp, root = build(rows=[row(evidence="[scope](SPEC-LANGUAGE.md#scope)")])
+        self.addCleanup(tmp.cleanup)
+        (root / "SPEC-LANGUAGE.md").write_text("# Scope\n", encoding="utf-8")
+        self.assertEqual(problems_of(root), [])
+
+    def test_evidence_link_with_a_line_fragment_resolves(self):
+        tmp, root = build(rows=[row(evidence=f"[01]({FIXTURE_1}#L1)")])
+        self.addCleanup(tmp.cleanup)
+        self.assertEqual(problems_of(root), [])
+
+    def test_missing_file_with_a_fragment_reports_the_whole_target(self):
+        # The diagnostic keeps the destination as written — fragment included — so
+        # a real miss is still nameable by the reader who has to fix it.
+        tmp, root = build(rows=[row(evidence="[gate](gates/G9.md#gate)")])
+        self.addCleanup(tmp.cleanup)
+        self.assertIn("evidence link `gates/G9.md#gate` does not exist", joined(problems_of(root)))
+
+    def test_evidence_link_with_a_percent_encoded_space_resolves(self):
+        # A markdown destination is a URL, so `%20` names a space in the file on
+        # disk; a citation to a file whose name needs escaping must still resolve.
+        tmp, root = build(rows=[row(evidence="[odd](notes/weird%20name.md)")])
+        self.addCleanup(tmp.cleanup)
+        (root / "notes").mkdir()
+        (root / "notes" / "weird name.md").write_text("# Odd\n", encoding="utf-8")
+        self.assertEqual(problems_of(root), [])
+
+    def test_percent_encoded_hash_names_a_literal_hash_in_the_filename(self):
+        # Decoding happens after the fragment split, so `%23` stays a literal `#`
+        # in the filename instead of being mistaken for an anchor.
+        tmp, root = build(rows=[row(evidence="[hash](notes/a%23b.md)")])
+        self.addCleanup(tmp.cleanup)
+        (root / "notes").mkdir()
+        (root / "notes" / "a#b.md").write_text("# Hash\n", encoding="utf-8")
+        self.assertEqual(problems_of(root), [])
+
+    def test_missing_percent_encoded_file_is_reported_as_written(self):
+        tmp, root = build(rows=[row(evidence="[gone](notes/gone%20file.md)")])
+        self.addCleanup(tmp.cleanup)
+        self.assertIn("evidence link `notes/gone%20file.md` does not exist", joined(problems_of(root)))
+
     def test_fixture_without_verdict_line_fails(self):
         tmp, root = build(
             rows=[row()],
