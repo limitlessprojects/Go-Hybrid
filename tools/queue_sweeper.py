@@ -78,10 +78,14 @@ def api(path, method="GET", body=None):
 def config_protected_numbers():
     nums = set()
     try:
-        with open("tools/triage_config.json") as f:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "triage_config.json")) as f:
             cfg = json.load(f)
-        nums |= set(cfg.get("wildcard_holds", []))
-        nums |= set(cfg.get("drafts_parked", []))
+        for field in ("wildcard_holds", "drafts_parked"):
+            entries = cfg.get(field, [])
+            if isinstance(entries, list):
+                # bool is an int subclass, but is not a JSON PR number.
+                nums.update(n for n in entries if type(n) is int)
     except Exception as e:
         print(f"  (triage_config.json unreadable: {e} — label protection only)")
     return nums
@@ -141,6 +145,10 @@ def main():
     ap.add_argument("--max", type=int, default=200)
     ap.add_argument("--min-age", type=int, default=MIN_AGE)
     args = ap.parse_args()
+    if args.min_age <= 0:
+        ap.error("--min-age must be greater than zero")
+    if args.max < 0:
+        ap.error("--max must be at least zero")
     if not TOK:
         print("GITHUB_TOKEN not set"); sys.exit(1)
 
@@ -188,13 +196,14 @@ def main():
     for p in due:
         st, _ = api(f"/repos/{REPO}/pulls/{p['number']}", "PATCH",
                     {"state": "closed", "state_reason": "not_planned"})
-        ok = st in (200, 422)
+        ok = st == 200
+        cs = None
         if ok:
             cs, _ = api(f"/repos/{REPO}/issues/{p['number']}/comments", "POST",
                         {"body": COMMENT.format(window=args.min_age)})
-            ok = cs in (201, 403, 422)
+            ok = cs == 201
         if ok: n += 1
-        else: fails += 1; print(f"  FAIL #{p['number']} st={st}", flush=True)
+        else: fails += 1; print(f"  FAIL #{p['number']} st={st} comment_st={cs}", flush=True)
         if (n + fails) % 25 == 0:
             print(f"  progress {n+fails}/{len(due)} closed={n} fails={fails} ({time.time()-t0:.0f}s)", flush=True)
         time.sleep(0.3)
