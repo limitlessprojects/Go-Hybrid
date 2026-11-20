@@ -460,6 +460,82 @@ class WorkingDirectoryTests(unittest.TestCase):
                     self.assert_unregistered(root, self.workflow(mode, scope), mode)
 
 
+class FailurePolicyTests(unittest.TestCase):
+    def workflow(self, mode, scope=None, value="true", after_run=False):
+        command = ("python3 -m unittest discover -s tools -p test_target.py"
+                   if mode == "discover" else "python3 tests/test_target.py")
+        lines = ["jobs:", "  quick:", "    runs-on: ubuntu-latest"]
+        if scope == "job":
+            lines.append("    continue-on-error: " + value)
+        lines += ["    steps:", "      - name: Target tests"]
+        if scope == "step" and not after_run:
+            lines.append("        continue-on-error: " + value)
+        lines.append("        run: " + command)
+        if scope == "step" and after_run:
+            lines.append("        continue-on-error: " + value)
+        return "\n".join(lines) + "\n"
+
+    def registered(self, mode, workflow):
+        if mode == "discover":
+            return bool(guard.registered_patterns(workflow))
+        return guard.is_registered_direct("tests/test_target.py", workflow)
+
+    def test_ignored_step_failures_do_not_register_tests(self):
+        for mode in ("discover", "direct"):
+            for after_run in (False, True):
+                with self.subTest(mode=mode, after_run=after_run):
+                    self.assertFalse(self.registered(
+                        mode, self.workflow(mode, "step", after_run=after_run)))
+
+    def test_ignored_job_failures_do_not_register_tests(self):
+        for mode in ("discover", "direct"):
+            with self.subTest(mode=mode):
+                self.assertFalse(self.registered(mode, self.workflow(mode, "job")))
+
+    def test_dynamic_failure_policy_cannot_certify_a_required_test(self):
+        for mode in ("discover", "direct"):
+            for scope in ("step", "job"):
+                for value in ("${{ matrix.experimental }}", "${{ true }}"):
+                    with self.subTest(mode=mode, scope=scope, value=value):
+                        self.assertFalse(self.registered(
+                            mode, self.workflow(mode, scope, value)))
+
+    def test_absent_or_literal_false_failure_policy_registers_tests(self):
+        for mode in ("discover", "direct"):
+            self.assertTrue(self.registered(mode, self.workflow(mode)))
+            for scope in ("step", "job"):
+                for value in ("false", "false # failures are required", "${{ false }}"):
+                    with self.subTest(mode=mode, scope=scope, value=value):
+                        self.assertTrue(self.registered(
+                            mode, self.workflow(mode, scope, value)))
+
+    def test_ignored_failure_policy_does_not_leak_to_required_step_or_job(self):
+        for scope in ("step", "job"):
+            text = self.workflow("discover", scope)
+            if scope == "step":
+                text += "      - run: python3 -m unittest discover -s tools -p test_control.py\n"
+            else:
+                text += ("  required:\n    runs-on: ubuntu-latest\n    steps:\n"
+                         "      - run: python3 -m unittest discover -s tools -p test_control.py\n")
+            with self.subTest(scope=scope):
+                self.assertEqual(guard.registered_patterns(text), ["test_control.py"])
+
+    def test_optional_test_is_unregistered_until_an_enforcing_run_exists(self):
+        with tempfile.TemporaryDirectory(prefix="hybrid-failure-policy-") as directory:
+            root = Path(directory)
+            for relative in ("tools/test_target.py", "tests/test_target.py"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("raise AssertionError('test must fail CI')\n", encoding="utf-8")
+            text = self.workflow("discover", "step")
+            text += "      - run: python3 tests/test_target.py\n        continue-on-error: true\n"
+            self.assertEqual([path for path, _ in guard.unregistered(root, text)],
+                             ["tools/test_target.py", "tests/test_target.py"])
+            text += ("      - run: python3 -m unittest discover -s tools -p test_target.py\n"
+                     "      - run: python3 tests/test_target.py\n")
+            self.assertEqual(guard.unregistered(root, text), [])
+
+
 class GuardMisuseTests(unittest.TestCase):
     def run_main(self, workflow, suites=()):
         """Run the real main() against a throwaway workflow/root pair."""
