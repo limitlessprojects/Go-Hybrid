@@ -26,6 +26,9 @@ Behavior:
     toolchain versions, per-command exit codes + durations, wall clock.
   * Steps run under timeout; failures do not stop later steps (fail-soft) unless
     "hard": true. A hard setup failure skips all commands and still writes a summary.
+  * On timeout, terminate the command's POSIX process group or Windows process
+    tree before returning. Deliberately detached descendants are outside this
+    boundary; failed cleanup is reported in the timeout diagnostic.
   * "cwd": "repo" means relative to the cloned repo checkout.
   * Output files land in the results dir (default: $RESULTS_DIR or ./results).
   * Declared expected_results must be files. A results/ prefix refers to the
@@ -36,9 +39,11 @@ Stdlib only — must run on a bare Kaggle/Actions image with just python3.
 import argparse
 import datetime
 import json
+import math
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -46,29 +51,84 @@ import time
 UTC = lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _terminate_process_scope(process):
+    """Best-effort termination; return a diagnostic if scope cleanup fails."""
+    try:
+        if os.name == "nt":
+            stopped = subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if stopped.returncode != 0:
+                raise RuntimeError("taskkill failed with exit {}".format(stopped.returncode))
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass  # The scoped process group already exited.
+    except Exception as error:
+        message = str(error)
+        try:
+            process.kill()
+        except OSError as kill_error:
+            message += "; parent kill failed: {}".format(kill_error)
+        return message
+    return None
+
+
 def run_cmd(cmd, timeout, cwd=None, env=None):
     """Run one command; return (exit_code, duration_s, tail_of_output). Never raises."""
     start = time.monotonic()
     out_tail = ""
+    p = None
     try:
-        p = subprocess.run(
+        # Validate before starting anything: communicate() rejects malformed
+        # deadlines only after Popen has already launched the command.
+        if timeout is not None and (not isinstance(timeout, (int, float))
+                                    or not math.isfinite(timeout)):
+            raise ValueError("timeout must be a finite number or None")
+        p = subprocess.Popen(
             cmd if isinstance(cmd, list) else ["/bin/sh", "-c", cmd],
             cwd=cwd, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=timeout,
+            start_new_session=(os.name != "nt"),
         )
-        code, out = p.returncode, p.stdout.decode("utf-8", "replace")
+        output, _ = p.communicate(timeout=timeout)
+        code, out = p.returncode, output.decode("utf-8", "replace")
     except subprocess.TimeoutExpired as exc:
-        # communicate() has already collected output before the deadline. Keep it
-        # so a slow build/test does not lose its last useful diagnostic.
+        # Keep the parent alive until its descendants are targeted: killing the
+        # parent first loses the Windows tree relationship used by taskkill /T.
+        cleanup_error = _terminate_process_scope(p)
+        # communicate() returns all captured output, including the prefix in
+        # TimeoutExpired.output. Do not concatenate that prefix a second time.
         partial = exc.output or b""
+        try:
+            partial, _ = p.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            cleanup_error = cleanup_error or "output pipe remained open after cleanup"
+            if p.stdout is not None:
+                p.stdout.close()
+        except OSError as read_error:
+            cleanup_error = cleanup_error or str(read_error)
         if isinstance(partial, bytes):
             partial = partial.decode("utf-8", "replace")
         code = 124
         out = partial + ("" if not partial or partial.endswith("\n") else "\n")
         out += "<<TIMEOUT after {}s>>".format(timeout)
+        if cleanup_error:
+            out += "\n<<descendant cleanup incomplete: {}>>".format(cleanup_error)
     except Exception as e:  # noqa: BLE001 — runner must never die
         code, out = 125, "<<runner error: {}>>".format(e)
+        if p is not None:
+            cleanup_error = _terminate_process_scope(p)
+            try:
+                p.communicate(timeout=5)
+            except Exception as error:
+                cleanup_error = cleanup_error or str(error)
+                if p.stdout is not None:
+                    p.stdout.close()
+            if cleanup_error:
+                out += "\n<<descendant cleanup incomplete: {}>>".format(cleanup_error)
     out_tail = out[-4000:]
     return code, round(time.monotonic() - start, 2), out_tail
 

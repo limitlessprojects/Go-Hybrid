@@ -8,6 +8,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -21,6 +22,43 @@ SPEC.loader.exec_module(runner)
 def step(name, code, hard=False, timeout=10):
     return {'name': name, 'run': [sys.executable, '-c', code],
             'hard': hard, 'timeout': timeout}
+
+
+class DescendantTimeoutTests(unittest.TestCase):
+    def test_invalid_timeout_is_rejected_before_starting_a_process(self):
+        for timeout in ("invalid", {"seconds": 1}, float("nan"), float("inf")):
+            with self.subTest(timeout=timeout), patch.object(runner.subprocess, "Popen") as spawn:
+                code, _, output = runner.run_cmd([sys.executable, "-c", "pass"], timeout)
+                self.assertEqual(code, 125)
+                self.assertIn("runner error", output)
+                spawn.assert_not_called()
+
+    def test_timeout_stops_child_before_late_artifact_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ready = pathlib.Path(directory) / "ready"
+            late = pathlib.Path(directory) / "late"
+            child = ("import time; from pathlib import Path; "
+                     f"Path({str(ready)!r}).write_text('ready'); time.sleep(3); "
+                     f"Path({str(late)!r}).write_text('too late')")
+            parent = ("import subprocess,sys,time; "
+                      f"subprocess.Popen([sys.executable, '-c', {child!r}], "
+                      "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+                      "print('parent diagnostic', flush=True); time.sleep(5)")
+            code, duration, output = runner.run_cmd([sys.executable, "-c", parent], 1)
+            self.assertEqual(code, 124)
+            self.assertTrue(ready.exists(), "child must have started before the deadline")
+            self.assertIn("parent diagnostic", output)
+            self.assertIn("TIMEOUT", output)
+            time.sleep(3.2)
+            self.assertFalse(late.exists(), "timed-out child still changed artifacts")
+
+    def test_success_and_nonzero_exit_keep_their_output(self):
+        for exit_code in (0, 7):
+            with self.subTest(exit_code=exit_code):
+                code, _, output = runner.run_cmd(
+                    [sys.executable, "-c", f"print('completed'); raise SystemExit({exit_code})"], 10)
+                self.assertEqual(code, exit_code)
+                self.assertIn("completed", output)
 
 
 class RunnerFailureTests(unittest.TestCase):
