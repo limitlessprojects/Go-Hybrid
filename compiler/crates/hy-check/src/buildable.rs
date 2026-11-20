@@ -5750,7 +5750,21 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let int_to_float_conflict = want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            let scalar_mismatch = matches!(
+                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (Some(w), Some(g)) if w != g
+            );
+            if kinds_conflict(&want, &got)
+                || int_to_float_conflict
+                || scalar_mismatch
+                || self.sized_array_names_differ(
+                    Some(p.ty.render().as_str()),
+                    self.typed_value_type_name(&a.value).as_deref(),
+                )
+            {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -6244,30 +6258,65 @@ impl<'a> Collector<'a> {
         let Expr::Call { callee, args, .. } = e else {
             return;
         };
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-            return;
-        };
-        let head = Checker::base_named_type_str(name);
-        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
-            return;
-        };
-        if !f.type_params.is_empty() || f.params.len() == args.len() {
-            return;
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                let head = Checker::base_named_type_str(name);
+                if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                    if !f.type_params.is_empty() {
+                        self.check_generic_call_arity(name, f, args, span);
+                        self.check_uninferable_type_params(name, f, span);
+                    } else if self.multi_value_arg_count(args).is_none() {
+                        if args.iter().any(|a| a.spread) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot use `...` in call to non-variadic `{}` — Go refuses `cannot use ... in call to non-variadic {}` (HYB-E1002)",
+                                    name, name
+                                ),
+                                "`...` (variadic spread) is only allowed on the variadic built-in `append`; Hybrid declares no variadic parameters",
+                            );
+                        } else if f.params.len() != args.len() {
+                            let want = f.params.len();
+                            let got = args.len();
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`defer {}()` passes {got} argument{} but `{}` takes {want} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
+                                    name,
+                                    if got == 1 { "" } else { "s" },
+                                    name,
+                                    if got < want { "not enough" } else { "too many" },
+                                    name
+                                ),
+                                "the deferred call is checked like any other call: one argument per declared parameter",
+                            );
+                        }
+                    }
+                    self.check_user_fn_arg_types(name, args);
+                }
+            }
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        let head = Checker::base_named_type_str(name);
+                        let assoc_key = format!("{}.{}", pkg, head);
+                        if self.ck.fns.contains_key(&assoc_key) {
+                            let full_name = format!("{}.{}", pkg, name);
+                            self.check_user_fn_arity(&full_name, args, span);
+                            self.check_user_fn_arg_types(&assoc_key, args);
+                            return;
+                        }
+                    }
+                }
+                let bk = self.kind_of_expr(base);
+                self.check_method_arity(&bk, name, args, span);
+                self.check_method_arg_types(&bk, name, args);
+            }
+            Expr::FnLit { params, .. } => {
+                self.check_fn_lit_call(params, args, callee, span);
+            }
+            _ => {}
         }
-        let want = f.params.len();
-        let got = args.len();
-        self.emit_e1002(
-            span,
-            format!(
-                "`defer {}()` passes {got} argument{} but `{}` takes {want} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
-                name,
-                if got == 1 { "" } else { "s" },
-                name,
-                if got < want { "not enough" } else { "too many" },
-                name
-            ),
-            "the deferred call is checked like any other call: one argument per declared parameter",
-        );
     }
 
     fn check_match_lit_pattern(
