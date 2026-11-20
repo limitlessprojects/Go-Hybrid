@@ -708,17 +708,23 @@ fn inclusive_range_and_labeled_break() {
         go
     );
     assert!(go.contains("break hyLoop"), ":\n{}", go);
-    // Inclusive ranges use a continue-safe stop flag (#322), not
-    // `i <= 8; i++` (that form wraps at a type maximum). Bounds are
-    // hoisted so the stop check is `i != hyHiN`.
+    // Inclusive ranges use a continue-safe stop flag (#322) driven by an
+    // internal index, not by `i <= 8; i++` (that form wraps at a type maximum)
+    // and not by the author's variable (the body may write it — #2153).
+    // Bounds are hoisted so the stop check is `c != hyHiN`.
     assert!(
         go.contains("<= ") && go.contains("8"),
         "inclusive empty-range guard:\n{}",
         go
     );
     assert!(
-        go.contains("i != "),
-        "inclusive last-value stop check:\n{}",
+        go.contains(" != hyHi"),
+        "inclusive last-value stop check reads the internal index:\n{}",
+        go
+    );
+    assert!(
+        go.contains("i := hyIdx"),
+        "the author's variable is bound from the internal index:\n{}",
         go
     );
     assert!(
@@ -742,8 +748,13 @@ fn inclusive_range_at_type_maximum_uses_stop_flag() {
         go
     );
     assert!(
-        go.contains("value !="),
-        "continue-safe stop check present:\n{}",
+        go.contains(" != hyHi"),
+        "continue-safe stop check present (reads the internal index):\n{}",
+        go
+    );
+    assert!(
+        go.contains("value := hyIdx"),
+        "the author's variable is bound from the internal index:\n{}",
         go
     );
     assert!(
@@ -752,6 +763,35 @@ fn inclusive_range_at_type_maximum_uses_stop_flag() {
         go
     );
 }
+
+#[test]
+fn inclusive_range_body_write_to_loop_var_does_not_steer_the_loop_issue_2153() {
+    // Issue #2153: the body is allowed to write the range variable (`i += 1`
+    // is the common skip-next idiom). The stop flag used to read that same
+    // variable, so the write defeated the flag and the loop ran past `hi` —
+    // `index out of range` on the array form, a runaway loop on the guarded
+    // form. The loop is now driven by an internal index the body cannot name,
+    // and the author's variable is rebound from it on every iteration.
+    let go = emit(
+        "fn main() {\n    xs := [10, 20, 30, 40]\n    last := len(xs) - 1\n    for i in 0..=last {\n        fmt.println(xs[i])\n        if xs[i] == 30 {\n            i += 1\n        }\n    }\n}\n",
+    );
+    assert!(
+        go.contains("i := hyIdx"),
+        "the author's variable is rebound from the internal index:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for i, hyCont"),
+        "the author's variable must not drive the loop — a body write would steer it:\n{}",
+        go
+    );
+    assert!(
+        go.contains(" != hyHi"),
+        "the stop check reads the internal index:\n{}",
+        go
+    );
+}
+
 
 #[test]
 fn sibling_labeled_loops_get_distinct_go_labels() {
