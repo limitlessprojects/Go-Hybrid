@@ -88,6 +88,8 @@ grouping for the 2026-12-01 window: **linear obligations & escape certification*
 **cancellation & protocol liveness** (W-025, W-026 — extends the W-006–W-008 row).
 M1 verdicts land in the window thread with written reasons.*
 
+| W-024 | Delete buildable.rs & emit_guard.rs (~510 KB): Span-Injected Emit + In-Memory go/types Back-Projection as the Exact Row-13 Decider (pre-registered F1 span/code attribution across 12 corpus classes & F2 warm in-memory check at 0.36 ms/file verified) | Shokun123 | #3674 | **intake acked + author executable spike submitted** | active 2026-11-01 window (+ author spike `spikes/w024-go-types-backprojection/`) | M1 2026-11-01 · M2 learning | $250 + $250 | author of #3674 (settlement `0xc1184f2c85d3158c14dc8f10d9727128ad5fb9f3`) |
+
 *First-window harvest (triaged 2026-10-17, all within the 48-hour acknowledgment
 commitment): 19 submissions → 17 ledger entries + 2 duplicate-credits (#175 →
 W-001 family, #308 → W-005). Review family grouping for the window: **capabilities
