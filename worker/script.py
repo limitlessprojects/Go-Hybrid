@@ -12,6 +12,7 @@ No tokens, no secrets, no pushing — worker output is data.
 """
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -57,14 +58,33 @@ def main():
         print("FATAL: no JOB_JSON injected; this kernel is only meant to be pushed by tools/job.py", flush=True)
         sys.exit(2)
 
-    job = json.loads(JOB_JSON)
+    try:
+        job = json.loads(JOB_JSON)
+    except Exception as e:  # noqa: BLE001
+        print("FATAL: invalid JOB_JSON: {}".format(e), flush=True)
+        sys.exit(2)
+    if not isinstance(job, dict):
+        print("FATAL: JOB_JSON must decode to a JSON object", flush=True)
+        sys.exit(2)
     job_path = os.path.join(WORK, "job.json")
-    with open(job_path, "w") as f:
+    with open(job_path, "w", encoding="utf-8") as f:
         json.dump(job, f, indent=2)
 
     # 2. clone the public repo at the pinned SHA
-    repo = job.get("repo", "https://github.com/limitlessprojects/Go-Hybrid.git")
-    sha = job.get("sha", "HEAD")
+    repo = job.get("repo")
+    if repo is None or repo == "":
+        repo = "https://github.com/limitlessprojects/Go-Hybrid.git"
+    sha = job.get("sha")
+    if sha is None or sha == "":
+        sha = "HEAD"
+    if (not isinstance(repo, str) or not repo.strip() or repo.startswith("-")
+            or any(c in repo for c in "\r\n\x00")):
+        print("FATAL: invalid repo in JOB_JSON: {!r}".format(repo), flush=True)
+        sys.exit(2)
+    if (not isinstance(sha, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", sha)
+            or sha.startswith("-") or ".." in sha):
+        print("FATAL: invalid sha in JOB_JSON: {!r}".format(sha), flush=True)
+        sys.exit(2)
     rc, _ = sh("git clone --quiet {} repo 2>&1".format(shlex.quote(repo)), 300)
     if rc == 0:
         rc, _ = sh("cd repo && git checkout --quiet {} 2>&1".format(shlex.quote(sha)), 60)
@@ -75,17 +95,26 @@ def main():
             sys.exit(rc)
 
     # 3. run the repo's runner
-    rc, _ = sh("python3 repo/tools/runner/runner.py {} --results-dir {}/results --repo-dir repo".format(job_path, WORK), 7200)
+    results_dir = os.path.join(WORK, "results")
+    rc, _ = sh("python3 repo/tools/runner/runner.py {} --results-dir {} --repo-dir repo".format(
+        shlex.quote(job_path), shlex.quote(results_dir)), 7200)
 
     # 4. surface summary
     try:
-        with open(os.path.join(WORK, "results", "summary.json")) as f:
+        with open(os.path.join(WORK, "results", "summary.json"), encoding="utf-8") as f:
             s = json.load(f)
+        if not isinstance(s, dict):
+            raise ValueError("summary.json must be a JSON object")
         print("\n=== JOB SUMMARY (job={}, ok={}, wall={:.0f}s) ===".format(s.get("job"), s.get("ok"), s.get("wall_clock_s") or 0), flush=True)
         for st in s.get("steps", []):
-            print("  {} {} exit={} {:.1f}s".format(st["kind"], st["name"], st["exit"], st["dur_s"]), flush=True)
+            if isinstance(st, dict):
+                print("  {} {} exit={} {:.1f}s".format(st.get("kind"), st.get("name"), st.get("exit"), st.get("dur_s") or 0), flush=True)
+        if s.get("ok") is not True and rc == 0:
+            rc = 1
     except Exception as e:  # noqa: BLE001
         print("no summary.json: {}".format(e), flush=True)
+        if rc == 0:
+            rc = 1
 
     print("\nTotal kernel time: {:.0f}s".format(time.time() - t0), flush=True)
     # exit code of the kernel reflects the job (0 = all steps green)

@@ -1,0 +1,29 @@
+{
+  "suite": "hybench_histogram_soundness_cases",
+  "cases": [
+    {
+      "id": "min_val_initialized_to_max_int64",
+      "samples_ns": [4611686018427399999],
+      "query_fraction": 0.0,
+      "expect_ns": 4611686018427399999
+    },
+    {
+      "id": "nan_fraction_returns_zero",
+      "samples_ns": [100, 200, 300],
+      "query_fraction": "NaN",
+      "expect_ns": 0
+    },
+    {
+      "id": "bucket_upper_bound_clamped_to_observed_max",
+      "samples_ns": [3000, 3000, 3000],
+      "query_fraction": 0.99,
+      "expect_ns": 3000
+    },
+    {
+      "id": "max_int64_sample_reconstructs_without_signed_overflow",
+      "samples_ns": [9223372036854775807],
+      "query_fraction": 0.5,
+      "expect_ns": 9223372036854775807
+    }
+  ]
+}
