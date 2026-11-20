@@ -258,7 +258,7 @@ fn check_one_closure(
         }
     }
     for p in params {
-        let shape = ck.shape_of_type(&p.ty);
+        let shape = ck.shape_of_type_in_scope(&p.ty, &cst.type_params);
         cst.env.insert(
             p.name.clone(),
             Binding {
@@ -277,7 +277,7 @@ fn check_one_closure(
         );
     }
     for r in results {
-        let shape = ck.shape_of_type(&r.ty);
+        let shape = ck.shape_of_type_in_scope(&r.ty, &cst.type_params);
         if let Some(name) = &r.name {
             if name != "_" {
                 cst.env.insert(
@@ -509,7 +509,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
     match stmt {
         Stmt::Local(l) => {
             if let Some(t) = &l.ty {
-                let shape = ck.shape_of_type(t);
+                let shape = ck.shape_of_type_in_scope(t, &st.type_params);
                 for (name, value) in l.names.iter().zip(l.values.iter()) {
                     if Checker::is_nil_literal(value)
                         && !matches!(shape, TypeShape::Unknown)
@@ -554,7 +554,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 let shape = l
                     .ty
                     .as_ref()
-                    .map(|t| ck.shape_of_type(t))
+                    .map(|t| ck.shape_of_type_in_scope(t, &st.type_params))
                     .unwrap_or(TypeShape::Unknown);
                 let ty = l.ty.clone();
                 for name in &l.names {
@@ -574,7 +574,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     // when it resolves (boundary handles stay precise)
                     let inferred = ck.shape_of_expr(&pre_st, value);
                     let (shape, ty) = match (&l.ty, inferred) {
-                        (Some(t), TypeShape::Unknown) => (ck.shape_of_type(t), Some(t.clone())),
+                        (Some(t), TypeShape::Unknown) => {
+                            (ck.shape_of_type_in_scope(t, &pre_st.type_params), Some(t.clone()))
+                        }
                         (_, inferred) => (
                             inferred,
                             ck.ty_of_expr(&pre_st, value).or_else(|| l.ty.clone()),
