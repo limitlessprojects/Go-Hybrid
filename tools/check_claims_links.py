@@ -25,6 +25,8 @@ from pathlib import Path
 TABLE_HEADING = "## The claims table"
 ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|")
 LINK_RE = re.compile(r"\[([^\]]*)\]\((<[^<>\r\n]*>|[^)\s]+)(?:\s+\"[^\"]*\")?\)")
+REF_DEF_RE = re.compile(r"^\s*\[([^\]]+)\]:\s*(<[^<>\r\n]*>|\S+)", re.MULTILINE)
+REF_LINK_RE = re.compile(r"\[([^\]]+)\]\[([^\]]*)\]")
 INLINE_CORPUS_RE = re.compile(r"`(\d{2}-[a-z0-9][a-z0-9-]*(?:\.hy)?)`")
 CORPUS_NUM_RE = re.compile(r"\bcorpus\s+(\d{1,3})\b")
 MARKER_RE = re.compile(r"^\s*\((reject|accept|managed)\)", re.IGNORECASE)
@@ -94,13 +96,30 @@ def check(root):
         return {"ok": False, "rows": 0, "links": 0,
                 "issues": [{"row": 0, "kind": "missing-claims-file", "target": str(claims_file)}]}
     text = claims_file.read_text(encoding="utf-8", errors="replace")
+    ref_defs = {}
+    for match in REF_DEF_RE.finditer(text):
+        key = match.group(1).strip().lower()
+        url = match.group(2).strip()
+        if url.startswith("<") and url.endswith(">"):
+            url = url[1:-1]
+        ref_defs[key] = url
+
     for row_number, evidence in table_rows(text):
         rows += 1
-        for index, match in enumerate(LINK_RE.finditer(evidence)):
+        found_links = []
+        for match in LINK_RE.finditer(evidence):
             target = match.group(2)
-            # Angle-delimited Markdown destinations may contain spaces or parentheses.
             if target.startswith("<") and target.endswith(">"):
                 target = target[1:-1]
+            found_links.append((target, match.end()))
+
+        for match in REF_LINK_RE.finditer(evidence):
+            ref_label = match.group(2).strip() or match.group(1).strip()
+            target = ref_defs.get(ref_label.lower())
+            if target:
+                found_links.append((target, match.end()))
+
+        for target, match_end in found_links:
             if not is_checkable(target):
                 continue
             links += 1
@@ -111,7 +130,7 @@ def check(root):
                 continue
             if resolved.suffix.lower() != ".hy":
                 continue
-            follow = evidence[match.end():]
+            follow = evidence[match_end:]
             marker_match = MARKER_RE.match(follow)
             if not marker_match:
                 continue
