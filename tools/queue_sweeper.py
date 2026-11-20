@@ -65,6 +65,18 @@ def api(path, method="GET", body=None):
                 return r.status, (json.loads(raw) if raw else None)
         except urllib.error.HTTPError as e:
             if e.code in (403, 429):
+                # A permission-denied 403 is not a rate limit. Treat it as
+                # retryable only when GitHub supplies rate-limit signals.
+                if (e.code == 403
+                        and e.headers.get("X-RateLimit-Remaining") != "0"
+                        and not e.headers.get("Retry-After")):
+                    try:
+                        message = e.read(4096).decode("utf-8", errors="replace").lower()
+                    except (OSError, ValueError, AttributeError):
+                        message = ""
+                    if not any(term in message for term in
+                               ("secondary rate limit", "rate limit exceeded")):
+                        return e.code, None
                 reset = e.headers.get("X-RateLimit-Reset")
                 wait = max(10, int(reset) - int(time.time()) + 2) if reset else 180
                 print(f"  rate-limited on {path}, sleeping {wait}s", flush=True)
