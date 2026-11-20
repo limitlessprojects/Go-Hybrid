@@ -287,6 +287,74 @@ impl<'a> Checker<'a> {
                         return;
                     }
                 }
+                if tname == "hy.send_cap" {
+                    let want = match method.as_str() {
+                        "send" => 1,
+                        "close" => 0,
+                        _ => 0,
+                    };
+                    if cr.args.len() != want {
+                        self.diags.push(Diagnostic::error(
+                            "HYB-E1002",
+                            self.path.clone(),
+                            cr.span,
+                            format!(
+                                "method `{}` on `{}` takes {} argument{} but is called with {} (HYB-E1002)",
+                                method, tname, want, if want == 1 { "" } else { "s" }, cr.args.len()
+                            ),
+                        ));
+                        return;
+                    }
+                    if method == "send" && cr.args.len() == 1 {
+                        let target_shapes = match &recv {
+                            TypeShape::OwnHandle(full) => {
+                                if let Some((_, elem_str)) = full.split_once('[') {
+                                    let elem_str = elem_str.strip_suffix(']').unwrap_or(elem_str);
+                                    let shape = self.shape_of_type_arg_str(elem_str, 0);
+                                    if !matches!(shape, TypeShape::Unknown) {
+                                        Some(vec![shape])
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        let val = &cr.args[0].value;
+                        let desc = format!("the send `{}.send({})`", root, val.render());
+                        self.check_site(
+                            st,
+                            cr.span,
+                            "HYB-E3002",
+                            &[val],
+                            false,
+                            &desc,
+                            false,
+                            None,
+                            target_shapes.as_deref(),
+                        );
+                    }
+                } else if tname == "hy.recv_cap" {
+                    let want = match method.as_str() {
+                        "recv" => 0,
+                        "drain" => 0,
+                        _ => 0,
+                    };
+                    if cr.args.len() != want {
+                        self.diags.push(Diagnostic::error(
+                            "HYB-E1002",
+                            self.path.clone(),
+                            cr.span,
+                            format!(
+                                "method `{}` on `{}` takes {} argument{} but is called with {} (HYB-E1002)",
+                                method, tname, want, if want == 1 { "" } else { "s" }, cr.args.len()
+                            ),
+                        ));
+                        return;
+                    }
+                }
                 let receiver_moved = self
                     .lookup_binding(st, &root)
                     .map(|b| b.moved.is_some())
