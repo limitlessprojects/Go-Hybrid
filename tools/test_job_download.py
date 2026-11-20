@@ -3,6 +3,7 @@ import contextlib
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import http.client
+import hashlib
 import importlib.util
 import io
 import json
@@ -251,6 +252,82 @@ class DownloadIntegrityTests(unittest.TestCase):
             self.fetch(root, io.BytesIO(b"complete archive"))
             self.assertEqual((root / "result/results.zip").read_bytes(), b"complete archive")
             self.assertEqual([p.name for p in (root / "result").iterdir()], ["results.zip"])
+
+
+class ArtifactDigestTests(unittest.TestCase):
+    """GitHub's upload-artifact digest covers the downloaded archive bytes."""
+
+    def fetch(self, root, artifact, data):
+        response = io.BytesIO(data)
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch.object(job, "gh_api", return_value={"artifacts": [artifact]}), \
+             mock.patch.object(job, "gh_token", return_value="offline-fixture"), \
+             mock.patch.object(job.urllib.request, "urlopen", return_value=response) as transport, \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            result = job.actions_fetch(123, str(root))
+        return result, output.getvalue(), errors.getvalue(), transport.call_count
+
+    def artifact(self, data):
+        return {"name": "results", "archive_download_url": "https://example.invalid/archive",
+                "size_in_bytes": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest()}
+
+    def test_matching_digest_publishes_archive(self):
+        data = b"complete archive fixture"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result, output, errors, calls = self.fetch(root, self.artifact(data), data)
+            self.assertEqual(result, 0, errors)
+            self.assertEqual(calls, 1)
+            self.assertIn("artifact results", output)
+            self.assertEqual((root / "result/results.zip").read_bytes(), data)
+
+    def test_digest_mismatch_preserves_old_archive_or_absence(self):
+        original = b"complete archive fixture"
+        # One-byte mutation and successful-but-truncated response both finish read().
+        for bad in (b"Complete archive fixture", original[:-1]):
+            for previous in (None, b"previous validated archive"):
+                with self.subTest(bad=bad, previous=previous), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    result_dir = root / "result"
+                    result_dir.mkdir()
+                    dest = result_dir / "results.zip"
+                    if previous is not None:
+                        dest.write_bytes(previous)
+                    result, output, errors, calls = self.fetch(root, self.artifact(original), bad)
+                    self.assertEqual(result, 1)
+                    self.assertIn("digest mismatch", errors)
+                    self.assertNotIn("artifact results", output)
+                    self.assertEqual(calls, 1)
+                    self.assertEqual(dest.read_bytes() if dest.exists() else None, previous)
+                    self.assertEqual(sorted(p.name for p in result_dir.iterdir()),
+                                     [] if previous is None else ["results.zip"])
+
+    def test_invalid_advertised_digest_fails_before_download(self):
+        for digest in ("", "sha256:abc", "sha512:" + "a" * 128,
+                       "sha256:" + "z" * 64, 42, {"sha256": "a" * 64}):
+            with self.subTest(digest=digest), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                artifact = self.artifact(b"fixture")
+                artifact["digest"] = digest
+                result, output, errors, calls = self.fetch(root, artifact, b"fixture")
+                self.assertEqual(result, 1)
+                self.assertIn("unsupported artifact digest", errors)
+                self.assertEqual(calls, 0)
+                self.assertNotIn("artifact results", output)
+                self.assertFalse((root / "result/results.zip").exists())
+
+    def test_legacy_missing_or_null_digest_still_downloads(self):
+        for null in (False, True):
+            with self.subTest(null=null), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                artifact = self.artifact(b"legacy archive")
+                if null:
+                    artifact["digest"] = None
+                else:
+                    del artifact["digest"]
+                result, _, errors, _ = self.fetch(root, artifact, b"legacy archive")
+                self.assertEqual(result, 0, errors)
+                self.assertEqual((root / "result/results.zip").read_bytes(), b"legacy archive")
 
 
 if __name__ == "__main__":
