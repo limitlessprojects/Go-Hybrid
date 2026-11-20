@@ -269,12 +269,30 @@ impl ChannelLivenessChecker {
                             *span,
                             format!("use of moved linear capability '{}'", cap),
                         ));
+                    } else if self.is_tx_closed(&cap) {
+                        self.diags.push(Diagnostic::error(
+                            "HYB-E3001",
+                            &self.file_path,
+                            *span,
+                            format!(
+                                "cannot send on closed linear send capability '{}' (send on closed channel is forbidden)",
+                                cap
+                            ),
+                        ));
+                    } else {
+                        self.mark_tx_active(&cap);
                     }
                 }
                 self.check_expr(value);
             }
             Stmt::Select { arms, .. } => {
+                let saved_scopes = self.scope_stack.clone();
                 for arm in arms {
+                    for (i, s) in self.scope_stack.iter_mut().enumerate() {
+                        if i < saved_scopes.len() {
+                            s.pipes = saved_scopes[i].pipes.clone();
+                        }
+                    }
                     match &arm.kind {
                         SelectArmKind::Recv { chan, .. } => {
                             if let Some(cap) = self.get_cap_name(chan) {
@@ -284,6 +302,16 @@ impl ChannelLivenessChecker {
                                         &self.file_path,
                                         arm.body.span,
                                         format!("use of moved linear capability '{}'", cap),
+                                    ));
+                                } else if self.is_rx_drained(&cap) {
+                                    self.diags.push(Diagnostic::error(
+                                        "HYB-E3001",
+                                        &self.file_path,
+                                        arm.body.span,
+                                        format!(
+                                            "cannot receive from drained linear capability '{}'",
+                                            cap
+                                        ),
                                     ));
                                 } else {
                                     self.mark_rx_active(&cap);
@@ -299,6 +327,18 @@ impl ChannelLivenessChecker {
                                         arm.body.span,
                                         format!("use of moved linear capability '{}'", cap),
                                     ));
+                                } else if self.is_tx_closed(&cap) {
+                                    self.diags.push(Diagnostic::error(
+                                        "HYB-E3001",
+                                        &self.file_path,
+                                        arm.body.span,
+                                        format!(
+                                            "cannot send on closed linear send capability '{}' (send on closed channel is forbidden)",
+                                            cap
+                                        ),
+                                    ));
+                                } else {
+                                    self.mark_tx_active(&cap);
                                 }
                             }
                             self.check_expr(value);
@@ -418,15 +458,63 @@ impl ChannelLivenessChecker {
 
                         match name.as_str() {
                             "close" => {
+                                if self.is_tx_closed(&cap) {
+                                    self.diags.push(Diagnostic::error(
+                                        "HYB-E4004",
+                                        &self.file_path,
+                                        *span,
+                                        format!(
+                                            "linear send capability '{}' was already closed (double close is forbidden)",
+                                            cap
+                                        ),
+                                    ));
+                                    return;
+                                }
                                 self.mark_tx_closed(&cap);
                             }
                             "drain" => {
+                                if self.is_rx_drained(&cap) {
+                                    self.diags.push(Diagnostic::error(
+                                        "HYB-E4005",
+                                        &self.file_path,
+                                        *span,
+                                        format!(
+                                            "linear receive capability '{}' was already drained (double drain is forbidden)",
+                                            cap
+                                        ),
+                                    ));
+                                    return;
+                                }
                                 self.mark_rx_drained(&cap);
                             }
                             "send" => {
+                                if self.is_tx_closed(&cap) {
+                                    self.diags.push(Diagnostic::error(
+                                        "HYB-E3001",
+                                        &self.file_path,
+                                        *span,
+                                        format!(
+                                            "cannot send on closed linear capability '{}' (send on closed channel is forbidden)",
+                                            cap
+                                        ),
+                                    ));
+                                    return;
+                                }
                                 self.mark_tx_active(&cap);
                             }
                             "recv" => {
+                                if self.is_rx_drained(&cap) {
+                                    self.diags.push(Diagnostic::error(
+                                        "HYB-E3001",
+                                        &self.file_path,
+                                        *span,
+                                        format!(
+                                            "cannot receive from drained linear capability '{}'",
+                                            cap
+                                        ),
+                                    ));
+                                    return;
+                                }
                                 self.mark_rx_active(&cap);
                             }
                             _ => {}
@@ -453,6 +541,13 @@ impl ChannelLivenessChecker {
                             &self.file_path,
                             *span,
                             format!("use of moved linear capability '{}'", cap),
+                        ));
+                    } else if self.is_rx_drained(&cap) {
+                        self.diags.push(Diagnostic::error(
+                            "HYB-E3001",
+                            &self.file_path,
+                            *span,
+                            format!("cannot receive from drained linear capability '{}'", cap),
                         ));
                     } else {
                         self.mark_rx_active(&cap);
@@ -600,5 +695,27 @@ impl ChannelLivenessChecker {
                 }
             }
         }
+    }
+
+    fn is_tx_closed(&self, name: &str) -> bool {
+        for scope in self.scope_stack.iter().rev() {
+            for p in &scope.pipes {
+                if p.tx == name && p.tx_state == ChannelTypestate::Closed {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn is_rx_drained(&self, name: &str) -> bool {
+        for scope in self.scope_stack.iter().rev() {
+            for p in &scope.pipes {
+                if p.rx == name && p.rx_state == ChannelTypestate::Drained {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
