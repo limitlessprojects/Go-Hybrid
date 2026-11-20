@@ -717,7 +717,7 @@ fn inclusive_range_and_labeled_break() {
         go
     );
     assert!(
-        go.contains("i != "),
+        go.contains(", i = i < "),
         "inclusive last-value stop check:\n{}",
         go
     );
@@ -742,13 +742,32 @@ fn inclusive_range_at_type_maximum_uses_stop_flag() {
         go
     );
     assert!(
-        go.contains("value !="),
+        go.contains(", value = value < "),
         "continue-safe stop check present:\n{}",
         go
     );
     assert!(
         go.contains("<= "),
         "empty-range guard still present:\n{}",
+        go
+    );
+}
+
+#[test]
+fn inclusive_range_body_write_to_loop_var_emits_post_statement_stop_check_issue_4531() {
+    // Issue #4531: writes to loop variable in body must be evaluated by the stop check
+    // in the post-statement before the condition check runs.
+    let go = emit(
+        "fn main() {\n    count := 0\n    for i in 0..=10 {\n        count += 1\n        i = 10\n    }\n}\n",
+    );
+    assert!(
+        go.contains("for i, ") && go.contains("= i < ") && go.contains(", i + 1"),
+        "must emit post-statement stop update for loop var:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("i != "),
+        "must not emit stale first-statement stop check inside body:\n{}",
         go
     );
 }

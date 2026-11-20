@@ -2137,9 +2137,6 @@ impl Emitter {
                 return Ok(());
             }
         }
-        // When set, the inclusive-range arm asks us to inject
-        // `cont = v != hi` as the first body statement (see #322).
-        let mut inclusive_stop: Option<(String, String, String)> = None;
         let head = match kind {
             ForKind::Infinite => "for {".to_string(),
             ForKind::While { cond } => {
@@ -2170,13 +2167,14 @@ impl Emitter {
                     var.clone()
                 };
                 if *inclusive {
-                    // Issue #322: `for v := lo; v <= hi; v++` wraps past the
-                    // type maximum (int8 127..=127 never stops). Emit a
-                    // continue-safe form that still runs the body once at
-                    // `hi` and exits even when `continue` hits the post:
+                    // Issue #322, #4531: `for v := lo; v <= hi; v++` wraps past the
+                    // type maximum (int8 127..=127 never stops). Additionally,
+                    // evaluating `cont = v != hi` at the start of the body would ignore
+                    // writes to `v` inside the body (e.g. `i = 10` in `0..=10`, #4531).
+                    // We evaluate the stop flag in the post-statement alongside the
+                    // increment:
                     //   hyLo := lo; hyHi := hi
-                    //   for v, cont := hyLo, hyLo <= hyHi; cont; v++ {
-                    //       cont = v != hyHi
+                    //   for v, cont := hyLo, hyLo <= hyHi; cont; cont, v = v < hyHi, v + 1 {
                     //       body
                     //   }
                     let lo_once = self.next_temp("hyLo");
@@ -2184,10 +2182,9 @@ impl Emitter {
                     let cont = self.next_temp("hyCont");
                     self.push(&format!("{} := {}", lo_once, lo_t));
                     self.push(&format!("{} := {}", hi_once, hi_t));
-                    inclusive_stop = Some((cont.clone(), v.clone(), hi_once.clone()));
                     format!(
-                        "for {}, {} := {}, {} <= {}; {}; {}++ {{",
-                        v, cont, lo_once, lo_once, hi_once, cont, v
+                        "for {}, {} := {}, {} <= {}; {}; {}, {} = {} < {}, {} + 1 {{",
+                        v, cont, lo_once, lo_once, hi_once, cont, cont, v, v, hi_once, v
                     )
                 } else if (!Self::expr_mentions_ident(hi, &v) || !var_in_scope)
                     && !Self::expr_has_call_or_recv(hi)
@@ -2311,16 +2308,6 @@ impl Emitter {
         self.for_depth += 1;
         let sentinel_label = label.clone().unwrap_or_default();
         self.loan_frames.push(vec![(String::new(), sentinel_label)]);
-        // Inclusive-range stop-flag (#322): `hyCont = v != hyHi` runs as the
-        // FIRST body statement, so `continue` still evaluates it on the last
-        // value and the loop exits instead of wrapping past the type maximum.
-        // The body itself goes through emit_block_body so terminator flushes
-        // and the loan-frame sentinel machinery apply unchanged.
-        if let Some((cont, v, hi_once)) = &inclusive_stop {
-            self.indent += 1;
-            self.push(&format!("{} = {} != {}", cont, v, hi_once));
-            self.indent -= 1;
-        }
         let body_r = self.emit_block_body(&body.stmts);
         self.loan_frames.pop();
         self.for_depth -= 1;
