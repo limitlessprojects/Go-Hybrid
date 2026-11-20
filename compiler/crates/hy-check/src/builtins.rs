@@ -955,6 +955,11 @@ impl<'a> Checker<'a> {
             Expr::Ident { name, .. } if !sc.contains_key(name.as_str()) && !self.fns.contains_key(name.as_str()) && matches!(name.as_str(), "delete" | "clear" | "copy") => return args.first().and_then(|a| ref_of(&a.value)),
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) { if !sc.contains_key(pkg.as_str()) && self.lookup_binding(&sa.st, pkg).is_none() && (self.packages.contains(pkg.as_str()) || self.known_package(pkg)) { return if matches!(crate::foreign::package_mode(pkg, name), crate::foreign::CallMode::Mutate | crate::foreign::CallMode::Consume) { args.first().and_then(|a| ref_of(&a.value)) } else { crate::foreign::package_mutated_arg(pkg, name).and_then(|idx| args.get(idx)).and_then(|a| ref_of(&a.value)) }; } }
+                if let Some(idx) = crate::shape::receiver_type_name(&self.shape_of_expr(&sa.st, base))
+                    .and_then(|k| crate::foreign::foreign_method_mutated_arg(&k, name.as_str()))
+                {
+                    return args.get(idx).and_then(|a| ref_of(&a.value));
+                }
                 if matches!(name.as_str(), "insert" | "remove" | "pop" | "set" | "push_string" | "array_push_string" | "write" | "finish") { return ref_of(unwrap_parens(base)); }
             }
             _ => {}
