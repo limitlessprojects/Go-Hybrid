@@ -1492,38 +1492,55 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-            return None;
-        };
-        if self
-            .scopes
-            .iter()
-            .any(|layer| layer.contains_key(name.as_str()))
-        {
-            return None;
-        }
-        if let Some(fd) = self.ck.fns.get(name.as_str()) {
-            if fd.receiver.is_some() || !fd.type_params.is_empty() {
-                return None;
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                if self
+                    .scopes
+                    .iter()
+                    .any(|layer| layer.contains_key(name.as_str()))
+                {
+                    return None;
+                }
+                if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                    if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                        return None;
+                    }
+                    return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                }
+                if name == "min" || name == "max" {
+                    let res_scalar = args
+                        .iter()
+                        .find_map(|a| self.typed_value_scalar(&a.value));
+                    return Some(vec![res_scalar]);
+                }
+                if args.len() == 1
+                    && !self.ck.structs.contains_key(name.as_str())
+                    && !self.ck.enums.contains_key(name.as_str())
+                    && !self.ck.type_aliases.contains_key(name.as_str())
+                {
+                    if let Some(s) = canonical_numeric_name(name) {
+                        return Some(vec![Some(s)]);
+                    }
+                }
+                None
             }
-            return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
-        }
-        if name == "min" || name == "max" {
-            let res_scalar = args
-                .iter()
-                .find_map(|a| self.typed_value_scalar(&a.value));
-            return Some(vec![res_scalar]);
-        }
-        if args.len() == 1
-            && !self.ck.structs.contains_key(name.as_str())
-            && !self.ck.enums.contains_key(name.as_str())
-            && !self.ck.type_aliases.contains_key(name.as_str())
-        {
-            if let Some(s) = canonical_numeric_name(name) {
-                return Some(vec![Some(s)]);
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        let head = Checker::base_named_type_str(name);
+                        let assoc_key = format!("{}.{}", pkg, head);
+                        if let Some(fd) = self.ck.fns.get(&assoc_key) {
+                            if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                                return None;
+                            }
+                            return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                        }
+                    }
+                }
+                None
             }
+            _ => None,
         }
-        None
     }
 
     /// #1031 — the exact numeric type of a value that is provably TYPED.
@@ -4259,6 +4276,20 @@ impl<'a> Collector<'a> {
                 None
             }
             Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        let head = Checker::base_named_type_str(name);
+                        let assoc_key = format!("{}.{}", pkg, head);
+                        if let Some(f) = self.ck.fns.get(&assoc_key) {
+                            return Some(
+                                f.results
+                                    .iter()
+                                    .map(|r| self.kind_of_ty(&r.ty, 0))
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
                 let bk = self.kind_of_expr(base);
                 // #2823: the option payload methods carry a real result kind —
                 // `unwrap()` / `or(d)` yield the payload, `is_some()` /
@@ -5058,6 +5089,22 @@ impl<'a> Collector<'a> {
                         Some(f) => &f.results,
                         None => return None,
                     },
+                    Expr::Field { base, name, .. } => {
+                        if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                            if self.lookup_kind(pkg).is_none() {
+                                let head = Checker::base_named_type_str(name);
+                                let assoc_key = format!("{}.{}", pkg, head);
+                                match self.ck.fns.get(&assoc_key) {
+                                    Some(f) => &f.results,
+                                    None => return None,
+                                }
+                            } else {
+                                return None;
+                            }
+                        } else {
+                            return None;
+                        }
+                    }
                     Expr::FnLit { results, .. } => results,
                     _ => return None,
                 };
@@ -8672,6 +8719,12 @@ impl<'a> Collector<'a> {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
                         self.check_fn_type_arg_arity(&assoc_key, name, span);
+                        if self.ck.fns.contains_key(&assoc_key) {
+                            let full_name = format!("{}.{}", pkg, name);
+                            self.check_user_fn_arity(&full_name, args, span);
+                            self.check_user_fn_arg_types(&assoc_key, args);
+                            return;
+                        }
                     }
                 }
                 if let Some(m) = self.method_expr_decl(base, name) {
