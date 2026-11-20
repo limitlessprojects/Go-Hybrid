@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"runtime"
+	"unicode/utf8"
 	"unsafe"
 
 	"hybrid.program/hybridge"
@@ -94,13 +95,29 @@ func Parse(data []byte) (Value, error) {
 // NewObject / NewArray: fresh containers.
 func NewObject() Value {
 	var id uint64
-	hybridge.Cross1S(FnNewObject, uintptr(unsafe.Pointer(&id))) // SMALL: table insert, O(1)
+	var p runtime.Pinner
+	p.Pin(&id)
+	st := hybridge.Cross1S(FnNewObject, uintptr(unsafe.Pointer(&id))) // SMALL: table insert, O(1)
+	p.Unpin()
+	runtime.KeepAlive(&p)
+	runtime.KeepAlive(&id)
+	if st != statusOK {
+		return Value{}
+	}
 	return wrap(id)
 }
 
 func NewArray() Value {
 	var id uint64
-	hybridge.Cross1S(FnNewArray, uintptr(unsafe.Pointer(&id))) // SMALL: table insert, O(1)
+	var p runtime.Pinner
+	p.Pin(&id)
+	st := hybridge.Cross1S(FnNewArray, uintptr(unsafe.Pointer(&id))) // SMALL: table insert, O(1)
+	p.Unpin()
+	runtime.KeepAlive(&p)
+	runtime.KeepAlive(&id)
+	if st != statusOK {
+		return Value{}
+	}
 	return wrap(id)
 }
 
@@ -123,12 +140,36 @@ func (v Value) Array(key string) ([]Value, error) {
 		return nil, ErrJSON
 	}
 	var n uint64
-	hybridge.Cross2S(FnArrayLen, uintptr(arrID), uintptr(unsafe.Pointer(&n))) // SMALL: len read
+	var np runtime.Pinner
+	np.Pin(&n)
+	lst := hybridge.Cross2S(FnArrayLen, uintptr(arrID), uintptr(unsafe.Pointer(&n))) // SMALL: len read
+	np.Unpin()
+	runtime.KeepAlive(&np)
+	runtime.KeepAlive(&n)
+	if lst != statusOK {
+		hybridge.CrossDeep1(FnRelease, uintptr(arrID))
+		return nil, ErrJSON
+	}
 	out := make([]Value, n)
 	for i := range out {
 		var eid uint64
+		var ep runtime.Pinner
+		ep.Pin(&eid)
 		// DEEP class: elem.clone() recurses on the element's nesting.
-		hybridge.CrossDeep3(FnArrayGet, uintptr(arrID), uintptr(i), uintptr(unsafe.Pointer(&eid)))
+		est := hybridge.CrossDeep3(FnArrayGet, uintptr(arrID), uintptr(i), uintptr(unsafe.Pointer(&eid)))
+		ep.Unpin()
+		runtime.KeepAlive(&ep)
+		runtime.KeepAlive(&eid)
+		if est != statusOK {
+			for j := 0; j < i; j++ {
+				if out[j].h != nil && out[j].h.id != 0 {
+					hybridge.CrossDeep1(FnRelease, uintptr(out[j].h.id))
+					out[j].h.id = 0
+				}
+			}
+			hybridge.CrossDeep1(FnRelease, uintptr(arrID))
+			return nil, ErrJSON
+		}
 		out[i] = wrap(eid)
 	}
 	// The temporary array handle dies with the materialized slice.
@@ -200,8 +241,14 @@ func (v Value) PushString(s string) error {
 // releases nothing because the move zeroes its id). Set reports the Rust
 // status (hy_json_set's i32) as an error — `doc.set(k, v)?` propagates it.
 func (v Value) Set(key string, val any) error {
+	if v.h == nil || v.h.id == 0 || !utf8.ValidString(key) {
+		return ErrJSON
+	}
 	if hv, ok := val.(Value); ok {
 		return v.setHandle(key, hv)
+	}
+	if sv, ok := val.(string); ok && !utf8.ValidString(sv) {
+		return ErrJSON
 	}
 	b, err := json.Marshal(val)
 	if err != nil {
@@ -211,11 +258,18 @@ func (v Value) Set(key string, val any) error {
 	if err != nil {
 		return err
 	}
-	return v.setHandle(key, bv)
+	if err := v.setHandle(key, bv); err != nil {
+		if bv.h != nil && bv.h.id != 0 {
+			hybridge.CrossDeep1(FnRelease, uintptr(bv.h.id))
+			bv.h.id = 0
+		}
+		return err
+	}
+	return nil
 }
 
 func (v Value) setHandle(key string, val Value) error {
-	if v.h == nil || v.h.id == 0 || val.h == nil || val.h.id == 0 {
+	if v.h == nil || v.h.id == 0 || val.h == nil || val.h.id == 0 || !utf8.ValidString(key) {
 		return ErrJSON
 	}
 	kptr, klen, pin, kb := pinCrossKey(key)
@@ -239,17 +293,23 @@ func ToStringPretty(v Value) (string, error) {
 		return "", ErrJSON
 	}
 	var need uint64
+	var np runtime.Pinner
+	np.Pin(&need)
 	// DEEP class: serialize walks the value tree (see ledger).
 	st := hybridge.CrossDeep4(FnToStringPretty, uintptr(v.h.id), 0, 0, uintptr(unsafe.Pointer(&need)))
+	np.Unpin()
+	runtime.KeepAlive(&np)
 	if st == statusTryAgain && need > 0 {
 		buf := make([]byte, need)
 		var p runtime.Pinner
 		p.Pin(&buf[0])
+		p.Pin(&need)
 		st = hybridge.CrossDeep4(FnToStringPretty, uintptr(v.h.id),
 			uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(unsafe.Pointer(&need)))
 		p.Unpin()
 		runtime.KeepAlive(&p)
 		runtime.KeepAlive(buf)
+		runtime.KeepAlive(&need)
 		if st == statusOK {
 			return string(buf[:need]), nil
 		}
@@ -267,17 +327,26 @@ func ToStringPretty(v Value) (string, error) {
 // compact form and strips the quotes it added — one documented copy).
 func valueText(id uint64) string {
 	var need uint64
+	var np runtime.Pinner
+	np.Pin(&need)
 	st := hybridge.CrossDeep4(FnToStringPretty, uintptr(id), 0, 0, uintptr(unsafe.Pointer(&need))) // DEEP: serialize
+	np.Unpin()
+	runtime.KeepAlive(&np)
 	if st != statusTryAgain || need < 2 {
 		return ""
 	}
 	buf := make([]byte, need)
 	var p runtime.Pinner
 	p.Pin(&buf[0])
-	hybridge.CrossDeep4(FnToStringPretty, uintptr(id), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(unsafe.Pointer(&need)))
+	p.Pin(&need)
+	st = hybridge.CrossDeep4(FnToStringPretty, uintptr(id), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(unsafe.Pointer(&need)))
 	p.Unpin()
 	runtime.KeepAlive(&p)
 	runtime.KeepAlive(buf)
+	runtime.KeepAlive(&need)
+	if st != statusOK {
+		return ""
+	}
 	// Json::String's to_string is a quoted JSON string with escaped characters.
 	var s string
 	if err := json.Unmarshal(buf[:need], &s); err == nil {
