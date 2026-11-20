@@ -116,6 +116,23 @@ class PatternExtractionTests(unittest.TestCase):
         self.assertFalse(guard.is_registered_direct(
             "tests/test_live.py", "python3 -c 'print(1)' tests/test_live.py\n"))
 
+    def test_environment_prefixed_python_invocations_are_registered(self):
+        workflow = (
+            "PYTHONHASHSEED=0 TZ=UTC python3 -m unittest discover "
+            "-s tools -p test_live.py\n"
+            "COVERAGE_FILE='.coverage ci' python3 tests/test_direct.py\n"
+        )
+        self.assertEqual(guard.registered_patterns(workflow), ["test_live.py"])
+        self.assertTrue(guard.is_registered_direct("tests/test_direct.py", workflow))
+
+    def test_environment_assignment_without_python_registers_nothing(self):
+        workflow = (
+            "PYTHONHASHSEED=0\n"
+            "TEST_COMMAND='python3 tests/test_direct.py'\n"
+        )
+        self.assertEqual(guard.registered_patterns(workflow), [])
+        self.assertFalse(guard.is_registered_direct("tests/test_direct.py", workflow))
+
     def test_repeated_pattern_uses_the_last_value_like_unittest(self):
         self.assertEqual(guard.registered_patterns(
             "python3 -m unittest discover -s tools -p test_disabled.py -p test_live.py\n"),
