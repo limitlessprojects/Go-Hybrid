@@ -1623,7 +1623,9 @@ impl<'a> Checker<'a> {
                         (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
                         (_, s) => (s, ty.or_else(|| l.ty.clone())),
                     };
-                    let reads_self = self.value_reads_storage_of(st, &l.values[0], name);
+                    let reads_self = (self.shape_may_share(&shape)
+                        || matches!(shape, TypeShape::Unknown))
+                        && self.value_reads_storage_of(st, &l.values[0], name);
                     let shadowed_origin = if self.shape_may_share(&shape) && reads_self {
                         self.non_owned_origin_of(st, name).map(|(o, via_share)| {
                             if via_share && !o.starts_with("a may-share peer of ") {
@@ -2492,28 +2494,30 @@ impl<'a> Checker<'a> {
         let mut rhs = pre_st.clone();
         rhs.aliases.remove(name);
         rhs.share_clear(name);
-        if let Some(binding) = rhs.env_lookup_mut(name) {
-            binding.non_owned_origin = None;
+        if !self.value_reads_storage_of(pre_st, value, name) {
+            if let Some(mut nb) = self.lookup_binding(st, name).cloned() {
+                nb.non_owned_origin = None;
+                nb.moved = None;
+                rhs.env_define(name, nb);
+            }
         }
+        let n_shape =
+            self.lookup_binding(st, name).map_or(TypeShape::Unknown, |b| b.shape.clone());
         if multi {
-            let shape = self.lookup_binding(st, name).map(|b| b.shape.clone()).unwrap_or(TypeShape::Unknown);
-            self.record_multi_value_share_and_alias(&mut rhs, name, &shape, value);
+            self.record_multi_value_share_and_alias(&mut rhs, name, &n_shape, value);
         } else {
             self.record_may_share(&mut rhs, name, value);
             self.record_alias(&mut rhs, name, value);
         }
-        if let Some(origin) = self.lookup_binding(&rhs, name).and_then(|b| b.non_owned_origin.clone()) {
-            if let Some(binding) = st.env_lookup_mut(name) {
-                if binding.non_owned_origin.is_none() {
-                    binding.non_owned_origin = Some(origin);
-                }
-            }
-        }
+        let mut rhs_b = self.lookup_binding(&rhs, name);
+        let mut rhs_orig = rhs_b.and_then(|b| b.non_owned_origin.clone());
+        let mut rhs_mv = rhs_b.take().and_then(|b| b.moved.clone());
         let alias = rhs.aliases.get(name).cloned();
         let mut sources = rhs.may_share.get(name).cloned().unwrap_or_default();
         if let Some(source) = &alias {
             sources.insert(source.clone());
         }
+        let carries = self.shape_may_share(&n_shape) || matches!(n_shape, TypeShape::Unknown);
         for source in sources {
             let mut peers = self.storage_peers(pre_st, &source);
             peers.insert(0, source.clone());
@@ -2524,6 +2528,21 @@ impl<'a> Checker<'a> {
                             st.shadow_links.entry(name.to_string()).or_default().insert((peer.clone(), depth));
                         }
                     }
+                    if carries && rhs_orig.is_none() {
+                        let pre_o = self.non_owned_origin_of(pre_st, &peer).or_else(|| {
+                            let cr = self.binding_const_root(pre_st, &peer);
+                            cr.map(|c| (format!("`const {c}`"), true))
+                        });
+                        rhs_orig = pre_o.map(|(o, v)| {
+                            if (alias.as_ref() == Some(&source) && peer == source && !v)
+                                || o.starts_with("a may-share peer of ")
+                            { o } else { format!("a may-share peer of {o}") }
+                        });
+                    }
+                    if carries && rhs_mv.is_none() {
+                        rhs_mv = self.lookup_binding(pre_st, &peer).and_then(|b| b.moved.clone());
+                    }
+                    Self::inherit_peer_loans(st, pre_st, &peer, name);
                 } else if peer != name {
                     st.share_edge(name, &peer);
                     if alias.as_ref() == Some(&source) && !st.aliases.contains_key(name) {
@@ -2534,6 +2553,26 @@ impl<'a> Checker<'a> {
                     st.shadow_links.entry(name.to_string()).or_default().extend(links.iter().cloned());
                 }
             }
+        }
+        if let Some(b) = st.env_lookup_mut(name) {
+            b.non_owned_origin = b.non_owned_origin.take().or(rhs_orig);
+            b.moved = b.moved.take().or(rhs_mv);
+        }
+    }
+
+    fn inherit_peer_loans(st: &mut FnState, pre: &FnState, peer: &str, dst: &str) {
+        use LoanTarget::{Handle, MapSlot};
+        for l in &pre.loans {
+            let target = match &l.target {
+                Handle { handle } if a3_paths_conflict(pre, handle, peer) => {
+                    Handle { handle: dst.into() }
+                }
+                MapSlot { binding: b, path: p, key: k } if a3_paths_conflict(pre, p, peer) => {
+                    MapSlot { binding: b.clone(), path: dst.into(), key: k.clone() }
+                }
+                _ => continue,
+            };
+            st.loans.push(Loan { target, ..l.clone() });
         }
     }
 
@@ -2593,7 +2632,9 @@ impl<'a> Checker<'a> {
             let mut peers = self.storage_peers(pre_st, &source);
             peers.insert(0, source);
             for peer in peers {
-                if !overwritten.contains(&peer) && peer != root {
+                if overwritten.contains(&peer) {
+                    Self::inherit_peer_loans(st, pre_st, &peer, root);
+                } else if peer != root {
                     st.share_edge(root, &peer);
                 }
                 if let Some(links) = pre_st.shadow_links.get(&peer) {
@@ -4336,10 +4377,12 @@ impl<'a> Checker<'a> {
         } else {
             return;
         };
+        let mut overwritten = HashSet::new();
         for (name, (value, shape)) in l.names.iter().zip(values) {
             if name == "_" {
                 continue;
             }
+            overwritten.insert(name.clone());
             let borrow_slot = field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
             if (l.names.len() == l.values.len() || borrow_slot) && self.expr_carries_borrow(st, value) {
                 st.borrow_bindings.insert(name.clone());
@@ -4352,7 +4395,7 @@ impl<'a> Checker<'a> {
             let mut addr_roots = Vec::new();
             self.collect_borrowed_roots(st, value, &mut addr_roots);
             for src in addr_roots {
-                if src == *name {
+                if src == *name || overwritten.contains(&src) {
                     continue;
                 }
                 let matched = self.lookup_binding(st, &src).map(|b| {
@@ -4400,12 +4443,14 @@ impl<'a> Checker<'a> {
             } else {
                 return;
             };
+            let mut overwritten = HashSet::new();
             for (t, (v, shape)) in targets.iter().zip(shaped_values) {
                 let carries_borrow = self.expr_carries_borrow(st, v);
                 if let PlaceKind::Ident(name) = &t.kind {
                     if name == "_" {
                         continue;
                     }
+                    overwritten.insert(name.clone());
                     let borrow_slot =
                         field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
                     let inner = unwrap_parens(v);
@@ -4422,7 +4467,7 @@ impl<'a> Checker<'a> {
                         let mut addr_roots = Vec::new();
                         self.collect_borrowed_roots(st, v, &mut addr_roots);
                         for src in addr_roots {
-                            if src != *name {
+                            if src != *name && !overwritten.contains(&src) {
                                 let matched = self.lookup_binding(st, &src).map(|b| {
                                     let ok = !b.shape.is_sendable_by_type()
                                         || b.immutable
@@ -6946,11 +6991,14 @@ impl<'a> Checker<'a> {
             let mut ref_roots = Vec::new();
             collect_ref_roots(&values[0], &mut ref_roots);
             self.collect_callee_const_return_roots(st, &values[0], &mut ref_roots, 0);
+            let pre_st = st.clone();
+            let mut overwritten = Vec::new();
             for (i, ((t, shape), ty)) in targets.iter().zip(shapes).zip(tys).enumerate() {
                 if is_const_write.get(i).copied().unwrap_or(false) {
                     continue;
                 }
                 if let PlaceKind::Ident(name) = &t.kind {
+                    overwritten.push(name.clone());
                     let may_share = self.shape_may_share(&shape);
                     let reads_self = may_share
                         && (self.value_reads_storage_of(st, &values[0], name)
@@ -7062,10 +7110,13 @@ impl<'a> Checker<'a> {
                             st.share_edge(name, &peer);
                         }
                     }
-                    self.record_multi_value_share_and_alias(st, name, &shape, &values[0]);
+                    self.record_storage_from_snapshot(
+                        st, &pre_st, name, &values[0], &overwritten, false, true,
+                    );
                     if may_share {
                         for r in &ref_roots {
-                            if r != name && self.binding_may_share(st, r) {
+                            let keep = r != name && !overwritten.contains(r);
+                            if keep && self.binding_may_share(st, r) {
                                 st.share_edge(name, r);
                                 if !st.aliases.contains_key(name) {
                                     st.aliases.insert(name.clone(), r.clone());
@@ -7151,13 +7202,16 @@ impl<'a> Checker<'a> {
                         // must stay writable. Only consts that can share backing storage
                         // (#123: map/slice/pointer/handle/struct-or-array containing them)
                         // make a write through the copy a write to the const.
-                        if let Some(cb) = self.lookup_binding(st, const_name) {
-                            if matches!(
-                                cb.shape,
-                                TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic
-                            ) {
-                                return None;
-                            }
+                        let cb = st.scopes.iter().rev()
+                            .find_map(|s| s.get(const_name).filter(|x| x.immutable))
+                            .or_else(|| st.env.get(const_name).filter(|x| x.immutable))
+                            .or_else(|| self.consts.get(const_name));
+                        let is_val = cb.is_some_and(|x| {
+                            use TypeShape::{Atomic, Primitive, Str};
+                            matches!(x.shape, Primitive | Str | Atomic)
+                        });
+                        if is_val && field_borrow_kind(&b.shape).is_none() {
+                            return None;
                         }
                         return Some(const_name.to_string());
                     }
@@ -8328,16 +8382,17 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if targets.len() == values.len() {
+                    let pre = aliases.clone();
                     for (t, v) in targets.iter().zip(values.iter()) {
                         if let PlaceKind::Ident(name) = &t.kind {
-                            if Self::expr_reaches_const_aliases(v, aliases) {
+                            if Self::expr_reaches_const_aliases(v, &pre) {
                                 aliases.insert(name.clone());
                             } else {
                                 aliases.remove(name);
                             }
                         } else {
                             let root = t.root();
-                            if !root.is_empty() && Self::expr_reaches_const_aliases(v, aliases) {
+                            if !root.is_empty() && Self::expr_reaches_const_aliases(v, &pre) {
                                 aliases.insert(root.to_string());
                             }
                         }
@@ -8371,8 +8426,9 @@ impl<'a> Checker<'a> {
                         aliases.remove(name);
                     }
                 } else if l.names.len() == l.values.len() {
+                    let pre = aliases.clone();
                     for (name, v) in l.names.iter().zip(l.values.iter()) {
-                        if Self::expr_reaches_const_aliases(v, aliases) {
+                        if Self::expr_reaches_const_aliases(v, &pre) {
                             aliases.insert(name.clone());
                         } else {
                             aliases.remove(name);
