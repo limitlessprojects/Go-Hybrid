@@ -181,6 +181,27 @@ class Rules(unittest.TestCase):
 
 
 class Fixtures(unittest.TestCase):
+    def test_fixture_must_be_a_direct_harness_input(self):
+        # corpus_harness enumerates top-level *.hy, not sibling, parent,
+        # nested, or differently suffixed files with copied verdict headers.
+        for outside in ('tests/checker-corpus-extra/01-fake.hy',
+                        'tests/checker-corpus/../01-fake.hy',
+                        'tests/checker-corpus/nested/01-fake.hy',
+                        'tests/checker-corpus/01-fake.txt'):
+            with self.subTest(path=outside):
+                tmp, root = build(
+                    rows=[row(fixtures=[{'path': outside, 'expect': 'reject'}])],
+                    fixtures={outside: fixture('REJECT A1c')})
+                self.addCleanup(tmp.cleanup)
+                self.assertIn('outside', joined(problems_of(root)))
+
+    def test_normalized_direct_corpus_path_remains_valid(self):
+        path = 'tests/checker-corpus/../checker-corpus/01-real.hy'
+        tmp, root = build(rows=[row(fixtures=[{'path': path, 'expect': 'reject'}])],
+                          fixtures={path: fixture('REJECT A1c')})
+        self.addCleanup(tmp.cleanup)
+        self.assertEqual(problems_of(root), [])
+
     def test_registered_verdict_contradicts_the_row(self):
         tmp, root = build(rows=[row(fixtures=[{"path": FIXTURE_1, "expect": "accept"}])])
         self.addCleanup(tmp.cleanup)
