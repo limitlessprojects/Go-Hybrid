@@ -64,6 +64,26 @@ class MarkerDetectionTests(unittest.TestCase):
         hits = list(MOD.scan(str(root)))
         self.assertEqual(sorted(h[1] for h in hits), [1, 5])
 
+    def test_dependency_manifest_conflicts_fail_the_cli(self):
+        for rel in ("compiler/Cargo.lock", "runtime/go/hyrt/go.mod",
+                    "runtime/go/hyrt/go.sum"):
+            with self.subTest(path=rel):
+                root = self._tree({rel: "<<<<<<< HEAD\nold\n=======\nnew\n>>>>>>> main\n"})
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), "--root", str(root)],
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(rel + ":1:", result.stderr.replace(os.sep, "/"))
+
+    def test_clean_dependency_manifests_are_not_reported(self):
+        root = self._tree({
+            "compiler/Cargo.lock": 'version = 4\n[[package]]\nname = "hy-check"\n',
+            "runtime/go/hyrt/go.mod": "module hyrt\n\ngo 1.26.9\n",
+            "runtime/go/hyrt/go.sum": "example.org/module v1.0.0 h1:abc=\n",
+        })
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
     def test_unknown_extension_is_skipped(self):
         root = self._tree({"weird.xyz": "<<<<<<< HEAD\n>>>>>>> main\n"})
         self.assertEqual(list(MOD.scan(str(root))), [])
