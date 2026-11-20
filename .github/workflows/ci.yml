@@ -41,6 +41,7 @@ jobs:
           python3 -m unittest discover -s tools -p test_shepherd_verify_assert.py -v
           python3 -m unittest discover -s tools -p test_queue_sweeper.py -v
           python3 -m unittest discover -s tools -p test_check_corpus_census.py -v
+          python3 -m unittest discover -s tools -p test_check_diagnostic_registry.py -v
           python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz.py'
           python3 -m unittest discover -s tools/runner -p test_runner.py -v
           python3 -m unittest discover -s tools -p test_job_cli.py -v
@@ -159,6 +160,8 @@ jobs:
           bash tools/check-versions.sh
       - name: Check Corpus Census (every stated count matches the corpus)
         run: make census
+      - name: Check diagnostic registry (every code the compiler prints is registered)
+        run: make registry
       - name: Compiler tests (hy-diag + hy-syntax + hy-check + hy-emit)
         run: |
           set -e
