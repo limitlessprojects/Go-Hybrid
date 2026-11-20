@@ -4624,6 +4624,88 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_bufio_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "reader"
+                | "writer"
+                | "read_writer"
+                | "readwriter"
+                | "scanner"
+                | "split_func"
+                | "splitfunc"
+                | "max_scan_token_size"
+                | "maxscantokensize"
+                | "err_advance_too_far"
+                | "err_bad_read_count"
+                | "err_buffer_full"
+                | "err_final_token"
+                | "err_invalid_unread_byte"
+                | "err_invalid_unread_rune"
+                | "err_negative_advance"
+                | "err_negative_count"
+                | "err_too_long"
+                | "Reader"
+                | "Writer"
+                | "ReadWriter"
+                | "Scanner"
+                | "SplitFunc"
+                | "MaxScanTokenSize"
+                | "ErrAdvanceTooFar"
+                | "ErrBadReadCount"
+                | "ErrBufferFull"
+                | "ErrFinalToken"
+                | "ErrInvalidUnreadByte"
+                | "ErrInvalidUnreadRune"
+                | "ErrNegativeAdvance"
+                | "ErrNegativeCount"
+                | "ErrTooLong"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `bufio.{member}`: `bufio.{member}` is a type, variable, or constant, not a function (HYB-E1002)"),
+                &format!("`bufio.{member}` is a package symbol/type, not a callable function"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_reader" | "new_writer" | "new_scanner" | "NewReader" | "NewWriter" | "NewScanner" => Some(1),
+            "new_reader_size"
+            | "new_writer_size"
+            | "new_read_writer"
+            | "scan_bytes"
+            | "scan_lines"
+            | "scan_runes"
+            | "scan_words"
+            | "NewReaderSize"
+            | "NewWriterSize"
+            | "NewReadWriter"
+            | "ScanBytes"
+            | "ScanLines"
+            | "ScanRunes"
+            | "ScanWords" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `bufio.{member}` (HYB-E1002)"),
+                    &format!("`bufio.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`bufio.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `bufio.{member}`"),
+                );
+            }
+        }
+    }
+
     fn check_sync_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(
             member,
@@ -8413,6 +8495,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "bufio" && self.lookup_kind(pkg).is_none() {
+                        self.check_bufio_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
