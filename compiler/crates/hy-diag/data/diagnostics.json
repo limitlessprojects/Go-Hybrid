@@ -669,6 +669,38 @@
       "rule": "BUILDABLE"
     },
     {
+      "code": "HYB-E6007",
+      "name": "heap-budget-exceeded",
+      "category": "overflow-bounds",
+      "severity": "error",
+      "title": "checked function exceeds its declared heap-allocation budget",
+      "summary": "Under opt-in heap-budget checking (`--heap-budget`, `--check-alloc`, or `@heap-budget`), every checked function carries a compositional allocation summary (`const(k)`, `linear(coeff * param + base)`, or `unbounded`) over its emitted Go heap-allocation sites (map literals and inserts, `append`, `make`, string interpolation and dynamic concatenation, escaping composites, `new`, capturing closures, interface boxing, and interprocedural calls/spawns). When a function's proven summary exceeds the declared cap (for example `const(5)` against `const(2)`, or `linear(...)` against a `const` cap), the checker rejects fail-closed before Go emission (issue #4492).",
+      "fixits": [
+        "pre-size containers outside hot paths or bound sizes with a compile-time `const` (`make([]T, MAX_ITEMS)`)",
+        "widen the declared heap budget to match the proven bound (for example `--heap-budget linear(items)` or a higher constant cap)",
+        "if the extra heap growth is intentionally outside the checked budget, isolate the site in `managed(\"why heap growth is bounded externally\", \"other\") { ... }` (audited by `--report-managed` and `--report-alloc`)"
+      ],
+      "example": "// @heap-budget: const(0)\nfn alloc_pair() []int { return []int{1, 2} }   // reject: HYB-E6007 (const(1) exceeds const(0))",
+      "rule": "ALLOC",
+      "tier0_rule_id": "ALLOC"
+    },
+    {
+      "code": "HYB-E6008",
+      "name": "heap-budget-unbounded",
+      "category": "overflow-bounds",
+      "severity": "error",
+      "title": "unprovable or unbounded heap allocation in a budgeted checked region (fail-closed)",
+      "summary": "Under opt-in heap-budget checking (`--check-alloc`, `--heap-budget`, or `@heap-budget`), any heap allocation the compositional model cannot bound by a constant or a single unmodified input parameter is summarized as `unbounded` and rejected fail-closed (mirroring rule FC / O4.9 for sendability). Common causes include allocating inside an unbounded `loop`, `for cond`, or channel-receive loop, calling `make` with a dynamic non-parameter size, allocating inside a recursive call cycle, combining linear bounds across distinct parameters, or calling an unmodeled foreign API without `managed` (issue #4492).",
+      "fixits": [
+        "bound the loop or `make` size with a compile-time `const` (`for i in 0..MAX_N`) or an unmodified function parameter (`for x in items`, `for i in 0..n`)",
+        "hoist `make`, map literals, string interpolation, and `append` buffers out of unbounded `loop` / `for cond` / channel-receive loops",
+        "wrap intentionally unbounded or foreign-allocated work in `managed(\"why heap growth is safe\", \"other\") { ... }` (audited by `--report-managed` and `--report-alloc`)"
+      ],
+      "example": "fn drain(ch <-chan int) []int { var xs []int; for v in ch { xs = append(xs, v) }; return xs }   // reject under --check-alloc: HYB-E6008",
+      "rule": "ALLOC",
+      "tier0_rule_id": "ALLOC"
+    },
+    {
       "code": "HYB-E7001",
       "name": "boundary-pointer-field",
       "category": "boundary",

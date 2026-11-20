@@ -53,11 +53,11 @@ fn main() -> ExitCode {
             eprintln!("hyb — the Hybrid compiler CLI (MVP-0)");
             eprintln!();
             eprintln!("usage:");
-            eprintln!("  hyb check <file.hy> [--json] [--report-managed] [--deny-managed]");
+            eprintln!("  hyb check <file.hy> [--json] [--report-managed] [--deny-managed] [--report-alloc] [--check-alloc] [--heap-budget <spec>]");
             eprintln!("  hyb generate [--check] [--binding-prefix <path>] <paths...>  (existing go.mod projects)");
             eprintln!("  hyb vendor-runtime <dir>  (vendored runtime for a go.mod project)");
             eprintln!("  hyb explain <HYB-Exxxx | Exxxx | xxxx | machine-name>");
-            eprintln!("  hyb build <file.hy> -o <bin-path> [--emit-go] [--race]");
+            eprintln!("  hyb build <file.hy> -o <bin-path> [--emit-go] [--race] [--check-alloc] [--heap-budget <spec>]");
             eprintln!("  hyb bench-overhead");
             eprintln!();
             eprintln!(
@@ -92,31 +92,95 @@ fn cmd_explain(args: &[String]) -> ExitCode {
 
 fn cmd_check(args: &[String]) -> ExitCode {
     const USAGE: &str =
-        "usage: hyb check [--json] [--report-managed] [--deny-managed] [--] <file.hy>";
+        "usage: hyb check [--json] [--report-managed] [--deny-managed] [--report-alloc] [--check-alloc] [--heap-budget <spec>] [--] <file.hy>";
     let mut file = None;
     let mut json = false;
     let mut report_managed = false;
     let mut deny_managed = false;
+    let mut report_alloc = false;
+    let mut alloc_cfg = hy_check::AllocCheckConfig::default();
     let mut end_of_options = false;
     // Validate the entire invocation before reading or checking any source.
     // Otherwise a second file or a mistyped option can silently go unchecked.
-    for arg in args {
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = &args[i];
         if !end_of_options {
             match arg.as_str() {
                 "--" => {
                     end_of_options = true;
+                    i += 1;
                     continue;
                 }
                 "--json" => {
                     json = true;
+                    i += 1;
                     continue;
                 }
                 "--report-managed" => {
                     report_managed = true;
+                    i += 1;
                     continue;
                 }
                 "--deny-managed" => {
                     deny_managed = true;
+                    i += 1;
+                    continue;
+                }
+                "--report-alloc" => {
+                    report_alloc = true;
+                    i += 1;
+                    continue;
+                }
+                "--check-alloc" => {
+                    alloc_cfg.require_bounded_all_fns = true;
+                    alloc_cfg.honor_source_pragmas = true;
+                    i += 1;
+                    continue;
+                }
+                "--heap-budget" => {
+                    let Some(val) = args.get(i + 1) else {
+                        eprintln!("error: --heap-budget requires a value\n{USAGE}");
+                        return ExitCode::from(2);
+                    };
+                    if val.is_empty() || val.starts_with('-') {
+                        eprintln!("error: --heap-budget requires a value, not an option\n{USAGE}");
+                        return ExitCode::from(2);
+                    }
+                    match hy_check::parse_cli_budget_arg(val) {
+                        Ok((Some(fn_name), budget)) => {
+                            alloc_cfg.fn_budgets.insert(fn_name, budget);
+                            alloc_cfg.honor_source_pragmas = true;
+                        }
+                        Ok((None, budget)) => {
+                            alloc_cfg.program_budget = Some(budget);
+                            alloc_cfg.honor_source_pragmas = true;
+                        }
+                        Err(msg) => {
+                            eprintln!("error: {msg}\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+                value if value.starts_with("--heap-budget=") => {
+                    let spec = &value["--heap-budget=".len()..];
+                    match hy_check::parse_cli_budget_arg(spec) {
+                        Ok((Some(fn_name), budget)) => {
+                            alloc_cfg.fn_budgets.insert(fn_name, budget);
+                            alloc_cfg.honor_source_pragmas = true;
+                        }
+                        Ok((None, budget)) => {
+                            alloc_cfg.program_budget = Some(budget);
+                            alloc_cfg.honor_source_pragmas = true;
+                        }
+                        Err(msg) => {
+                            eprintln!("error: {msg}\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
+                    }
+                    i += 1;
                     continue;
                 }
                 value if value.starts_with('-') => {
@@ -131,6 +195,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
         file = Some(arg.clone());
+        i += 1;
     }
     let Some(file) = file else {
         eprintln!("{USAGE}");
@@ -156,6 +221,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
                     errors: diags.len(),
                     warnings: 0,
                     managed: None,
+                    alloc: None,
                 };
                 println!("{}", hy_diag::check_output_json(&diags, &summary));
             } else {
@@ -168,7 +234,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
     };
 
     // check
-    let result = hy_check::check_file(&ast);
+    let result = hy_check::check_file_with_alloc(&ast, Some(&src), &alloc_cfg);
     let errors = result
         .diagnostics
         .iter()
@@ -186,6 +252,11 @@ fn cmd_check(args: &[String]) -> ExitCode {
         warnings,
         managed: if report_managed {
             Some(result.managed.clone())
+        } else {
+            None
+        },
+        alloc: if report_alloc {
+            Some(result.alloc.to_diag_audit())
         } else {
             None
         },
@@ -235,6 +306,30 @@ fn cmd_check(args: &[String]) -> ExitCode {
                     format!(" [{}]", b.tickets.join(", "))
                 };
                 println!("  block: [{}] \"{}\"{}", b.category, b.reason, tickets);
+            }
+        }
+        if report_alloc {
+            println!(
+                "alloc: {} site(s) ({} checked, {} via managed), program bound: {}",
+                result.alloc.total_sites,
+                result.alloc.checked_sites,
+                result.alloc.managed_sites,
+                result.alloc.program_checked_summary
+            );
+            if !result.alloc.by_kind.is_empty() {
+                let kinds: Vec<String> = result
+                    .alloc
+                    .by_kind
+                    .iter()
+                    .map(|(k, n)| format!("{}: {}", k, n))
+                    .collect();
+                println!("  kinds: {}", kinds.join(", "));
+            }
+            for f in result.alloc.functions.values() {
+                println!(
+                    "  fn {}: {} (checked: {} site(s), managed: {} site(s))",
+                    f.name, f.checked_summary, f.checked_sites, f.managed_sites
+                );
             }
         }
         if result.diagnostics.is_empty() {
@@ -795,7 +890,7 @@ fn render_build_error(e: &BuildError) -> String {
 }
 
 fn cmd_build(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--emit-proof] [--race] [--deny-managed] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
+    const USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--emit-proof] [--race] [--deny-managed] [--check-alloc] [--heap-budget <spec>] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
     // Validate the entire invocation before touching the filesystem or the
     // toolchain, mirroring cmd_check/cmd_generate: a mistyped option or a
     // missing value must not fall back to a default and build something else.
@@ -804,6 +899,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
     let mut emit_go_only = false;
     let mut emit_proof = false;
     let mut deny_managed = false;
+    let mut alloc_cfg = hy_check::AllocCheckConfig::default();
     // --race hands `-race` to the underlying `go build`. The race
     // detector needs cgo, so the flag also forces CGO_ENABLED=1 on the
     // plain single-file path (the bridge path already sets it). Off by
@@ -838,6 +934,57 @@ fn cmd_build(args: &[String]) -> ExitCode {
                 }
                 "--deny-managed" => {
                     deny_managed = true;
+                    i += 1;
+                    continue;
+                }
+                "--check-alloc" => {
+                    alloc_cfg.require_bounded_all_fns = true;
+                    alloc_cfg.honor_source_pragmas = true;
+                    i += 1;
+                    continue;
+                }
+                "--heap-budget" => {
+                    let Some(value) = args.get(i + 1) else {
+                        eprintln!("error: {arg} requires a value\n{USAGE}");
+                        return ExitCode::from(2);
+                    };
+                    if value.is_empty() || value.starts_with('-') {
+                        eprintln!("error: {arg} requires a value, not an option\n{USAGE}");
+                        return ExitCode::from(2);
+                    }
+                    match hy_check::parse_cli_budget_arg(value) {
+                        Ok((Some(fn_name), budget)) => {
+                            alloc_cfg.fn_budgets.insert(fn_name, budget);
+                            alloc_cfg.honor_source_pragmas = true;
+                        }
+                        Ok((None, budget)) => {
+                            alloc_cfg.program_budget = Some(budget);
+                            alloc_cfg.honor_source_pragmas = true;
+                        }
+                        Err(msg) => {
+                            eprintln!("error: {msg}\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+                value if value.starts_with("--heap-budget=") => {
+                    let spec = &value["--heap-budget=".len()..];
+                    match hy_check::parse_cli_budget_arg(spec) {
+                        Ok((Some(fn_name), budget)) => {
+                            alloc_cfg.fn_budgets.insert(fn_name, budget);
+                            alloc_cfg.honor_source_pragmas = true;
+                        }
+                        Ok((None, budget)) => {
+                            alloc_cfg.program_budget = Some(budget);
+                            alloc_cfg.honor_source_pragmas = true;
+                        }
+                        Err(msg) => {
+                            eprintln!("error: {msg}\n{USAGE}");
+                            return ExitCode::from(2);
+                        }
+                    }
                     i += 1;
                     continue;
                 }
@@ -929,6 +1076,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
                 errors: diags.len(),
                 warnings: 0,
                 managed: None,
+                alloc: None,
             };
             println!("{}", hy_diag::check_output_json(&diags, &summary));
             for d in &diags {
@@ -939,7 +1087,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
     };
 
     // --- 3. Tier-0 check (verdict gates the build) ---
-    let result = hy_check::check_file(&ast);
+    let result = hy_check::check_file_with_alloc(&ast, Some(&src), &alloc_cfg);
     let errors = result
         .diagnostics
         .iter()
@@ -956,6 +1104,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
                 .filter(|d| d.severity == hy_diag::Severity::Warning)
                 .count(),
             managed: None,
+            alloc: None,
         };
         println!(
             "{}",

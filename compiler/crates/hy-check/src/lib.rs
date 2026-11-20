@@ -47,6 +47,7 @@
 
 mod addr_loan;
 mod addressable;
+pub mod alloc_budget;
 mod arith;
 mod buildable;
 mod builtins;
@@ -70,6 +71,12 @@ mod try_context;
 mod tuple;
 mod walk;
 
+pub use alloc_budget::{
+    audit_corpus_dir, canonical_fn_key, parse_budget_spec, parse_cli_budget_arg,
+    parse_source_pragmas, AllocCheckConfig, AllocKind, AllocReport, AllocSite, AllocSummary,
+    CorpusAllocAudit, CorpusProgramAllocRow, FnAllocReport, HeapBudget,
+};
+
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
 use hy_syntax::{Decl, Expr, File, FnDecl, ForKind, SelectArmKind, Stmt, TypeExpr};
@@ -82,6 +89,8 @@ pub struct CheckResult {
     /// `accept` when no errors remain (warnings allowed), else `reject`.
     pub verdict: Verdict,
     pub managed: ManagedReport,
+    /// Compositional heap-allocation summary and static site audit (#4492).
+    pub alloc: AllocReport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -107,6 +116,33 @@ impl Verdict {
 /// into source order before returning: the corpus harness reads the FIRST
 /// error's `tier0_rule` as the join key against VERDICTS.md.
 pub fn check_file(file: &File) -> CheckResult {
+    check_file_with_alloc(file, None, &AllocCheckConfig::default())
+}
+
+/// Internal baseline helper used by `audit_corpus_dir` to measure predictor overhead.
+pub(crate) fn check_file_without_alloc(file: &File) -> CheckResult {
+    run_core_check(file, None, &AllocCheckConfig::default(), false)
+}
+
+/// Check one parsed file with optional opt-in heap-allocation budget enforcement (#4492).
+///
+/// When `alloc_cfg` is inactive (`AllocCheckConfig::default()`), verdicts and diagnostics
+/// are identical to `check_file`, while `CheckResult.alloc` still populates static
+/// compositional summaries for `--report-alloc` and callers.
+pub fn check_file_with_alloc(
+    file: &File,
+    src: Option<&str>,
+    alloc_cfg: &AllocCheckConfig,
+) -> CheckResult {
+    run_core_check(file, src, alloc_cfg, true)
+}
+
+fn run_core_check(
+    file: &File,
+    src: Option<&str>,
+    alloc_cfg: &AllocCheckConfig,
+    compute_alloc: bool,
+) -> CheckResult {
     let mut ck = Checker::new(file);
 
     build_tables(&mut ck);
@@ -146,6 +182,17 @@ pub fn check_file(file: &File) -> CheckResult {
         channel_liveness::ChannelLivenessChecker::new(file.path.clone()).check_file(file);
     ck.diags.extend(cl_diags);
 
+    let alloc = if compute_alloc {
+        let rep = alloc_budget::analyze_file_allocations(&ck, file, src);
+        if alloc_cfg.is_active() {
+            let alloc_diags = alloc_budget::enforce_alloc_budgets(&file.path, &rep, alloc_cfg);
+            ck.diags.extend(alloc_diags);
+        }
+        rep
+    } else {
+        AllocReport::default()
+    };
+
     let mut diags = ck.diags;
     diags.sort_by(|a, b| {
         (
@@ -182,6 +229,7 @@ pub fn check_file(file: &File) -> CheckResult {
             },
             blocks: ck.managed_audit.clone(),
         },
+        alloc,
     }
 }
 
