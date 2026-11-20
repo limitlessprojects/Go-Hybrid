@@ -1112,3 +1112,22 @@ the move freeze reach the send path as well.
 | struct-chan-shared-map-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct over the channel freezes that storage, so `m["after"] = 2` is a write through a live alias |
 
 With this registration the corpus is **139 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 92**.
+
+-------------------------------------------------------------------------------
+
+### map-elem-struct-slice-spawn-reject / map-elem-struct-slice-fresh-spawn-accept — REJECT + ACCEPT (bounty track: grow the adversarial corpus)
+
+A map literal stores a struct value whose `xs` field carries the sender's
+slice header; moving the map to a task freezes that backing array, so the
+sender's later `xs[0] = 9` is a write through a live alias. The control keeps
+the same map-of-struct shape but builds the slice inline, so there is no
+alias and the move is accepted. This pins the MAP-ELEMENT store as an edge
+materialization site at depth 3 (map > struct > slice), where corpus 45
+pins slice > struct > map and 54/55 pin field stores.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| map-elem-struct-slice-spawn-reject | REJECT | A1b | `HYB-E3003` | the map element holds a shallow struct copy; its slice field aliases `xs`, and moving the map freezes that storage, so `xs[0] = 9` is a write through a live alias |
+| map-elem-struct-slice-fresh-spawn-accept | ACCEPT | — | — | the same map-of-struct shape with a fresh inline `[]int`: no second binding names the array, so the owned move is legal |
+
+With this registration the corpus is **141 programs — ACCEPT 46 · ACCEPT-MANAGED 2 · REJECT 93**.
