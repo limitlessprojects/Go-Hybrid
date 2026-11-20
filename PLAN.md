@@ -1,5 +1,11 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — Go build source filename filtering (2026-11-08)
+
+- On `a1490f0`, `hyb build` passed its `<output>.go` sidecar directly to Go. Go ignores source filenames beginning with `.` or `_` and files ending in `_test.go`, so valid outputs such as `_hidden`, `.hidden`, and `latest_test` failed with `no Go files` / `no packages to build`.
+- The CLI now compiles an exclusively created, normally named temporary Go source beside the preserved sidecar and removes it on every exit path. A real-CLI regression failed on baseline and now covers ordinary, hidden, `_test`, and `.exe` output names while checking sidecar retention and temporary cleanup.
+- Focused CLI suite: 7/7; checker corpus: 135/135. `cargo test --workspace` reaches an unrelated `spec_t3_strings` failure because its extractor requires LF while the Windows checkout has CRLF. Differential: 43/45 accepted programs and 90/90 rejects; the two remaining accepted cases require unavailable `gcc` for cgo. `rustfmt` is not installed here. Hosted CI and review remain pending.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.
