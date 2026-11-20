@@ -743,6 +743,10 @@ struct Collector<'a> {
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     file_untyped_consts: HashSet<String>,
+    /// #3107: File-level typed `const` scalars (`const k i8 = 3` -> `Some("int8")`).
+    file_const_scalars: HashMap<String, Option<&'static str>>,
+    /// #3107: Parallel scope stack tracking return scalars for function/method-value locals (`f := get`).
+    fn_val_scopes: Vec<HashMap<String, Vec<Option<&'static str>>>>,
     /// Result kinds of the function whose body is currently being walked
     /// (#577 C9/C10). Empty for a fn declared with no results — which is also
     /// the state outside any body, so `Stmt::Return` can only ever see it
@@ -814,6 +818,8 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
+            file_const_scalars: HashMap::new(),
+            fn_val_scopes: Vec::new(),
             fn_results: Vec::new(),
             fn_result_type_names: Vec::new(),
             fn_type_params: HashSet::new(),
@@ -839,7 +845,9 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                     .map(|t| c.kind_of_ty(t, 0))
                     .unwrap_or_else(|| c.kind_of_expr(&cd.value));
                 c.file_consts.insert(cd.name.clone(), k);
-                if cd.ty.is_none() {
+                if let Some(t) = &cd.ty {
+                    c.file_const_scalars.insert(cd.name.clone(), c.scalar_of_ty(t));
+                } else {
                     c.file_untyped_consts.insert(cd.name.clone());
                 }
             }
@@ -886,6 +894,7 @@ impl<'a> Collector<'a> {
         self.container_elem_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
+        self.fn_val_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -896,6 +905,57 @@ impl<'a> Collector<'a> {
         self.container_elem_scopes.pop();
         self.set_elem_scopes.pop();
         self.copy_var_scopes.pop();
+        self.fn_val_scopes.pop();
+    }
+
+    fn bind_fn_val_scalars(&mut self, name: &str, rs: Vec<Option<&'static str>>) {
+        if name != "_" {
+            if let Some(top) = self.fn_val_scopes.last_mut() {
+                top.insert(name.to_string(), rs);
+            }
+        }
+    }
+
+    fn lookup_fn_val_scalars(&self, name: &str) -> Option<Vec<Option<&'static str>>> {
+        for layer in self.fn_val_scopes.iter().rev() {
+            if let Some(rs) = layer.get(name) {
+                return Some(rs.clone());
+            }
+        }
+        None
+    }
+
+    fn expr_fn_result_scalars(&self, e: &Expr) -> Option<Vec<Option<&'static str>>> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::FnLit { results, .. } => {
+                Some(results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect())
+            }
+            Expr::Ident { name, .. } => {
+                if let Some(rs) = self.lookup_fn_val_scalars(name) {
+                    return Some(rs);
+                }
+                let head = Checker::base_named_type_str(name);
+                if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                    return Some(f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                }
+                None
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let head = Checker::base_named_type_str(name);
+                if let Some(sn) = self.struct_base_name(&bk).or_else(|| self.struct_name(&bk)) {
+                    if let Some(m) = self.ck.method_decls.get(&(sn, head.to_string())) {
+                        return Some(m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                    }
+                }
+                if let Some(m) = self.method_expr_decl(base, name) {
+                    return Some(m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     fn bind_type_name(&mut self, name: &str, type_name: String) {
@@ -1156,6 +1216,9 @@ impl<'a> Collector<'a> {
             if let Some(s) = layer.get(name) {
                 return *s;
             }
+        }
+        if let Some(s) = self.file_const_scalars.get(name) {
+            return *s;
         }
         None
     }
@@ -1492,38 +1555,68 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-            return None;
-        };
-        if self
-            .scopes
-            .iter()
-            .any(|layer| layer.contains_key(name.as_str()))
-        {
-            return None;
-        }
-        if let Some(fd) = self.ck.fns.get(name.as_str()) {
-            if fd.receiver.is_some() || !fd.type_params.is_empty() {
-                return None;
+        let bare = unwrap_parens(callee);
+        match bare {
+            Expr::FnLit { results, .. } => {
+                Some(results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect())
             }
-            return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
-        }
-        if name == "min" || name == "max" {
-            let res_scalar = args
-                .iter()
-                .find_map(|a| self.typed_value_scalar(&a.value));
-            return Some(vec![res_scalar]);
-        }
-        if args.len() == 1
-            && !self.ck.structs.contains_key(name.as_str())
-            && !self.ck.enums.contains_key(name.as_str())
-            && !self.ck.type_aliases.contains_key(name.as_str())
-        {
-            if let Some(s) = canonical_numeric_name(name) {
-                return Some(vec![Some(s)]);
+            Expr::Ident { name, .. } => {
+                if let Some(rs) = self.lookup_fn_val_scalars(name) {
+                    return Some(rs);
+                }
+                if self
+                    .scopes
+                    .iter()
+                    .any(|layer| layer.contains_key(name.as_str()))
+                {
+                    return None;
+                }
+                if (name == "len" || name == "cap") && args.len() == 1 {
+                    return Some(vec![Some("int")]);
+                }
+                if name == "copy" && args.len() == 2 {
+                    return Some(vec![Some("int")]);
+                }
+                if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                    if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                        return None;
+                    }
+                    return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                }
+                if name == "min" || name == "max" {
+                    let res_scalar = args
+                        .iter()
+                        .find_map(|a| self.typed_value_scalar(&a.value));
+                    return Some(vec![res_scalar]);
+                }
+                if args.len() == 1
+                    && !self.ck.structs.contains_key(name.as_str())
+                    && !self.ck.enums.contains_key(name.as_str())
+                    && !self.ck.type_aliases.contains_key(name.as_str())
+                {
+                    if let Some(s) = canonical_numeric_name(name) {
+                        return Some(vec![Some(s)]);
+                    }
+                }
+                None
             }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let head = Checker::base_named_type_str(name);
+                if let Some(sn) = self.struct_base_name(&bk).or_else(|| self.struct_name(&bk)) {
+                    if let Some(m) = self.ck.method_decls.get(&(sn, head.to_string())) {
+                        if m.type_params.is_empty() {
+                            return Some(m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                        }
+                    }
+                }
+                if let Some(m) = self.method_expr_decl(base, name) {
+                    return Some(m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                }
+                None
+            }
+            _ => None,
         }
-        None
     }
 
     /// #1031 — the exact numeric type of a value that is provably TYPED.
@@ -2235,6 +2328,9 @@ impl<'a> Collector<'a> {
                     self.bind_type_name(name, format!("[]{}", elem));
                 } else if let Some(tp) = self.expr_type_param(val) {
                     self.bind_type_name(name, tp);
+                }
+                if let Some(rs) = self.expr_fn_result_scalars(val) {
+                    self.bind_fn_val_scalars(name, rs);
                 }
             }
         }
