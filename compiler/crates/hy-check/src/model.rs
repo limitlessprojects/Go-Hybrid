@@ -273,6 +273,12 @@ pub(crate) struct FnState {
     /// rebind time; consumed at the CALL site so an insert inside the body
     /// counts as an A3 event when the call sits in a live slot-loan window.
     pub closure_mutates: HashMap<String, HashSet<String>>,
+    /// Issue #970 (A3 re-binding half): a local closure binding -> the
+    /// CAPTURED base paths its body whole-value RE-BINDS (`xs = xs[:0]`).
+    /// Sibling of `closure_mutates`: a mutation event is HYB-E3102, a
+    /// re-binding event is HYB-E3105. Both invalidate a live slot loan when
+    /// the call sits inside the loan's window.
+    pub closure_rebinds: HashMap<String, HashSet<String>>,
     /// Local closure binding -> `(params, named_results, body)` for
     /// interprocedural return-origin and multi-value return sharing analysis.
     pub closure_fnlits: HashMap<
