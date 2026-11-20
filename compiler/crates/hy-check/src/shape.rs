@@ -330,16 +330,18 @@ impl<'a> Checker<'a> {
                 // mutate the same map (HYB-E3003 missed) and the A5
                 // closure perimeter missed closure-carrying maps
                 // (`type cbmap = map[string]fn()`; HYB-E3001 missed).
-                // Only an unresolvable type keeps the legacy spelling.
-                let shape = self.shape_of_type(t);
-                if matches!(shape, TypeShape::Unknown) {
-                    TypeShape::Struct(match t {
-                        TypeExpr::Named { name, .. } => Some(name.clone()),
-                        _ => None,
-                    })
-                } else {
-                    shape
-                }
+                // An unresolvable type stays `Unknown` (fail-closed O4.9):
+                // re-wrapping it in the legacy `Struct(Some(alias))` spelling
+                // made boundaries read an UNPROVEN resolution as a proven
+                // no-share value struct — silent accept. Three QA probes
+                // (2026-11-19, gamma-3) all hit exactly that hole: a
+                // MAX_TYPE_RESOLUTION_DEPTH overflow (9-hop alias chain
+                // passes where 8 hops correctly E3005s), a cyclic alias
+                // (`type a = b; type b = a;` at a spawn boundary), and an
+                // alias to an unresolvable NAME (unresolved GENERIC already
+                // correctly E3005s). Unknown degrades to HYB-E3005 at the
+                // boundary, same as any unresolvable name.
+                self.shape_of_type(t)
             }
             Expr::StructLit { ty: None, .. } => TypeShape::Struct(None),
             Expr::MapLit { key, value, .. } => TypeShape::Map(
