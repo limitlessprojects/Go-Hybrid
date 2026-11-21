@@ -555,7 +555,17 @@ impl Emitter {
                 self.shadow_local_names(&l.names);
                 return Ok(());
             }
-            // `:=` and `let` both render as Go's short declaration —
+            // #1761: SPEC-LANGUAGE §1.3 gives `let` an optional type
+            // ascription. A typed let is Go's `var x T = e` plus an
+            // immutability contract the checker already enforces; re-enter
+            // the Var arm so the declared type survives emission (and the
+            // `?` hoist, pointer tracking, and var-type registration run).
+            LocalKind::Let if l.ty.is_some() => {
+                let mut as_var = l.clone();
+                as_var.kind = LocalKind::Var;
+                return self.emit_local_in_seq_inner(&as_var, rest);
+            }
+            // `:=` and untyped `let` both render as Go's short declaration —
             // immutability is a checker-level contract (D14 folded
             // `let x := e` into this shape).
             LocalKind::Define | LocalKind::Let => {}
