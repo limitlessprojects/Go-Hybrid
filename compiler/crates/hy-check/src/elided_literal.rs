@@ -75,7 +75,49 @@ fn is_non_struct_foreign_type(name: &str) -> bool {
             | "fmt.scanner"
             | "fmt.scan_state"
             | "sort.interface"
+            | "context.context"
+            | "context.canceler"
+            | "context.cancel_func"
+            | "sync.locker"
+            | "http.handler_func"
+            | "filepath.walk_func"
+            | "bufio.split_func"
+            | "rand.source"
+            | "rand.source64"
+            | "hash.hash"
+            | "hash.hash32"
+            | "hash.hash64"
+            | "cipher.block"
+            | "cipher.stream"
+            | "cipher.aead"
+            | "cipher.block_mode"
+            | "reflect.type"
+            | "reflect.kind"
+            | "flag.value"
+            | "flag.getter"
+            | "testing.tb"
+            | "sql.scanner"
+            | "sql.result"
     )
+}
+
+fn collect_receiver_tps(ty: &TypeExpr, out: &mut Vec<String>) {
+    match ty {
+        TypeExpr::Pointer { to, .. } => collect_receiver_tps(to, out),
+        TypeExpr::Named { name, .. } => {
+            if let Some((_, rest)) = name.split_once('[') {
+                if let Some(inner) = rest.strip_suffix(']') {
+                    for part in inner.split(',') {
+                        let tp = part.trim();
+                        if !tp.is_empty() && tp != "_" {
+                            out.push(tp.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Whether the expression sits in a composite element slot, where the
@@ -83,39 +125,53 @@ fn is_non_struct_foreign_type(name: &str) -> bool {
 impl<'a> Checker<'a> {
     pub(crate) fn check_elided_struct_literals(&mut self) {
         let file = self.file;
+        let empty_tps: Vec<String> = Vec::new();
         for d in &file.decls {
             match d {
                 Decl::Const(c) => {
                     if let Some(ty) = &c.ty {
-                        self.elided_type(ty);
+                        self.elided_type(ty, &empty_tps);
                     }
-                    self.elided_expr(&c.value, None);
+                    self.elided_expr(&c.value, None, &empty_tps);
                 }
                 Decl::Struct(s) => {
+                    let tps: Vec<String> = s
+                        .type_params
+                        .iter()
+                        .map(|tp| tp.name.clone())
+                        .filter(|n| !n.is_empty() && n != "_")
+                        .collect();
                     for f in &s.fields {
-                        self.elided_type(&f.ty);
+                        self.elided_type(&f.ty, &tps);
                     }
                 }
-                Decl::TypeAlias(a) => self.elided_type(&a.ty),
+                Decl::TypeAlias(a) => self.elided_type(&a.ty, &empty_tps),
                 Decl::Enum(e) => {
                     for v in &e.variants {
                         if let Some(payload) = &v.payload {
-                            self.elided_type(payload);
+                            self.elided_type(payload, &empty_tps);
                         }
                     }
                 }
                 Decl::Fn(f) => {
+                    let mut tps: Vec<String> = f
+                        .type_params
+                        .iter()
+                        .map(|tp| tp.name.clone())
+                        .filter(|n| !n.is_empty() && n != "_")
+                        .collect();
                     if let Some(r) = &f.receiver {
-                        self.elided_type(&r.ty);
+                        collect_receiver_tps(&r.ty, &mut tps);
+                        self.elided_type(&r.ty, &tps);
                     }
                     for p in &f.params {
-                        self.elided_type(&p.ty);
+                        self.elided_type(&p.ty, &tps);
                     }
                     for r in &f.results {
-                        self.elided_type(&r.ty);
+                        self.elided_type(&r.ty, &tps);
                     }
                     if let Some(b) = &f.body {
-                        self.elided_block(b);
+                        self.elided_block(b, &tps);
                     }
                 }
                 Decl::Import { .. } => {}
@@ -123,68 +179,68 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn elided_type(&mut self, ty: &TypeExpr) {
+    fn elided_type(&mut self, ty: &TypeExpr, tps: &[String]) {
         match ty {
             TypeExpr::Named { .. } => {}
             TypeExpr::Pointer { to, .. }
             | TypeExpr::Slice { elem: to, .. }
             | TypeExpr::Chan { elem: to, .. }
-            | TypeExpr::Option { elem: to, .. } => self.elided_type(to),
+            | TypeExpr::Option { elem: to, .. } => self.elided_type(to, tps),
             TypeExpr::Array { len, elem, .. } => {
                 if let Some(l) = len {
-                    self.elided_expr(l, None);
+                    self.elided_expr(l, None, tps);
                 }
-                self.elided_type(elem);
+                self.elided_type(elem, tps);
             }
             TypeExpr::Map { key, value, .. } => {
-                self.elided_type(key);
-                self.elided_type(value);
+                self.elided_type(key, tps);
+                self.elided_type(value, tps);
             }
             TypeExpr::Fn {
                 params, results, ..
             } => {
                 for p in params {
-                    self.elided_type(&p.ty);
+                    self.elided_type(&p.ty, tps);
                 }
                 for r in results {
-                    self.elided_type(r);
+                    self.elided_type(r, tps);
                 }
             }
         }
     }
 
-    fn elided_block(&mut self, b: &Block) {
+    fn elided_block(&mut self, b: &Block, tps: &[String]) {
         for s in &b.stmts {
-            self.elided_stmt(s);
+            self.elided_stmt(s, tps);
         }
     }
 
-    fn elided_stmt(&mut self, s: &Stmt) {
+    fn elided_stmt(&mut self, s: &Stmt, tps: &[String]) {
         match s {
             Stmt::Local(l) => {
                 if let Some(ty) = &l.ty {
-                    self.elided_type(ty);
+                    self.elided_type(ty, tps);
                 }
                 for v in &l.values {
-                    self.elided_expr(v, None);
+                    self.elided_expr(v, None, tps);
                 }
             }
             Stmt::Assign {
                 targets, values, ..
             } => {
                 for t in targets {
-                    self.elided_place(t);
+                    self.elided_place(t, tps);
                 }
                 for v in values {
-                    self.elided_expr(v, None);
+                    self.elided_expr(v, None, tps);
                 }
             }
             Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => {
-                self.elided_expr(expr, None)
+                self.elided_expr(expr, None, tps)
             }
             Stmt::Send { chan, value, .. } => {
-                self.elided_expr(chan, None);
-                self.elided_expr(value, None);
+                self.elided_expr(chan, None, tps);
+                self.elided_expr(value, None, tps);
             }
             Stmt::If {
                 init,
@@ -194,82 +250,103 @@ impl<'a> Checker<'a> {
                 ..
             } => {
                 if let Some(i) = init {
-                    self.elided_stmt(i);
+                    self.elided_stmt(i, tps);
                 }
-                self.elided_expr(cond, None);
-                self.elided_block(then);
+                self.elided_expr(cond, None, tps);
+                self.elided_block(then, tps);
                 if let Some(o) = otherwise {
-                    self.elided_stmt(o);
+                    self.elided_stmt(o, tps);
                 }
             }
             Stmt::For { kind, body, .. } => {
                 match kind {
                     ForKind::Infinite => {}
-                    ForKind::While { cond } => self.elided_expr(cond, None),
+                    ForKind::While { cond } => self.elided_expr(cond, None, tps),
                     ForKind::Range { lo, hi, .. } => {
-                        self.elided_expr(lo, None);
-                        self.elided_expr(hi, None);
+                        self.elided_expr(lo, None, tps);
+                        self.elided_expr(hi, None, tps);
                     }
-                    ForKind::Iterate { expr, .. } => self.elided_expr(expr, None),
+                    ForKind::Iterate { expr, .. } => self.elided_expr(expr, None, tps),
                 }
-                self.elided_block(body);
+                self.elided_block(body, tps);
             }
             Stmt::Return { values, .. } => {
                 for v in values {
-                    self.elided_expr(v, None);
+                    self.elided_expr(v, None, tps);
                 }
             }
             Stmt::Task { callee, args, .. } => {
-                self.elided_expr(callee, None);
+                self.elided_expr(callee, None, tps);
                 for a in args {
-                    self.elided_expr(&a.value, None);
+                    self.elided_expr(&a.value, None, tps);
                 }
             }
             Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
-                self.elided_block(body)
+                self.elided_block(body, tps)
             }
             Stmt::Match { subject, arms, .. } => {
-                self.elided_expr(subject, None);
+                self.elided_expr(subject, None, tps);
                 for a in arms {
                     if let Some(g) = &a.guard {
-                        self.elided_expr(g, None);
+                        self.elided_expr(g, None, tps);
                     }
-                    self.elided_block(&a.body);
+                    self.elided_block(&a.body, tps);
                 }
             }
             Stmt::Select { arms, .. } => {
                 for a in arms {
                     match &a.kind {
                         SelectArmKind::Send { chan, value, .. } => {
-                            self.elided_expr(chan, None);
-                            self.elided_expr(value, None);
+                            self.elided_expr(chan, None, tps);
+                            self.elided_expr(value, None, tps);
                         }
-                        SelectArmKind::Recv { chan, .. } => self.elided_expr(chan, None),
+                        SelectArmKind::Recv { chan, .. } => self.elided_expr(chan, None, tps),
                         SelectArmKind::Default => {}
                     }
-                    self.elided_block(&a.body);
+                    self.elided_block(&a.body, tps);
                 }
             }
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
         }
     }
 
-    fn elided_place(&mut self, p: &Place) {
+    fn elided_place(&mut self, p: &Place, tps: &[String]) {
         match &p.kind {
             PlaceKind::Ident(_) => {}
             PlaceKind::Index { base, index } => {
-                self.elided_place(base);
-                self.elided_expr(index, None);
+                self.elided_place(base, tps);
+                self.elided_expr(index, None, tps);
             }
-            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => self.elided_place(base),
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                self.elided_place(base, tps)
+            }
         }
     }
 
-    fn is_elidable_struct_slot(&self, exp: Option<&TypeExpr>, is_empty: bool) -> bool {
+    fn resolve_elided_type(&self, ty: &TypeExpr, tps: &[String]) -> TypeExpr {
+        let mut cur = ty.clone();
+        for _ in 0..8 {
+            let TypeExpr::Named { name, .. } = &cur else {
+                break;
+            };
+            let head = name.split('[').next().unwrap_or(name.as_str());
+            if tps.iter().any(|tp| tp == head) {
+                break;
+            }
+            if let Some(next) = self.type_aliases.get(name.as_str()) {
+                cur = next.clone();
+            } else {
+                break;
+            }
+        }
+        cur
+    }
+
+    fn is_elidable_struct_slot(&self, exp: Option<&TypeExpr>, is_empty: bool, tps: &[String]) -> bool {
         let Some(t) = exp else { return false };
-        let mut r = self.resolve_type_alias(t);
+        let mut r = self.resolve_elided_type(t, tps);
         if let TypeExpr::Pointer { to, .. } = r {
-            r = self.resolve_type_alias(&to);
+            r = self.resolve_elided_type(&to, tps);
         }
         if is_empty
             && matches!(
@@ -284,26 +361,23 @@ impl<'a> Checker<'a> {
             return true;
         }
         let head = name.split('[').next().unwrap_or(name.as_str());
-        if is_non_struct_foreign_type(head) {
+        if tps.iter().any(|tp| tp == head) || is_non_struct_foreign_type(head) {
             return false;
         }
         self.structs.contains_key(head) || head.contains('.')
     }
 
-    fn check_elided_struct_fields(&mut self, exp: Option<&TypeExpr>, fields: &[FieldInit]) {
+    fn check_elided_struct_fields(&mut self, exp: Option<&TypeExpr>, fields: &[FieldInit], tps: &[String]) {
         if fields.is_empty() {
             return;
         }
         let Some(t) = exp else { return };
-        let mut r = self.resolve_type_alias(t);
+        let mut r = self.resolve_elided_type(t, tps);
         if let TypeExpr::Pointer { to, .. } = r {
-            r = self.resolve_type_alias(&to);
+            r = self.resolve_elided_type(&to, tps);
         }
         let TypeExpr::Named { name, .. } = &r else { return };
         let head = name.split('[').next().unwrap_or(name.as_str());
-        let Some(declared) = self.structs.get(head).cloned() else {
-            return;
-        };
 
         let mut seen: HashMap<String, usize> = HashMap::new();
         for f in fields {
@@ -327,6 +401,10 @@ impl<'a> Checker<'a> {
             }
         }
 
+        let Some(declared) = self.structs.get(head).cloned() else {
+            return;
+        };
+
         for f in fields {
             if !declared.iter().any(|(n, _)| n == &f.name) {
                 self.diags.push(
@@ -347,28 +425,28 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn elided_expr(&mut self, e: &Expr, expected: Option<&TypeExpr>) {
+    fn elided_expr(&mut self, e: &Expr, expected: Option<&TypeExpr>, tps: &[String]) {
         match e {
             // `emit_expr_exp` peels parentheses before filling the head.
-            Expr::Paren { inner, .. } => self.elided_expr(inner, expected),
+            Expr::Paren { inner, .. } => self.elided_expr(inner, expected, tps),
             Expr::StructLit { ty, fields, span } => {
                 if let Some(t) = ty {
-                    self.elided_type(t);
-                } else if !self.is_elidable_struct_slot(expected, fields.is_empty()) {
+                    self.elided_type(t, tps);
+                } else if !self.is_elidable_struct_slot(expected, fields.is_empty(), tps) {
                     self.push_elided_diag(*span);
                 } else {
-                    self.check_elided_struct_fields(expected, fields);
+                    self.check_elided_struct_fields(expected, fields, tps);
                 }
                 // Field values are emitted without an expected type.
                 for f in fields {
-                    self.elided_expr(&f.value, None);
+                    self.elided_expr(&f.value, None, tps);
                 }
             }
             Expr::SliceLit { elem, items, .. } => {
                 if let Some(t) = elem {
-                    self.elided_type(t);
+                    self.elided_type(t, tps);
                 }
-                let resolved_exp = expected.map(|t| self.resolve_type_alias(t));
+                let resolved_exp = expected.map(|t| self.resolve_elided_type(t, tps));
                 let item_exp = if let Some((_, inner_elem, _)) = e.as_array_lit() {
                     Some(inner_elem)
                 } else if let Some(t) = elem.as_deref() {
@@ -382,52 +460,52 @@ impl<'a> Checker<'a> {
                     }
                 };
                 for i in items {
-                    self.elided_expr(i, item_exp);
+                    self.elided_expr(i, item_exp, tps);
                 }
             }
             Expr::MapLit { key, value, entries, .. } => {
-                self.elided_type(key);
-                self.elided_type(value);
+                self.elided_type(key, tps);
+                self.elided_type(value, tps);
                 for (k, v) in entries {
-                    self.elided_expr(k, Some(key));
-                    self.elided_expr(v, Some(value));
+                    self.elided_expr(k, Some(key), tps);
+                    self.elided_expr(v, Some(value), tps);
                 }
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
             Expr::Interp { parts, .. } => {
                 for p in parts {
                     if let InterpPart::Expr(x) = p {
-                        self.elided_expr(x, None);
+                        self.elided_expr(x, None, tps);
                     }
                 }
             }
             Expr::Binary { lhs, rhs, .. } => {
-                self.elided_expr(lhs, None);
-                self.elided_expr(rhs, None);
+                self.elided_expr(lhs, None, tps);
+                self.elided_expr(rhs, None, tps);
             }
             Expr::Unary { operand, .. }
             | Expr::AddrOf { operand, .. }
             | Expr::Move { operand, .. }
-            | Expr::Try { operand, .. } => self.elided_expr(operand, None),
-            Expr::Receive { chan, .. } => self.elided_expr(chan, None),
+            | Expr::Try { operand, .. } => self.elided_expr(operand, None, tps),
+            Expr::Receive { chan, .. } => self.elided_expr(chan, None, tps),
             Expr::Index { base, index, .. } => {
-                self.elided_expr(base, None);
-                self.elided_expr(index, None);
+                self.elided_expr(base, None, tps);
+                self.elided_expr(index, None, tps);
             }
             Expr::Slice { base, lo, hi, .. } => {
-                self.elided_expr(base, None);
+                self.elided_expr(base, None, tps);
                 if let Some(l) = lo {
-                    self.elided_expr(l, None);
+                    self.elided_expr(l, None, tps);
                 }
                 if let Some(h) = hi {
-                    self.elided_expr(h, None);
+                    self.elided_expr(h, None, tps);
                 }
             }
-            Expr::Field { base, .. } => self.elided_expr(base, None),
+            Expr::Field { base, .. } => self.elided_expr(base, None, tps),
             Expr::Call { callee, args, .. } => {
-                self.elided_expr(callee, None);
+                self.elided_expr(callee, None, tps);
                 for a in args {
-                    self.elided_expr(&a.value, None);
+                    self.elided_expr(&a.value, None, tps);
                 }
             }
             Expr::FnLit {
@@ -437,12 +515,12 @@ impl<'a> Checker<'a> {
                 ..
             } => {
                 for p in params {
-                    self.elided_type(&p.ty);
+                    self.elided_type(&p.ty, tps);
                 }
                 for r in results {
-                    self.elided_type(&r.ty);
+                    self.elided_type(&r.ty, tps);
                 }
-                self.elided_block(body);
+                self.elided_block(body, tps);
             }
         }
     }
