@@ -1,0 +1,29 @@
+TEXT main.frameRoot.abi0(SB) w1755probe/probe_arm64.s
+  probe_arm64.s:11	0xa6300			f8190ffe		MOVD.W R30, -112(RSP)
+  probe_arm64.s:11	0xa6304			f81f83fd		MOVD R29, -8(RSP)
+  probe_arm64.s:11	0xa6308			d10023fd		SUB $8, RSP, R29
+  probe_arm64.s:12	0xa630c			94000005		CALL main.frameMiddle.abi0(SB)
+  probe_arm64.s:13	0xa6310			f85f83fd		MOVD -8(RSP), R29
+  probe_arm64.s:13	0xa6314			f84707fe		MOVD.P 112(RSP), R30
+  probe_arm64.s:13	0xa6318			d65f03c0		RET
+  probe_arm64.s:13	0xa631c			00000000		?
+
+TEXT main.frameMiddle.abi0(SB) w1755probe/probe_arm64.s
+  probe_arm64.s:15	0xa6320			f8190ffe		MOVD.W R30, -112(RSP)
+  probe_arm64.s:15	0xa6324			f81f83fd		MOVD R29, -8(RSP)
+  probe_arm64.s:15	0xa6328			d10023fd		SUB $8, RSP, R29
+  probe_arm64.s:16	0xa632c			94000005		CALL main.frameLeaf.abi0(SB)
+  probe_arm64.s:17	0xa6330			f85f83fd		MOVD -8(RSP), R29
+  probe_arm64.s:17	0xa6334			f84707fe		MOVD.P 112(RSP), R30
+  probe_arm64.s:17	0xa6338			d65f03c0		RET
+  probe_arm64.s:17	0xa633c			00000000		?
+
+TEXT main.frameLeaf.abi0(SB) w1755probe/probe_arm64.s
+  probe_arm64.s:19	0xa6340			f8190ffe		MOVD.W R30, -112(RSP)
+  probe_arm64.s:19	0xa6344			f81f83fd		MOVD R29, -8(RSP)
+  probe_arm64.s:19	0xa6348			d10023fd		SUB $8, RSP, R29
+  probe_arm64.s:20	0xa634c			9101a3fd		ADD $104, RSP, R29
+  probe_arm64.s:20	0xa6350			9101c3ff		ADD $112, RSP, RSP
+  probe_arm64.s:20	0xa6354			d65f03c0		RET
+  probe_arm64.s:20	0xa6358			00000000		?
+  probe_arm64.s:20	0xa635c			00000000		?

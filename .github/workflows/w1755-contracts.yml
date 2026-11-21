@@ -1,0 +1,41 @@
+name: w1755-contracts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'spikes/w1755-contract-falsifiers/**'
+      - '.github/workflows/w1755-contracts.yml'
+  pull_request:
+    paths:
+      - 'spikes/w1755-contract-falsifiers/**'
+      - '.github/workflows/w1755-contracts.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  native-contracts:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (pinned v4)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install pinned native ARM64 Go
+        run: |
+          set -eu
+          curl --fail --location --output "$RUNNER_TEMP/w1755-go.tar.gz" https://go.dev/dl/go1.26.9.linux-arm64.tar.gz
+          printf '%s  %s\n' '4a97373d49fcacdcf3694fea368a500b00ee3e963974f3e7514132717632f052' "$RUNNER_TEMP/w1755-go.tar.gz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/w1755-toolchain"
+          tar -C "$RUNNER_TEMP/w1755-toolchain" -xzf "$RUNNER_TEMP/w1755-go.tar.gz"
+          echo "$RUNNER_TEMP/w1755-toolchain/go/bin" >> "$GITHUB_PATH"
+      - name: Execute native contract probes (expected ABI rejection included)
+        run: python3 spikes/w1755-contract-falsifiers/run.py --output "$RUNNER_TEMP/w1755-evidence"
+      - name: Preserve raw evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: w1755-contract-evidence
+          path: |
+            ${{ runner.temp }}/w1755-evidence/*.json
+            ${{ runner.temp }}/w1755-evidence/*.txt

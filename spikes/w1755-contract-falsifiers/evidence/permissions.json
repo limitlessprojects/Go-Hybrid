@@ -1,0 +1,9 @@
+{
+  "full": 65535,
+  "shifted_child": 32767,
+  "or_reunion": 32767,
+  "sum_reunion": 65534,
+  "overlapping_bits": 32767,
+  "exact_fraction_reunion": "1",
+  "scope": "literal equal right-shift children; alternative splits are not disproved"
+}

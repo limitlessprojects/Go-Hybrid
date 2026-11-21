@@ -1,0 +1,45 @@
+{
+  "go_version": "go version go1.26.9 linux/arm64",
+  "platform": "linux/arm64",
+  "audit_passed": true,
+  "external_abiinternal": "rejected by pinned assembler",
+  "abi0_control": "native execution and vet passed; ABI wrapper observed",
+  "chain": {
+    "declared_local_frames_bytes": [
+      96,
+      96,
+      96
+    ],
+    "local_bytes_lower_bound": 288,
+    "proposed_path_bound": 192,
+    "observed_frame_allocations_bytes": {
+      "frameRoot": 112,
+      "frameMiddle": 112,
+      "frameLeaf": 112
+    },
+    "native_execution": "returned",
+    "calls_morestack": false
+  },
+  "permissions": {
+    "full": 65535,
+    "shifted_child": 32767,
+    "or_reunion": 32767,
+    "sum_reunion": 65534,
+    "overlapping_bits": 32767,
+    "exact_fraction_reunion": "1",
+    "scope": "literal equal right-shift children; alternative splits are not disproved"
+  },
+  "not_measured": [
+    "Rust kernels",
+    "amd64",
+    "H1 corpus parity",
+    "H3 latency",
+    "GC safety"
+  ],
+  "inputs_sha256": {
+    "control/main.go": "bc5a13997958d2426046fc623d2c6e89562522c090f6eda84b2f010345c6e42e",
+    "control/probe_arm64.s": "3f1cfcb065065c6da71c42ef6dd48b0e8630d2d1fef735f666a128047761efe5",
+    "run.py": "e68468705ee9270808fdf866c0c71fc2f13f46548ab3de378c8391f9e4ba5b75",
+    "testdata/abiinternal_arm64.s": "116a3aa017f0c60ec0562d839b1b53e1f249a5899c93e420ef72306e0449133e"
+  }
+}

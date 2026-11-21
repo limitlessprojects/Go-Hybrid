@@ -1,0 +1,2 @@
+testdata/abiinternal_arm64.s:4: ABI selector only permitted when compiling runtime, reference was to "w1755probe.identity"
+asm: assembly of testdata/abiinternal_arm64.s failed
