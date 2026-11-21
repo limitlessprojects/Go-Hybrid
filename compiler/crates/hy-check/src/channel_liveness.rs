@@ -95,10 +95,47 @@ impl ChannelLivenessChecker {
         }
     }
 
+    fn transfer_cap(
+        &mut self,
+        new_name: String,
+        is_tx: bool,
+        state: ChannelTypestate,
+        def_span: Span,
+    ) {
+        let pipe = if is_tx {
+            PipeInfo {
+                tx: new_name.clone(),
+                rx: String::new(),
+                tx_state: state,
+                rx_state: ChannelTypestate::Drained,
+                def_span,
+            }
+        } else {
+            PipeInfo {
+                tx: String::new(),
+                rx: new_name.clone(),
+                tx_state: ChannelTypestate::Closed,
+                rx_state: state,
+                def_span,
+            }
+        };
+
+        let p_idx = self.pipes_all.len();
+        self.pipes_all.push(pipe.clone());
+        self.cap_to_pipe.insert(new_name, p_idx);
+
+        if let Some(cur) = self.scope_stack.last_mut() {
+            cur.pipes.push(pipe);
+        }
+    }
+
     fn check_terminal_invariants(&mut self, scope: &ScopeState) {
         for pipe in &scope.pipes {
             // Check send capability terminal state
-            if !scope.moved_caps.contains(&pipe.tx) && pipe.tx_state != ChannelTypestate::Closed {
+            if !pipe.tx.is_empty()
+                && !scope.moved_caps.contains(&pipe.tx)
+                && pipe.tx_state != ChannelTypestate::Closed
+            {
                 self.diags.push(Diagnostic::error(
                     "HYB-E4004",
                     &self.file_path,
@@ -112,7 +149,10 @@ impl ChannelLivenessChecker {
 
             // Check receive capability terminal state
             // If rx was moved into a subtask, the subtask assumed lifecycle responsibility
-            if !scope.moved_caps.contains(&pipe.rx) && pipe.rx_state != ChannelTypestate::Drained {
+            if !pipe.rx.is_empty()
+                && !scope.moved_caps.contains(&pipe.rx)
+                && pipe.rx_state != ChannelTypestate::Drained
+            {
                 self.diags.push(Diagnostic::error(
                     "HYB-E4005",
                     &self.file_path,
@@ -145,23 +185,50 @@ impl ChannelLivenessChecker {
                         return;
                     }
                 }
-                for v in &decl.values {
-                    self.check_expr(v);
+                if decl.names.len() == decl.values.len() {
+                    for (name, v) in decl.names.iter().zip(decl.values.iter()) {
+                        self.check_cap_binding(name, v, decl.span);
+                    }
+                } else {
+                    for v in &decl.values {
+                        self.check_expr(v);
+                    }
                 }
             }
-            Stmt::Assign { targets, values, span, .. } => {
+            Stmt::Assign {
+                targets,
+                op,
+                values,
+                span,
+            } => {
                 if targets.len() == 2 && values.len() == 1 && self.is_pipe_call(&values[0]) {
-                    if let (PlaceKind::Ident(tx_name), PlaceKind::Ident(rx_name)) = (&targets[0].kind, &targets[1].kind) {
+                    if let (PlaceKind::Ident(tx_name), PlaceKind::Ident(rx_name)) =
+                        (&targets[0].kind, &targets[1].kind)
+                    {
                         self.register_pipe(tx_name.clone(), rx_name.clone(), *span);
                         return;
                     }
                 }
-                for v in values {
-                    self.check_expr(v);
+                if *op == AssignOp::Assign && targets.len() == values.len() {
+                    for (target, v) in targets.iter().zip(values.iter()) {
+                        if let PlaceKind::Ident(target_name) = &target.kind {
+                            self.check_cap_binding(target_name, v, *span);
+                        } else {
+                            self.check_expr(v);
+                        }
+                    }
+                } else {
+                    for v in values {
+                        self.check_expr(v);
+                    }
                 }
             }
-            Stmt::Expr { expr, .. } => {
-                self.check_expr(expr);
+            Stmt::Expr { expr, span } => {
+                if self.unwrap_move_cap(expr).is_some() {
+                    self.check_cap_binding("_", expr, *span);
+                } else {
+                    self.check_expr(expr);
+                }
             }
             Stmt::Task { callee, args, span } => {
                 self.check_expr(callee);
@@ -526,6 +593,107 @@ impl ChannelLivenessChecker {
         false
     }
 
+    fn unwrap_move_cap(&self, expr: &Expr) -> Option<(String, Span)> {
+        let mut e = expr;
+        while let Expr::Paren { inner, .. } = e {
+            e = inner.as_ref();
+        }
+        if let Expr::Move { operand, span } = e {
+            if let Some(cap) = self.get_cap_name(operand) {
+                return Some((cap, *span));
+            }
+        }
+        None
+    }
+
+    fn find_cap_role_and_state(&self, name: &str) -> Option<(bool, ChannelTypestate)> {
+        for scope in self.scope_stack.iter().rev() {
+            for p in scope.pipes.iter().rev() {
+                if !p.tx.is_empty() && p.tx == name {
+                    return Some((true, p.tx_state));
+                }
+                if !p.rx.is_empty() && p.rx == name {
+                    return Some((false, p.rx_state));
+                }
+            }
+        }
+        None
+    }
+
+    fn check_cap_binding(&mut self, target: &str, value: &Expr, stmt_span: Span) {
+        if let Some((cap, move_span)) = self.unwrap_move_cap(value) {
+            if self.is_moved(&cap) {
+                self.diags.push(Diagnostic::error(
+                    "HYB-E3001",
+                    &self.file_path,
+                    move_span,
+                    format!("affine capability '{}' moved more than once", cap),
+                ));
+                return;
+            }
+            if target == "_" {
+                if let Some((is_tx, state)) = self.find_cap_role_and_state(&cap) {
+                    if is_tx && state != ChannelTypestate::Closed {
+                        self.diags.push(Diagnostic::error(
+                            "HYB-E4004",
+                            &self.file_path,
+                            move_span,
+                            format!(
+                                "linear send capability '{}' discarded via blank move before being closed",
+                                cap
+                            ),
+                        ));
+                    } else if !is_tx && state != ChannelTypestate::Drained {
+                        self.diags.push(Diagnostic::error(
+                            "HYB-E4005",
+                            &self.file_path,
+                            move_span,
+                            format!(
+                                "linear receive capability '{}' discarded via blank move before being drained",
+                                cap
+                            ),
+                        ));
+                    }
+                }
+                self.mark_moved(&cap);
+                return;
+            }
+            if target != cap {
+                if let Some((is_tx, state)) = self.find_cap_role_and_state(&cap) {
+                    self.mark_moved(&cap);
+                    self.transfer_cap(target.to_string(), is_tx, state, stmt_span);
+                } else {
+                    self.mark_moved(&cap);
+                }
+            }
+            return;
+        }
+
+        if let Some(cap) = self.get_cap_name(value) {
+            if self.is_moved(&cap) {
+                self.diags.push(Diagnostic::error(
+                    "HYB-E3001",
+                    &self.file_path,
+                    value.span(),
+                    format!("use of moved linear capability '{}'", cap),
+                ));
+            } else if target != "_" {
+                self.diags.push(Diagnostic::error(
+                    "HYB-E3002",
+                    &self.file_path,
+                    value.span(),
+                    format!(
+                        "aliasing linear capability '{}' without explicit 'move' is forbidden",
+                        cap
+                    ),
+                ));
+            }
+            return;
+        }
+
+        self.check_expr(value);
+    }
+
     fn get_cap_name(&self, expr: &Expr) -> Option<String> {
         let mut e = expr;
         while let Expr::Paren { inner, .. } = e {
@@ -560,8 +728,8 @@ impl ChannelLivenessChecker {
 
     fn mark_tx_closed(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
-            for p in &mut scope.pipes {
-                if p.tx == name {
+            for p in scope.pipes.iter_mut().rev() {
+                if !p.tx.is_empty() && p.tx == name {
                     p.tx_state = ChannelTypestate::Closed;
                     return;
                 }
@@ -571,8 +739,8 @@ impl ChannelLivenessChecker {
 
     fn mark_tx_active(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
-            for p in &mut scope.pipes {
-                if p.tx == name && p.tx_state == ChannelTypestate::Fresh {
+            for p in scope.pipes.iter_mut().rev() {
+                if !p.tx.is_empty() && p.tx == name && p.tx_state == ChannelTypestate::Fresh {
                     p.tx_state = ChannelTypestate::Active;
                     return;
                 }
@@ -582,8 +750,8 @@ impl ChannelLivenessChecker {
 
     fn mark_rx_drained(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
-            for p in &mut scope.pipes {
-                if p.rx == name {
+            for p in scope.pipes.iter_mut().rev() {
+                if !p.rx.is_empty() && p.rx == name {
                     p.rx_state = ChannelTypestate::Drained;
                     return;
                 }
@@ -593,8 +761,8 @@ impl ChannelLivenessChecker {
 
     fn mark_rx_active(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
-            for p in &mut scope.pipes {
-                if p.rx == name && p.rx_state == ChannelTypestate::Fresh {
+            for p in scope.pipes.iter_mut().rev() {
+                if !p.rx.is_empty() && p.rx == name && p.rx_state == ChannelTypestate::Fresh {
                     p.rx_state = ChannelTypestate::Active;
                     return;
                 }
