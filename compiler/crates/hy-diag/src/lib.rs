@@ -522,6 +522,50 @@ mod tests {
     }
 
     #[test]
+    fn user_facing_registry_text_names_no_build_host_path() {
+        // Fix-it text is printed by `hyb explain` and by build-time
+        // diagnostics, including in release installs. A path from the
+        // maintainer's machine is unreachable for an installed user: the
+        // toolchain guidance must point at go.dev/dl and the shipped
+        // release notes instead.
+        let reg = Registry::global();
+        for e in reg.entries() {
+            for text in std::iter::once(&e.summary)
+                .chain(std::iter::once(&e.example))
+                .chain(e.fixits.iter())
+            {
+                assert!(
+                    !text.contains("/home/"),
+                    "{} prints a build-host path in user-facing text: {text}",
+                    e.code
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn e9001_fixits_are_actionable_for_release_installs() {
+        let e = Registry::global().lookup("HYB-E9001").expect("E9001 registered");
+        assert!(
+            e.fixits.iter().any(|f| f.contains("https://go.dev/dl/")),
+            "E9001 must tell a release user where to get the pinned Go: {:?}",
+            e.fixits
+        );
+        assert!(
+            e.fixits
+                .iter()
+                .any(|f| f.contains("HYB_ALLOW_TOOLCHAIN_DRIFT=1")),
+            "E9001 must name the documented local escape hatch: {:?}",
+            e.fixits
+        );
+        assert!(
+            e.fixits.iter().any(|f| f.contains("tools/RELEASE-INSTALL.md")),
+            "E9001 must point at the release install notes: {:?}",
+            e.fixits
+        );
+    }
+
+    #[test]
     fn every_code_has_reference_page() {
         let reg = Registry::global();
         for e in reg.entries() {

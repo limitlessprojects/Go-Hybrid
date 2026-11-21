@@ -716,10 +716,11 @@
       "category": "tooling",
       "severity": "error",
       "title": "toolchain does not match the pinned version",
-      "summary": "`hyb build` enforces the project's version pins (go1.26.9 / Rust 1.99.0 per tools/env.sh) so emitted Go and the compiler behave identically everywhere. The installed toolchain's version differs from the pin. Lints and checks stay available; builds stop.",
+      "summary": "`hyb build` enforces the project's version pins (go1.26.9 / Rust 1.99.0) so emitted Go and the compiler behave identically everywhere. The installed toolchain's version differs from the pin. Lints and checks stay available; builds stop. A release install needs only the pinned Go (tools/RELEASE-INSTALL.md); the pinned Rust is used only where rustc actually rebuilds the bridge staticlib.",
       "fixits": [
-        "install the pinned toolchain version (see tools/env.sh for the exact pins)",
-        "source tools/env.sh so PATH picks up the pinned Go at /home/z/tools/go",
+        "install go1.26.9 (https://go.dev/dl/) and put it first on PATH — `hyb build` uses the Go it finds there",
+        "release installs need only Go — see tools/RELEASE-INSTALL.md for the requirements; a source checkout's `tools/env.sh` exports the contributor pins and is not shipped in the tarball",
+        "for a deliberate local smoke test, set `HYB_ALLOW_TOOLCHAIN_DRIFT=1` (the documented escape hatch; CI keeps the pin)",
         "change the pin deliberately: update tools/env.sh, PLAN.md's environment row, and this registry entry in the same commit"
       ],
       "example": "hyb build prog.hy -o out/   // reject: HYB-E9001 — go1.21 found, go1.26.9 pinned",
