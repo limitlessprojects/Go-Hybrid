@@ -120,3 +120,39 @@ fn deny_managed_fails_a_managed_program_before_building() {
     assert!(!inputs.0.join("bin").exists(), "no binary on a denied build");
     assert!(!inputs.0.join("bin.go").exists(), "no Go emitted on a denied build");
 }
+
+#[test]
+fn report_managed_prints_the_audit_table_and_still_builds() {
+    // SPEC-LANGUAGE O6.3: `hybrid build --report-managed` MUST print the same
+    // audit table as `hybrid check --report-managed`; a report, not a gate.
+    let inputs = Inputs::new();
+    let check = Command::new(env!("CARGO_BIN_EXE_hyb"))
+        .args(["check", "managed.hy", "--report-managed"])
+        .current_dir(&inputs.0)
+        .output()
+        .expect("run hyb check");
+    let check_out = String::from_utf8(check.stdout).unwrap();
+    let table: Vec<&str> = check_out
+        .lines()
+        .skip_while(|l| !l.starts_with("managed:"))
+        .take(3)
+        .collect();
+    assert_eq!(table.len(), 3, "check prints the table: {check_out}");
+
+    let output = inputs.build_with_drift(
+        &["managed.hy", "-o", "bin", "--emit-go", "--report-managed"],
+        true,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for line in &table {
+        assert!(stdout.lines().any(|l| l == *line), "missing `{line}` in {stdout}");
+    }
+    assert!(inputs.0.join("bin.go").exists(), "the report must not stop the build");
+}
