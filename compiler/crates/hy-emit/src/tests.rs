@@ -75,6 +75,52 @@ fn map_literal_zero_value_is_direct_composite() {
     assert!(go.contains("m := map[string]int{}"), ":\n{}", go);
 }
 
+#[test]
+fn typed_let_emits_var_declaration_1761() {
+    // SPEC-LANGUAGE §1.3 gives `let` an optional type; Go has no typed
+    // short declaration, so the emitter must use its `var x T = e` twin
+    // (#1761). Immutability stays a checker-level contract.
+    let go = emit(
+        "fn main() {\n    let n int64 = 42\n    let err error = nil\n    _ = n\n    _ = err\n}\n",
+    );
+    assert!(go.contains("var n int64 = 42"), ":\n{}", go);
+    assert!(go.contains("var err error = nil"), ":\n{}", go);
+    assert!(!go.contains("n int64 :="), ":\n{}", go);
+}
+
+#[test]
+fn typed_let_with_try_keeps_declared_type_1761() {
+    // The `?` desugar used to emit `v, hyErr0 := read_val()`, dropping the
+    // declared `int64`; the typed let must hoist the try and keep the type.
+    let go = emit(
+        "fn read_val() (int64, error) {\n    return 42, nil\n}\n\nfn main() {\n    let v int64 = read_val()?\n    _ = v\n}\n",
+    );
+    assert!(go.contains("var v int64 = "), ":\n{}", go);
+    assert!(
+        !go.contains("v, hyErr"),
+        "declared type must survive the ? desugar:\n{}",
+        go
+    );
+}
+
+#[test]
+fn untyped_let_still_emits_short_declaration_1761() {
+    let go = emit("fn main() {\n    let x = 5\n    let y := 6\n    fmt.println(x + y)\n}\n");
+    assert!(go.contains("x := 5"), ":\n{}", go);
+    assert!(go.contains("y := 6"), ":\n{}", go);
+}
+
+#[test]
+fn typed_let_pointer_emits_var_and_keeps_pointer_use_1761() {
+    // The Var arm also registers pointer-ness; a typed let of `*T` must
+    // emit `var p *stats = &s` and stay usable as a pointer.
+    let go = emit(
+        "struct stats {\n    hits int64\n}\n\nfn main() {\n    var s stats\n    let p *stats = &s\n    fmt.println(p.hits)\n}\n",
+    );
+    assert!(go.contains("var p *stats = &s"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(p.hits)"), ":\n{}", go);
+}
+
 // ---------------------------------------------------------------------------
 // Example 01 — hello (interpolation, printf, range with index)
 // ---------------------------------------------------------------------------
