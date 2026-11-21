@@ -42,6 +42,10 @@ fn loop_carried_while_cond_closure_loop_and_value_updated_return_reject_e3104() 
     for body in [
         "m := map[string]entry{\"k\": entry{val: 1, arr: [2]int{0, 0}}}\nvar slot *entry\nfor slot != nil && check_int_ptr(&slot.val) {\n    slot = &m[\"k\"]\n    slot.val = 0\n}",
         "m := map[string]entry{\"k\": entry{val: 1, arr: [2]int{0, 0}}}\nvar slot *entry\nfor slot != nil && check_ptr(move slot) {\n    slot = &m[\"k\"]\n}",
+        "m := map[string]entry{\"k\": entry{val: 1, arr: [2]int{0, 0}}}\nvar slot *entry\nother := entry{val: 9, arr: [2]int{0, 0}}\nfor i in 0..2 {\n    if i == 1 {\n        slot = &other\n    }\n    slot = &m[\"k\"]\n    slot.val = i\n}",
+        "m := map[string]entry{\"k\": entry{val: 1, arr: [2]int{0, 0}}}\nvar slot *entry\nfor i in 0..2 {\n    if i == 1 {\n        _ = check_int_ptr(&slot.val)\n    }\n    slot = &m[\"k\"]\n    slot.val = i\n}",
+        "pa := &[1]map[string]entry{map[string]entry{\"k\": entry{val: 1, arr: [2]int{0, 0}}}}\n_ = check_ptr(&pa[0][\"k\"])",
+        "pa := &[1]map[string]entry{map[string]entry{\"k\": entry{val: 1, arr: [2]int{0, 0}}}}\nother := entry{val: 2, arr: [2]int{0, 0}}\nif true {\n    &pa[0][\"k\"] = &other\n}",
         "f := fn() {\n    m := map[string]entry{\"k\": entry{val: 1, arr: [2]int{0, 0}}}\n    var slot *entry\n    for i in 0..2 {\n        if i == 1 {\n            task consume_ptr(move slot)\n        }\n        slot = &m[\"k\"]\n        slot.val = i\n    }\n}\nf()",
         "f := fn() {\n    m := map[string]entry{\"k\": entry{val: 1, arr: [2]int{0, 0}}}\n    var slot *entry\n    other := entry{val: 9, arr: [2]int{0, 0}}\n    for i in 0..2 {\n        if i == 1 {\n            slot = &other\n        }\n        slot = &m[\"k\"]\n        slot.val = i\n    }\n}\nf()",
         "f := fn() *entry {\n    m := map[string]entry{\"k\": entry{val: 1, arr: [2]int{0, 0}}}\n    var q entry\n    q = &m[\"k\"]\n    q = entry{val: 2, arr: [2]int{0, 0}}\n    return q\n}\n_ = f()",
@@ -58,6 +62,8 @@ fn non_loan_parallel_rebind_and_shadowed_loop_bindings_stay_accepted() {
         "m := map[string]entry{\"k\": entry{val: 1, arr: [2]int{0, 0}}}\nslot := entry{val: 3, arr: [2]int{0, 0}}\nfor check_int_ptr(&slot.val) {\n    var slot *entry\n    slot = &m[\"k\"]\n    slot.val = 0\n    break\n}",
         "m := map[string]entry{\"k\": entry{val: 1, arr: [2]int{0, 0}}}\nslot := entry{val: 3, arr: [2]int{0, 0}}\nother := entry{val: 4, arr: [2]int{0, 0}}\nfor check_int_ptr(&slot.val) {\n    if slot := &other; slot != nil {\n        slot = &m[\"k\"]\n        slot.val = 0\n    }\n    break\n}",
         "f := fn() {\n    m := map[string]entry{\"k\": entry{val: 1, arr: [2]int{0, 0}}}\n    for i in 0..2 {\n        slot := &m[\"k\"]\n        slot.val = i\n        if true {\n            slot := entry{val: 7, arr: [2]int{0, 0}}\n            p := &slot\n            _ = p.val\n        }\n    }\n}\nf()",
+        "m := map[string]entry{\"k\": entry{val: 1, arr: [2]int{0, 0}}}\nfor i in 0..2 {\n    slot := &m[\"k\"]\n    slot.val = i\n}",
+        "pa := &[2]entry{entry{val: 1, arr: [2]int{0, 0}}, entry{val: 2, arr: [2]int{0, 0}}}\nslot := &pa[0]\nslot = &pa[1]\nslot.val = 9",
     ] {
         assert_accept(&format!("{PRE}\nfn main() {{\n{body}\n}}\n"));
     }
