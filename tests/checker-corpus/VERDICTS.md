@@ -1112,3 +1112,17 @@ the move freeze reach the send path as well.
 | struct-chan-shared-map-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct over the channel freezes that storage, so `m["after"] = 2` is a write through a live alias |
 
 With this registration the corpus is **139 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 92**.
+
+-------------------------------------------------------------------------------
+
+### prelude-option-private-field-reject — REJECT (bounty track: grow the adversarial corpus, issue #4532)
+
+Pins that the prelude-private fields of `option[T]` (`val`, `ok`) are not selectable
+or writable from Hybrid source, preserving option soundness and constructor guarantees (SPEC §2.3 T20).
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| prelude-option-private-field-reject | REJECT | BUILDABLE | `HYB-E1002` | `o.val` / `o.ok` are private Go fields; option surface exposes only `.unwrap()`, `.unwrap_or()`, `.is_some()`, `.is_none()` |
+
+With this registration the corpus is **140 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 93**.
+
