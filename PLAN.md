@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — cat example byte fidelity (2026-11-18)
+
+On base `b1627e83`, four lossy copies pass the acceptance example. The binary fixture now detects CRLF normalization, dropped NUL, UTF-8 replacement and an added final newline. All 22 runner tests pass, as does the example built with the pinned compiler toolchain.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.

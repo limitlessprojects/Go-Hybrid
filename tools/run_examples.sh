@@ -146,20 +146,27 @@ run_example() {
             FAIL=1
             return
         fi
-        printf 'hello from the file\nsecond line\n' >"$WORK/in.txt"
-        local ok=1
-        # happy path: stdout == input bytes verbatim, exit 0
-        if "$catbin" "$WORK/in.txt" >"$WORK/$name.out" 2>"$WORK/$name.err" && \
-           diff -u "$WORK/in.txt" "$WORK/$name.out" >/dev/null; then
+        # Exercise byte preservation across NUL, invalid UTF-8, CRLF and an
+        # unterminated final line. Keep binary data in files, not shell variables.
+        printf 'hello\000\377\r\nsecond line' >"$WORK/in.txt"
+        local ok=1 rc
+        "$catbin" "$WORK/in.txt" >"$WORK/$name.out" 2>"$WORK/$name.err"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            note "FAIL $name happy path (run exit $rc)"
+            show_run_failure "$name"
+            ok=0
+        elif cmp "$WORK/in.txt" "$WORK/$name.out" >"$WORK/$name.diff" 2>&1; then
             note "PASS $name happy path (bytes verbatim, exit 0)"
         else
-            note "FAIL $name happy path"
+            note "FAIL $name happy path (byte mismatch)"
+            show_run_failure "$name"
             ok=0
         fi
         # error path: stderr "<prog>: open <missing>: no such file...", exit 1
         local missing="$WORK/definitely-not-here.txt"
         "$catbin" "$missing" >"$WORK/$name.out2" 2>"$WORK/$name.err2"
-        local rc=$?
+        rc=$?
         local want="cat: open $missing: no such file or directory"
         if [ "$rc" -eq 1 ] && [ "$(cat "$WORK/$name.err2")" = "$want" ]; then
             note "PASS $name error path (E6: stderr + exit 1)"

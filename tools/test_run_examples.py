@@ -25,15 +25,16 @@ PKG_EXPECTED = (ROOT / "examples" / PKG_EXAMPLE / "expected.txt").read_text(enco
 
 class ExampleExitTests(unittest.TestCase):
     def run_example(self, output=EXPECTED, exit_code=0, build_exit=0,
-                    stderr="", example=EXAMPLE):
+                    stderr="", example=EXAMPLE, program=None):
         with tempfile.TemporaryDirectory(prefix="hybrid-example-test-") as directory:
             root = Path(directory)
-            program = (
-                f"#!{sys.executable}\nimport sys\n"
-                f"sys.stdout.write({output!r})\n"
-                f"sys.stderr.write({stderr!r})\n"
-                f"sys.exit({exit_code})\n"
-            )
+            if program is None:
+                program = (
+                    f"#!{sys.executable}\nimport sys\n"
+                    f"sys.stdout.write({output!r})\n"
+                    f"sys.stderr.write({stderr!r})\n"
+                    f"sys.exit({exit_code})\n"
+                )
             builder = root / "hyb"
             builder.write_text(
                 f"#!{sys.executable}\nfrom pathlib import Path\nimport sys\n"
@@ -121,6 +122,41 @@ class ExampleExitTests(unittest.TestCase):
 
     def test_timing_example_compares_only_stdout(self):
         self.check_streams([EXAMPLE])
+
+
+class CatExampleTests(unittest.TestCase):
+    run_example = ExampleExitTests.run_example
+    assert_result = ExampleExitTests.assert_result
+
+    def run_cat(self, copy):
+        program = (
+            f"#!{sys.executable}\n"
+            "from pathlib import Path\nimport sys\n"
+            "path = Path(sys.argv[1])\n"
+            "if not path.exists():\n"
+            "    print(f'cat: open {path}: no such file or directory', file=sys.stderr)\n"
+            "    sys.exit(1)\n"
+            "data = path.read_bytes()\n" + copy + "\n"
+        )
+        return self.run_example(example="02-cli-cat", program=program)
+
+    def test_exact_copy_passes(self):
+        self.assert_result(self.run_cat("sys.stdout.buffer.write(data)"), 0)
+
+    def test_lossy_copies_fail(self):
+        for expr in (r"data.replace(b'\r\n', b'\n')", r"data.replace(b'\x00', b'')",
+                     "data.decode('utf-8', 'replace').encode()",
+                     r"data if data.endswith(b'\n') else data + b'\n'"):
+            with self.subTest(transform=expr):
+                result = self.run_cat(f"sys.stdout.buffer.write({expr})")
+                self.assert_result(result, 1)
+                self.assertIn("happy path (byte mismatch)", result.stdout)
+
+    def test_failed_copy_reports_exit_and_stderr(self):
+        result = self.run_cat("print('copy failed', file=sys.stderr)\nsys.exit(7)")
+        self.assert_result(result, 1)
+        self.assertIn("happy path (run exit 7)", result.stdout)
+        self.assertIn("copy failed", result.stdout)
 
 
 class StandardExampleExitTests(unittest.TestCase):
