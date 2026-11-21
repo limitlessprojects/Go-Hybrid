@@ -187,6 +187,27 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         // pattern, example 04); the element shape is opaque here — the
         // binding still resolves as a channel so receives on it classify.
         ("time", "after") => TypeShape::Chan(Box::new(TypeShape::Unknown)),
+        (
+            "time",
+            "seconds"
+            | "milliseconds"
+            | "microseconds"
+            | "nanoseconds"
+            | "minutes"
+            | "hours"
+            | "parse_duration"
+            | "since"
+            | "until"
+            | "Seconds"
+            | "Milliseconds"
+            | "Microseconds"
+            | "Nanoseconds"
+            | "Minutes"
+            | "Hours"
+            | "ParseDuration"
+            | "Since"
+            | "Until",
+        ) => TypeShape::ForeignOpaque("time.duration".into()),
         ("http", "new_serve_mux") => TypeShape::ForeignOpaque("http.serve_mux".into()),
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
         // `atomic.load_pointer` / `atomic.swap_pointer` return an
@@ -417,6 +438,19 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     ];
     const TIME_TICKER: &[&str] = &["stop", "reset"];
     const TIME_TIMER: &[&str] = &["stop", "reset"];
+    /// `time.Duration` — Go standard library duration methods.
+    const TIME_DURATION: &[&str] = &[
+        "abs",
+        "hours",
+        "microseconds",
+        "milliseconds",
+        "minutes",
+        "nanoseconds",
+        "round",
+        "seconds",
+        "string",
+        "truncate",
+    ];
     /// `bufio.Reader` — Go standard library buffered reader methods.
     const BUFIO_READER: &[&str] = &[
         "buffered",
@@ -652,6 +686,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "sync.map" | "sync.Map" => Some(SYNC_MAP),
         "time.ticker" | "time.Ticker" => Some(TIME_TICKER),
         "time.timer" | "time.Timer" => Some(TIME_TIMER),
+        "time.duration" | "time.Duration" => Some(TIME_DURATION),
         "bufio.reader" | "bufio.Reader" => Some(BUFIO_READER),
         "bufio.writer" | "bufio.Writer" => Some(BUFIO_WRITER),
         "bufio.scanner" | "bufio.Scanner" => Some(BUFIO_SCANNER),
