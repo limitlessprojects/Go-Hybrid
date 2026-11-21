@@ -319,13 +319,28 @@ impl<'a> Checker<'a> {
             // a task left `h2` free to mutate the same map (#385). Resolve the
             // alias first; predeclared spellings (`make(chan T, n)`,
             // `make([]T, n)`) keep their own shape through `shape_of_type`.
-            Expr::StructLit { ty: Some(t), .. } => match self.shape_of_type(t) {
-                shape @ TypeShape::Struct(_) => shape,
-                _ => TypeShape::Struct(match t {
-                    TypeExpr::Named { name, .. } => Some(name.clone()),
-                    _ => None,
-                }),
-            },
+            Expr::StructLit { ty: Some(t), .. } => {
+                // A literal written through a type alias to a NON-STRUCT type
+                // (`type mmap = map[string]int; m := mmap{a: 1}`) IS a
+                // map/slice/chan literal — the resolved shape is the true
+                // shape. Wrapping the alias spelling in `Struct(Some(alias))`
+                // made `shape_may_share` claim no-share for a value whose
+                // shallow Go copy shares GC storage: `m2 := m` recorded no
+                // may-share edge, so `task f(move m)` left `m2` free to
+                // mutate the same map (HYB-E3003 missed) and the A5
+                // closure perimeter missed closure-carrying maps
+                // (`type cbmap = map[string]fn()`; HYB-E3001 missed).
+                // Only an unresolvable type keeps the legacy spelling.
+                let shape = self.shape_of_type(t);
+                if matches!(shape, TypeShape::Unknown) {
+                    TypeShape::Struct(match t {
+                        TypeExpr::Named { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                } else {
+                    shape
+                }
+            }
             Expr::StructLit { ty: None, .. } => TypeShape::Struct(None),
             Expr::MapLit { key, value, .. } => TypeShape::Map(
                 Box::new(self.shape_of_type(key)),
