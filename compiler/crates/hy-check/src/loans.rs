@@ -691,7 +691,8 @@ impl<'a> Checker<'a> {
                 if !live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
                     continue;
                 }
-                let Some(decl) = self.fns.get(name) else {
+                let head = Self::base_named_type_str(name);
+                let Some(decl) = self.fns.get(name).or_else(|| self.fns.get(head)) else {
                     continue;
                 };
                 match decl.params.get(i) {
@@ -780,8 +781,9 @@ impl<'a> Checker<'a> {
         let callee_path = walk::expr_path(cr.callee).unwrap_or_else(|| root.to_string());
         if let Some(sname) = recv_sname {
             let sbase = Self::base_named_type_str(&sname);
+            let mhead = Self::base_named_type_str(method);
             let found_decl = self.file.decls.iter().find_map(|d| match d {
-                hy_syntax::Decl::Fn(f) if f.name == method => {
+                hy_syntax::Decl::Fn(f) if f.name == method || f.name == mhead => {
                     let r = f.receiver.as_ref()?;
                     let b = Self::base_named_type(&r.ty)?;
                     (b == sbase).then_some(f)
@@ -1084,7 +1086,8 @@ impl<'a> Checker<'a> {
                 if A3_PURE_FNS.contains(&name.as_str()) {
                     return false;
                 }
-                if let Some(decl) = self.fns.get(name) {
+                let head = Self::base_named_type_str(name);
+                if let Some(decl) = self.fns.get(name).or_else(|| self.fns.get(head)) {
                     for (i, a) in cr.args.iter().enumerate() {
                         if !arg_root_is_param(a) {
                             continue;
@@ -1198,7 +1201,8 @@ impl<'a> Checker<'a> {
                 }
                 let mut mutated_roots = HashSet::new();
                 if let Expr::Ident { name: fn_name, .. } = unwrap_parens(callee) {
-                    if let Some(decl) = self.fns.get(fn_name) {
+                    let head = Self::base_named_type_str(fn_name);
+                    if let Some(decl) = self.fns.get(fn_name).or_else(|| self.fns.get(head)) {
                         for (i, a) in args.iter().enumerate() {
                             let mutates = match decl.params.get(i) {
                                 Some(p) => self.fn_mutates_param(decl, &p.name, 0),
@@ -1415,7 +1419,8 @@ impl<'a> Checker<'a> {
                         if A3_PURE_FNS.contains(&name.as_str()) {
                             continue;
                         }
-                        if let Some(decl) = self.fns.get(name) {
+                        let head = Self::base_named_type_str(name);
+                        if let Some(decl) = self.fns.get(name).or_else(|| self.fns.get(head)) {
                             for (i, a) in cr.args.iter().enumerate() {
                                 let mut roots = Vec::new();
                                 collect_ref_roots(&a.value, &mut roots);
@@ -3370,7 +3375,8 @@ impl<'a> Checker<'a> {
                     self.append_outer_binding_slots(st, &mut bound, true, &mut slots);
                     return Some((slots, std::borrow::Cow::Owned(body.clone())));
                 }
-                let decl = *self.fns.get(name.as_str())?;
+                let head = Self::base_named_type_str(name);
+                let decl = *self.fns.get(name.as_str()).or_else(|| self.fns.get(head))?;
                 let body = decl.body.as_ref()?;
                 let mut slots = Vec::new();
                 let mut bound: HashSet<String> =
@@ -3418,15 +3424,17 @@ impl<'a> Checker<'a> {
                     },
                     _ => None,
                 };
+                let mhead = Self::base_named_type_str(method_name);
                 let decl = if let Some(s) = recv_struct {
                     self.method_decls
-                        .get(&(s, method_name.clone()))
+                        .get(&(s.clone(), method_name.clone()))
+                        .or_else(|| self.method_decls.get(&(s, mhead.to_string())))
                         .copied()
                 } else {
                     let mut matching = self
                         .method_decls
                         .iter()
-                        .filter(|((_, m), _)| m == method_name)
+                        .filter(|((_, m), _)| m == method_name || m == mhead)
                         .map(|(_, d)| *d);
                     let first = matching.next()?;
                     if matching.next().is_some() {
@@ -8779,7 +8787,8 @@ impl<'a> Checker<'a> {
                 if A3_PURE_FNS.contains(&name.as_str()) {
                     return false;
                 }
-                if let Some(decl) = self.fns.get(name) {
+                let head = Self::base_named_type_str(name);
+                if let Some(decl) = self.fns.get(name).or_else(|| self.fns.get(head)) {
                     for (i, a) in cr.args.iter().enumerate() {
                         if !arg_reaches_alias(a) {
                             continue;
