@@ -914,6 +914,9 @@ impl<'a> Checker<'a> {
         }
 
         let mut replay_st = iter_st.clone();
+        if let Some((_, first_idx)) = loop_stmts.first() {
+            replay_st.loans.retain(|l| l.created < *first_idx);
+        }
         let diags_len_before = self.diags.len();
         let managed_blocks_before = self.managed_blocks;
         let sites_via_managed_before = self.sites_via_managed;
@@ -1167,7 +1170,12 @@ impl<'a> Checker<'a> {
 
         let new_diags = self.diags.split_off(diags_len_before);
         for d in new_diags {
-            if d.code == "HYB-E3003" || d.code == "HYB-E3004" || d.code == "HYB-E3104" {
+            if d.code == "HYB-E3003"
+                || d.code == "HYB-E3004"
+                || d.code == "HYB-E3101"
+                || d.code == "HYB-E3102"
+                || d.code == "HYB-E3104"
+            {
                 if !self
                     .diags
                     .iter()

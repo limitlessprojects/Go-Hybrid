@@ -67,3 +67,28 @@ fn closure_body_loop_fresh_local_per_iteration_accepts() {
     );
     assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
 }
+
+#[test]
+fn loop_backedge_alias_map_slot_loan_invalidation_rejects_e3102() {
+    let r = check(
+        "struct acct {\n\
+           bal int\n\
+         }\n\
+         fn main() {\n\
+           m := map[string]acct{\"a\": acct{bal: 1}}\n\
+           t := map[string]acct{\"a\": acct{bal: 0}}\n\
+           s := &m[\"a\"]\n\
+           for i in 0..2 {\n\
+             delete(t, \"a\")\n\
+             s.bal = s.bal + 10\n\
+             t = m\n\
+           }\n\
+         }",
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+    assert!(
+        r.diagnostics.iter().any(|d| d.code == "HYB-E3102"),
+        "expected HYB-E3102 on loop-carried alias invalidating live map-slot loan, got {:?}",
+        r.diagnostics
+    );
+}
