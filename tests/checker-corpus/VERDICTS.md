@@ -1112,3 +1112,19 @@ the move freeze reach the send path as well.
 | struct-chan-shared-map-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct over the channel freezes that storage, so `m["after"] = 2` is a write through a live alias |
 
 With this registration the corpus is **139 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 92**.
+
+-------------------------------------------------------------------------------
+
+### struct-chan-scalars-select-send-accept / struct-chan-shared-map-select-send-reject — ACCEPT + REJECT (bounty track: grow the adversarial corpus)
+
+The `select`-send companions of the #4208 spawn-site and #4209 statement-send
+pairs: the same struct shapes crossed through a `select` send clause (`SPEC C5:
+select { packets <- move p: {} }`), pinning that deep sendability and the A1b
+alias-freeze reach `SelectArmKind::Send` as well.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| struct-chan-scalars-select-send-accept | ACCEPT | — | — | channel safe-by-type + immutable scalars; owned `move` in `select` send arm; no use after move |
+| struct-chan-shared-map-select-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct in a `select` send arm freezes that storage, so `m["after"] = 2` is a write through a live alias |
+
+With this registration the corpus is **141 programs — ACCEPT 46 · ACCEPT-MANAGED 2 · REJECT 93**.
