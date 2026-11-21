@@ -1492,38 +1492,67 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-            return None;
-        };
-        if self
-            .scopes
-            .iter()
-            .any(|layer| layer.contains_key(name.as_str()))
-        {
-            return None;
-        }
-        if let Some(fd) = self.ck.fns.get(name.as_str()) {
-            if fd.receiver.is_some() || !fd.type_params.is_empty() {
-                return None;
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                if self
+                    .scopes
+                    .iter()
+                    .any(|layer| layer.contains_key(name.as_str()))
+                {
+                    return None;
+                }
+                if let Some(fd) = self.ck.fns.get(name.as_str()) {
+                    if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                        return None;
+                    }
+                    return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                }
+                if name == "min" || name == "max" {
+                    let res_scalar = args
+                        .iter()
+                        .find_map(|a| self.typed_value_scalar(&a.value));
+                    return Some(vec![res_scalar]);
+                }
+                if args.len() == 1
+                    && !self.ck.structs.contains_key(name.as_str())
+                    && !self.ck.enums.contains_key(name.as_str())
+                    && !self.ck.type_aliases.contains_key(name.as_str())
+                {
+                    if let Some(s) = canonical_numeric_name(name) {
+                        return Some(vec![Some(s)]);
+                    }
+                }
+                None
             }
-            return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
-        }
-        if name == "min" || name == "max" {
-            let res_scalar = args
-                .iter()
-                .find_map(|a| self.typed_value_scalar(&a.value));
-            return Some(vec![res_scalar]);
-        }
-        if args.len() == 1
-            && !self.ck.structs.contains_key(name.as_str())
-            && !self.ck.enums.contains_key(name.as_str())
-            && !self.ck.type_aliases.contains_key(name.as_str())
-        {
-            if let Some(s) = canonical_numeric_name(name) {
-                return Some(vec![Some(s)]);
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let head = Checker::base_named_type_str(name);
+                if let Some(sname) = self.struct_base_name(&bk) {
+                    if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
+                        if !m.type_params.is_empty() {
+                            return None;
+                        }
+                        return Some(m.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                    }
+                }
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        let assoc_key = format!("{}.{}", pkg, head);
+                        if let Some(fd) = self.ck.fns.get(&assoc_key) {
+                            if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                                return None;
+                            }
+                            return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                        }
+                    }
+                }
+                None
             }
+            Expr::FnLit { results, .. } => {
+                Some(results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect())
+            }
+            _ => None,
         }
-        None
     }
 
     /// #1031 — the exact numeric type of a value that is provably TYPED.
@@ -6931,17 +6960,35 @@ impl<'a> Collector<'a> {
                     } else {
                         let got_kinds = self.multi_value_kinds(&values[0]);
                         if got_kinds.len() == targets.len() {
-                            for (t, vk) in targets.iter().zip(got_kinds.iter()) {
+                            let got_scalars = match unwrap_parens(&values[0]) {
+                                Expr::Call { callee, args, .. } => self.call_result_scalars(callee, args),
+                                _ => None,
+                            };
+                            for (i, (t, vk)) in targets.iter().zip(got_kinds.iter()).enumerate() {
                                 let tpk = self.kind_of_place(t);
-                                if kinds_conflict(&tpk, vk) {
+                                let want_scalar = self.place_scalar(t);
+                                let got_scalar = got_scalars
+                                    .as_ref()
+                                    .and_then(|v| v.get(i).copied().flatten());
+                                let width_conflict = matches!(
+                                    (want_scalar, got_scalar),
+                                    (Some(w), Some(g)) if w != g
+                                );
+                                if kinds_conflict(&tpk, vk) || width_conflict {
+                                    let got_label = got_scalar
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_else(|| vk.label());
+                                    let want_label = want_scalar
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_else(|| tpk.label());
                                     self.emit_e1002(
                                         span,
                                         format!(
                                             "cannot assign a value of type `{}` to `{}` (type `{}`) in multi-value assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
-                                            vk.label(),
+                                            got_label,
                                             t.render(),
-                                            tpk.label(),
-                                            tpk.label()
+                                            want_label,
+                                            want_label
                                         ),
                                         "each target's declared type is fixed; write an explicit conversion when a conversion is intended",
                                     );
