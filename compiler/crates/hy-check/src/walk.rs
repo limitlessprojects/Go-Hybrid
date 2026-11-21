@@ -390,31 +390,42 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
 
 fn place_uses(place: &Place, out: &mut Vec<Use>) {
     match &place.kind {
-        PlaceKind::Ident(n) => out.push(Use {
-            name: n.clone(),
-            span: place.span,
-            is_write: true,
-            via_move: false,
-            via_addr: false,
-        }),
+        PlaceKind::Ident(n) => {
+            if !record_folded_bracket_uses(n, place.span, true, true, out) {
+                out.push(Use {
+                    name: n.clone(),
+                    span: place.span,
+                    is_write: true,
+                    via_move: false,
+                    via_addr: false,
+                });
+            }
+        }
         PlaceKind::Index { base, index } => {
             place_uses(base, out);
             expr_uses(index, out);
         }
-        PlaceKind::Field { base, .. } => place_uses(base, out),
+        PlaceKind::Field { base, name } => {
+            let _ = record_folded_bracket_uses(name, place.span, false, false, out);
+            place_uses(base, out);
+        }
         PlaceKind::AddrOf { base } => place_uses(base, out),
     }
 }
 
 pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
     match expr {
-        Expr::Ident { name, span } => out.push(Use {
-            name: name.clone(),
-            span: *span,
-            is_write: false,
-            via_move: false,
-            via_addr: false,
-        }),
+        Expr::Ident { name, span } => {
+            if !record_folded_bracket_uses(name, *span, false, true, out) {
+                out.push(Use {
+                    name: name.clone(),
+                    span: *span,
+                    is_write: false,
+                    via_move: false,
+                    via_addr: false,
+                });
+            }
+        }
         Expr::Lit { .. } => {}
         Expr::Interp { parts, .. } => {
             for p in parts {
@@ -460,6 +471,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                         via_move: true,
                         via_addr: false,
                     });
+                    walk_projection_subexpr_uses(crate::model::unwrap_parens(operand), out);
                 } else {
                     expr_uses(operand, out);
                 }
@@ -481,7 +493,10 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                 expr_uses(hi, out);
             }
         }
-        Expr::Field { base, .. } => expr_uses(base, out),
+        Expr::Field { base, name, span } => {
+            let _ = record_folded_bracket_uses(name, *span, false, false, out);
+            expr_uses(base, out);
+        }
         Expr::Call { callee, args, .. } => {
             expr_uses(callee, out);
             for a in args {
@@ -510,9 +525,119 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
         }
         // A5 perimeter: closure bodies are not analyzed HERE (uses/calls/
         // loans stay outside); their boundary statements are checked by the
-        // closures.rs pass (O4.9).
-        Expr::FnLit { .. } => {}
+        // closures.rs pass (O4.9). Signature types are evaluated in the outer scope.
+        Expr::FnLit { params, results, .. } => {
+            for p in params {
+                walk_type_len_exprs(&p.ty, &mut |e| expr_uses(e, out));
+            }
+            for r in results {
+                walk_type_len_exprs(&r.ty, &mut |e| expr_uses(e, out));
+            }
+        }
         Expr::Paren { inner, .. } => expr_uses(inner, out),
+    }
+}
+
+fn walk_projection_subexpr_uses(expr: &Expr, out: &mut Vec<Use>) {
+    match crate::model::unwrap_parens(expr) {
+        Expr::Field { base, name, span } => {
+            let _ = record_folded_bracket_uses(name, *span, false, false, out);
+            walk_projection_subexpr_uses(base, out);
+        }
+        Expr::Index { base, index, .. } => {
+            walk_projection_subexpr_uses(base, out);
+            expr_uses(index, out);
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            walk_projection_subexpr_uses(base, out);
+            if let Some(lo) = lo { expr_uses(lo, out); }
+            if let Some(hi) = hi { expr_uses(hi, out); }
+        }
+        _ => {}
+    }
+}
+
+fn push_use(name: &str, span: Span, is_write: bool, out: &mut Vec<Use>) {
+    out.push(Use { name: name.to_string(), span, is_write, via_move: false, via_addr: false });
+}
+
+fn record_folded_bracket_uses(name: &str, span: Span, is_write: bool, record_head: bool, out: &mut Vec<Use>) -> bool {
+    let Some((head, rest)) = name.split_once('[') else { return false; };
+    if record_head && !head.is_empty() { push_use(head, span, is_write, out); }
+    if let Some(inside) = rest.strip_suffix(']') { record_bracket_arg_list_uses(inside, span, out); }
+    true
+}
+
+fn record_bracket_arg_list_uses(inside: &str, span: Span, out: &mut Vec<Use>) {
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (i, ch) in inside.char_indices() {
+        match ch {
+            '[' | '(' | '{' => depth += 1,
+            ']' | ')' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                record_single_bracket_arg_uses(&inside[start..i], span, out);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    record_single_bracket_arg_uses(&inside[start..], span, out);
+}
+
+fn record_single_bracket_arg_uses(raw: &str, span: Span, out: &mut Vec<Use>) {
+    let s = raw.trim();
+    if s.is_empty() { return; }
+    if let Ok(parsed) = hy_syntax::parse_file("walk.hy", &format!("type _hy_ty = {}\n", s)) {
+        if let Some(hy_syntax::Decl::TypeAlias(a)) = parsed.decls.first() {
+            record_parsed_type_arg_uses(&a.ty, span, out);
+            return;
+        }
+    }
+    if let Ok(parsed) = hy_syntax::parse_file("walk.hy", &format!("fn _hy_fn() {{\n    _ = {}\n}}\n", s)) {
+        if let Some(hy_syntax::Decl::Fn(f)) = parsed.decls.first() {
+            if let Some(Stmt::Assign { values, .. }) = f.body.as_ref().and_then(|b| b.stmts.first()) {
+                if let Some(expr) = values.first() {
+                    let start_idx = out.len();
+                    expr_uses(expr, out);
+                    for u in &mut out[start_idx..] { u.span = span; }
+                }
+            }
+        }
+    }
+}
+
+fn record_parsed_type_arg_uses(ty: &hy_syntax::TypeExpr, span: Span, out: &mut Vec<Use>) {
+    match ty {
+        hy_syntax::TypeExpr::Named { name, .. } => {
+            if let Some((head, rest)) = name.split_once('[') {
+                if !head.is_empty() && !crate::resolve::is_predeclared_type_name(head) {
+                    push_use(head, span, false, out);
+                }
+                if let Some(inside) = rest.strip_suffix(']') { record_bracket_arg_list_uses(inside, span, out); }
+            } else if !crate::resolve::is_predeclared_type_name(name) {
+                push_use(name, span, false, out);
+            }
+        }
+        hy_syntax::TypeExpr::Array { len, elem, .. } => {
+            if let Some(l) = len {
+                let start_idx = out.len();
+                expr_uses(l, out);
+                for u in &mut out[start_idx..] { u.span = span; }
+            }
+            record_parsed_type_arg_uses(elem, span, out);
+        }
+        hy_syntax::TypeExpr::Pointer { to, .. }
+        | hy_syntax::TypeExpr::Slice { elem: to, .. }
+        | hy_syntax::TypeExpr::Option { elem: to, .. }
+        | hy_syntax::TypeExpr::Chan { elem: to, .. } => record_parsed_type_arg_uses(to, span, out),
+        hy_syntax::TypeExpr::Map { key, value, .. } => {
+            record_parsed_type_arg_uses(key, span, out);
+            record_parsed_type_arg_uses(value, span, out);
+        }
+        hy_syntax::TypeExpr::Fn { params, results, .. } => {
+            for p in params { record_parsed_type_arg_uses(&p.ty, span, out); }
+            for r in results { record_parsed_type_arg_uses(r, span, out); }
+        }
     }
 }
 
