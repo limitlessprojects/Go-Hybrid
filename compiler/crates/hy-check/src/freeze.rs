@@ -407,6 +407,8 @@ impl<'a> Checker<'a> {
             {
                 if let Some(root) = op.root_ident() {
                     self.mark_move(st, root, mspan, desc.clone(), MoveKind::Moved);
+                } else {
+                    self.check_o54_non_ident_move(st, op, mspan);
                 }
             } else {
                 self.check_o54_non_ident_move(st, op, mspan);
@@ -453,6 +455,7 @@ impl<'a> Checker<'a> {
         let shape = self.shape_of_expr(st, operand);
         if matches!(operand, Expr::Field { .. })
             && matches!(shape, crate::model::TypeShape::OwnHandle(_))
+            && operand.root_ident().is_some()
         {
             return;
         }
