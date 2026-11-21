@@ -1244,8 +1244,9 @@ close(jobs)
 
 ### 8.3 `select`
 
-**C4 — `select` is Go's.** One or more comm clauses plus optional
-`default`; a ready clause is chosen uniformly at random among ready ones;
+**C4 — `select` is Go's.** One or more comm clauses plus an optional
+single `default` (a second default is a checker error, #2356); a ready
+clause is chosen uniformly at random among ready ones;
 with no ready clause and no `default`, the task blocks. Timeout idiom uses
 `time.after`, which returns a receive-only channel (example 04, the pinned
 program):

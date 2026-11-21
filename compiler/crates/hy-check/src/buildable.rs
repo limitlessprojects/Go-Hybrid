@@ -2741,6 +2741,11 @@ impl<'a> Collector<'a> {
             Stmt::Block { block, .. } => self.block_scoped(block),
             Stmt::Select { arms, .. } => {
                 self.select_depth += 1;
+                // #2356: Go allows at most one `default` clause per select.
+                // The parser accepts more and the emitter prints them all,
+                // so a second default used to pass `hyb check` and fail
+                // `go build` with `multiple defaults` (Row 13 BUILDABLE).
+                let mut default_seen = false;
                 for arm in arms {
                     self.push_scope();
                     match &arm.kind {
@@ -2766,7 +2771,18 @@ impl<'a> Collector<'a> {
                                 self.bind_kind(n, if i == 0 { elem.clone() } else { OpKind::Bool });
                             }
                         }
-                        SelectArmKind::Default => {}
+                        SelectArmKind::Default => {
+                            if default_seen {
+                                self.emit_e1002(
+                                    arm.body.span,
+                                    "`select` has more than one `default` arm — Go refuses `multiple defaults` (HYB-E1002)"
+                                        .to_string(),
+                                    "only one `default` arm is allowed in a `select` statement; remove this duplicate",
+                                );
+                            } else {
+                                default_seen = true;
+                            }
+                        }
                     }
                     self.block_scoped(&arm.body);
                     self.pop_scope();
