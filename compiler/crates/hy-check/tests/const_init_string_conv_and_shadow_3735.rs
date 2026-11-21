@@ -86,3 +86,13 @@ fn const_init_valid_string_conversions_and_ascriptions_accept() {
         "const x int = 1\nconst y = x + 2\nfn main() {\n    _ = y\n}\n",
     );
 }
+
+#[test]
+fn const_init_rejects_intermediate_alias_hop_shadowed_by_type_param_or_struct_3851() {
+    assert_reject_e6003(
+        "type mid = int\ntype outer = mid\nfn f[mid]() {\n    const c = outer(1)\n    const d outer = 1\n    _ = c\n    _ = d\n}\nfn main() {}\n",
+    );
+    assert_reject_e6003(
+        "type mid_s = string\ntype outer_s = mid_s\nfn f[mid_s]() {\n    const c = outer_s(65)\n    _ = c\n}\nfn main() {}\n",
+    );
+}
