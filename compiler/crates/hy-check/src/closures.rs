@@ -1368,32 +1368,43 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             }
                         }
                     }
-                } else if l.values.len() == 1 && l.names.len() == 2 {
+                } else if l.values.len() == 1 && l.names.len() > 1 {
                     let val = &l.values[0];
-                    if let Some(path) = walk::addr_of_index_base_path(val) {
-                        let binding = l.names[0].clone();
-                        let key = walk::addr_of_index_slot_key(val);
-                        ck.emit_o8_alias_if_live(
-                            st,
-                            &path,
-                            key.as_deref(),
-                            Some(&binding),
-                            val.span(),
-                            idx,
-                            "a second slot loan",
-                        );
-                        let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
-                        st.loans.push(Loan {
-                            target: LoanTarget::MapSlot {
-                                binding: binding.clone(),
-                                path,
-                                key,
-                            },
-                            created: idx,
-                            last,
-                            span: val.span(),
-                            desc: format!("`{} := {}`", l.names.join(", "), val.render()),
-                        });
+                    if l.names.len() == 2 {
+                        if let Some(path) = walk::addr_of_index_base_path(val) {
+                            let binding = l.names[0].clone();
+                            let key = walk::addr_of_index_slot_key(val);
+                            ck.emit_o8_alias_if_live(
+                                st,
+                                &path,
+                                key.as_deref(),
+                                Some(&binding),
+                                val.span(),
+                                idx,
+                                "a second slot loan",
+                            );
+                            let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
+                            st.loans.push(Loan {
+                                target: LoanTarget::MapSlot {
+                                    binding: binding.clone(),
+                                    path,
+                                    key,
+                                },
+                                created: idx,
+                                last,
+                                span: val.span(),
+                                desc: format!("`{} := {}`", l.names.join(", "), val.render()),
+                            });
+                            continue;
+                        }
+                    }
+                    let shapes = ck.multi_value_shapes(st, val, l.names.len());
+                    for (name, shape) in l.names.iter().zip(shapes.iter()) {
+                        if ck.shape_carries_slot_loan_pointer(shape)
+                            || matches!(shape, crate::model::TypeShape::Unknown)
+                        {
+                            ck.extend_map_slot_loan_to_alias(st, name, val, idx);
+                        }
                     }
                 }
             }
@@ -1438,38 +1449,66 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                                     st.share_edge(name, src);
                                 }
                             }
+                        } else if matches!(
+                            t.kind,
+                            hy_syntax::PlaceKind::Index { .. } | hy_syntax::PlaceKind::Field { .. }
+                        ) {
+                            let root = t.root().to_string();
+                            let root_carries_ptr = ck.lookup_binding(st, &root).is_some_and(|b| {
+                                ck.shape_carries_slot_loan_pointer(&b.shape)
+                                    || matches!(b.shape, crate::model::TypeShape::Unknown)
+                            });
+                            if root_carries_ptr && ck.expr_carries_slot_loan_pointer(st, v) {
+                                ck.extend_map_slot_loan_to_alias(st, &root, v, idx);
+                            }
                         }
                     }
                 } else if *op == hy_syntax::AssignOp::Assign
                     && values.len() == 1
-                    && targets.len() == 2
+                    && targets.len() > 1
                 {
                     let v = &values[0];
-                    if let hy_syntax::PlaceKind::Ident(name) = &targets[0].kind {
-                        if let Some(path) = walk::addr_of_index_base_path(v) {
-                            let binding = name.clone();
-                            let key = walk::addr_of_index_slot_key(v);
-                            ck.emit_o8_alias_if_live(
-                                st,
-                                &path,
-                                key.as_deref(),
-                                Some(&binding),
-                                v.span(),
-                                idx,
-                                "a second slot loan",
-                            );
-                            let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
-                            st.loans.push(Loan {
-                                target: LoanTarget::MapSlot {
-                                    binding: binding.clone(),
-                                    path,
-                                    key,
-                                },
-                                created: idx,
-                                last,
-                                span: v.span(),
-                                desc: format!("`{} = {}`", binding, v.render()),
-                            });
+                    let mut handled_addr_root = false;
+                    if targets.len() == 2 {
+                        if let hy_syntax::PlaceKind::Ident(name) = &targets[0].kind {
+                            if let Some(path) = walk::addr_of_index_base_path(v) {
+                                let binding = name.clone();
+                                let key = walk::addr_of_index_slot_key(v);
+                                ck.emit_o8_alias_if_live(
+                                    st,
+                                    &path,
+                                    key.as_deref(),
+                                    Some(&binding),
+                                    v.span(),
+                                    idx,
+                                    "a second slot loan",
+                                );
+                                let last =
+                                    st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
+                                st.loans.push(Loan {
+                                    target: LoanTarget::MapSlot {
+                                        binding: binding.clone(),
+                                        path,
+                                        key,
+                                    },
+                                    created: idx,
+                                    last,
+                                    span: v.span(),
+                                    desc: format!("`{} = {}`", binding, v.render()),
+                                });
+                                handled_addr_root = true;
+                            }
+                        }
+                    }
+                    if !handled_addr_root {
+                        let shapes = ck.multi_value_shapes(st, v, targets.len());
+                        for (t, shape) in targets.iter().zip(shapes.iter()) {
+                            if ck.shape_carries_slot_loan_pointer(shape)
+                                || matches!(shape, crate::model::TypeShape::Unknown)
+                            {
+                                let root = t.root().to_string();
+                                ck.extend_map_slot_loan_to_alias(st, &root, v, idx);
+                            }
                         }
                     }
                 }

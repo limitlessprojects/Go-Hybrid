@@ -405,11 +405,35 @@ impl<'a> Checker<'a> {
                         Expr::Ident { name: src, .. } => {
                             self.lookup_binding(&pre_st, src).is_some_and(|b| b.slot_loan)
                         }
-                        _ => false,
+                        _ => {
+                            (self.shape_carries_slot_loan_pointer(&shape)
+                                || matches!(shape, TypeShape::Unknown))
+                                && self.expr_carries_slot_loan_pointer(&pre_st, val)
+                        }
                     },
-                    _ => false,
+                    _ => {
+                        (self.shape_carries_slot_loan_pointer(&shape)
+                            || matches!(shape, TypeShape::Unknown))
+                            && self.expr_carries_slot_loan_pointer(&pre_st, val)
+                    }
                 };
                 self.define_binding(st, name, shape, ty, immutable, false, is_let);
+                if rhs_slot_loan {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.slot_loan = true;
+                    }
+                }
+            }
+        } else if l.values.len() == 1 && l.names.len() > 1 {
+            let pre_st = st.clone();
+            let val = &l.values[0];
+            let shapes = self.multi_value_shapes(&pre_st, val, l.names.len());
+            let carries_loan = self.expr_carries_slot_loan_pointer(&pre_st, val);
+            for (name, shape) in l.names.iter().zip(shapes) {
+                let rhs_slot_loan = carries_loan
+                    && (self.shape_carries_slot_loan_pointer(&shape)
+                        || matches!(shape, TypeShape::Unknown));
+                self.define_binding(st, name, shape, l.ty.clone(), immutable, false, is_let);
                 if rhs_slot_loan {
                     if let Some(b) = st.env_lookup_mut(name) {
                         b.slot_loan = true;

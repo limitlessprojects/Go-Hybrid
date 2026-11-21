@@ -40,6 +40,7 @@ fn is_slot_loan_or_alias_expr(
     ck: &Checker<'_>,
     st: &FnState,
     e: &Expr,
+    target_shape: Option<&TypeShape>,
     allow_addr_root: bool,
 ) -> bool {
     if allow_addr_root && is_slot_loan_expr(ck, st, e) {
@@ -49,40 +50,202 @@ fn is_slot_loan_or_alias_expr(
     while let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = cur {
         cur = inner;
     }
-    matches!(cur, Expr::Ident { name, .. } if ck.lookup_binding(st, name).is_some_and(|b| b.slot_loan))
+    if matches!(cur, Expr::Ident { name, .. } if ck.lookup_binding(st, name).is_some_and(|b| b.slot_loan)) {
+        return true;
+    }
+    let shape_ok = match target_shape {
+        Some(sh) => ck.shape_carries_slot_loan_pointer(sh) || matches!(sh, TypeShape::Unknown),
+        None => ck.expr_may_carry_slot_loan_pointer_shape(st, cur),
+    };
+    shape_ok && ck.expr_carries_slot_loan_pointer(st, cur)
 }
 
 impl<'a> Checker<'a> {
-    /// After `process_local`: flag every name bound to `&m[k]` (including
-    /// parenthesized `(&m[k])` and `&(m[k])`) or aliased from an active
-    /// slot-loan binding (`p := slot`, `var p *T = slot`).
-    pub(crate) fn mark_slot_loans_local(&self, st: &mut FnState, l: &LocalDecl) {
-        if !matches!(l.kind, LocalKind::Define | LocalKind::Let | LocalKind::Var)
-            || l.names.len() != l.values.len()
-        {
-            return;
+    /// Does `shape` carry a non-atomic pointer (or borrow handle) directly or
+    /// inside a slice, array, map, or struct field? Scalar/value copies (`int`,
+    /// `[]int`, `acct` without pointer fields) return `false` so O9/A4 reads
+    /// from a slot loan are never over-rejected.
+    pub(crate) fn shape_carries_slot_loan_pointer(&self, shape: &TypeShape) -> bool {
+        self.shape_carries_slot_loan_pointer_depth(shape, 0)
+    }
+
+    fn shape_carries_slot_loan_pointer_depth(&self, shape: &TypeShape, depth: usize) -> bool {
+        if depth > 8 {
+            return false;
         }
-        let allow_addr_root =
-            matches!(l.kind, LocalKind::Define | LocalKind::Let) && l.ty.is_none();
-        let flags: Vec<bool> = l
-            .values
-            .iter()
-            .map(|val| is_slot_loan_or_alias_expr(self, st, val, allow_addr_root))
-            .collect();
-        for (name, is_loan) in l.names.iter().zip(flags) {
-            if is_loan {
-                if let Some(b) = st.env_lookup_mut(name) {
-                    b.slot_loan = true;
+        match shape {
+            TypeShape::Pointer(inner) => !matches!(**inner, TypeShape::Atomic),
+            TypeShape::Slice(elem) | TypeShape::Array(elem) => {
+                self.shape_carries_slot_loan_pointer_depth(elem, depth + 1)
+            }
+            TypeShape::Map(k, v) => {
+                self.shape_carries_slot_loan_pointer_depth(k, depth + 1)
+                    || self.shape_carries_slot_loan_pointer_depth(v, depth + 1)
+            }
+            TypeShape::BorrowHandle(_) => true,
+            TypeShape::Struct(Some(sname)) => self.structs.get(sname).is_some_and(|fields| {
+                fields.iter().any(|(_, fty)| {
+                    let fsh = self.shape_of_type(fty);
+                    self.shape_carries_slot_loan_pointer_depth(&fsh, depth + 1)
+                })
+            }),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn expr_may_carry_slot_loan_pointer_shape(&self, st: &FnState, e: &Expr) -> bool {
+        let inner = unwrap_parens(e);
+        if let Expr::Call { callee, .. } = inner {
+            if let Some(results) = self.call_result_tys(st, callee) {
+                return results.iter().any(|ty| {
+                    let shape = self.shape_of_type(ty);
+                    self.shape_carries_slot_loan_pointer(&shape)
+                        || matches!(shape, TypeShape::Unknown)
+                });
+            }
+        }
+        let shape = self.shape_of_expr(st, inner);
+        self.shape_carries_slot_loan_pointer(&shape) || matches!(shape, TypeShape::Unknown)
+    }
+
+    /// Collect active O8 slot-loan bindings whose loan pointer can be carried
+    /// out of `e` (through composite literals, re-slices, projections, or
+    /// pointer-returning calls such as `id_ptr(slot)` / `append(xs, slot)` /
+    /// `some(slot)`). Stops at value-only projections and scalar-returning calls.
+    pub(crate) fn collect_slot_loan_pointer_roots(
+        &self,
+        st: &FnState,
+        e: &Expr,
+        out: &mut Vec<String>,
+    ) {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let is_active_ptr_loan = self.lookup_binding(st, name).is_some_and(|b| {
+                    let is_loan = b.slot_loan
+                        || st.loans.iter().any(|l| {
+                            matches!(&l.target, LoanTarget::MapSlot { binding, .. } if binding == name)
+                        });
+                    is_loan
+                        && (self.shape_carries_slot_loan_pointer(&b.shape)
+                            || matches!(b.shape, TypeShape::Unknown))
+                });
+                if is_active_ptr_loan && !out.iter().any(|s| s == name) {
+                    out.push(name.clone());
+                }
+            }
+            Expr::Move { operand, .. } | Expr::Try { operand, .. } => {
+                self.collect_slot_loan_pointer_roots(st, operand, out);
+            }
+            Expr::Slice { base, .. } => {
+                if self.expr_may_carry_slot_loan_pointer_shape(st, e) {
+                    self.collect_slot_loan_pointer_roots(st, base, out);
+                }
+            }
+            Expr::Index { base, .. } | Expr::Field { base, .. } => {
+                if self.expr_may_carry_slot_loan_pointer_shape(st, e) {
+                    self.collect_slot_loan_pointer_roots(st, base, out);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for it in items {
+                    self.collect_slot_loan_pointer_roots(st, it, out);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.collect_slot_loan_pointer_roots(st, k, out);
+                    self.collect_slot_loan_pointer_roots(st, v, out);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.collect_slot_loan_pointer_roots(st, &f.value, out);
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                if self.expr_may_carry_slot_loan_pointer_shape(st, e) {
+                    if let Expr::Field { base, .. } = unwrap_parens(callee) {
+                        self.collect_slot_loan_pointer_roots(st, base, out);
+                    }
+                    for a in args {
+                        self.collect_slot_loan_pointer_roots(st, &a.value, out);
+                    }
+                }
+            }
+            _ => {
+                if is_slot_loan_expr(self, st, e) {
+                    if let Some(root) = e.root_ident() {
+                        if !out.iter().any(|s| s == root) {
+                            out.push(root.to_string());
+                        }
+                    }
                 }
             }
         }
     }
 
-    /// After `process_assign`: `x = &m[k]` or `x = slot` makes `x` a slot loan;
-    /// a whole-value update (`x = T{...}`) to an already-active slot loan preserves
-    /// `slot_loan` because the emitter keeps the O8 store-back active for `x` until
-    /// its last use or a shadowing declaration. Direct `&m[k]` roots require all
-    /// targets to be identifiers; slot-loan aliases propagate to any identifier target.
+    pub(crate) fn expr_carries_slot_loan_pointer(&self, st: &FnState, e: &Expr) -> bool {
+        let mut roots = Vec::new();
+        self.collect_slot_loan_pointer_roots(st, e, &mut roots);
+        !roots.is_empty()
+    }
+
+    /// After `process_local`: flag every name bound to `&m[k]` (including
+    /// parenthesized `(&m[k])` and `&(m[k])`), aliased from an active
+    /// slot-loan binding (`p := slot`, `var p *T = slot`), or laundered into
+    /// a pointer-carrying container / call result (`xs := []*T{slot}`,
+    /// `p := id_ptr(slot)`, `p, _ := pair(slot)`).
+    pub(crate) fn mark_slot_loans_local(&self, st: &mut FnState, l: &LocalDecl) {
+        if !matches!(l.kind, LocalKind::Define | LocalKind::Let | LocalKind::Var) {
+            return;
+        }
+        if l.names.len() == l.values.len() {
+            let allow_addr_root =
+                matches!(l.kind, LocalKind::Define | LocalKind::Let) && l.ty.is_none();
+            let flags: Vec<bool> = l
+                .names
+                .iter()
+                .zip(l.values.iter())
+                .map(|(name, val)| {
+                    let target_shape = self.lookup_binding(st, name).map(|b| b.shape.clone());
+                    is_slot_loan_or_alias_expr(
+                        self,
+                        st,
+                        val,
+                        target_shape.as_ref(),
+                        allow_addr_root,
+                    )
+                })
+                .collect();
+            for (name, is_loan) in l.names.iter().zip(flags) {
+                if is_loan {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.slot_loan = true;
+                    }
+                }
+            }
+        } else if l.values.len() == 1 && l.names.len() > 1 {
+            if !self.expr_carries_slot_loan_pointer(st, &l.values[0]) {
+                return;
+            }
+            let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
+            for (name, shape) in l.names.iter().zip(shapes.iter()) {
+                if self.shape_carries_slot_loan_pointer(shape)
+                    || matches!(shape, TypeShape::Unknown)
+                {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.slot_loan = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// After `process_assign`: `x = &m[k]` or `x = slot` (plus pointer-carrying
+    /// containers/calls and indexed container writes `xs[0] = slot`) makes the
+    /// target carry `slot_loan`; a whole-value update (`x = T{...}`) to an
+    /// already-active slot loan preserves `slot_loan` because the emitter keeps
+    /// the O8 store-back active for `x` until its last use or shadowing decl.
     pub(crate) fn mark_slot_loans_assign(
         &self,
         st: &mut FnState,
@@ -90,18 +253,76 @@ impl<'a> Checker<'a> {
         op: AssignOp,
         values: &[hy_syntax::Expr],
     ) {
-        if op != AssignOp::Assign || targets.len() != values.len() {
+        if op != AssignOp::Assign {
             return;
         }
-        let allow_addr_root = targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)));
-        let flags: Vec<bool> = values
-            .iter()
-            .map(|v| is_slot_loan_or_alias_expr(self, st, v, allow_addr_root))
-            .collect();
-        for (t, is_loan) in targets.iter().zip(flags) {
-            if let PlaceKind::Ident(name) = &t.kind {
-                if let Some(b) = st.env_lookup_mut(name) {
-                    b.slot_loan |= is_loan;
+        if targets.len() == values.len() {
+            let allow_addr_root = targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)));
+            let updates: Vec<(String, bool, bool)> = targets
+                .iter()
+                .zip(values.iter())
+                .filter_map(|(t, v)| match &t.kind {
+                    PlaceKind::Ident(name) => {
+                        let target_shape = self.lookup_binding(st, name).map(|b| b.shape.clone());
+                        let is_loan = is_slot_loan_or_alias_expr(
+                            self,
+                            st,
+                            v,
+                            target_shape.as_ref(),
+                            allow_addr_root,
+                        );
+                        Some((name.clone(), is_loan, true))
+                    }
+                    PlaceKind::Index { .. } | PlaceKind::Field { .. } => {
+                        let root = t.root().to_string();
+                        if root.is_empty() {
+                            return None;
+                        }
+                        let root_carries_ptr = self.lookup_binding(st, &root).is_some_and(|b| {
+                            self.shape_carries_slot_loan_pointer(&b.shape)
+                                || matches!(b.shape, TypeShape::Unknown)
+                        });
+                        let is_loan = root_carries_ptr && self.expr_carries_slot_loan_pointer(st, v);
+                        Some((root, is_loan, false))
+                    }
+                    PlaceKind::AddrOf { .. } => None,
+                })
+                .collect();
+            for (name, is_loan, is_whole_ident) in updates {
+                if let Some(b) = st.env_lookup_mut(&name) {
+                    if is_loan {
+                        b.slot_loan = true;
+                    } else if is_whole_ident
+                        && matches!(
+                            b.shape,
+                            TypeShape::Slice(_) | TypeShape::Map(..) | TypeShape::Array(_)
+                        )
+                    {
+                        b.slot_loan = false;
+                    }
+                }
+            }
+        } else if values.len() == 1 && targets.len() > 1 {
+            if !self.expr_carries_slot_loan_pointer(st, &values[0]) {
+                return;
+            }
+            let shapes = self.multi_value_shapes(st, &values[0], targets.len());
+            let names: Vec<String> = targets
+                .iter()
+                .zip(shapes.iter())
+                .filter_map(|(t, shape)| {
+                    if !self.shape_carries_slot_loan_pointer(shape)
+                        && !matches!(shape, TypeShape::Unknown)
+                    {
+                        return None;
+                    }
+                    let root = t.root();
+                    (!root.is_empty()).then(|| root.to_string())
+                })
+                .collect();
+            for name in names {
+                if let Some(b) = st.env_lookup_mut(&name) {
+                    b.slot_loan = true;
                 }
             }
         }
@@ -134,6 +355,10 @@ impl<'a> Checker<'a> {
                             continue;
                         };
                         if !b.slot_loan
+                            || matches!(
+                                b.shape,
+                                TypeShape::Slice(_) | TypeShape::Map(..) | TypeShape::Array(_)
+                            )
                             || (allow_addr_root && walk::addr_of_index_base_path(v).is_some())
                             || !self.is_general_pointer_value(st, v)
                         {
@@ -164,6 +389,10 @@ impl<'a> Checker<'a> {
                             continue;
                         };
                         if !b.slot_loan
+                            || matches!(
+                                b.shape,
+                                TypeShape::Slice(_) | TypeShape::Map(..) | TypeShape::Array(_)
+                            )
                             || walk::addr_of_index_base_path(v).is_some()
                             || !self.is_general_pointer_value(st, v)
                         {
@@ -745,9 +974,28 @@ impl<'a> Checker<'a> {
         if !matches!(l.kind, LocalKind::Define | LocalKind::Let | LocalKind::Var) {
             return;
         }
-        for name in &l.names {
+        let pre_st = st.clone();
+        let shapes: Vec<TypeShape> = if l.names.len() == l.values.len() {
+            l.values
+                .iter()
+                .map(|v| match (&l.ty, self.shape_of_expr(&pre_st, v)) {
+                    (Some(t), TypeShape::Unknown) => self.shape_of_type(t),
+                    (_, s) => s,
+                })
+                .collect()
+        } else if l.values.len() == 1 && l.names.len() > 1 {
+            self.multi_value_shapes(&pre_st, &l.values[0], l.names.len())
+        } else {
+            let sh = l
+                .ty
+                .as_ref()
+                .map(|t| self.shape_of_type(t))
+                .unwrap_or(TypeShape::Unknown);
+            vec![sh; l.names.len()]
+        };
+        for (name, shape) in l.names.iter().zip(shapes) {
             if Self::current_scope_binding(st, name).is_none() {
-                self.define_binding(st, name, TypeShape::Unknown, None, false, false, false);
+                self.define_binding(st, name, shape, l.ty.clone(), false, false, false);
             }
         }
     }
