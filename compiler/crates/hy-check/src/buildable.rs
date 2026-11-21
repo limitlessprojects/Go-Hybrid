@@ -5505,6 +5505,9 @@ impl<'a> Collector<'a> {
         if !m.type_params.is_empty() {
             return;
         }
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
         let (want, got) = (m.params.len(), args.len());
         if want == got {
             return;
@@ -5662,7 +5665,45 @@ impl<'a> Collector<'a> {
         if !m.type_params.is_empty() {
             return;
         }
-        if self.multi_value_arg_count(args).is_some() {
+        if let Some(n) = self.multi_value_arg_count(args) {
+            if m.params.len() == n {
+                let got_kinds = self.multi_value_kinds(&args[0].value);
+                let got_scalars = match unwrap_parens(&args[0].value) {
+                    Expr::Call { callee, args, .. } => self.call_result_scalars(callee, args),
+                    _ => None,
+                };
+                for (i, (p, got)) in m.params.iter().zip(got_kinds.iter()).enumerate() {
+                    let want = self.kind_of_ty(&p.ty, 0);
+                    let want_scalar = self.scalar_of_ty(&p.ty);
+                    let got_scalar = got_scalars
+                        .as_ref()
+                        .and_then(|v| v.get(i).copied().flatten());
+                    let width_conflict = matches!(
+                        (want_scalar, got_scalar),
+                        (Some(w), Some(g)) if w != g
+                    );
+                    if kinds_conflict(&want, got) || width_conflict {
+                        let got_label = got_scalar
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| got.label());
+                        let want_label = want_scalar
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| want.label());
+                        self.emit_e1002(
+                            args[0].value.span(),
+                            format!(
+                                "cannot use `{}` result of type `{}` as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
+                                args[0].value.render(),
+                                got_label,
+                                want_label,
+                                sn,
+                                name
+                            ),
+                            "argument types must match declared parameter types",
+                        );
+                    }
+                }
+            }
             return;
         }
         if m.params.len() != args.len() {
@@ -5722,7 +5763,43 @@ impl<'a> Collector<'a> {
     }
 
     fn check_fn_lit_call(&mut self, params: &[Param], args: &[CallArg], callee: &Expr, span: Span) {
-        if self.multi_value_arg_count(args).is_some() {
+        if let Some(n) = self.multi_value_arg_count(args) {
+            if params.len() == n {
+                let got_kinds = self.multi_value_kinds(&args[0].value);
+                let got_scalars = match unwrap_parens(&args[0].value) {
+                    Expr::Call { callee, args, .. } => self.call_result_scalars(callee, args),
+                    _ => None,
+                };
+                for (i, (p, got)) in params.iter().zip(got_kinds.iter()).enumerate() {
+                    let want = self.kind_of_ty(&p.ty, 0);
+                    let want_scalar = self.scalar_of_ty(&p.ty);
+                    let got_scalar = got_scalars
+                        .as_ref()
+                        .and_then(|v| v.get(i).copied().flatten());
+                    let width_conflict = matches!(
+                        (want_scalar, got_scalar),
+                        (Some(w), Some(g)) if w != g
+                    );
+                    if kinds_conflict(&want, got) || width_conflict {
+                        let got_label = got_scalar
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| got.label());
+                        let want_label = want_scalar
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| want.label());
+                        self.emit_e1002(
+                            args[0].value.span(),
+                            format!(
+                                "cannot use `{}` result of type `{}` as `{}` value in argument to func literal — Go refuses mismatched argument types (HYB-E1002)",
+                                args[0].value.render(),
+                                got_label,
+                                want_label
+                            ),
+                            "argument types must match closure parameter types",
+                        );
+                    }
+                }
+            }
             return;
         }
         let want = params.len();
@@ -8153,7 +8230,9 @@ impl<'a> Collector<'a> {
                         // its declared parameter count, so the call's arity is
                         // checkable (#577 C9).
                         OpKind::Fn(_, Some(ref want)) if want.len() != args.len() => {
-                            self.report_local_arity(name, want.len(), args.len(), span)
+                            if self.multi_value_arg_count(args).is_none() {
+                                self.report_local_arity(name, want.len(), args.len(), span);
+                            }
                         }
                         OpKind::Fn(..) | OpKind::Unknown => {}
                         _ => self.emit_e1002(
