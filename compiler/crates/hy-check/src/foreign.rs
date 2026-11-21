@@ -637,6 +637,9 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     const BUILTIN_ERROR: &[&str] = &["error"];
     const NET_ADDR: &[&str] = &["network", "string"];
     const NET_ERROR: &[&str] = &["error", "temporary", "timeout"];
+    /// `sort.StringSlice`, `sort.IntSlice`, and `sort.Float64Slice` — Go
+    /// standard library sortable slice adapters.
+    const SORT_SLICE: &[&str] = &["len", "less", "search", "sort", "swap"];
     match recv_type {
         "error" | "errors.error" => Some(BUILTIN_ERROR),
         "net.addr" | "net.Addr" => Some(NET_ADDR),
@@ -688,6 +691,15 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "net.udp_addr" | "net.udpaddr" | "net.UDPAddr" => Some(NET_UDP_ADDR),
         "net.unix_addr" | "net.unixaddr" | "net.UnixAddr" => Some(NET_UNIX_ADDR),
         "net.ip_addr" | "net.ipaddr" | "net.IPAddr" => Some(NET_IP_ADDR),
+        "sort.string_slice"
+        | "sort.stringslice"
+        | "sort.StringSlice"
+        | "sort.int_slice"
+        | "sort.intslice"
+        | "sort.IntSlice"
+        | "sort.float64_slice"
+        | "sort.float64slice"
+        | "sort.Float64Slice" => Some(SORT_SLICE),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
