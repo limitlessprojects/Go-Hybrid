@@ -21,6 +21,11 @@ const PINNED_RUST: &str = match option_env!("HYB_PINNED_RUST") {
     None => "1.99.0",
 };
 
+/// Canonical `hyb build` usage line. The top-level help and every
+/// flag-validation error print this one string, so the discoverability surface
+/// cannot silently omit a mode the binary accepts.
+const BUILD_USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--emit-proof] [--race] [--deny-managed] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
+
 /// The Go binary: HYB_GO_BIN override, else PATH (tools/env.sh puts the
 /// pinned toolchain first; CI prepends /usr/local/go/bin). The version-pin
 /// check below still enforces go1.26.9, so PATH lookup cannot drift silently.
@@ -57,7 +62,10 @@ fn main() -> ExitCode {
             eprintln!("  hyb generate [--check] [--binding-prefix <path>] <paths...>  (existing go.mod projects)");
             eprintln!("  hyb vendor-runtime <dir>  (vendored runtime for a go.mod project)");
             eprintln!("  hyb explain <HYB-Exxxx | Exxxx | xxxx | machine-name>");
-            eprintln!("  hyb build <file.hy> -o <bin-path> [--emit-go] [--race]");
+            eprintln!(
+                "  {}",
+                BUILD_USAGE.strip_prefix("usage: ").unwrap_or(BUILD_USAGE)
+            );
             eprintln!("  hyb bench-overhead");
             eprintln!();
             eprintln!(
@@ -795,7 +803,7 @@ fn render_build_error(e: &BuildError) -> String {
 }
 
 fn cmd_build(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--emit-proof] [--race] [--deny-managed] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
+    const USAGE: &str = BUILD_USAGE;
     // Validate the entire invocation before touching the filesystem or the
     // toolchain, mirroring cmd_check/cmd_generate: a mistyped option or a
     // missing value must not fall back to a default and build something else.
