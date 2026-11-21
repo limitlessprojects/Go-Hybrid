@@ -4588,6 +4588,62 @@ impl<'a> Collector<'a> {
         }
     }
 
+    // Full `crypto/rand` call surface — every member the member table in
+    // foreign.rs blesses, with the arity of the Go name it lowers to.
+    // Calling rand package members with wrong arity or calling non-callable
+    // package variables (Reader) passed `hyb check` with any arity and blew up
+    // at `go build` instead (Row 13 BUILDABLE: reject fail-closed, HYB-E1002).
+    fn check_rand_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        // Package-level variables are not callable.
+        if matches!(member, "reader") {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`rand.{member}` is not a function — it is a package-level value/variable and cannot be called (HYB-E1002)"
+                ),
+                &format!("reference `rand.{member}` directly, do not call it"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            // 0 args: Text() (Go 1.24+)
+            "text" => Some(0),
+            // 1 arg: Read(b)
+            "read" => Some(1),
+            // 2 args: Prime(rand, bits), Int(rand, max)
+            "prime" | "int" => Some(2),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `rand.{member}` (HYB-E1002)"),
+                    &format!("`rand.{member}` does not accept variadic spread arguments"),
+                );
+            } else if args.len() != expected {
+                let go_name = match member {
+                    "text" => "Text",
+                    "read" => "Read",
+                    "prime" => "Prime",
+                    "int" => "Int",
+                    _ => member,
+                };
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`rand.{member}` takes exactly {expected} argument{}, got {} (HYB-E1002)",
+                        if expected == 1 { "" } else { "s" },
+                        args.len()
+                    ),
+                    &format!("match the arity of the Go function this lowers to (`rand.{go_name}`)"),
+                );
+            }
+        }
+    }
+
     fn check_sort_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(member, "interface" | "int_slice" | "float64_slice" | "string_slice") {
             self.emit_e1002(
@@ -8410,6 +8466,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "strconv" && self.lookup_kind(pkg).is_none() {
                         self.check_strconv_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "rand" && self.lookup_kind(pkg).is_none() {
+                        self.check_rand_package_call(name.as_str(), args, span);
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);

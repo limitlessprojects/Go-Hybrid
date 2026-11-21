@@ -292,6 +292,15 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
         ) => Some(2),
         ("net", "split_host_port" | "SplitHostPort") => Some(3),
         ("hex", "decode_string" | "DecodeString") => Some(2),
+        (
+            "rand",
+            "read"
+                | "Read"
+                | "prime"
+                | "Prime"
+                | "int"
+                | "Int",
+        ) => Some(2),
         ("regex", "compile" | "match_string" | "Compile" | "MatchString") => Some(2),
         _ => None,
     }
@@ -793,7 +802,8 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "json"
             | "encoding/hex"
             | "hex"
-            | "path"
+            | "crypto/rand"
+                        | "path"
             | "path/filepath"
             | "filepath"
             | "log"
@@ -830,7 +840,6 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
             | "crypto"
             | "sha256"
             | "sha512"
-            | "rand"
             | "binary"
             | "base64"
             | "csv"
@@ -1685,6 +1694,14 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "new_decoder"
                 | "err_length"
                 | "invalid_byte_error"
+        ),
+        "rand" => matches!(
+            m,
+            "read"
+                | "prime"
+                | "int"
+                | "text"
+                | "reader"
         ),
         "path" => matches!(
             m,
