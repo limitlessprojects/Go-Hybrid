@@ -441,7 +441,7 @@ impl<'a> Checker<'a> {
         seen: &mut Vec<String>,
     ) -> bool {
         match shape {
-            TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic | TypeShape::Chan(_) => true,
+            TypeShape::Primitive | TypeShape::Str | TypeShape::Chan(_) => true,
             TypeShape::Array(elem) => self.shape_is_const_sendable(elem, seen),
             TypeShape::Struct(Some(sname)) => {
                 if seen.iter().any(|s| s == sname) {
@@ -616,10 +616,17 @@ impl<'a> Checker<'a> {
                 )],
             });
         }
-        let mut notes = vec![format!(
-            "this {} is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)",
-            b.shape.noun()
-        )];
+        let mut notes = if matches!(b.shape, TypeShape::Atomic) {
+            vec![format!(
+                "`{}` is an atomic passed by value — copying an atomic across tasks mutates a private copy (`go vet copylocks`) and loses writes; pass `&{}` behind a `*atomic.*` pointer (OQ6)",
+                name, name
+            )]
+        } else {
+            vec![format!(
+                "this {} is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)",
+                b.shape.noun()
+            )]
+        };
         if b.immutable {
             notes.push(
                 "a composite `const` with reference storage lowers to a runtime-mutable Go value, so sharing it across a task or channel boundary without `managed` can race if the receiver mutates it (issue #188)".to_string(),
@@ -787,13 +794,21 @@ impl<'a> Checker<'a> {
                 )],
             });
         }
+        let notes = if matches!(shape, TypeShape::Atomic) {
+            vec![format!(
+                "`{}` is an atomic passed by value — copying an atomic across tasks mutates a private copy (`go vet copylocks`) and loses writes; pass `&{}` behind a `*atomic.*` pointer (OQ6)",
+                value, value
+            )]
+        } else {
+            vec![format!(
+                "this {} is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)",
+                shape.noun()
+            )]
+        };
         Outcome::Rejected(RejectInfo {
             value: value.to_string(),
             ty: ty.clone(),
-            notes: vec![format!(
-                "this {} is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)",
-                shape.noun()
-            )],
+            notes,
         })
     }
 
