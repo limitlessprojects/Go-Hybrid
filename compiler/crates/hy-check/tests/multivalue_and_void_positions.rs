@@ -194,3 +194,24 @@ fn single_value_calls_stay_accepted() {
         "fn one() int {\n    return 1\n}\n\nfn g(a int) {\n    fmt.println(\"{a}\")\n}\n\nfn main() {\n    g(one())\n}\n",
     );
 }
+
+#[test]
+fn multi_value_call_as_index_base_is_rejected() {
+    let src = "fn two_slices() ([]int, []int) {\n    return []int{10, 20}, []int{30, 40}\n}\n\nfn main() {\n    _ = two_slices()[0]\n}\n";
+    let cs = codes(src);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E1002"),
+        "expected HYB-E1002 for multi-value call as index base, got {cs:?}"
+    );
+}
+
+#[test]
+fn multi_value_call_as_slice_base_is_rejected() {
+    let src = "fn two_slices() ([]int, []int) {\n    return []int{10, 20}, []int{30, 40}\n}\n\nfn main() {\n    _ = two_slices()[:]\n}\n";
+    let cs = codes(src);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E1002"),
+        "expected HYB-E1002 for multi-value call as slice base, got {cs:?}"
+    );
+}
+
