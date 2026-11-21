@@ -729,6 +729,12 @@ impl Emitter {
                 self.resolve_to_struct_name(fty)
             }
             Expr::StructLit { ty: Some(t), .. } => super::base_ty_name(t).and_then(|n| self.resolve_to_struct_name(&n)),
+            Expr::Receive { chan, .. } => {
+                let name = self
+                    .chan_elem_of_expr(chan)
+                    .and_then(|elem| self.peel_ptr_base_ty_name(&elem))?;
+                self.resolve_to_struct_name(&name)
+            }
             Expr::Call { callee, args, .. } => {
                 let callee_head = match Self::unwrap_parens(callee) {
                     Expr::Index { base, .. } => Self::unwrap_parens(base),
@@ -790,6 +796,101 @@ impl Emitter {
         None
     }
 
+    fn peel_ptr_base_ty_name(&self, ty: &TypeExpr) -> Option<String> {
+        let resolved = self.resolve_type_alias(ty);
+        let inner = match resolved {
+            TypeExpr::Pointer { to, .. } => self.resolve_type_alias(to),
+            other => other,
+        };
+        super::base_ty_name(inner)
+    }
+
+    pub(crate) fn recv_elem_of_expr(&self, e: &Expr) -> Option<TypeExpr> {
+        match Self::unwrap_parens(e) {
+            Expr::Receive { chan, .. } => self.chan_elem_of_expr(chan),
+            Expr::Try { operand, .. } | Expr::Move { operand, .. } => {
+                self.recv_elem_of_expr(operand)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn chan_elem_of_expr(&self, e: &Expr) -> Option<TypeExpr> {
+        match Self::unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.chan_elem.get(name).cloned(),
+            Expr::Try { operand, .. } | Expr::Move { operand, .. } => {
+                self.chan_elem_of_expr(operand)
+            }
+            Expr::Field { base, name, .. } => {
+                let sn = self.user_struct_name_of(base.as_ref())?;
+                let f = self.n5_structs.get(sn)?.iter().find(|f| &f.name == name)?;
+                self.chan_elem_of_type(&f.ty)
+            }
+            Expr::Receive { chan, .. } => {
+                let elem = self.chan_elem_of_expr(chan)?;
+                self.chan_elem_of_type(&elem)
+            }
+            Expr::Call { callee, args, .. } => {
+                let callee_head = match Self::unwrap_parens(callee) {
+                    Expr::Index { base, .. } => Self::unwrap_parens(base),
+                    other => other,
+                };
+                match callee_head {
+                    Expr::Ident { name, .. } => {
+                        if name == "make" && self.is_unshadowed_builtin("make") {
+                            return match args.first().map(|a| Self::unwrap_parens(&a.value)) {
+                                Some(Expr::StructLit { ty: Some(t), .. }) => {
+                                    self.chan_elem_of_type(t)
+                                }
+                                Some(Expr::Ident { name: tname, span }) => {
+                                    self.chan_elem_of_type(&TypeExpr::Named {
+                                        name: tname.clone(),
+                                        span: *span,
+                                    })
+                                }
+                                _ => None,
+                            };
+                        }
+                        let (fn_head, _) = split_type_args(name);
+                        if !self.local_vars.contains(fn_head) {
+                            return self.fn_ret_chan_elem.get(fn_head).cloned();
+                        }
+                        None
+                    }
+                    Expr::Field { base, name, .. } => {
+                        let (head, _) = split_type_args(name);
+                        if let Some(recv_sn) = self.user_struct_name_of(base) {
+                            if let Some(elem) =
+                                self.fn_ret_chan_elem.get(&format!("{recv_sn}.{head}"))
+                            {
+                                return Some(elem.clone());
+                            }
+                        }
+                        if let Expr::Ident { name: pkg, .. } = Self::unwrap_parens(base) {
+                            if !self.local_vars.contains(pkg) && !self.bindings.contains_key(pkg) {
+                                return self.fn_ret_chan_elem.get(&format!("{pkg}.{head}")).cloned();
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn expr_foreign_binding(&self, e: &Expr) -> Option<BindingKind> {
+        let kind = match Self::unwrap_parens_and_addr(e) {
+            Expr::Ident { name: root, .. } => self.bindings.get(root).copied()?,
+            Expr::Receive { chan, .. } => self
+                .chan_elem_of_expr(chan)
+                .and_then(|t| self.binding_kind_of_ty(&t))?,
+            _ => return None,
+        };
+        matches!(kind, BindingKind::Foreign | BindingKind::ForeignTy(_)).then_some(kind)
+    }
+
     /// Descriptor type of an expression, when the shape table knows it
     /// (Batch E chain resolution):
     ///
@@ -839,6 +940,15 @@ impl Emitter {
                     }
                 }
                 None
+            }
+            Expr::Receive { chan, .. } => {
+                let name = self
+                    .chan_elem_of_expr(chan)
+                    .and_then(|elem| self.peel_ptr_base_ty_name(&elem))?;
+                super::shapes::SHAPES
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(k, _)| *k)
             }
             Expr::Try { operand, .. }
             | Expr::Move { operand, .. }
@@ -929,13 +1039,8 @@ impl Emitter {
                 };
             }
         }
-        if let Expr::Ident { name: root, .. } = Self::unwrap_parens_and_addr(base) {
-            if matches!(
-                self.bindings.get(root),
-                Some(BindingKind::Foreign) | Some(BindingKind::ForeignTy(_))
-            ) {
-                return to_go_name(name);
-            }
+        if self.expr_foreign_binding(base).is_some() {
+            return to_go_name(name);
         }
         self.member_name(base, name)
     }
@@ -1009,7 +1114,9 @@ impl Emitter {
             // three-level `o.sub.thing.pop()` look like a builtin pop and
             // rewrite to `hy_pop(&o.sub.thing)` — Go has no such method on
             // a user struct field.
-            Expr::Field { .. } | Expr::Call { .. } => self.user_struct_name_of(e).is_some(),
+            Expr::Field { .. } | Expr::Call { .. } | Expr::Receive { .. } => {
+                self.user_struct_name_of(e).is_some()
+            }
             _ => false,
         }
     }
@@ -1078,15 +1185,13 @@ impl Emitter {
                     // — a clean failure, never a wrong emission.
                 }
             }
-            if let Expr::Ident { name: root, .. } = Self::unwrap_parens_and_addr(base) {
-                if let Some(BindingKind::Foreign) = self.bindings.get(root) {
-                    let b = self.emit_expr(base, ATOM)?;
-                    let mut parts = Vec::new();
-                    for a in args {
-                        parts.push(self.emit_call_arg(a)?);
-                    }
-                    return Ok(format!("{}.{}({})", b, to_go_name(name), parts.join(", ")));
+            if self.expr_foreign_binding(base) == Some(BindingKind::Foreign) {
+                let b = self.emit_expr(base, ATOM)?;
+                let mut parts = Vec::new();
+                for a in args {
+                    parts.push(self.emit_call_arg(a)?);
                 }
+                return Ok(format!("{}.{}({})", b, to_go_name(name), parts.join(", ")));
             }
         }
 
