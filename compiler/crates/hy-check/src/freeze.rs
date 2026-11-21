@@ -1181,7 +1181,7 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn check_loop_backedge(
         &mut self,
-        st: &FnState,
+        st: &mut FnState,
         outer_depth: usize,
         loop_stmts: &[(&hy_syntax::Stmt, usize)],
         events: &std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>>,
@@ -1207,7 +1207,14 @@ impl<'a> Checker<'a> {
             iter_st.scope_pop();
         }
 
-        self.check_loop_backedge_replay(&iter_st, loop_stmts, events, in_managed);
+        self.replay_and_propagate_loop_backedge(
+            st,
+            &mut iter_st,
+            outer_depth,
+            loop_stmts,
+            events,
+            in_managed,
+        );
 
         let popped_st = iter_st.clone();
         let mut any_loop_carried = false;
@@ -1788,6 +1795,283 @@ impl<'a> Checker<'a> {
             crate::model::unwrap_parens(&args[0].value),
             Expr::SliceLit { items, .. } if items.is_empty()
         )
+    }
+
+    fn replay_and_propagate_loop_backedge(
+        &mut self,
+        st: &mut FnState,
+        iter_st: &mut FnState,
+        outer_depth: usize,
+        loop_stmts: &[(&hy_syntax::Stmt, usize)],
+        events: &std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>>,
+        in_managed: &dyn Fn(usize) -> bool,
+    ) {
+        self.check_loop_backedge_replay(iter_st, loop_stmts, events, in_managed);
+
+        let mut cur_st = iter_st.clone();
+        for _ in 0..4 {
+            let prev_sig = Self::loop_carried_state_sig(&cur_st);
+            let next_st = self.advance_loop_carried_state(
+                &cur_st,
+                outer_depth,
+                loop_stmts,
+                events,
+                in_managed,
+            );
+            let next_sig = Self::loop_carried_state_sig(&next_st);
+            cur_st = next_st;
+            if next_sig == prev_sig {
+                break;
+            }
+            self.check_loop_backedge_replay(&cur_st, loop_stmts, events, in_managed);
+        }
+
+        Self::merge_loop_carried_into_state(iter_st, &cur_st, outer_depth);
+        Self::merge_loop_carried_into_state(st, &cur_st, outer_depth);
+    }
+
+    fn advance_loop_carried_state(
+        &mut self,
+        iter_st: &FnState,
+        outer_depth: usize,
+        loop_stmts: &[(&hy_syntax::Stmt, usize)],
+        events: &std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>>,
+        in_managed: &dyn Fn(usize) -> bool,
+    ) -> FnState {
+        let mut next_st = iter_st.clone();
+        let diags_len_before = self.diags.len();
+        let managed_blocks_before = self.managed_blocks;
+        let sites_via_managed_before = self.sites_via_managed;
+        let total_sites_before = self.total_sites;
+        let managed_audit_len_before = self.managed_audit.len();
+
+        for (i, (stmt, stmt_idx)) in loop_stmts.iter().enumerate() {
+            let idx = *stmt_idx;
+            let managed = in_managed(idx);
+
+            if let Some(evs) = events.get(&idx) {
+                for ev in evs {
+                    match ev {
+                        crate::walk::ScopeEvent::Push => next_st.scope_push(),
+                        crate::walk::ScopeEvent::Pop => next_st.scope_pop(),
+                        crate::walk::ScopeEvent::SelectRecv { names, chan } => {
+                            let elem = match self.shape_of_expr(&next_st, chan) {
+                                crate::model::TypeShape::Chan(e) => *e,
+                                _ => crate::model::TypeShape::Unknown,
+                            };
+                            for (j, n) in names.iter().enumerate() {
+                                let shape = if j == 0 {
+                                    elem.clone()
+                                } else {
+                                    crate::model::TypeShape::Primitive
+                                };
+                                self.define_binding(
+                                    &mut next_st,
+                                    n,
+                                    shape,
+                                    None,
+                                    false,
+                                    managed,
+                                    false,
+                                );
+                            }
+                        }
+                        crate::walk::ScopeEvent::MatchBind { name, subject } => {
+                            self.bind_match_arm(&mut next_st, name, subject, managed);
+                        }
+                    }
+                }
+            }
+
+            if i == 0 {
+                if let hy_syntax::Stmt::For { kind, .. } = stmt {
+                    match kind {
+                        hy_syntax::ForKind::Iterate { vars, expr, .. } => {
+                            let elem = match self.shape_of_expr(&next_st, expr) {
+                                crate::model::TypeShape::Slice(e)
+                                | crate::model::TypeShape::Array(e) => *e,
+                                crate::model::TypeShape::Chan(e) => *e,
+                                crate::model::TypeShape::Map(k, v) => {
+                                    if vars.len() == 1 {
+                                        *k
+                                    } else {
+                                        *v
+                                    }
+                                }
+                                _ => crate::model::TypeShape::Unknown,
+                            };
+                            for (idx_var, v) in vars.iter().enumerate() {
+                                let shape = if idx_var == 0 && vars.len() > 1 {
+                                    crate::model::TypeShape::Primitive
+                                } else {
+                                    elem.clone()
+                                };
+                                self.define_binding(
+                                    &mut next_st,
+                                    v,
+                                    shape,
+                                    None,
+                                    false,
+                                    managed,
+                                    false,
+                                );
+                            }
+                        }
+                        hy_syntax::ForKind::Range { var, .. } => {
+                            self.define_binding(
+                                &mut next_st,
+                                var,
+                                crate::model::TypeShape::Primitive,
+                                None,
+                                false,
+                                managed,
+                                false,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+
+            let mut stmt_consumes = Vec::new();
+            if let hy_syntax::Stmt::For {
+                kind: hy_syntax::ForKind::Iterate { expr, .. },
+                ..
+            } = stmt
+            {
+                let mut calls = Vec::new();
+                crate::walk::expr_calls(expr, &mut calls);
+                for cr in calls {
+                    self.process_call(&mut next_st, &cr, idx, None, &mut stmt_consumes);
+                }
+            } else {
+                let mut calls = Vec::new();
+                crate::walk::own_calls(stmt, &mut calls);
+                for cr in calls {
+                    self.process_call(&mut next_st, &cr, idx, None, &mut stmt_consumes);
+                }
+            }
+
+            match stmt {
+                hy_syntax::Stmt::Local(l) => {
+                    self.process_local(&mut next_st, l, idx, managed);
+                    self.record_local_borrow_aliases(&mut next_st, l);
+                    self.mark_slot_loans_local(&mut next_st, l);
+                }
+                hy_syntax::Stmt::Assign {
+                    targets,
+                    op,
+                    values,
+                    span,
+                } => {
+                    self.process_assign(&mut next_st, targets, *op, values, *span, idx);
+                    self.record_assign_borrow_aliases(&mut next_st, targets, *op, values);
+                    self.mark_slot_loans_assign(&mut next_st, targets, *op, values);
+                }
+                _ => {}
+            }
+        }
+
+        while next_st.scopes.len() > outer_depth {
+            next_st.scope_pop();
+        }
+        Self::merge_loop_carried_into_state(&mut next_st, iter_st, outer_depth);
+
+        self.diags.truncate(diags_len_before);
+        self.managed_blocks = managed_blocks_before;
+        self.sites_via_managed = sites_via_managed_before;
+        self.total_sites = total_sites_before;
+        self.managed_audit.truncate(managed_audit_len_before);
+
+        next_st
+    }
+
+    fn loop_carried_state_sig(
+        st: &FnState,
+    ) -> (
+        Vec<(String, String)>,
+        Vec<(String, Vec<String>)>,
+        Vec<String>,
+        Vec<(String, bool, Option<String>)>,
+    ) {
+        let mut aliases: Vec<(String, String)> =
+            st.aliases.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        aliases.sort();
+
+        let mut shares: Vec<(String, Vec<String>)> = st
+            .may_share
+            .iter()
+            .map(|(k, v)| {
+                let mut peers: Vec<String> = v.iter().cloned().collect();
+                peers.sort();
+                (k.clone(), peers)
+            })
+            .collect();
+        shares.sort();
+
+        let mut borrows: Vec<String> = st.borrow_bindings.iter().cloned().collect();
+        borrows.sort();
+
+        let mut bindings: Vec<(String, bool, Option<String>)> = st
+            .env
+            .iter()
+            .chain(st.scopes.iter().flat_map(|s| s.iter()))
+            .map(|(k, b)| (k.clone(), b.slot_loan, b.non_owned_origin.clone()))
+            .collect();
+        bindings.sort();
+
+        (aliases, shares, borrows, bindings)
+    }
+
+    fn merge_loop_carried_into_state(dst: &mut FnState, src: &FnState, outer_depth: usize) {
+        let is_outer = |st: &FnState, name: &str| -> bool {
+            st.env.contains_key(name)
+                || st.scopes.iter().take(outer_depth).any(|s| s.contains_key(name))
+        };
+
+        for (a, peers) in &src.may_share {
+            if !is_outer(dst, a) {
+                continue;
+            }
+            for b in peers {
+                if is_outer(dst, b) {
+                    dst.share_edge(a, b);
+                }
+            }
+        }
+        for (a, b) in &src.aliases {
+            if is_outer(dst, a) && is_outer(dst, b) {
+                dst.share_edge(a, b);
+                dst.aliases.entry(a.clone()).or_insert_with(|| b.clone());
+            }
+        }
+        for k in &src.borrow_bindings {
+            if is_outer(dst, k) {
+                dst.borrow_bindings.insert(k.clone());
+            }
+        }
+        for (name, sb) in src
+            .env
+            .iter()
+            .chain(src.scopes.iter().take(outer_depth).flat_map(|s| s.iter()))
+        {
+            if let Some(db) = dst
+                .scopes
+                .iter_mut()
+                .take(outer_depth)
+                .rev()
+                .find_map(|s| s.get_mut(name))
+                .or_else(|| dst.env.get_mut(name))
+            {
+                if sb.slot_loan {
+                    db.slot_loan = true;
+                }
+                if db.non_owned_origin.is_none() && sb.non_owned_origin.is_some() {
+                    db.non_owned_origin = sb.non_owned_origin.clone();
+                }
+            }
+        }
     }
 }
 
