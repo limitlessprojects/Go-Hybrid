@@ -292,6 +292,21 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
         ) => Some(2),
         ("net", "split_host_port" | "SplitHostPort") => Some(3),
         ("hex", "decode_string" | "DecodeString") => Some(2),
+        (
+            "binary",
+            "varint"
+                | "Varint"
+                | "uvarint"
+                | "Uvarint"
+                | "read_varint"
+                | "ReadVarint"
+                | "read_uvarint"
+                | "ReadUvarint"
+                | "encode"
+                | "Encode"
+                | "decode"
+                | "Decode",
+        ) => Some(2),
         ("regex", "compile" | "match_string" | "Compile" | "MatchString") => Some(2),
         _ => None,
     }
@@ -793,6 +808,8 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "json"
             | "encoding/hex"
             | "hex"
+            | "encoding/binary"
+            | "binary"
             | "path"
             | "path/filepath"
             | "filepath"
@@ -831,7 +848,6 @@ pub(crate) fn is_uncurated_go_stdlib_root(root: &str) -> bool {
             | "sha256"
             | "sha512"
             | "rand"
-            | "binary"
             | "base64"
             | "csv"
             | "xml"
@@ -869,6 +885,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "url"
             | "json"
             | "hex"
+            | "binary"
             | "path"
             | "filepath"
             | "log"
@@ -1685,6 +1702,29 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "new_decoder"
                 | "err_length"
                 | "invalid_byte_error"
+        ),
+        "binary" => matches!(
+            m,
+            "read"
+                | "write"
+                | "size"
+                | "varint"
+                | "uvarint"
+                | "put_varint"
+                | "put_uvarint"
+                | "read_varint"
+                | "read_uvarint"
+                | "append"
+                | "encode"
+                | "decode"
+                | "big_endian"
+                | "little_endian"
+                | "native_endian"
+                | "max_varint_len16"
+                | "max_varint_len32"
+                | "max_varint_len64"
+                | "byte_order"
+                | "append_byte_order"
         ),
         "path" => matches!(
             m,
