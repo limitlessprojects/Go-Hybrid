@@ -117,10 +117,12 @@ fn sink[t any](x t) {}
 
 fn main() {
     var ok_chan chan int32
+    ok_chan = make(chan int32)
     let s = []chan int32{ ok_chan }
     sink(s)
 
     var bidir chan int32
+    bidir = make(chan int32)
     let r = []<-chan int32{ bidir }
     sink(r)
 
@@ -129,6 +131,8 @@ fn main() {
     sink(a)
 
     var ok_ptr *box
+    let b = box{val: 1}
+    ok_ptr = &b
     let p = []*box{ ok_ptr }
     sink(p)
 

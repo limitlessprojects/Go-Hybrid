@@ -107,6 +107,18 @@ impl<'a> Checker<'a> {
         let mut reported: HashSet<String> = HashSet::new();
         let mut stmt_moves: Vec<(String, String, MoveInfo)> = Vec::new();
         for u in uses {
+            if let Some(b) = self.lookup_binding(st, &u.name) {
+                // Zero-initialized pointer bindings are nil until first real
+                // assignment: only a dereference (`x.f`, `x[i]`, `x[a:b]`,
+                // including as a write target) or a move/addr-take is a
+                // soundness hazard. Nil comparisons and plain copies stay legal.
+                if b.unassigned && u.via_deref && !u.via_move {
+                    if reported.insert(format!("unassigned@{}:{}", u.span.start.line, u.span.start.col)) {
+                        self.emit_use_before_assign(st, u);
+                    }
+                    continue;
+                }
+            }
             let moved = match self.lookup_binding(st, &u.name) {
                 Some(b) => b.moved.clone(),
                 None => continue,
@@ -192,6 +204,30 @@ impl<'a> Checker<'a> {
                 self.emit_use_after_move(st, u, &mv);
             }
         }
+    }
+
+    fn emit_use_before_assign(&mut self, st: &FnState, u: &Use) {
+        let shape = self
+            .lookup_binding(st, &u.name)
+            .map(|b| b.shape.render())
+            .unwrap_or_default();
+        let d = Diagnostic::error(
+            "HYB-E3199",
+            self.path.clone(),
+            u.span,
+            format!(
+                "use of `{}` before assignment — a zero-value `{}` binding is nil, using it dereferences nil",
+                u.name, shape
+            ),
+        )
+        .with_notes(vec![
+            format!(
+                "assign `{}` first (e.g. `{} = ...`) or guard the use with `{} != nil`",
+                u.name, u.name, u.name
+            ),
+            "zero-value declarations (`var p *T`) are not initialized to a valid value — only comparison against nil is legal before the first assignment (HYB-E3199)".to_string(),
+        ]);
+        self.diags.push(d);
     }
 
     fn emit_use_after_move(&mut self, st: &FnState, u: &Use, mv: &MoveInfo) {

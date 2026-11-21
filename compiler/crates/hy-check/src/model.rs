@@ -154,6 +154,8 @@ pub(crate) struct Binding {
     /// capture, or non-channel `for ... in` element), so `move x` at a
     /// concurrency boundary cannot freeze all live aliases (O5.1/O5.2/O5.4).
     pub non_owned_origin: Option<String>,
+    /// Zero-value `var p *T` declaration not yet assigned (use-before-assign).
+    pub unassigned: bool,
     /// Defined (or re-assigned) as an O8 map-slot loan `x := &m[k]`.
     /// T24: a loan is not an addressable value — `&x` on it is
     /// HYB-E3104. A shadowing redefinition creates a fresh binding with
@@ -273,6 +275,15 @@ pub(crate) struct FnState {
     /// rebind time; consumed at the CALL site so an insert inside the body
     /// counts as an A3 event when the call sits in a live slot-loan window.
     pub closure_mutates: HashMap<String, HashSet<String>>,
+    /// E5e (HYB-E3199 via closures): closure binding -> captured names that
+    /// were still unassigned zero-value pointers when the closure literal was
+    /// DEFINED. Recorded at define/rebind time (`record_closure_mutations`),
+    /// where the define-order env is flow-sensitive; consumed at closure CALL
+    /// sites, where the call-order env decides whether the call dereferences
+    /// a still-nil captured pointer. Go accepts fill-before-call order, so
+    /// flagging at define time would false-positive — the check must be
+    /// call-site.
+    pub closure_nil_derefs: HashMap<String, HashSet<String>>,
     /// Local closure binding -> `(params, named_results, body)` for
     /// interprocedural return-origin and multi-value return sharing analysis.
     pub closure_fnlits: HashMap<
