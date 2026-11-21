@@ -19,7 +19,7 @@ fn assert_accept(src: &str) {
     assert!(r.diagnostics.is_empty(), "expected 0 diagnostics, got {:?}", r.diagnostics);
 }
 
-const PRE: &str = "struct box_ch { ch chan<- int }\nstruct box_bi { ch chan int }";
+const PRE: &str = "struct box_ch { ch chan<- int }\nstruct box_bi { ch chan int }\nstruct gen_box[t] { ch t }\nfn (b gen_box[t]) get() t { return b.ch }\nfn id_ch[t](x t) t { return x }\nenum pkt { empty, send_only(chan<- int), num(int), bi(chan int) }";
 
 #[test]
 fn addrof_elided_slice_and_composite_call_send_only_receives_reject_e2008() {
@@ -32,6 +32,9 @@ fn addrof_elided_slice_and_composite_call_send_only_receives_reject_e2008() {
         "var opt_ch chan option[chan<- int]\nvar a [<-(<-opt_ch).unwrap()]int\n_ = a",
         "var chs []chan<- int\nvar a [<-none.or(chs[0:1])[0]]int\n_ = a",
         "var fn_ch chan fn() chan<- int\nvar a [<-(<-fn_ch)()]int\n_ = a",
+        "var ch chan<- int\nvar a [<-id_ch(ch)]int\n_ = a",
+        "var chs []chan<- int\nvar a [<-id_ch(chs)[0]]int\n_ = a",
+        "var gb gen_box[chan<- int]\nvar a [<-gb.get()]int\n_ = a",
     ] {
         assert_e2008(&format!("{PRE}\nfn main() {{\n{body}\n}}\n"));
     }
@@ -48,6 +51,8 @@ fn if_init_and_match_guard_receive_operands_reject_e2008() {
         "var opt option[chan<- int]\nmatch opt {\n    option.some(ch) if len([<-ch]int{}) > 0 => {}\n    _ => {}\n}",
         "var opts []option[chan<- int]\nmatch opts[0:1][0] {\n    some(ch) if len([<-ch]int{}) > 0 => {}\n    _ => {}\n}",
         "var opt_ch chan option[chan<- int]\nmatch <-opt_ch {\n    some(ch) if len([<-ch]int{}) > 0 => {}\n    _ => {}\n}",
+        "var p pkt\nmatch p {\n    pkt.send_only(ch) if len([<-ch]int{}) > 0 => {}\n    _ => {}\n}",
+        "ch := make(chan int, 1)\nvar p pkt\nmatch p {\n    pkt.num(ch) if (<-ch) > 0 => {}\n    _ => {}\n}\n_ = ch",
     ] {
         assert_e2008(&format!("{PRE}\nfn main() {{\n{body}\n}}\n"));
     }
@@ -61,6 +66,7 @@ fn bidirectional_composite_if_init_and_match_guard_receives_stay_accepted() {
         "var chs []chan int\nvar ch chan int\nif sub := append(chs, ch); (<-sub[0]) > 0 {}",
         "var opt option[chan int]\nmatch opt {\n    some(ch) if (<-ch) > 0 => {}\n    some(_) => {}\n    none => {}\n}",
         "var opts []option[chan int]\nmatch opts[0:1][0] {\n    option.some(ch) if (<-ch) > 0 => {}\n    _ => {}\n}",
+        "var p pkt\nmatch p {\n    pkt.bi(ch) if (<-ch) > 0 => {}\n    _ => {}\n}",
     ] {
         assert_accept(&format!("{PRE}\nfn main() {{\n{body}\n}}\n"));
     }
