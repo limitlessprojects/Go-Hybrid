@@ -251,7 +251,7 @@ impl<'a> Checker<'a> {
         // classify the literal. Block-scoped consts stay fail-open (no
         // const-value map in FnState — the #998 precedent).
         if let Expr::Ident { name, .. } = unwrap_parens_and_move(expr) {
-            if st.env_lookup(name).is_none() {
+            if st.env_lookup(name).is_none() && !st.type_params.contains(name.as_str()) {
                 if let Some(b) = self.consts.get(name.as_str()) {
                     if let Some(ty) = &b.ty {
                         if let Some(desc) = self.non_integer_type_desc(ty) {
@@ -416,7 +416,7 @@ impl<'a> Checker<'a> {
         match unwrap_parens_and_move(e) {
             Expr::Lit { .. } => None,
             Expr::Ident { name, .. } => {
-                if st.env_lookup(name).is_none() {
+                if st.env_lookup(name).is_none() && !st.type_params.contains(name.as_str()) {
                     if let Some(b) = self.consts.get(name.as_str()) {
                         // a file-level const: a TYPED const fixes the
                         // bound's type; an untyped const adapts.
@@ -463,9 +463,11 @@ impl<'a> Checker<'a> {
                 // is a u32 bound regardless of what ty_of_expr infers.
                 if let Expr::Ident { name, .. } = unwrap_parens_and_move(callee) {
                     if st.env_lookup(name).is_none()
+                        && !st.type_params.contains(name.as_str())
                         && !self.fns.contains_key(name.as_str())
                         && !self.structs.contains_key(name.as_str())
                         && !self.enums.contains_key(name.as_str())
+                        && !self.consts.contains_key(name.as_str())
                     {
                         if args.len() == 1
                             && !args[0].spread
