@@ -212,6 +212,13 @@ if ! mv "$STAGE/bin" "$INSTALL_DIR/bin"; then
     exit 1
 fi
 NEW_BIN=1
+# The extracted candidate may work while the promoted copy cannot execute on
+# the install filesystem or find its relocated runtime. Keep rollback armed
+# until the installed payload itself passes, before touching the launcher.
+if ! HYB_RUNTIME_DIR="$INSTALL_DIR/runtime" "$INSTALL_DIR/bin/hyb" explain E0002 >/dev/null 2>&1; then
+    echo "install.sh: installed payload verification FAILED; restoring previous installation" >&2
+    exit 1
+fi
 TRANSACTION_ACTIVE=0
 
 # --- launcher (bakes the install path; runtime override still wins) ---
