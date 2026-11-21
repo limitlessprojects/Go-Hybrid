@@ -700,8 +700,9 @@ impl<'a> Checker<'a> {
     ///
     /// Closed-world rule (SPEC-LANGUAGE §8.5 C9): no curated Go API database is
     /// consulted. The site fires when BOTH hold:
-    ///   1. the callee is `<pkg>.<fn>` (`<pkg>` imported) or a method on a
-    ///      foreign opaque/handle receiver from an imported package, and
+    ///   1. the callee is `<pkg>.<fn>` (`<pkg>` a known foreign package -
+    ///      imported, or a builtin root recognized without an import) or a
+    ///      method on a foreign opaque/handle receiver from such a package, and
     ///   2. an argument is a `fn(...) { ... }` literal (or named/aliased
     ///      closure binding) whose body writes or mutates a captured binding.
     /// A site inside `managed(...)` is the declared escape hatch and is allowed.
@@ -743,7 +744,7 @@ impl<'a> Checker<'a> {
         };
         let base = unwrap_parens(base);
         if let Expr::Ident { name, .. } = base {
-            if self.lookup_binding(st, name).is_none() && self.packages.contains(name.as_str()) {
+            if self.lookup_binding(st, name).is_none() && self.known_package(name.as_str()) {
                 return true;
             }
         }
@@ -755,7 +756,7 @@ impl<'a> Checker<'a> {
         | crate::model::TypeShape::OwnHandle(ty)
         | crate::model::TypeShape::BorrowHandle(ty) = recv
         {
-            return self.packages.contains(ty.split('.').next().unwrap_or(""));
+            return self.known_package(ty.split('.').next().unwrap_or(""));
         }
         false
     }
