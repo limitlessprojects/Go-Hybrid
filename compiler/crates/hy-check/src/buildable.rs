@@ -2636,9 +2636,29 @@ impl<'a> Collector<'a> {
                         self.check_user_fn_arg_types(name, args);
                     }
                     Expr::Field { base, name, .. } => {
-                        let bk = self.kind_of_expr(base);
-                        self.check_method_arity(&bk, name, args, *span);
-                        self.check_method_arg_types(&bk, name, args);
+                        let is_assoc = if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                            if self.lookup_kind(pkg).is_none() {
+                                let head = Checker::base_named_type_str(name);
+                                let assoc_key = format!("{}.{}", pkg, head);
+                                if self.ck.fns.contains_key(&assoc_key) {
+                                    let full_name = format!("{}.{}", pkg, name);
+                                    self.check_user_fn_arity(&full_name, args, *span);
+                                    self.check_user_fn_arg_types(&assoc_key, args);
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        if !is_assoc {
+                            let bk = self.kind_of_expr(base);
+                            self.check_method_arity(&bk, name, args, *span);
+                            self.check_method_arg_types(&bk, name, args);
+                        }
                     }
                     Expr::FnLit { params, .. } => {
                         self.check_fn_lit_call(params, args, callee, *span);
@@ -5750,7 +5770,21 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let int_to_float_conflict = want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            let scalar_mismatch = matches!(
+                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (Some(w), Some(g)) if w != g
+            );
+            if kinds_conflict(&want, &got)
+                || int_to_float_conflict
+                || scalar_mismatch
+                || self.sized_array_names_differ(
+                    Some(p.ty.render().as_str()),
+                    self.typed_value_type_name(&a.value).as_deref(),
+                )
+            {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
