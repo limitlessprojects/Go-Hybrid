@@ -1112,3 +1112,20 @@ the move freeze reach the send path as well.
 | struct-chan-shared-map-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct over the channel freezes that storage, so `m["after"] = 2` is a write through a live alias |
 
 With this registration the corpus is **139 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 92**.
+
+-------------------------------------------------------------------------------
+
+### struct-chan-array-send-accept / struct-chan-shared-slice-send-reject — ACCEPT + REJECT (bounty track: grow the adversarial corpus)
+
+Fixed-size scalar arrays vs. reference slice headers inside a struct moved over
+a channel (`packets <- move p`): a `[2]int` field is copied by value so the
+sender's original array binding remains independent after the send, whereas a
+`[]int` field shares the backing array with the sender's `s` binding and must
+freeze `s` on the channel-send path.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| struct-chan-array-send-accept | ACCEPT | — | — | channel safe-by-type + fixed-size `[2]int` value array; owned `move` over `chan packet`; sender's `arr` is an independent value copy |
+| struct-chan-shared-slice-send-reject | REJECT | A1b | `HYB-E3003` | the slice field aliases the sender's `s`; moving the struct over the channel freezes that backing storage, so `s[0] = 9` is a write through a live alias |
+
+With this registration the corpus is **141 programs — ACCEPT 46 · ACCEPT-MANAGED 2 · REJECT 93**.
