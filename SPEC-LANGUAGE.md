@@ -261,6 +261,13 @@ Go's method model with `fn` spelling; the corpus uses both forms
 named results are pre-initialized to their zero values (§3) and a bare
 `return` returns them.
 
+**LX12b — A function with results must terminate.** Go's terminating
+statement rule applies unchanged: a body ends in `return`, `panic(...)`, an
+`if`/`else` whose branches both end that way, or a `for {}` with no `break`.
+Falling off the end is HYB-E1002 (Go's `missing return`); function literals
+are included, and `fn main` with the exit-code result is the documented
+exception (the emitter wraps it).
+
 ### 1.3 Grammar — statements
 
 ```ebnf

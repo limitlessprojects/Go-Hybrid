@@ -60,6 +60,7 @@ mod foreign;
 mod freeze;
 mod go_keyword_names;
 mod loans;
+mod missing_return;
 mod model;
 mod range_iter;
 mod recv;
@@ -344,6 +345,18 @@ fn build_tables(ck: &mut Checker<'_>) {
                 }
                 for r in &f.results {
                     ck.check_type_expr(&r.ty);
+                }
+                // GUARANTEES Row 13: a function with results must end in a
+                // terminating statement. `fn main` with results is the
+                // exit-code surface (the emitter wraps it in an os.Exit
+                // path), so falling off its end is legal.
+                let is_main = f.receiver.is_none() && f.name == "main";
+                if let (Some(body), false) = (&f.body, is_main) {
+                    let what = match &f.receiver {
+                        Some(r) => format!("method `{}.{}`", r.ty.render(), f.name),
+                        None => format!("function `{}`", f.name),
+                    };
+                    ck.check_missing_return(&what, &f.results, body, f.span);
                 }
             }
             Decl::TypeAlias(a) => ck.check_type_expr(&a.ty),
