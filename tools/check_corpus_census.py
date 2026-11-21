@@ -4,6 +4,9 @@
 `tests/checker-corpus/` is the spec, and several files restate its size:
 `parse_all.rs` asserts it, `ci.yml` and the `Makefile` name it in a step
 label, and `README.md` / `GUARANTEES.md` / `ast.rs` describe it in prose.
+The human-normative ledger, `tests/checker-corpus/VERDICTS.md`, records each
+registration wave with a "With this registration the corpus is ..." line;
+only its LAST line is current (earlier lines are append-only history).
 Every corpus PR has to move those numbers, so they drift apart whenever one
 is missed — and a stale count is not cosmetic: it is a claim about the spec
 that the spec contradicts.
@@ -82,6 +85,19 @@ README_BREAKDOWN = (
     r"corpus:\s*(\d+) programs\D+ACCEPT (\d+)\D+ACCEPT-MANAGED (\d+)\D+REJECT (\d+)",
 )
 
+# VERDICTS.md is the human-normative ledger. Its "With this registration the
+# corpus is ..." lines are append-only history: each one records the size at
+# the moment that section landed, and earlier lines are deliberately stale
+# (rewriting them would falsify the record). Only the LAST line is the current
+# claim. Nothing checked it, and corpus PRs repeatedly appended fixtures
+# without updating the ledger's final count -- the corpus README already
+# promises every fixture a row there.
+VERDICTS_LEDGER = "tests/checker-corpus/VERDICTS.md"
+REGISTRATION_RE = re.compile(
+    r"With this registration the corpus is \*\*(\d+) programs\s*[:\u2014\u2013-]\s*"
+    r"ACCEPT (\d+)\s*\u00b7\s*ACCEPT-MANAGED (\d+)\s*\u00b7\s*REJECT (\d+)\*\*"
+)
+
 
 def census(corpus_dir: Path) -> tuple[int, Counter]:
     """The truth: derived from the corpus files, never from another claim."""
@@ -155,6 +171,46 @@ def check_breakdown(root: Path, total: int, counts: Counter) -> list[str]:
     return problems
 
 
+def check_verdicts_ledger(root: Path, total: int, counts: Counter) -> list[str]:
+    """The LAST registration line in VERDICTS.md must match the corpus.
+
+    Earlier lines are append-only history and stay stale by design, so only
+    the last one is compared. A missing line means the ledger did not record
+    the current size at all.
+    """
+    path = root / VERDICTS_LEDGER
+    if not path.exists():
+        return [f"{VERDICTS_LEDGER}: missing"]
+    text = path.read_text(encoding="utf-8")
+    matches = list(REGISTRATION_RE.finditer(text))
+    if not matches:
+        return [
+            f"{VERDICTS_LEDGER}: no 'With this registration the corpus is ...' "
+            f"line found - append one naming the current size"
+        ]
+    match = matches[-1]
+    line = text.count("\n", 0, match.start()) + 1
+    claimed_total, accept, managed, reject = (int(g) for g in match.groups())
+    problems: list[str] = []
+    if claimed_total != total:
+        problems.append(
+            f"{VERDICTS_LEDGER}: line {line}: last registration says "
+            f"{claimed_total} programs, corpus holds {total}"
+        )
+    if (accept, managed, reject) != (
+        counts["ACCEPT"],
+        counts["ACCEPT-MANAGED"],
+        counts["REJECT"],
+    ):
+        problems.append(
+            f"{VERDICTS_LEDGER}: line {line}: last registration breakdown says "
+            f"ACCEPT {accept} / ACCEPT-MANAGED {managed} / REJECT {reject}, "
+            f"corpus holds ACCEPT {counts['ACCEPT']} / "
+            f"ACCEPT-MANAGED {counts['ACCEPT-MANAGED']} / REJECT {counts['REJECT']}"
+        )
+    return problems
+
+
 def collect_problems(root: Path) -> tuple[list[str], int, Counter]:
     """Every disagreement with the corpus, plus the derived census."""
     corpus_dir = root / CORPUS_REL
@@ -165,7 +221,11 @@ def collect_problems(root: Path) -> tuple[list[str], int, Counter]:
     if total == 0:
         return ["the corpus is empty; refusing to certify a count"], 0, counts
 
-    problems = check_total_surfaces(root, total) + check_breakdown(root, total, counts)
+    problems = (
+        check_total_surfaces(root, total)
+        + check_breakdown(root, total, counts)
+        + check_verdicts_ledger(root, total, counts)
+    )
     no_verdict = counts.get("NO-VERDICT", 0)
     if no_verdict:
         problems.append(
@@ -195,7 +255,7 @@ def main() -> int:
         return 1
 
     print(
-        f"OK: all {len(TOTAL_SURFACES) + 1} corpus census surfaces agree with the "
+        f"OK: all {len(TOTAL_SURFACES) + 2} corpus census surfaces agree with the "
         f"corpus ({total} programs: ACCEPT {counts['ACCEPT']} · "
         f"ACCEPT-MANAGED {counts['ACCEPT-MANAGED']} · REJECT {counts['REJECT']})."
     )

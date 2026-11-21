@@ -58,6 +58,14 @@ def consistent_tree(total=3, accept=1, managed=0, reject=2):
         f"**Current registered corpus: {total} programs** — ACCEPT {accept} · "
         f"ACCEPT-MANAGED {managed} ·\nREJECT {reject} — each with a header.\n"
     )
+    # Historical registration lines are deliberately stale (append-only
+    # record); only the last one claims the current size.
+    files["tests/checker-corpus/VERDICTS.md"] = (
+        "With this registration the corpus is **1 programs: ACCEPT 1 · "
+        "ACCEPT-MANAGED 0 · REJECT 0**\n\n"
+        f"With this registration the corpus is **{total} programs — ACCEPT {accept} · "
+        f"ACCEPT-MANAGED {managed} · REJECT {reject}**\n"
+    )
     return files
 
 
@@ -177,6 +185,43 @@ class DriftTests(_ProblemsMixin, unittest.TestCase):
         )
         self.assertEqual(len(hits), 1)
         self.assertIn("says 7 programs", hits[0])
+
+
+class VerdictsLedgerTests(_ProblemsMixin, unittest.TestCase):
+    """Only VERDICTS.md's LAST registration line is the current claim."""
+
+    def _hits(self, content):
+        return self._problems_with("tests/checker-corpus/VERDICTS.md", content)
+
+    def test_stale_final_total_is_named(self):
+        hits = self._hits(
+            "With this registration the corpus is **99 programs — ACCEPT 1 · "
+            "ACCEPT-MANAGED 0 · REJECT 2**\n"
+        )
+        self.assertEqual(len(hits), 1)
+        self.assertIn("says 99 programs", hits[0])
+
+    def test_stale_final_breakdown_is_named(self):
+        hits = self._hits(
+            "With this registration the corpus is **3 programs — ACCEPT 2 · "
+            "ACCEPT-MANAGED 0 · REJECT 1**\n"
+        )
+        self.assertEqual(len(hits), 1)
+        self.assertIn("breakdown says ACCEPT 2", hits[0])
+
+    def test_stale_historical_line_is_not_current(self):
+        hits = self._hits(
+            "With this registration the corpus is **1 programs: ACCEPT 1 · "
+            "ACCEPT-MANAGED 0 · REJECT 0**\n\n"
+            "With this registration the corpus is **3 programs — ACCEPT 1 · "
+            "ACCEPT-MANAGED 0 · REJECT 2**\n"
+        )
+        self.assertEqual(hits, [])
+
+    def test_missing_registration_line_is_named(self):
+        hits = self._hits("# no registration ledger line here\n")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("no 'With this registration", hits[0])
 
 
 class FailClosedTests(_ProblemsMixin, unittest.TestCase):
