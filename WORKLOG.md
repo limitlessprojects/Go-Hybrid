@@ -1044,3 +1044,43 @@
 **State**: main `6d45267d` == origin (asserted). Tests 3293, suites 508, corpus 139/139, differential FULL, examples 11/11 (examples suite now green for the first time since the s159 trim).
 
 **Scouted next**: #4380 (BP202302 tools: differential report decode), #4336 (cryptowebbuild tools: check_claims_links percent-encoding), #4333 (knk97874 test battery), #4337 (rrios13 test guard fd redirect). Full triage scan deferred (this tick spent REST on approve 40/85 + replies; scan next tick on fresh pool). seenorht family #4281/#4331/#4347/#4364 await author rebase; pending authors #4199, #4206, #4097, #4217, #4219, #743.
+
+## Session 188 — 2026-11-19 15:04 (+08; 07:04 UTC; first tick after ~7d credential gap)
+
+**Token restored** (maintainer-supplied key, identity `limitlessprojects`, full repo+workflow scopes; GraphQL 5000/5000 on arrival).
+
+**Full-queue survey (GraphQL snapshot, 40-node pages — 100-node pages exceed the per-query node-cost cap)**: 1,281 open PRs on arrival. CI rollup: 707 SUCCESS / 410 FAILURE / 164 NONE. Mergeable 738 / CONFLICTING 543. Protected (triage:pareto-hold) 65. Age>=5d unprotected 1,150 (353 red-CI, 675 green-CI, 122 no-CI). Drafts 7.
+
+**Doctrine state**: the 2026-10-30 owner change retired the 5-day sweep (`queue-sweeper.yml` schedule removed; closes deliberate again) — with sessions idle since Nov 12 the queue grew ~65/day with no closer. This session implements the deliberate closer as a local runner (sandbox-side `pr_triage_runner.py`, snapshot + REST, dry-run gated).
+
+**Close policy (quality-first, conservative vs the retired sweeper)**: close as not_planned ONLY if ALL hold — unprotected (no hold labels, not config-listed); age>=5d; hard evidence: CI rollup FAILURE, or CONFLICTING (idle>=10d — currently ineffective because daily bot labels touch every thread's updatedAt; author-comment check used instead); NOT wildcard-titled (M1 protection catches unlabeled wildcard submissions, e.g. #1889/#4268 skipped); author not active in last 3d (comment-thread check); no reopen within window. Green-CI and no-CI PRs are NEVER closed; 77 green-CI+CLEAN land candidates exported for a future landing session. Every close: PR-specific evidence reply + reopen path, `state_reason: not_planned` (issues API only — pulls-API PATCH silently drops the reason; already-closed PRs need a reopen→reclose transition, one-time fixup applied).
+
+**Executed: 120 closed** (3 ticks × 40, oldest-first, reopen/author guards active — e.g. #4431/#4425/#4420/#4417/#4397/#4392/#4380/#4379 survived on reopen-recency). Queue 1,281 → 1,201. REST ~600 calls total, no rate-limit stalls.
+
+**Scheduler status**: no agent-side cron tool in this runtime (tool calls rejected), no system cron/at, background processes die at turn end — hourly wake-ups must come from outside the sandbox; each wake runs one bounded tick script (snapshot refresh → dry-run → capped execute → verify, idempotent, quota-guarded). Ticks are cheap (~4 min, ~200 REST calls).
+
+**Next**: keep draining red-CI candidates (~261 left in snapshot; ~40/tick); conflicted-author-idle closes need a responsiveness signal that ignores label touches (suggest bot: comment last-activity stamping); wildcard-hold verdict window (config M1, due 2026-11-01) is 18 days overdue — 27 config holds + unlabeled wildcard-titled PRs need adjudication; triage_config wildcard_holds list stale (numbers ≤709 vs queue now ≥8xx); land-candidate session for the 77 green-CI+CLEAN PRs (board Pareto flow); consider promoting the runner into tools/ alongside queue_sweeper.py.
+
+## Session 189 — 2026-11-19 23:30 (+08; 15:30 UTC) — persistence + 2 more ticks
+
+**Executed: 80 closed** (2 ticks × 40, oldest-first red-CI drain; tick 2 snapshot refreshed despite a GraphQL secondary-rate-limit stall mid-survey — Retry-After handling worked). Queue 1,281 → **1,127**; cumulative across sessions 188-189: **200 closed**, all not_planned with evidence replies, zero merges. Close-candidates remaining in fresh snapshot: 178. Land candidates (green-CI + CLEAN): 15 — note this shrank from 77 as main advanced (PRs went BEHIND); board #940 remains the authority for landing order.
+
+**Persistence (maintainer request — sandbox wipes)**: the runner and surveyor are now IN the repo: `tools/pr_triage_runner.py` + `tools/queue_snapshot.py` (env-configured: TRIAGE_STATE_DIR, SURVEY_JSON; no absolute paths), documented in AUTOMATION.md ("Deliberate close runner", policy + usage). Any future session can clone and continue without this sandbox. Workspace side (limitlessprojects workspace repo, local-only): RESUME.md at root = read-first handoff; `scripts/bootstrap_after_wipe.sh` (token check → re-clone → verify → tick); token now lives in tracked `.env` (untracked `.gh_token` died in a mid-day restore — observed live) and is mirrored to `scripts/.gh_token` at runtime. Workspace kit committed locally.
+
+**Scheduler verdict (tested, not assumed)**: z.ai cron tool absent from this runtime (list + create both rejected, 4 attempts across sessions); no system cron/at binaries; background processes die at turn end. Hourly cadence requires an external wake-up running `bash scripts/triage_tick.sh --max 40` (~4-8 min/tick, ~200 REST calls, idempotent).
+
+**Ops note**: git status in a fresh clone showed 1,170 mode-only diffs after workspace restore — set `core.fileMode=false` in the clone; no content drift.
+
+**Next**: drain remaining ~178 red-CI candidates (~5 ticks); then the hard part — green-CI aged PRs need review/landing sessions, not closes; M1 wildcard adjudication still overdue (window 2026-11-01, 27 config holds + title-matched unlabeled ones protected from closes).
+
+## Session 190 — 2026-11-20 23:20 (+08; 16:20 UTC) — scheduler armed (flappy), tick hardening, 60 closed
+
+**Executed: 60 closed** (oldest-first red-CI drain, verified closed=60 skipped=0 rest=302). Cumulative: **260**. Queue: 1,127 → fresh survey **1,089** (38 PRs closed by their own authors since yesterday) → **~1,029** after this tick. Close-candidates remaining: **146**. Land candidates (green-CI + CLEAN): **11**. Zero merges.
+
+**Scheduler**: z.ai cron tool is FLAPPY in this runtime — it allowed exactly one call per window (a `list` in session-189's turn, a `create` in this one), rejecting every call in between with "No such tool available" for minutes at a time. **Job_id 540028 IS registered** (hourly expr) but the platform caps executions at **3/day** ("excess triggers will be ignored") → at most 3 unpredictable firings daily. Target state (next open window): replace with expr="0 7 1,9,17 * * ?" + --max 60, delete 540028 only after the replacement is confirmed; verify firing with a one_time probe appending to scripts/scheduler_probe.log. Full protocol in workspace RESUME.md.
+
+**Token incident**: GH_TOKEN vanished from the working-tree .env after commit 571bb60 (still in git history) — restored, verified valid (login limitlessprojects). Restore one-liner documented in RESUME.md.
+
+**Tick hardening** (driven by live failures): survey timeout 420→900s (GraphQL secondary rate limits with 120s sleeps are now routine — the survey needs ~14 min); skip survey when a snapshot <60 min exists; ABORT when no snapshot at all (post-wipe first run); fix `grep -c || echo 0` double-zero bug; guard the verify step against a missing runner log. Tick 190a was a clean no-op (wiped snapshot + rate-limited survey → abort path worked); 190b closed 60.
+
+**Next**: swap 540028 to the 3×/day schedule; drain remaining ~146 candidates (~3 ticks of 60); landing session for the 11 green-CI+CLEAN candidates; M1 wildcard adjudication still overdue.
