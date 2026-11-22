@@ -717,6 +717,10 @@ struct Define {
     written: bool,
     elidable: bool,
     is_untyped: bool,
+    /// For an untyped `const`: Go's default type for the constant (`int`,
+    /// `int32` for a rune, `float64`) when its initializer is a pure untyped
+    /// constant expression; `None` when unknown.
+    untyped_default: Option<&'static str>,
 }
 
 struct Collector<'a> {
@@ -743,6 +747,7 @@ struct Collector<'a> {
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     file_untyped_consts: HashSet<String>,
+    file_const_defaults: HashMap<String, &'static str>,
     /// Result kinds of the function whose body is currently being walked
     /// (#577 C9/C10). Empty for a fn declared with no results — which is also
     /// the state outside any body, so `Stmt::Return` can only ever see it
@@ -814,6 +819,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
+            file_const_defaults: HashMap::new(),
             fn_results: Vec::new(),
             fn_result_type_names: Vec::new(),
             fn_type_params: HashSet::new(),
@@ -841,6 +847,9 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                 c.file_consts.insert(cd.name.clone(), k);
                 if cd.ty.is_none() {
                     c.file_untyped_consts.insert(cd.name.clone());
+                    if let Some(def) = c.untyped_const_default(&cd.value) {
+                        c.file_const_defaults.insert(cd.name.clone(), def);
+                    }
                 }
             }
         }
@@ -1592,10 +1601,84 @@ impl<'a> Collector<'a> {
         matches!((want, got), (Some(w), Some(g)) if w != g)
     }
 
+    /// Go's default type for an UNTYPED numeric constant expression: `int`
+    /// for integer literals, `int32` (`rune`) for rune literals, `float64`
+    /// for float literals, the wider of the two operands of an untyped
+    /// arithmetic / bitwise operation (`1 + 2` is `int`, `'a' + 1` is `rune`,
+    /// `1 + 2.5` is `float64`), the left operand's type for an untyped shift,
+    /// and the recorded default of a named untyped `const`. `None` for
+    /// anything that is typed or not a constant expression, so a typed
+    /// operand never gets pinned to `int` by this helper.
+    fn untyped_const_default(&self, e: &Expr) -> Option<&'static str> {
+        fn rank(t: &str) -> u8 {
+            match t {
+                "int" => 0,
+                "int32" => 1,
+                _ => 2,
+            }
+        }
+        match unwrap_parens(e) {
+            Expr::Lit {
+                kind: LitKind::Int(_),
+                ..
+            } => Some("int"),
+            Expr::Lit {
+                kind: LitKind::Float(_),
+                ..
+            } => Some("float64"),
+            Expr::Lit {
+                kind: LitKind::Char(_),
+                ..
+            } => Some("int32"),
+            Expr::Ident { name, .. } => {
+                for layer in self.scopes.iter().rev() {
+                    if let Some(entry) = layer.get(name) {
+                        // A define is untyped only when it is an untyped
+                        // `const`; a `None` entry (parameter, receiver,
+                        // named result, ...) shadows the file const.
+                        return entry.and_then(|id| {
+                            let d = &self.defines[id];
+                            d.is_untyped.then_some(d.untyped_default).flatten()
+                        });
+                    }
+                }
+                self.file_const_defaults.get(name).copied()
+            }
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.untyped_const_default(operand),
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let l = self.untyped_const_default(lhs)?;
+                let r = self.untyped_const_default(rhs)?;
+                match op {
+                    BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Mod
+                    | BinOp::BitOr
+                    | BinOp::BitXor
+                    | BinOp::BitAnd => Some(if rank(l) >= rank(r) { l } else { r }),
+                    // A constant shift of an untyped integer constant is an
+                    // untyped integer constant (the count's own default is
+                    // irrelevant); rune/float left operands stay unpinned.
+                    BinOp::Shl | BinOp::Shr => (l == "int").then_some("int"),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// #1031 — the type a `x := v` / `var x = v` binding takes from its
     /// initializer: Go's default type for an untyped numeric literal (`int`,
     /// `float64`), or the initializer's own type when it is typed.
     fn initializer_scalar(&self, e: &Expr) -> Option<&'static str> {
+        if let Some(def) = self.untyped_const_default(e) {
+            return Some(def);
+        }
         match unwrap_parens(e) {
             Expr::Lit {
                 kind: LitKind::Int(_),
@@ -1729,6 +1812,7 @@ impl<'a> Collector<'a> {
             written: false,
             elidable: true,
             is_untyped: false,
+            untyped_default: None,
         });
         top.insert(name.to_string(), Some(id));
     }
@@ -2238,8 +2322,20 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        for ((((name, kind), scalar), set_elem), container_elem_scalar) in
-            l.names.iter().zip(kinds).zip(scalars).zip(set_elems).zip(container_elem_scalars)
+        let untyped_defaults: Vec<Option<&'static str>> =
+            if l.kind == LocalKind::Const && l.ty.is_none() && l.values.len() == l.names.len() {
+                l.values.iter().map(|v| self.untyped_const_default(v)).collect()
+            } else {
+                vec![None; l.names.len()]
+            };
+        for (idx, ((((name, kind), scalar), set_elem), container_elem_scalar)) in l
+            .names
+            .iter()
+            .zip(kinds)
+            .zip(scalars)
+            .zip(set_elems)
+            .zip(container_elem_scalars)
+            .enumerate()
         {
             // #1031: a same-scope `:=` re-define keeps the EXISTING variable
             // (and its type) in Go, so only a fresh binding takes the
@@ -2286,6 +2382,7 @@ impl<'a> Collector<'a> {
                 written: false,
                 elidable: false,
                 is_untyped: matches!(l.kind, LocalKind::Const) && l.ty.is_none(),
+                untyped_default: untyped_defaults[idx],
             });
             top.insert(name.clone(), Some(id));
         }
