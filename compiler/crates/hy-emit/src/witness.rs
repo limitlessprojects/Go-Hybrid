@@ -1,9 +1,9 @@
 //! IR witness table (issue #3930) — proof that emitted Go corresponds to
 //! the checked Hybrid IR at concurrency sites.
 //!
-//! For every `task` spawn and channel `send` statement the emitter records
-//! a witness: the source span plus a content hash of the printed sub-AST
-//! (deterministic `{:#?}` Debug format, FNV-1a 64-bit — no new dependency).
+//! For every `task` spawn and channel send (standalone or in a `select`
+//! arm), the emitter records a witness: the source span plus an FNV-1a
+//! 64-bit hash of the sub-AST's deterministic `Debug` representation.
 //! `hyb build --emit-proof` writes proof.json next to the Go output; the
 //! verifier re-parses the source, re-runs the emitter, recomputes every
 //! hash and compares — any mismatch is a hard error (fail-closed).
@@ -17,10 +17,21 @@ use serde::Serialize;
 pub struct Witness {
     /// Site kind: "task" (goroutine spawn) or "send" (channel send).
     pub site: &'static str,
-    /// Source span of the statement.
+    /// Source span of the statement or select send header.
     pub span: Span,
     /// FNV-1a 64-bit of the printed sub-AST (callee+args / chan+value).
     pub node_hash: String,
+    /// Proof classification for channel sends; omitted for task witnesses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<SendStatus>,
+}
+
+/// Whether a send is covered by a managed escape hatch.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SendStatus {
+    Proven,
+    Managed,
 }
 
 /// Proof envelope written as proof.json by `hyb build --emit-proof`.
@@ -56,6 +67,7 @@ pub(crate) fn witness_task(
         site: "task",
         span,
         node_hash: format!("{:016x}", fnv1a64(printed.as_bytes())),
+        status: None,
     }
 }
 
@@ -70,6 +82,7 @@ pub(crate) fn witness_send(
         site: "send",
         span,
         node_hash: format!("{:016x}", fnv1a64(printed.as_bytes())),
+        status: Some(SendStatus::Proven),
     }
 }
 
