@@ -4671,6 +4671,113 @@ impl<'a> Collector<'a> {
             }
         }
     }
+
+    fn check_http_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if member.starts_with("status_")
+            || member.starts_with("method_")
+            || member.starts_with("err_")
+            || matches!(
+                member,
+                "request"
+                    | "response"
+                    | "response_writer"
+                    | "header"
+                    | "serve_mux"
+                    | "server"
+                    | "client"
+                    | "transport"
+                    | "cookie"
+                    | "cookie_jar"
+                    | "round_tripper"
+                    | "flusher"
+                    | "hijacker"
+                    | "close_notifier"
+                    | "pusher"
+                    | "conn_state"
+                    | "dir"
+                    | "file"
+                    | "file_system"
+                    | "http2_config"
+                    | "max_bytes_error"
+                    | "protocol_error"
+                    | "protocols"
+                    | "response_controller"
+                    | "same_site"
+                    | "default_client"
+                    | "default_serve_mux"
+                    | "default_transport"
+                    | "no_body"
+                    | "time_format"
+                    | "trailer_prefix"
+            )
+        {
+            self.emit_e1002(
+                span,
+                format!("cannot call `http.{member}`: `http.{member}` is a type/constant/variable, not a function (HYB-E1002)"),
+                &format!("`http.{member}` is a package symbol and cannot be called as a function"),
+            );
+            return;
+        }
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `http.{member}` (HYB-E1002)"),
+                &format!("`http.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "new_serve_mux" => Some(0),
+            "get"
+            | "head"
+            | "not_found_handler"
+            | "canonical_header_key"
+            | "detect_content_type"
+            | "file_server"
+            | "handler_func"
+            | "proxy_from_environment"
+            | "proxy_url"
+            | "read_request"
+            | "read_response"
+            | "parse_http_version"
+            | "parse_time" => Some(1),
+            "handle"
+            | "handle_func"
+            | "listen_and_serve"
+            | "post_form"
+            | "serve"
+            | "error"
+            | "not_found"
+            | "redirect"
+            | "redirect_handler"
+            | "strip_prefix"
+            | "timeout_handler"
+            | "max_bytes_handler"
+            | "max_bytes_reader"
+            | "set_cookie"
+            | "allow_query_semicolons" => Some(2),
+            "post"
+            | "listen_and_serve_tls"
+            | "serve_tls"
+            | "new_request"
+            | "serve_file" => Some(3),
+            "new_request_with_context" | "serve_content" => Some(4),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`http.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `http.{member}`"),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -8413,6 +8520,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if (pkg == "http" || pkg == "net/http") && self.lookup_kind(pkg).is_none() {
+                        self.check_http_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
