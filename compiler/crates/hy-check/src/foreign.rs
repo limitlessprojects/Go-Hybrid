@@ -127,6 +127,8 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
         ("serde_json", "parse" | "new_object" | "new_array")
         | ("flate2", "new_writer")
+        | ("time", "fixed_zone" | "FixedZone")
+        | ("os", "new_syscall_error" | "NewSyscallError")
         | ("json" | "encoding/json", "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder")
         | (
             "httptest" | "net/http/httptest",
@@ -214,6 +216,13 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ) => TypeShape::ForeignOpaque("httptest.server".into()),
         ("httptest" | "net/http/httptest", "new_recorder" | "NewRecorder") => {
             TypeShape::ForeignOpaque("httptest.response_recorder".into())
+        }
+        ("time", "fixed_zone" | "FixedZone") => {
+            TypeShape::ForeignOpaque("time.location".into())
+        }
+        // NewSyscallError's static result is error, not *os.SyscallError.
+        ("os", "new_syscall_error" | "NewSyscallError") => {
+            TypeShape::ForeignOpaque("error".into())
         }
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
@@ -342,6 +351,18 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
 /// by hand: `hy-check` cannot depend on `hy-emit` without a crate cycle, so
 /// there is no automated cross-crate pin.
 pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'static str]> {
+    match recv_type.strip_prefix('*').unwrap_or(recv_type) {
+        "time.location" | "time.Location" => return Some(&["string"]),
+        "time.parse_error" | "time.ParseError" => return Some(&["error"]),
+        "strconv.num_error" | "strconv.NumError" | "os.link_error" | "os.LinkError" => {
+            return Some(&["error", "unwrap"]);
+        }
+        "os.path_error" | "os.PathError" | "os.syscall_error" | "os.SyscallError" => {
+            return Some(&["error", "timeout", "unwrap"]);
+        }
+        _ => {}
+    }
+
     /// `serde_json.value`: jsonbinding.Value — Array, Int, String, Set,
     /// PushString. Package-level `Parse`/`NewObject`/`NewArray`/
     /// `ToStringPretty` are functions, NOT methods, and `Get`/`Remove` are
@@ -744,7 +765,21 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("http.round_tripper" | "http.roundtripper" | "http.RoundTripper", "round_trip") => {
             TypeShape::ForeignOpaque("http.response".into())
         }
-        ("error" | "errors.error", "error") => TypeShape::Str,
+        ("time.location" | "time.Location", "string")
+        | (
+            "error" | "errors.error" | "time.parse_error" | "time.ParseError"
+            | "strconv.num_error" | "strconv.NumError" | "os.path_error" | "os.PathError"
+            | "os.link_error" | "os.LinkError" | "os.syscall_error" | "os.SyscallError",
+            "error",
+        ) => TypeShape::Str,
+        (
+            "strconv.num_error" | "strconv.NumError" | "os.path_error" | "os.PathError"
+            | "os.link_error" | "os.LinkError" | "os.syscall_error" | "os.SyscallError",
+            "unwrap",
+        ) => TypeShape::ForeignOpaque("error".into()),
+        ("os.path_error" | "os.PathError" | "os.syscall_error" | "os.SyscallError", "timeout") => {
+            TypeShape::Primitive
+        }
         ("net.addr" | "net.Addr", "network" | "string") => TypeShape::Str,
         ("net.error" | "net.Error", "error") => TypeShape::Str,
         ("net.error" | "net.Error", "temporary" | "timeout") => TypeShape::Primitive,
@@ -1021,6 +1056,7 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "path_error"
                 | "link_error"
                 | "syscall_error"
+                | "new_syscall_error"
                 | "process"
                 | "process_state"
                 | "proc_attr"
