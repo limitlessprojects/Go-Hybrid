@@ -4671,6 +4671,147 @@ impl<'a> Collector<'a> {
             }
         }
     }
+
+    fn check_time_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "nanosecond"
+                | "microsecond"
+                | "millisecond"
+                | "second"
+                | "minute"
+                | "hour"
+                | "layout"
+                | "ansic"
+                | "unix_date"
+                | "ruby_date"
+                | "rfc822"
+                | "rfc822z"
+                | "rfc850"
+                | "rfc1123"
+                | "rfc1123z"
+                | "rfc3339"
+                | "rfc3339_nano"
+                | "kitchen"
+                | "stamp"
+                | "stamp_milli"
+                | "stamp_micro"
+                | "stamp_nano"
+                | "date_time"
+                | "date_only"
+                | "time_only"
+                | "january"
+                | "february"
+                | "march"
+                | "april"
+                | "may"
+                | "june"
+                | "july"
+                | "august"
+                | "september"
+                | "october"
+                | "november"
+                | "december"
+                | "sunday"
+                | "monday"
+                | "tuesday"
+                | "wednesday"
+                | "thursday"
+                | "friday"
+                | "saturday"
+                | "utc"
+                | "local"
+                | "time"
+                | "duration"
+                | "timer"
+                | "ticker"
+                | "location"
+                | "month"
+                | "weekday"
+                | "parse_error"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `time.{member}`: `time.{member}` is a type/constant, not a function (HYB-E1002)"),
+                &format!("`time.{member}` is a package constant or type, not a callable function"),
+            );
+            return;
+        }
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `time.{member}` (HYB-E1002)"),
+                &format!("`time.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        if matches!(member, "milliseconds" | "seconds" | "minutes" | "hours" | "nanoseconds" | "microseconds") {
+            if args.len() != 1 {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`time.{member}` takes exactly 1 argument `(n)`, got {} (HYB-E1002)",
+                        args.len()
+                    ),
+                    &format!("write `time.{member}(10)` (SPEC duration constructor)"),
+                );
+            } else {
+                let bare = unwrap_parens(&args[0].value);
+                if matches!(
+                    bare,
+                    Expr::Lit {
+                        kind: LitKind::Str(_)
+                            | LitKind::RawStr(_)
+                            | LitKind::Bool(_)
+                            | LitKind::Char(_)
+                            | LitKind::Nil,
+                        ..
+                    }
+                ) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`time.{member}` requires a numeric argument, found non-numeric literal (HYB-E1002)"
+                        ),
+                        &format!("pass an integer or numeric expression to `time.{member}`"),
+                    );
+                }
+            }
+            return;
+        }
+
+        let expected_arity = match member {
+            "now" => Some(0),
+            "since"
+            | "until"
+            | "sleep"
+            | "after"
+            | "tick"
+            | "new_ticker"
+            | "new_timer"
+            | "unix_milli"
+            | "unix_micro"
+            | "parse_duration"
+            | "load_location" => Some(1),
+            "after_func" | "unix" | "parse" | "fixed_zone" | "load_location_from_tz_data" => Some(2),
+            "parse_in_location" => Some(3),
+            "date" => Some(8),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`time.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `time.{member}`"),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -8272,43 +8413,8 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
-                    if pkg == "time"
-                        && self.lookup_kind(pkg).is_none()
-                        && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
-                    {
-                        if args.len() != 1 {
-                            self.emit_e1002(
-                                span,
-                                format!(
-                                    "`time.{}` takes exactly 1 argument `(n)`, got {} (HYB-E1002)",
-                                    name,
-                                    args.len()
-                                ),
-                                &format!("write `time.{}(10)` (SPEC duration constructor)", name),
-                            );
-                        } else {
-                            let bare = unwrap_parens(&args[0].value);
-                            if matches!(
-                                bare,
-                                Expr::Lit {
-                                    kind: LitKind::Str(_)
-                                        | LitKind::RawStr(_)
-                                        | LitKind::Bool(_)
-                                        | LitKind::Char(_)
-                                        | LitKind::Nil,
-                                    ..
-                                }
-                            ) {
-                                self.emit_e1002(
-                                    span,
-                                    format!(
-                                        "`time.{}` requires a numeric argument, found non-numeric literal (HYB-E1002)",
-                                        name
-                                    ),
-                                    &format!("pass an integer or numeric expression to `time.{}`", name),
-                                );
-                            }
-                        }
+                    if pkg == "time" && self.lookup_kind(pkg).is_none() {
+                        self.check_time_package_call(name.as_str(), args, span);
                     }
                     if pkg == "os"
                         && self.lookup_kind(pkg).is_none()
