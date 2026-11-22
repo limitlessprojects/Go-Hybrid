@@ -1290,6 +1290,11 @@ impl Emitter {
         } else {
             None
         };
+        let static_ty = if single_hint.is_some() {
+            self.static_ty_of(&values[0])
+        } else {
+            None
+        };
         let ptr_flags: Vec<bool> = if names.len() == values.len() {
             values.iter().map(|v| self.expr_is_pointer(v)).collect()
         } else {
@@ -1302,6 +1307,10 @@ impl Emitter {
             }
             if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first() {
                 self.register_var_ty(&names[0], t);
+            } else if let Some(t) = static_ty {
+                // `x := m["a"]` / `row := grid[0]` / `b := bs[0]`: the
+                // local carries the element's declared type forward.
+                self.register_var_ty(&names[0], &t);
             } else if let Some(sn) = self.user_struct_name_of(&values[0]).map(str::to_string) {
                 self.var_struct.insert(names[0].clone(), sn);
             }
@@ -1329,6 +1338,18 @@ impl Emitter {
         }
         if matches!(e, Expr::MapLit { .. }) {
             return BindingKind::Map;
+        }
+        // An index read of a container with a declared element type
+        // (`ss[0]` of `[]set[int]`, `m["a"]` of `map[string]set[int]`,
+        // `ms[0]` of `[]map[K]V`): the element's kind drives set/map/chan
+        // lowering exactly as it does for a plain local.
+        if matches!(e, Expr::Index { .. }) {
+            if let Some(kind) = self
+                .static_ty_of(e)
+                .and_then(|t| self.binding_kind_of_ty(&t))
+            {
+                return kind;
+            }
         }
         if let Expr::StructLit { ty: Some(t), .. } = e {
             if let Some(kind) = self.binding_kind_of_ty(t) {
@@ -1418,6 +1439,21 @@ impl Emitter {
     /// Whether an expression evaluates to a channel type (param, typed local,
     /// make(chan ...), or a function returning a channel). Channel ranges in
     /// Go permit only one iteration variable and bind the received value directly.
+    /// Record what a declared type tells the emitter about a fresh local
+    /// (range element / key): its binding kind and receiver typing.
+    fn bind_local_from_ty(&mut self, name: &str, t: &TypeExpr) {
+        if name == "_" {
+            return;
+        }
+        if let Some(kind) = self.binding_kind_of_ty(t) {
+            self.bindings.insert(name.to_string(), kind);
+        }
+        if self.is_pointer_ty(t) {
+            self.pointer_vars.insert(name.to_string());
+        }
+        self.register_var_ty(name, t);
+    }
+
     fn is_channel_expr(&self, e: &Expr) -> bool {
         self.binding_kind_of(e) == BindingKind::Chan
     }
@@ -2204,6 +2240,17 @@ impl Emitter {
                 // the try before the loop (Batch G).
                 self.hoist_tries_expr(expr)?;
                 let e = self.emit_expr(expr, 0)?;
+                // Declared element types of the ranged container, taken
+                // before the loop vars shadow anything: (key, value) for a
+                // map, (index, element) for a slice/array.
+                let (range_key_ty, range_val_ty) = match self
+                    .static_ty_of(expr)
+                    .map(|t| self.resolve_type_alias(&t).clone())
+                {
+                    Some(TypeExpr::Map { key, value, .. }) => (Some(*key), Some(*value)),
+                    Some(t) => (None, self.container_elem_ty(&t).cloned()),
+                    None => (None, None),
+                };
                 let core = match vars.len() {
                     1 => {
                         // `for _ in ch` drains without binding (corpus 17);
@@ -2235,6 +2282,9 @@ impl Emitter {
                             // the KEY (#2945) — Go's own single-var form.
                             if over_chan || self.is_map_expr(expr) {
                                 self.shadow_local_names(vars);
+                                if let Some(t) = &range_key_ty {
+                                    self.bind_local_from_ty(&vars[0], t);
+                                }
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {
                                 // A rust-handle slice (ForeignTy binding)
@@ -2255,6 +2305,8 @@ impl Emitter {
                                 if let Some(t) = elem_ty {
                                     self.bindings
                                         .insert(vars[0].clone(), BindingKind::ForeignTy(t));
+                                } else if let Some(t) = &range_val_ty {
+                                    self.bind_local_from_ty(&vars[0], t);
                                 }
                                 format!("for _, {} := range {} {{", vars[0], e)
                             }
@@ -2279,6 +2331,12 @@ impl Emitter {
                         // that reads neither binding drops the list entirely.
                         // Same lowering the one-variable form already uses.
                         // Issue #139.
+                        if let Some(t) = &range_key_ty {
+                            self.bind_local_from_ty(&vars[0], t);
+                        }
+                        if let Some(t) = &range_val_ty {
+                            self.bind_local_from_ty(&vars[1], t);
+                        }
                         let a = if crate::rangebind::body_reads(body, &vars[0]) {
                             vars[0].clone()
                         } else {
