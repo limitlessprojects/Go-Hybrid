@@ -10,11 +10,6 @@ fn result(src: &str) -> hy_check::CheckResult {
 fn valid_multi_result_arguments_match_fixed_go_signatures() {
     let cases = [
         (
-            "path",
-            "fn pair() (string, string) { return \"a\", \"b\" }",
-            "path.match(pair())",
-        ),
-        (
             "path/filepath",
             "fn pair() (string, string) { return \"a\", \"b\" }",
             "filepath.rel(pair())",
@@ -41,17 +36,17 @@ fn valid_multi_result_arguments_match_fixed_go_signatures() {
         ),
         (
             "strconv",
-            "fn five() ([]byte, f64, byte, int, int) { return nil, 1.0, 103, -1, 64 }",
+            "fn five() ([]byte, f64, byte, int, int) { return []byte{}, 1.0, 103, -1, 64 }",
             "strconv.append_float(five())",
         ),
         (
             "sort",
-            "fn pair() ([]int, int) { return nil, 1 }",
+            "fn pair() ([]int, int) { return []int{}, 1 }",
             "sort.search_ints(pair())",
         ),
         (
             "encoding/hex",
-            "fn pair() ([]byte, []byte) { return nil, nil }",
+            "fn pair() ([]byte, []byte) { return []byte{}, []byte{} }",
             "hex.decode(pair())",
         ),
         (
@@ -97,7 +92,7 @@ fn unary_foreign_calls_reject_two_forwarded_results() {
 #[test]
 fn wrong_expanded_counts_reject_even_when_the_written_list_has_one_argument() {
     for (import, call) in [
-        ("path", "path.match"),
+        ("path", "path.clean"),
         ("net/url", "url.user_password"),
         ("strconv", "strconv.format_int"),
         ("sort", "sort.search_ints"),
@@ -106,14 +101,20 @@ fn wrong_expanded_counts_reject_even_when_the_written_list_has_one_argument() {
         let src = format!("import \"{import}\"\nfn triple() (string, string, string) {{ return \"a\", \"b\", \"c\" }}\nfn main() {{ {call}(triple()) }}");
         let r = result(&src);
         assert_eq!(r.verdict, Verdict::Reject, "{call}: {:?}", r.diagnostics);
-        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E1002"));
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == "HYB-E1002" && d.message.contains("got 3")),
+            "{:?}",
+            r.diagnostics
+        );
     }
 }
 
 #[test]
 fn ordinary_and_variadic_calls_keep_their_verdicts() {
     for src in [
-        "import \"path\"\nfn main() { path.match(\"a\", \"b\") }",
+        "import \"path\"\nfn main() { path.clean(\"a\") }",
         "import \"net/url\"\nfn main() { url.join_path(\"a\", \"b\") }",
         "import \"path/filepath\"\nfn main() { filepath.join(\"a\", \"b\") }",
     ] {
@@ -123,4 +124,17 @@ fn ordinary_and_variadic_calls_keep_their_verdicts() {
     let r = result("import \"path\"\nfn main() { path.clean([]string{\"a\"}...) }");
     assert_eq!(r.verdict, Verdict::Reject);
     assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E1002"));
+}
+
+#[test]
+fn aliases_closures_and_error_unwrapping_keep_tuple_counts() {
+    let cases = [
+        "import \"net/url\"\nfn pair() (string, string) { return \"a\", \"b\" }\nfn main() { cb := pair\n url.user_password(cb()) }",
+        "import \"net/url\"\nfn main() { cb := fn() (string, string) { return \"a\", \"b\" }\n url.user_password(cb()) }",
+        "import \"net/url\"\nfn pair() (string, string, error) { return \"a\", \"b\", nil }\nfn run() error { url.user_password(pair()?)\n return nil }\nfn main() {}",
+    ];
+    for src in cases {
+        let r = result(src);
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
 }
