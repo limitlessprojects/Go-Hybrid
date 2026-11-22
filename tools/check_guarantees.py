@@ -187,7 +187,7 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
             if not fixture.is_file():
                 problems.append(f"{where}: fixture {path_rel} does not exist")
                 continue
-            if not str(path_rel).startswith(corpus_rel):
+            if not fixture.resolve().is_relative_to((root / corpus_rel).resolve()):
                 problems.append(f"{where}: fixture {path_rel} is outside {corpus_rel}")
             verdict, pinned = fixture_verdict(fixture)
             if verdict is None:
