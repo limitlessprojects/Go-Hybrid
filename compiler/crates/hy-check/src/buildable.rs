@@ -4671,6 +4671,80 @@ impl<'a> Collector<'a> {
             }
         }
     }
+
+    fn check_atomic_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(
+            member,
+            "bool"
+                | "int32"
+                | "int64"
+                | "uint32"
+                | "uint64"
+                | "uintptr"
+                | "pointer"
+                | "value"
+        ) {
+            self.emit_e1002(
+                span,
+                format!("cannot call `atomic.{member}`: `atomic.{member}` is a type, not a function (HYB-E1002)"),
+                &format!("`atomic.{member}` is a package type, not a callable function"),
+            );
+            return;
+        }
+
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `atomic.{member}` (HYB-E1002)"),
+                &format!("`atomic.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "load_int32"
+            | "load_int64"
+            | "load_uint32"
+            | "load_uint64"
+            | "load_uintptr"
+            | "load_pointer" => Some(1),
+            "store_int32"
+            | "store_int64"
+            | "store_uint32"
+            | "store_uint64"
+            | "store_uintptr"
+            | "store_pointer"
+            | "add_int32"
+            | "add_int64"
+            | "add_uint32"
+            | "add_uint64"
+            | "add_uintptr"
+            | "swap_int32"
+            | "swap_int64"
+            | "swap_uint32"
+            | "swap_uint64"
+            | "swap_uintptr"
+            | "swap_pointer" => Some(2),
+            "compare_and_swap_int32"
+            | "compare_and_swap_int64"
+            | "compare_and_swap_uint32"
+            | "compare_and_swap_uint64"
+            | "compare_and_swap_uintptr"
+            | "compare_and_swap_pointer" => Some(3),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`atomic.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `atomic.{member}`"),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -8413,6 +8487,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if (pkg == "atomic" || pkg == "sync/atomic") && self.lookup_kind(pkg).is_none() {
+                        self.check_atomic_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
