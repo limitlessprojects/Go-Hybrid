@@ -18,9 +18,65 @@
 //! (parentheses are transparent, as in `emit_expr_exp`), so a literal the
 //! emitter can lower is never rejected here.
 
+use std::collections::HashMap;
+
 use crate::model::Checker;
 use hy_diag::Diagnostic;
-use hy_syntax::{Block, Decl, Expr, ForKind, InterpPart, Place, PlaceKind, SelectArmKind, Stmt, TypeExpr};
+use hy_syntax::{
+    Block, Decl, Expr, FieldInit, ForKind, InterpPart, Place, PlaceKind, SelectArmKind, Stmt,
+    TypeExpr,
+};
+
+/// Curated foreign named types that are Go interfaces, function types, or
+/// scalar aliases rather than structs (`go build` refuses `T{...}` with
+/// `invalid composite literal type ...`).
+fn is_non_struct_foreign_type(name: &str) -> bool {
+    matches!(
+        name,
+        "io.reader"
+            | "io.writer"
+            | "io.closer"
+            | "io.read_closer"
+            | "io.write_closer"
+            | "io.read_writer"
+            | "io.read_write_closer"
+            | "io.read_seeker"
+            | "io.write_seeker"
+            | "io.read_write_seeker"
+            | "io.seeker"
+            | "io.reader_at"
+            | "io.writer_at"
+            | "io.reader_from"
+            | "io.writer_to"
+            | "io.byte_reader"
+            | "io.byte_scanner"
+            | "io.byte_writer"
+            | "io.rune_reader"
+            | "io.rune_scanner"
+            | "io.string_writer"
+            | "http.handler"
+            | "http.response_writer"
+            | "http.flusher"
+            | "http.hijacker"
+            | "http.round_tripper"
+            | "time.duration"
+            | "os.file_mode"
+            | "os.file_info"
+            | "os.dir_entry"
+            | "os.signal"
+            | "net.conn"
+            | "net.listener"
+            | "net.addr"
+            | "net.packet_conn"
+            | "fmt.stringer"
+            | "fmt.go_stringer"
+            | "fmt.state"
+            | "fmt.formatter"
+            | "fmt.scanner"
+            | "fmt.scan_state"
+            | "sort.interface"
+    )
+}
 
 /// Whether the expression sits in a composite element slot, where the
 /// emitter inherits the head from the enclosing literal's type.
@@ -29,13 +85,70 @@ impl<'a> Checker<'a> {
         let file = self.file;
         for d in &file.decls {
             match d {
-                Decl::Const(c) => self.elided_expr(&c.value, None),
+                Decl::Const(c) => {
+                    if let Some(ty) = &c.ty {
+                        self.elided_type(ty);
+                    }
+                    self.elided_expr(&c.value, None);
+                }
+                Decl::Struct(s) => {
+                    for f in &s.fields {
+                        self.elided_type(&f.ty);
+                    }
+                }
+                Decl::TypeAlias(a) => self.elided_type(&a.ty),
+                Decl::Enum(e) => {
+                    for v in &e.variants {
+                        if let Some(payload) = &v.payload {
+                            self.elided_type(payload);
+                        }
+                    }
+                }
                 Decl::Fn(f) => {
+                    if let Some(r) = &f.receiver {
+                        self.elided_type(&r.ty);
+                    }
+                    for p in &f.params {
+                        self.elided_type(&p.ty);
+                    }
+                    for r in &f.results {
+                        self.elided_type(&r.ty);
+                    }
                     if let Some(b) = &f.body {
                         self.elided_block(b);
                     }
                 }
-                _ => {}
+                Decl::Import { .. } => {}
+            }
+        }
+    }
+
+    fn elided_type(&mut self, ty: &TypeExpr) {
+        match ty {
+            TypeExpr::Named { .. } => {}
+            TypeExpr::Pointer { to, .. }
+            | TypeExpr::Slice { elem: to, .. }
+            | TypeExpr::Chan { elem: to, .. }
+            | TypeExpr::Option { elem: to, .. } => self.elided_type(to),
+            TypeExpr::Array { len, elem, .. } => {
+                if let Some(l) = len {
+                    self.elided_expr(l, None);
+                }
+                self.elided_type(elem);
+            }
+            TypeExpr::Map { key, value, .. } => {
+                self.elided_type(key);
+                self.elided_type(value);
+            }
+            TypeExpr::Fn {
+                params, results, ..
+            } => {
+                for p in params {
+                    self.elided_type(&p.ty);
+                }
+                for r in results {
+                    self.elided_type(r);
+                }
             }
         }
     }
@@ -49,6 +162,9 @@ impl<'a> Checker<'a> {
     fn elided_stmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Local(l) => {
+                if let Some(ty) = &l.ty {
+                    self.elided_type(ty);
+                }
                 for v in &l.values {
                     self.elided_expr(v, None);
                 }
@@ -155,7 +271,12 @@ impl<'a> Checker<'a> {
         if let TypeExpr::Pointer { to, .. } = r {
             r = self.resolve_type_alias(&to);
         }
-        if is_empty && matches!(r, TypeExpr::Map { .. } | TypeExpr::Slice { .. } | TypeExpr::Array { .. }) {
+        if is_empty
+            && matches!(
+                r,
+                TypeExpr::Map { .. } | TypeExpr::Slice { .. } | TypeExpr::Array { .. }
+            )
+        {
             return true;
         }
         let TypeExpr::Named { name, .. } = &r else { return false };
@@ -163,7 +284,67 @@ impl<'a> Checker<'a> {
             return true;
         }
         let head = name.split('[').next().unwrap_or(name.as_str());
+        if is_non_struct_foreign_type(head) {
+            return false;
+        }
         self.structs.contains_key(head) || head.contains('.')
+    }
+
+    fn check_elided_struct_fields(&mut self, exp: Option<&TypeExpr>, fields: &[FieldInit]) {
+        if fields.is_empty() {
+            return;
+        }
+        let Some(t) = exp else { return };
+        let mut r = self.resolve_type_alias(t);
+        if let TypeExpr::Pointer { to, .. } = r {
+            r = self.resolve_type_alias(&to);
+        }
+        let TypeExpr::Named { name, .. } = &r else { return };
+        let head = name.split('[').next().unwrap_or(name.as_str());
+        let Some(declared) = self.structs.get(head).cloned() else {
+            return;
+        };
+
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for f in fields {
+            let n = seen.entry(f.name.clone()).or_insert(0);
+            *n += 1;
+            if *n == 2 {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        f.span,
+                        format!(
+                            "duplicate field `{}` in `{}` literal — Go refuses `duplicate field name {} in struct literal` (HYB-E1002)",
+                            f.name, name, f.name
+                        ),
+                    )
+                    .with_notes(vec![
+                        "each field may be set at most once in one struct literal".to_string(),
+                    ]),
+                );
+            }
+        }
+
+        for f in fields {
+            if !declared.iter().any(|(n, _)| n == &f.name) {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        f.span,
+                        format!(
+                            "unknown field `{}` in `{}` literal — Go refuses `unknown field {} in struct literal of type {}` (HYB-E1002)",
+                            f.name, name, f.name, name
+                        ),
+                    )
+                    .with_notes(vec![
+                        "a struct literal may only name fields the struct declares".to_string(),
+                    ]),
+                );
+            }
+        }
     }
 
     fn elided_expr(&mut self, e: &Expr, expected: Option<&TypeExpr>) {
@@ -171,8 +352,12 @@ impl<'a> Checker<'a> {
             // `emit_expr_exp` peels parentheses before filling the head.
             Expr::Paren { inner, .. } => self.elided_expr(inner, expected),
             Expr::StructLit { ty, fields, span } => {
-                if ty.is_none() && !self.is_elidable_struct_slot(expected, fields.is_empty()) {
+                if let Some(t) = ty {
+                    self.elided_type(t);
+                } else if !self.is_elidable_struct_slot(expected, fields.is_empty()) {
                     self.push_elided_diag(*span);
+                } else {
+                    self.check_elided_struct_fields(expected, fields);
                 }
                 // Field values are emitted without an expected type.
                 for f in fields {
@@ -180,6 +365,9 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::SliceLit { elem, items, .. } => {
+                if let Some(t) = elem {
+                    self.elided_type(t);
+                }
                 let resolved_exp = expected.map(|t| self.resolve_type_alias(t));
                 let item_exp = if let Some((_, inner_elem, _)) = e.as_array_lit() {
                     Some(inner_elem)
@@ -198,6 +386,8 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::MapLit { key, value, entries, .. } => {
+                self.elided_type(key);
+                self.elided_type(value);
                 for (k, v) in entries {
                     self.elided_expr(k, Some(key));
                     self.elided_expr(v, Some(value));
@@ -240,7 +430,20 @@ impl<'a> Checker<'a> {
                     self.elided_expr(&a.value, None);
                 }
             }
-            Expr::FnLit { body, .. } => self.elided_block(body),
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                for p in params {
+                    self.elided_type(&p.ty);
+                }
+                for r in results {
+                    self.elided_type(&r.ty);
+                }
+                self.elided_block(body);
+            }
         }
     }
 

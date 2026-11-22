@@ -94,7 +94,9 @@ def apply_candidate(cand: dict) -> None:
                 raise RuntimeError(f"anchor occurs {n}x in {path}: {old[:90]!r}")
             p.write_text(src.replace(old, new))
     for path, content in cand["new_files"]:
-        (ROOT / path).write_text(content)
+        np = ROOT / path
+        np.parent.mkdir(parents=True, exist_ok=True)
+        np.write_text(content)
 
 
 def revert_tree() -> None:
@@ -186,6 +188,8 @@ def smoke(repro_rel: str, expected: str, rust_tests: list[str]) -> tuple[bool, s
     for c in ACCEPT_CONTROLS:
         tmp = SMOKE_DIR / ("ctl-" + pathlib.Path(c).name)
         gs = sh(["git", "show", f"HEAD:{c}"], timeout=60)
+        if gs.returncode != 0 or not gs.stdout.strip():
+            return False, f"accept control {c} missing or empty at HEAD (exit {gs.returncode})"
         tmp.write_text(gs.stdout)
         cc = sh([str(HYB), "check", str(tmp.relative_to(ROOT))], timeout=300)
         if cc.returncode != 0:
@@ -256,7 +260,7 @@ def propose(issue_no: int, round_no: int, repro_src: str, expected: str,
     (ROOT / repro_rel).write_text(repro_src)
 
     idx = round_no - 1
-    if idx >= len(cands):
+    if idx < 0 or idx >= len(cands):
         _trace(issue_no, {"kind": "descent-exhausted", "round": round_no})
         return (f"specialized brain: descent exhausted at round {round_no} — "
                 f"{len(cands)} candidate(s) tried; see "
@@ -271,28 +275,28 @@ def propose(issue_no: int, round_no: int, repro_src: str, expected: str,
     rec = {"kind": "candidate", "round": round_no, "family": fam,
            "variant": cand["name"]}
     try:
-        apply_candidate(cand)
-    except RuntimeError as e:
-        rec["result"] = f"anchor-failure: {e}"
+        try:
+            apply_candidate(cand)
+        except RuntimeError as e:
+            rec["result"] = f"anchor-failure: {e}"
+            _trace(issue_no, rec)
+            return (f"specialized brain: template anchor rotted against HEAD — "
+                    f"{e} (candidate {cand['name']}). No diff proposed; the "
+                    f"family needs re-derivation against the new tree.")
+        ok, evidence = smoke(repro_rel, expected, cand.get("rust_tests", []))
+        rec["result"] = "green" if ok else f"smoke-fail: {evidence[:300]}"
         _trace(issue_no, rec)
+        if not ok:
+            return (f"specialized brain: candidate '{cand['name']}' failed "
+                    f"internal pre-verification — {evidence[:600]} No diff "
+                    f"proposed this round.")
+        # green: capture diffs BEFORE reverting
+        diffs = []
+        touched = {p for p, *_ in cand["edits"]} | {p for p, _ in cand["new_files"]}
+        for path in sorted(touched):
+            diffs.append(diff_of(path, (ROOT / path).read_text()))
+    finally:
         revert_tree()
-        return (f"specialized brain: template anchor rotted against HEAD — "
-                f"{e} (candidate {cand['name']}). No diff proposed; the "
-                f"family needs re-derivation against the new tree.")
-    ok, evidence = smoke(repro_rel, expected, cand.get("rust_tests", []))
-    rec["result"] = "green" if ok else f"smoke-fail: {evidence[:300]}"
-    _trace(issue_no, rec)
-    if not ok:
-        revert_tree()
-        return (f"specialized brain: candidate '{cand['name']}' failed "
-                f"internal pre-verification — {evidence[:600]} No diff "
-                f"proposed this round.")
-    # green: capture diffs BEFORE reverting
-    diffs = []
-    touched = {p for p, *_ in cand["edits"]} | {p for p, _ in cand["new_files"]}
-    for path in sorted(touched):
-        diffs.append(diff_of(path, (ROOT / path).read_text()))
-    revert_tree()
     rationale = cand["rationale"]
     return ("```diff\n" + "\n".join(diffs) + "\n```\n\n" + rationale)
 
