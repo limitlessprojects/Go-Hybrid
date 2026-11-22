@@ -4671,6 +4671,93 @@ impl<'a> Collector<'a> {
             }
         }
     }
+
+    fn check_strings_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(member, "reader" | "replacer") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `strings.{member}`: `strings.{member}` is a type, not a function (HYB-E1002)"),
+                &format!("`strings.{member}` is a package type, not a callable function"),
+            );
+            return;
+        }
+
+        if member != "new_replacer" && args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!("cannot use `...` in call to non-variadic `strings.{member}` (HYB-E1002)"),
+                &format!("`strings.{member}` does not accept variadic spread arguments"),
+            );
+            return;
+        }
+
+        let expected_arity = match member {
+            "builder" => Some(0),
+            "clone"
+            | "fields"
+            | "title"
+            | "to_lower"
+            | "to_title"
+            | "to_upper"
+            | "trim_space"
+            | "new_reader" => Some(1),
+            "compare"
+            | "contains"
+            | "contains_any"
+            | "contains_func"
+            | "contains_rune"
+            | "count"
+            | "cut"
+            | "cut_prefix"
+            | "cut_suffix"
+            | "equal_fold"
+            | "fields_func"
+            | "has_prefix"
+            | "has_suffix"
+            | "index"
+            | "index_any"
+            | "index_byte"
+            | "index_func"
+            | "index_rune"
+            | "join"
+            | "last_index"
+            | "last_index_any"
+            | "last_index_byte"
+            | "last_index_func"
+            | "map"
+            | "repeat"
+            | "split"
+            | "split_after"
+            | "to_lower_special"
+            | "to_title_special"
+            | "to_upper_special"
+            | "to_valid_utf8"
+            | "trim"
+            | "trim_func"
+            | "trim_left"
+            | "trim_left_func"
+            | "trim_prefix"
+            | "trim_right"
+            | "trim_right_func"
+            | "trim_suffix" => Some(2),
+            "replace_all"
+            | "split_after_n"
+            | "split_n" => Some(3),
+            "replace" => Some(4),
+            _ => None,
+        };
+
+        if let Some(expected) = expected_arity {
+            if args.len() != expected {
+                let noun = if expected == 1 { "argument" } else { "arguments" };
+                self.emit_e1002(
+                    span,
+                    format!("`strings.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    &format!("provide exactly {expected} {noun} to `strings.{member}`"),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -8413,6 +8500,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "strings" && self.lookup_kind(pkg).is_none() {
+                        self.check_strings_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
