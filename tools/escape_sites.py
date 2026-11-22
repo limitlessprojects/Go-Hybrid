@@ -143,14 +143,18 @@ def find_escape_sites(src: str) -> list:
         if fn_idx > 0 and (clean_src[fn_idx - 1].isalnum() or clean_src[fn_idx - 1] == '_'):
             i = fn_idx + 2
             continue
-        # Check next char is '('
-        if fn_idx + 2 >= len(clean_src) or clean_src[fn_idx + 2] != '(':
+        # Whitespace (including masked comments) may separate fn from its
+        # parameter list. Keep fn_idx for the original closure line number.
+        params_start = fn_idx + 2
+        while params_start < len(clean_src) and clean_src[params_start].isspace():
+            params_start += 1
+        if params_start >= len(clean_src) or clean_src[params_start] != '(':
             i = fn_idx + 2
             continue
 
         # Match parens from after 'fn('
         depth = 1
-        j = fn_idx + 3
+        j = params_start + 1
         while j < len(clean_src) and depth > 0:
             c = clean_src[j]
             if c == '(':

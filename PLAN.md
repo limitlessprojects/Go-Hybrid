@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — closure spacing (2026-11-22)
+
+- Contributor (2026-11-22): escape-site scanning preserves captures with whitespace/comments between `fn` and `(`; five focused tests pass (seven pre-fix subtest failures), tooling suite 558 tests completed with only three sandbox loopback errors, and the affected 10-test module passes outside the sandbox. Claims, census, registration and conflict-marker guards pass. Tooling-only; compiler/corpus execution not run locally. Hosted CI/review and any award pending.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.
