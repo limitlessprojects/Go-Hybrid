@@ -72,7 +72,7 @@ pub struct TypeShape {
 /// The curated table. Keys are hy type names; every entry names its pinning
 /// example. `http.header` rides along (response_writer.header's result) so
 /// the chain continues if an example needs it.
-pub static SHAPES: &[(&str, TypeShape)] = &[
+const SHAPE_DEFS: &[(&str, TypeShape)] = &[
     (
         // 06: r.method, r.url (fields on *http.Request)
         "http.request",
@@ -125,13 +125,18 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
         },
     ),
     (
-        // http.Header — the result of w.header(); get/set/add.
+        // http.Header — the result of w.header(). Clone returns another Header.
+        // Write returns only error, unlike ResponseWriter.Write's (int, error).
         "http.header",
         TypeShape {
             members: &[
                 ("get", method("Get", None)),
                 ("set", method("Set", None)),
                 ("add", method("Add", None)),
+                ("write", method("Write", None)),
+                ("del", method("Del", None)),
+                ("values", method("Values", None)),
+                ("clone", method("Clone", Some("http.header"))),
             ],
         },
     ),
@@ -327,17 +332,137 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
     ),
 ];
 
-/// Result shapes for binding-value methods: (descriptor type, method) →
-/// (n_results, has_error). The `?` hoist needs the arity BEFORE emitting
-/// (`doc.set(k, v)?` has no value temp — Set returns only error). Methods
-/// not listed default to (1, true) — the rust-call convention.
-pub static METHOD_RESULTS: &[(&str, &str, (u8, bool))] = &[
+/// Curated foreign receiver and member descriptors.
+pub static SHAPES: &[(&str, TypeShape)] = SHAPE_DEFS;
+
+type MethodResult = (&'static str, &'static str, (u8, bool));
+
+/// (receiver, hy method) → (non-error result count, has error).
+/// Keyed by the hy member name. Header.Write and ResponseWriter.Write share
+/// a Go name but not a signature, so the receiver stays part of the key.
+const EXPLICIT_METHOD_RESULTS: &[MethodResult] = &[
+    ("url.url", "query", (1, false)),
+    ("url.values", "get", (1, false)),
+    ("url.values", "set", (0, false)),
+    ("url.values", "has", (1, false)),
+    ("url.values", "encode", (1, false)),
+    ("http.response_writer", "header", (1, false)),
+    ("http.response_writer", "write", (1, true)),
+    ("http.response_writer", "write_header", (0, false)),
+    ("http.header", "get", (1, false)),
+    ("http.header", "set", (0, false)),
+    ("http.header", "add", (0, false)),
+    ("http.header", "write", (0, true)),
+    ("http.header", "del", (0, false)),
+    ("http.header", "values", (1, false)),
+    ("http.header", "clone", (1, false)),
+    ("http.handler", "serve_http", (0, false)),
+    ("http.serve_mux", "handle", (0, false)),
+    ("http.serve_mux", "handle_func", (0, false)),
+    ("http.serve_mux", "serve_http", (0, false)),
+    ("time.duration", "milliseconds", (1, false)),
+    ("time.duration", "microseconds", (1, false)),
+    ("time.duration", "nanoseconds", (1, false)),
+    ("time.duration", "seconds", (1, false)),
+    ("time.duration", "minutes", (1, false)),
+    ("time.duration", "hours", (1, false)),
+    ("sync.mutex", "lock", (0, false)),
+    ("sync.mutex", "unlock", (0, false)),
+    ("sync.mutex", "try_lock", (1, false)),
+    ("sync.rwmutex", "lock", (0, false)),
+    ("sync.rwmutex", "unlock", (0, false)),
+    ("sync.rwmutex", "try_lock", (1, false)),
+    ("sync.rwmutex", "rlock", (0, false)),
+    ("sync.rwmutex", "runlock", (0, false)),
+    ("sync.rwmutex", "try_rlock", (1, false)),
+    ("sync.rw_mutex", "lock", (0, false)),
+    ("sync.rw_mutex", "unlock", (0, false)),
+    ("sync.rw_mutex", "try_lock", (1, false)),
+    ("sync.rw_mutex", "rlock", (0, false)),
+    ("sync.rw_mutex", "runlock", (0, false)),
+    ("sync.rw_mutex", "try_rlock", (1, false)),
+    ("sync.wait_group", "add", (0, false)),
+    ("sync.wait_group", "done", (0, false)),
+    ("sync.wait_group", "wait", (0, false)),
+    ("sync.once", "do", (0, false)),
     ("serde_json.value", "array", (1, true)),
     ("serde_json.value", "int", (1, true)),
     ("serde_json.value", "string", (1, true)),
     ("serde_json.value", "set", (0, true)),
     ("serde_json.value", "push_string", (0, true)),
 ];
+
+const fn is_atomic_ty(ty: &str) -> bool {
+    let b = ty.as_bytes();
+    b.len() >= 7
+        && b[0] == b'a'
+        && b[1] == b't'
+        && b[2] == b'o'
+        && b[3] == b'm'
+        && b[4] == b'i'
+        && b[5] == b'c'
+        && b[6] == b'.'
+}
+
+const fn atomic_method_result(go: &str) -> (u8, bool) {
+    match go.as_bytes() {
+        b"Store" => (0, false),
+        b"Load" | b"Swap" | b"CompareAndSwap" | b"Add" | b"And" | b"Or" => (1, false),
+        _ => panic!("missing scalar atomic method signature"),
+    }
+}
+
+const fn method_result_count() -> usize {
+    let mut count = EXPLICIT_METHOD_RESULTS.len();
+    let mut i = 0;
+    while i < SHAPE_DEFS.len() {
+        let ty = SHAPE_DEFS[i].0;
+        let members = SHAPE_DEFS[i].1.members;
+        let mut j = 0;
+        while j < members.len() {
+            if is_atomic_ty(ty) && !matches!(members[j].1.kind, MemberKind::Field) {
+                count += 1;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
+const N_METHOD_RESULTS: usize = method_result_count();
+
+const fn build_method_results() -> [MethodResult; N_METHOD_RESULTS] {
+    let mut rows = [("", "", (0, false)); N_METHOD_RESULTS];
+    let mut n = 0;
+    while n < EXPLICIT_METHOD_RESULTS.len() {
+        rows[n] = EXPLICIT_METHOD_RESULTS[n];
+        n += 1;
+    }
+    let mut i = 0;
+    while i < SHAPE_DEFS.len() {
+        let ty = SHAPE_DEFS[i].0;
+        let members = SHAPE_DEFS[i].1.members;
+        let mut j = 0;
+        while j < members.len() {
+            let (name, member) = members[j];
+            if is_atomic_ty(ty) && !matches!(member.kind, MemberKind::Field) {
+                rows[n] = (ty, name, atomic_method_result(member.go));
+                n += 1;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    rows
+}
+
+/// Curated method signatures: (receiver descriptor, hy method name) →
+/// (number of non-error results, has_error). The `?` hoist reads this
+/// before emitting (`h.write(w)?` has no value temp — Header.Write returns
+/// only error). Lookup returns None when the method is not curated; the
+/// caller keeps the historical `(1, true)` fallback.
+pub static METHOD_RESULTS: &[(&str, &str, (u8, bool))] = &build_method_results();
 
 pub fn lookup_method_results(ty: &str, name: &str) -> Option<(u8, bool)> {
     METHOD_RESULTS
@@ -619,6 +744,73 @@ mod tests {
     fn unknown_members_are_none() {
         assert!(lookup_member("http.request", "nope").is_none());
         assert!(lookup_member("made.up.type", "url").is_none());
+    }
+
+    #[test]
+    fn header_write_is_error_only_and_distinct_from_response_writer() {
+        let header = lookup_member("http.response_writer", "header").unwrap();
+        assert_eq!(header.result, Some("http.header"));
+        let write = lookup_member("http.header", "write").unwrap();
+        assert_eq!(write.go, "Write");
+        assert_eq!(write.kind, MemberKind::Method);
+        assert_eq!(lookup_member("http.header", "del").unwrap().go, "Del");
+        assert_eq!(lookup_member("http.header", "values").unwrap().go, "Values");
+        assert_eq!(
+            lookup_member("http.header", "clone").unwrap().result,
+            Some("http.header")
+        );
+        assert_eq!(lookup_method_results("http.header", "write"), Some((0, true)));
+        assert_eq!(lookup_method_results("http.header", "set"), Some((0, false)));
+        assert_eq!(lookup_method_results("http.header", "add"), Some((0, false)));
+        assert_eq!(lookup_method_results("http.header", "del"), Some((0, false)));
+        assert_eq!(lookup_method_results("http.header", "get"), Some((1, false)));
+        assert_eq!(lookup_method_results("http.header", "values"), Some((1, false)));
+        assert_eq!(lookup_method_results("http.header", "clone"), Some((1, false)));
+        assert_eq!(
+            lookup_method_results("http.response_writer", "write"),
+            Some((1, true))
+        );
+        assert_eq!(
+            lookup_method_results("http.response_writer", "header"),
+            Some((1, false))
+        );
+        assert_eq!(
+            lookup_method_results("http.response_writer", "write_header"),
+            Some((0, false))
+        );
+    }
+
+    #[test]
+    fn known_shapes_keep_real_arities_and_unknown_methods_stay_absent() {
+        assert_eq!(lookup_method_results("url.url", "query"), Some((1, false)));
+        assert_eq!(lookup_method_results("url.values", "set"), Some((0, false)));
+        assert_eq!(lookup_method_results("url.values", "get"), Some((1, false)));
+        assert_eq!(
+            lookup_method_results("serde_json.value", "set"),
+            Some((0, true))
+        );
+        assert_eq!(
+            lookup_method_results("serde_json.value", "push_string"),
+            Some((0, true))
+        );
+        assert_eq!(
+            lookup_method_results("serde_json.value", "string"),
+            Some((1, true))
+        );
+        assert_eq!(lookup_method_results("sync.mutex", "lock"), Some((0, false)));
+        assert_eq!(lookup_method_results("sync.mutex", "try_lock"), Some((1, false)));
+        assert_eq!(lookup_method_results("sync.once", "do"), Some((0, false)));
+        assert_eq!(lookup_method_results("http.handler", "serve_http"), Some((0, false)));
+        assert_eq!(lookup_method_results("atomic.bool", "store"), Some((0, false)));
+        assert_eq!(lookup_method_results("atomic.bool", "load"), Some((1, false)));
+        assert_eq!(
+            lookup_method_results("atomic.bool", "compare_and_swap"),
+            Some((1, false))
+        );
+        assert_eq!(lookup_method_results("atomic.bool", "add"), None);
+        assert_eq!(lookup_method_results("http.request", "header"), None);
+        assert_eq!(lookup_method_results("http.header", "unknown"), None);
+        assert_eq!(lookup_method_results("unknown.receiver", "write"), None);
     }
 
     #[test]
