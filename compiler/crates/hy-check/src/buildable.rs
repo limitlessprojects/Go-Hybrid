@@ -2531,6 +2531,15 @@ impl<'a> Collector<'a> {
                         // The loop head always reads the counter.
                         self.exempt(var);
                         self.bind_kind(var, OpKind::Int);
+                        // The emitter lowers `for v in lo..hi` to `v := lo`
+                        // (or `hyLo := lo`), so the counter takes `lo`'s Go
+                        // type: its declared width when typed, `int` for an
+                        // untyped literal. Recording it (even as `None`, so
+                        // an outer same-named binding's width does not leak
+                        // through the shadow) lets the width checks reject
+                        // `take64(i)` / `var y int64 = i` / `u8v + i`.
+                        let counter = self.initializer_scalar(lo);
+                        self.set_scalar(var, counter);
                     }
                     ForKind::Iterate { vars, expr } => {
                         self.check_repeated_bindings(vars, *span);
