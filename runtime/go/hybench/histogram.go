@@ -21,6 +21,7 @@ package hybench
 import (
 	"fmt"
 	"math"
+	"math/bits"
 )
 
 // SubHalf is the sub-bucket half-count: 2^10 linear sub-buckets per
@@ -29,13 +30,18 @@ const SubHalf = 1024
 
 // Histogram is an HDR-style fixed-memory latency histogram (ns units).
 type Histogram struct {
-	counts   [64 * SubHalf]int64 // [exponent][sub-bucket]
-	subMask  int64
-	loShift  [64]int // per-exponent right-shift keeping the top sub-bucket bit
-	maxVal   int64
-	minVal   int64
-	count    int64
-	total    int64 // sum of recorded values (for the mean)
+	counts  [64 * SubHalf]int64 // [exponent][sub-bucket]
+	subMask int64
+	loShift [64]int // per-exponent right-shift keeping the top sub-bucket bit
+	maxVal  int64
+	minVal  int64
+	count   uint64
+	// Two limbs keep the exact nonnegative sum past the int64 range: an
+	// int64 sample split into 64 bits still needs 128 sum bits to be exact.
+	// The count is uint64 for the same reason — Mean and ValueAt rank in
+	// the same width instead of wrapping at 2^63 samples.
+	totalLo  uint64
+	totalHi  uint64
 	overflow int64
 }
 
@@ -68,7 +74,9 @@ func (h *Histogram) Record(ns int64) {
 		return
 	}
 	h.count++
-	h.total += ns
+	var carry uint64
+	h.totalLo, carry = bits.Add64(h.totalLo, uint64(ns), 0)
+	h.totalHi += carry
 	if ns > h.maxVal {
 		h.maxVal = ns
 	}
@@ -88,15 +96,18 @@ func (h *Histogram) Record(ns int64) {
 	h.counts[e*SubHalf+int(sub)]++
 }
 
-// Count is the number of recorded samples.
-func (h *Histogram) Count() int64 { return h.count }
+// Count is the number of recorded samples. It narrows to int64 for the
+// public signature; past 2^63 samples the narrowed value wraps, while
+// Mean, ValueAt and Summary keep ranking on the full uint64 count.
+func (h *Histogram) Count() int64 { return int64(h.count) }
 
 // Mean is the sample mean in ns (0 when empty).
 func (h *Histogram) Mean() float64 {
 	if h.count == 0 {
 		return 0
 	}
-	return float64(h.total) / float64(h.count)
+	sum := math.Ldexp(float64(h.totalHi), 64) + float64(h.totalLo)
+	return sum / float64(h.count)
 }
 
 // ValueAt returns the ns value the given fraction (0..1) of samples fall
@@ -111,17 +122,17 @@ func (h *Histogram) ValueAt(fraction float64) int64 {
 	if fraction >= 1 {
 		return h.maxVal
 	}
-	rank := int64(fraction*float64(h.count) + 0.5)
+	rank := uint64(fraction*float64(h.count) + 0.5)
 	if rank < 1 {
 		rank = 1
 	}
 	if rank > h.count {
 		rank = h.count
 	}
-	var seen int64
+	var seen uint64
 	for e := 0; e < 64; e++ {
 		for sub := 0; sub < SubHalf; sub++ {
-			seen += h.counts[e*SubHalf+sub]
+			seen += uint64(h.counts[e*SubHalf+sub])
 			if seen >= rank {
 				if e < 10 {
 					// exact regime: the sub-bucket index IS the value

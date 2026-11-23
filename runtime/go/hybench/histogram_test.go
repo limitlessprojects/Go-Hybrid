@@ -2,6 +2,7 @@ package hybench
 
 import (
 	"math"
+	"math/big"
 	"testing"
 )
 
@@ -109,5 +110,67 @@ func TestHighMagnitudeMinNaNAndBucketClamp(t *testing.T) {
 	top.Record(math.MaxInt64)
 	if top.P50() != math.MaxInt64 || top.P99() != math.MaxInt64 {
 		t.Fatalf("MaxInt64 bucket reconstruction drifted: p50=%d p99=%d", top.P50(), top.P99())
+	}
+}
+
+// TestMeanKeepsExactSumPastInt64 pins the accepted-input defect: the sum of
+// two MaxInt64 samples exceeds int64, and the mean wrapped to -1. The sum is
+// compared against an exact big.Rat oracle, so an approximate carry scheme
+// (float64 accumulation) is not enough either.
+func TestMeanKeepsExactSumPastInt64(t *testing.T) {
+	for _, samples := range [][]int64{
+		{math.MaxInt64, math.MaxInt64},
+		{math.MaxInt64, 1},
+		{math.MaxInt64, math.MaxInt64, math.MaxInt64, 0, 17},
+		{169999999999, math.MaxInt64, 3},
+		{0, 1, 10, 1000},
+	} {
+		h := New()
+		sum := new(big.Int)
+		for _, sample := range samples {
+			h.Record(sample)
+			sum.Add(sum, big.NewInt(sample))
+		}
+		want, _ := new(big.Rat).SetFrac(sum, big.NewInt(int64(len(samples)))).Float64()
+		got := h.Mean()
+		if math.Abs(got-want) > math.Abs(want)*1e-15 {
+			t.Fatalf("samples %v: mean = %g, want %g", samples, got, want)
+		}
+	}
+}
+
+// TestCountPastInt64KeepsMeanAndRank covers the second accepted-input limit:
+// the sample count itself is int64 today, so any histogram past 2^63 samples
+// wraps. The buckets hold fewer than 2^63 entries each, so the count is set
+// directly rather than by recording.
+func TestCountPastInt64KeepsMeanAndRank(t *testing.T) {
+	const bucket = 3000
+	h := New()
+	h.Record(0)
+	h.Record(0)
+	h.Record(0)
+	h.Record(0)
+	// plus MaxInt64 more samples at 3000, without looping.
+	h.count += math.MaxInt64
+	sub := (int64(bucket) >> uint(h.loShift[11])) & h.subMask
+	h.counts[11*SubHalf+int(sub)] += math.MaxInt64
+	h.maxVal = bucket // set directly: Record was not used for the synthetic samples
+
+	total := new(big.Int).Mul(big.NewInt(int64(bucket)), new(big.Int).Add(big.NewInt(math.MaxInt64), big.NewInt(4)))
+	lo := new(big.Int).And(total, new(big.Int).SetUint64(math.MaxUint64))
+	hi := new(big.Int).Rsh(total, 64)
+	h.totalLo = lo.Uint64()
+	h.totalHi = hi.Uint64()
+
+	want, _ := new(big.Rat).SetFrac(total, new(big.Int).Add(big.NewInt(math.MaxInt64), big.NewInt(4))).Float64()
+	if got := h.Mean(); math.Abs(got-want) > math.Abs(want)*1e-15 {
+		t.Fatalf("mean past int64 count = %g, want %g", got, want)
+	}
+	if got := h.P50(); got < bucket-30 || got > bucket+30 {
+		t.Fatalf("p50 past int64 count = %d, want ~%d", got, bucket)
+	}
+	// Count() narrows to int64 by signature; the wrap is documented.
+	if got, want := h.Count(), int64(math.MinInt64+3); got != want {
+		t.Fatalf("narrowed count = %d, want %d", got, want)
 	}
 }
