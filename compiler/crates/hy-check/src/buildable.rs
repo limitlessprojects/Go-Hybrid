@@ -9042,6 +9042,16 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// A local binding that shadows a helper the emitter lowers into the
+    /// user's own function body. Unlike the package-level prelude names
+    /// (#777), a local lives in `scopes` only: params, named results,
+    /// locals, loop variables, closure arguments. File-level declarations
+    /// are deliberately NOT consulted here — top-level collisions are the
+    /// rivals' territory, not this check's.
+    fn is_local_shadowed(&self, name: &str) -> bool {
+        self.scopes.iter().any(|s| s.contains_key(name))
+    }
+
     fn check_slice_pop_operands(&mut self, base: &Expr, bk: &OpKind, args: &[CallArg], span: Span) {
         match bk {
             OpKind::Slice(_) => {
@@ -9064,6 +9074,26 @@ impl<'a> Collector<'a> {
                             base.render()
                         ),
                         "bind the slice to a local variable first (`s := ...; x := s.pop()`)",
+                    );
+                }
+                // #4695 variant E: `.pop()` on a slice lowers to a call of
+                // the prelude helper `hy_pop(&base)` INSIDE the user's
+                // function body, so a local binding named `hy_pop` in scope
+                // captures the lowered call and Go refuses it ("cannot call
+                // hy_pop (variable of type int)"). The same shape as the
+                // `os`/`fmt`/`filepath` shadow guards, but for a helper the
+                // emitter itself calls. Only fires on the exact lowering
+                // conditions (0 args, addressable base): a local declared
+                // after this call, or in a sibling block, does not shadow
+                // it, and no `.pop()` means no helper call to capture.
+                if args.is_empty()
+                    && self.is_addressable_slice_pop_base(base)
+                    && self.is_local_shadowed("hy_pop")
+                {
+                    self.emit_e1002(
+                        span,
+                        "cannot call `.pop()` here because a local binding named `hy_pop` is in scope — `.pop()` lowers to the prelude helper `hy_pop(&...)`, which the local shadows, so the emitted Go cannot build (issue #4695) (HYB-E1002)".to_string(),
+                        "rename the local `hy_pop` (or the parameter) to a name the prelude does not use",
                     );
                 }
             }
