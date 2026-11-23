@@ -1,7 +1,8 @@
 //! Regression tests: the #2474 element-type check on `set[T]` methods
 //! (`insert` / `contains` / `remove`, and `delete(s, v)`) must also see sets
 //! reached through a struct field (`x.seen`, `p.seen`, generic `b.v`), the
-//! builtin `new(set[T])`, and an address-of binding (`p := &s`).
+//! builtin `new(set[T])`, an address-of binding (`p := &s`), and pointer-typed
+//! sets (`*set[T]` params, typed locals and fn results).
 //!
 //! Before, `set_elem_of_expr` resolved only plain set bindings, set literals
 //! and user fn results, so `x.seen.insert("a")` on a `set[int]` field passed
@@ -163,6 +164,74 @@ fn main() {
     x := f{seen: set[float64]{}}
     fmt.println(x.seen.insert(1))
     x.seen.remove(2)
+}
+"#,
+    );
+}
+
+// Pointer-typed sets: `*set[T]` params, typed locals and fn results reach the
+// same check. The prelude declares the set methods on `*set[t]` receivers, so
+// `p.insert(v)` on a `*set[T]` takes the same `T`. (A `*set[T]` struct field
+// is already rejected by A6, HYB-E3103: struct fields never hold borrows.)
+
+#[test]
+fn pointer_to_set_param_insert_wrong_element_rejects() {
+    rejects(
+        r#"
+fn add(p *set[int]) {
+    p.insert("a")
+}
+fn main() {}
+"#,
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn typed_pointer_to_set_local_remove_wrong_element_rejects() {
+    rejects(
+        r#"
+fn main() {
+    s := set[int]{}
+    var p *set[int] = &s
+    p.remove("a")
+}
+"#,
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn pointer_to_set_fn_result_contains_wrong_element_rejects() {
+    rejects(
+        r#"
+fn mk() *set[int] {
+    return new(set[int])
+}
+fn main() {
+    fmt.println(mk().contains("a"))
+}
+"#,
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn valid_calls_through_pointer_typed_sets_accept() {
+    accepts(
+        r#"
+fn add(p *set[int], v int) bool {
+    return p.insert(v)
+}
+fn mk() *set[float64] {
+    return new(set[float64])
+}
+fn main() {
+    s := set[int]{}
+    fmt.println(add(&s, 2))
+    var p *set[int] = &s
+    p.remove(3)
+    fmt.println(p.contains(2), mk().insert(4), mk().contains(1.5))
 }
 "#,
     );

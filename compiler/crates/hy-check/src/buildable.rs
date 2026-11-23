@@ -1033,15 +1033,28 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// `set[int]` -> `"int"`.
+    /// `set[int]` -> `"int"`; `*set[int]` -> `"int"` too. The prelude declares
+    /// `insert` / `contains` / `remove` on `*set[t]` receivers, so
+    /// `p.insert(v)` on a `*set[T]` takes the same `T`. One pointer level only:
+    /// a declared `**set[T]` has no methods in Go.
     fn set_elem_of_ty(ty: &TypeExpr) -> Option<String> {
+        let ty = match ty {
+            TypeExpr::Pointer { to, .. } => to.as_ref(),
+            t => t,
+        };
         if let TypeExpr::Named { name, .. } = ty {
-            return name
-                .strip_prefix("set[")
-                .and_then(|r| r.strip_suffix(']'))
-                .map(|t| t.to_string());
+            return Self::set_elem_of_type_name(name);
         }
         None
+    }
+
+    /// Rendered type text: `set[int]` / `*set[int]` -> `"int"`.
+    fn set_elem_of_type_name(name: &str) -> Option<String> {
+        name.strip_prefix('*')
+            .unwrap_or(name)
+            .strip_prefix("set[")
+            .and_then(|r| r.strip_suffix(']'))
+            .map(|t| t.to_string())
     }
 
     /// The element type text of a set-valued expression, when provable.
@@ -1069,10 +1082,7 @@ impl<'a> Collector<'a> {
             Expr::Field { base, name, .. } => {
                 let k = self.kind_of_expr(base);
                 let field_ty = self.struct_field_type_name(&k, name)?;
-                field_ty
-                    .strip_prefix("set[")
-                    .and_then(|r| r.strip_suffix(']'))
-                    .map(|t| t.to_string())
+                Self::set_elem_of_type_name(&field_ty)
             }
             // `new(set[T])` — the builtin `new` over the prelude set type
             // (neither `new` nor `set` shadowed by a binding/declaration).
@@ -1096,7 +1106,7 @@ impl<'a> Collector<'a> {
                     _ => None,
                 }
             }
-            // `mk()` where `fn mk() set[T]` — the declared single result.
+            // `mk()` where `fn mk() set[T]` (or `*set[T]`) — the declared single result.
             Expr::Call { callee, .. } => match unwrap_parens(callee) {
                 Expr::Ident { name, .. } if self.lookup_kind(name).is_none() => self
                     .ck
