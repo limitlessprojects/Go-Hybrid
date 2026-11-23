@@ -160,6 +160,8 @@ actions-watch:
 	$(PY) tools/job.py actions watch
 
 clean:
-	@command -v cargo >/dev/null && cargo clean 2>/dev/null || true
+	@if command -v "$(CARGO)" >/dev/null; then \
+		cd compiler && CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" "$(CARGO)" clean; \
+	fi
 	@if command -v go >/dev/null; then GOFLAGS= go clean -cache 2>/dev/null || true; fi
 	@df -h / | tail -1
