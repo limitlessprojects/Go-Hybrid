@@ -1629,9 +1629,115 @@ impl<'a> Collector<'a> {
                     kind: LitKind::Char(_),
                     ..
                 } => Some("int32"),
-                _ => self.typed_value_scalar(operand),
+                _ => self
+                    .typed_value_scalar(operand)
+                    .or_else(|| self.untyped_const_scalar(operand, 0)),
             },
-            other => self.typed_value_scalar(other),
+            other => self
+                .typed_value_scalar(other)
+                .or_else(|| self.untyped_const_scalar(other, 0)),
+        }
+    }
+
+    /// #4660 — Go assigns an untyped constant *expression* its default type
+    /// when it initializes a `:=` / `var` / `let` binding (`x := 1 + 2` ->
+    /// `int`, `x := 'a' + 1` -> `rune`, `x := c` for `const c = 1.5` ->
+    /// `float64`), exactly as it does for a bare literal. Without this the
+    /// binding records no scalar, every width check skips it, and `hyb
+    /// check` passes a program `go build` rejects.
+    ///
+    /// Returns `Some` only when every leaf is provably an untyped constant:
+    /// a typed operand (typed const, typed param, conversion call) makes the
+    /// whole expression typed or non-constant, which `typed_value_scalar` or
+    /// the kind model already covers — guessing here would invent scalars Go
+    /// does not assign.
+    fn untyped_const_scalar(&self, e: &Expr, depth: u32) -> Option<&'static str> {
+        if depth >= 16 {
+            return None;
+        }
+        match unwrap_parens(e) {
+            Expr::Lit {
+                kind: LitKind::Int(_),
+                ..
+            } => Some("int"),
+            Expr::Lit {
+                kind: LitKind::Float(_),
+                ..
+            } => Some("float64"),
+            Expr::Lit {
+                kind: LitKind::Char(_),
+                ..
+            } => Some("int32"),
+            Expr::Ident { name, span } => {
+                // A `const` local declared earlier in the enclosing fn.
+                if let Some(sight) = self.ck.resolve_local_binding_at(name, span.start) {
+                    if !sight.is_const || sight.ty.is_some() {
+                        return None;
+                    }
+                    if (sight.pos.line, sight.pos.col) == (span.start.line, span.start.col) {
+                        return None;
+                    }
+                    return self
+                        .untyped_const_scalar(sight.constant_initializer()?, depth + 1);
+                }
+                // Params, receivers, named results and other bindings that
+                // are not `Stmt::Local` are invisible to the stmt scan but
+                // still shadow file-level consts — bail when the name is
+                // bound in any local scope.
+                if self
+                    .kind_scopes
+                    .iter()
+                    .rev()
+                    .any(|s| s.contains_key(name.as_str()))
+                    || self
+                        .scalar_scopes
+                        .iter()
+                        .rev()
+                        .any(|s| s.contains_key(name.as_str()))
+                {
+                    return None;
+                }
+                if !self.file_untyped_consts.contains(name) {
+                    return None;
+                }
+                let v = *self.ck.const_values.get(name)?;
+                self.untyped_const_scalar(v, depth + 1)
+            }
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.untyped_const_scalar(operand, depth + 1),
+            Expr::Binary { op, lhs, rhs, .. } => {
+                if !matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Mod
+                        | BinOp::BitOr
+                        | BinOp::BitXor
+                        | BinOp::BitAnd
+                        | BinOp::Shl
+                        | BinOp::Shr
+                ) {
+                    return None;
+                }
+                let l = self.untyped_const_scalar(lhs, depth + 1)?;
+                let r = self.untyped_const_scalar(rhs, depth + 1)?;
+                // Untyped constant rules: a float operand makes the result
+                // untyped float; otherwise a rune operand makes it untyped
+                // rune; plain integer operands give untyped int. A shift
+                // result takes its left operand's type, which the same
+                // combine approximates for untyped leaves.
+                Some(match (l, r) {
+                    ("float64", _) | (_, "float64") => "float64",
+                    ("int32", _) | (_, "int32") => "int32",
+                    _ => "int",
+                })
+            }
+            _ => None,
         }
     }
 
