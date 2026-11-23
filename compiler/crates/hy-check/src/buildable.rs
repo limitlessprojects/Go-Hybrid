@@ -734,6 +734,18 @@ struct Collector<'a> {
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
     set_elem_scopes: Vec<HashMap<String, Option<String>>>,
+    /// O8 slot-loan bindings (`p := &m[k]`, `&xs[i]`, `&x.f`), scoped like
+    /// `kind_scopes`. The emitter lowers such a loan to a copy of the element
+    /// plus a store-back, so in Go the binding has the element's own type.
+    slot_loan_scopes: Vec<HashMap<String, bool>>,
+    /// `slot_loan_scopes.len()` when the innermost open `FnLit` body began
+    /// (None outside any fn literal). The emitter clears its active loans
+    /// while emitting a closure body, so an alias of an outer loan there is
+    /// emitted as written (`q := p`, a plain `*S` copy).
+    fn_lit_base: Option<usize>,
+    /// Set by `Stmt::If` for its init local: the emitter renders an if-init
+    /// as written (no slot-loan lowering), so it is never a loan.
+    if_init_local: bool,
     /// One layer per open scope, tracking `for ... in` element bindings
     /// whose kind is copy-semantics storage (`struct`/`array`). The emitter
     /// lowers them to Go's `for _, x := range xs`, so writes through the
@@ -811,6 +823,9 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             kind_scopes: Vec::new(),
             type_name_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
+            slot_loan_scopes: Vec::new(),
+            fn_lit_base: None,
+            if_init_local: false,
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
@@ -885,6 +900,7 @@ impl<'a> Collector<'a> {
         self.scalar_scopes.push(HashMap::new());
         self.container_elem_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
+        self.slot_loan_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
     }
 
@@ -895,6 +911,7 @@ impl<'a> Collector<'a> {
         self.scalar_scopes.pop();
         self.container_elem_scopes.pop();
         self.set_elem_scopes.pop();
+        self.slot_loan_scopes.pop();
         self.copy_var_scopes.pop();
     }
 
@@ -1022,6 +1039,54 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.set_elem_scopes.last_mut() {
                 top.insert(name.to_string(), None);
             }
+            // Every (re)binding shadows an outer slot loan; local decls with
+            // a loan initializer record it via bind_slot_loan.
+            if let Some(top) = self.slot_loan_scopes.last_mut() {
+                top.insert(name.to_string(), false);
+            }
+        }
+    }
+
+    fn bind_slot_loan(&mut self, name: &str) {
+        if name != "_" {
+            if let Some(top) = self.slot_loan_scopes.last_mut() {
+                top.insert(name.to_string(), true);
+            }
+        }
+    }
+
+    fn is_slot_loan(&self, name: &str) -> bool {
+        for layer in self.slot_loan_scopes.iter().rev() {
+            if let Some(v) = layer.get(name) {
+                return *v;
+            }
+        }
+        false
+    }
+
+    /// A slot loan bound OUTSIDE the innermost open fn literal (a capture).
+    fn is_captured_slot_loan(&self, name: &str) -> bool {
+        let Some(base) = self.fn_lit_base else {
+            return false;
+        };
+        for (i, layer) in self.slot_loan_scopes.iter().enumerate().rev() {
+            if let Some(v) = layer.get(name) {
+                return *v && i < base;
+            }
+        }
+        false
+    }
+
+    /// The kind a selector base has in the emitted Go. A slot-loan binding
+    /// of a pointer element (`p := &m[k]` with `m map[K]*S`) is
+    /// `Pointer(Pointer(S))` to the checker but a plain `*S` copy in Go, so
+    /// `p.f` is legal there. Only that multi-level case is rewritten.
+    fn selector_base_kind(&self, base_ident: Option<&str>, bk: OpKind) -> OpKind {
+        match (&bk, base_ident) {
+            (OpKind::Pointer(inner), Some(n)) if matches!(**inner, OpKind::Pointer(_)) && self.is_slot_loan(n) => {
+                (**inner).clone()
+            }
+            _ => bk,
         }
     }
 
@@ -2049,6 +2114,8 @@ impl<'a> Collector<'a> {
     }
 
     fn local(&mut self, l: &LocalDecl) {
+        // Taken first, before any nested fn literal in the values can see it.
+        let from_if_init = std::mem::take(&mut self.if_init_local);
         // Only the short declaration operator needs freshness checks.
         // Every kind of fn-local declaration emits a Go binding, whose
         // name must be read somewhere in its enclosing function.
@@ -2238,8 +2305,30 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        for ((((name, kind), scalar), set_elem), container_elem_scalar) in
-            l.names.iter().zip(kinds).zip(scalars).zip(set_elems).zip(container_elem_scalars)
+        // O8 slot loans: `p := &m[k]` / `&xs[i]` / `&x.f` (the same shape the
+        // `=` assignability rule fails open for). The emitter lowers them only
+        // for `:=` / `let` outside an if-init. Inside a fn literal, an alias of
+        // a captured loan (`q := p`) is emitted as written, so it is a copy too.
+        let loan_decl = matches!(l.kind, LocalKind::Define | LocalKind::Let) && !from_if_init;
+        let slot_loans: Vec<bool> = (0..l.names.len())
+            .map(|i| {
+                loan_decl
+                    && l.ty.is_none()
+                    && l.values.len() == l.names.len()
+                    && (as_addr_of(&l.values[i])
+                        .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }))
+                        || matches!(unwrap_parens(&l.values[i]),
+                            Expr::Ident { name, .. } if self.is_captured_slot_loan(name)))
+            })
+            .collect();
+        for (((((name, kind), scalar), set_elem), container_elem_scalar), slot_loan) in l
+            .names
+            .iter()
+            .zip(kinds)
+            .zip(scalars)
+            .zip(set_elems)
+            .zip(container_elem_scalars)
+            .zip(slot_loans)
         {
             // #1031: a same-scope `:=` re-define keeps the EXISTING variable
             // (and its type) in Go, so only a fresh binding takes the
@@ -2254,6 +2343,9 @@ impl<'a> Collector<'a> {
                 self.set_container_elem_scalar(name, container_elem_scalar);
             }
             self.bind_set_elem(name, set_elem);
+            if slot_loan {
+                self.bind_slot_loan(name);
+            }
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -2505,7 +2597,9 @@ impl<'a> Collector<'a> {
                 // Go's if-init scope covers the whole construct.
                 self.push_scope();
                 if let Some(i) = init {
+                    self.if_init_local = matches!(i.as_ref(), Stmt::Local(_));
                     self.stmt(i);
+                    self.if_init_local = false;
                 }
                 self.expr(cond);
                 self.check_bool_condition(cond, "if");
@@ -2859,7 +2953,11 @@ impl<'a> Collector<'a> {
                 self.place_read(p);
             }
             PlaceKind::Field { base, name } => {
-                let bk = self.kind_of_place(base);
+                let base_ident = match &base.kind {
+                    PlaceKind::Ident(n) => Some(n.as_str()),
+                    _ => None,
+                };
+                let bk = self.selector_base_kind(base_ident, self.kind_of_place(base));
                 self.check_field_selector_kind(&base.render(), name, &bk, p.span);
                 self.check_range_copy_write(p);
                 self.place_read(p);
@@ -3223,6 +3321,7 @@ impl<'a> Collector<'a> {
                 for r in results {
                     self.ty(&r.ty);
                 }
+                let outer_fn_lit_base = self.fn_lit_base.replace(self.slot_loan_scopes.len());
                 self.push_scope();
                 for p in params {
                     self.exempt(&p.name);
@@ -3282,6 +3381,7 @@ impl<'a> Collector<'a> {
                 self.fn_result_scalars = outer_scalars;
                 self.fn_result_type_names = outer_rt;
                 self.pop_scope();
+                self.fn_lit_base = outer_fn_lit_base;
             }
             Expr::Paren { inner, .. } => self.expr(inner),
         }
@@ -8962,7 +9062,11 @@ impl<'a> Collector<'a> {
                 return;
             }
         }
-        let bk = self.kind_of_expr(base);
+        let base_ident = match unwrap_parens(base) {
+            Expr::Ident { name, .. } => Some(name.as_str()),
+            _ => None,
+        };
+        let bk = self.selector_base_kind(base_ident, self.kind_of_expr(base));
         self.check_field_selector_kind(&base.render(), name, &bk, span);
     }
 
@@ -8982,20 +9086,24 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        let has_field = self.struct_field_kind(bk, name).is_some();
-        let sn_opt = self.struct_base_name(bk);
+        // Go auto-dereferences a selector through exactly ONE pointer: on a
+        // multi-level pointer (`pp **S`) both `pp.x` and `pp.m()` are
+        // `pp.x undefined (type **S has no field or method x)`, so its fields
+        // and methods must not resolve through the extra indirection.
+        let multi_ptr = matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Pointer(_)));
+        let has_field = !multi_ptr && self.struct_field_kind(bk, name).is_some();
+        let sn_opt = if multi_ptr { None } else { self.struct_base_name(bk) };
         let has_method = sn_opt
             .as_ref()
             .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn.clone(), name.to_string())));
 
-        // Go auto-dereferences a selector only through a pointer to a struct.
-        // A pointer to a scalar, string, slice, array, map, or channel
-        // (`p := &n; p.foo`) has no fields at all, so it takes the
-        // non-struct path below instead of failing open on the missing
-        // struct name. Multi-level pointers keep their existing handling.
+        // A pointer to a scalar, string, slice, array, map, channel or another
+        // pointer (`p := &n; p.foo`, `pp.x`) has no fields at all, so it takes
+        // the non-struct path below instead of failing open on the missing
+        // struct name.
         let is_struct_like = match bk {
             OpKind::Struct(_) => true,
-            OpKind::Pointer(inner) => matches!(**inner, OpKind::Struct(_) | OpKind::Pointer(_)),
+            OpKind::Pointer(inner) => matches!(**inner, OpKind::Struct(_)),
             _ => false,
         };
         let struct_known = if is_struct_like {
