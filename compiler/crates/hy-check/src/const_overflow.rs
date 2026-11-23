@@ -1590,6 +1590,10 @@ pub(crate) fn fixed_width_int_range(name: &str) -> Option<(i128, i128)> {
         "i32" | "int32" | "rune" => (i32::MIN as i128, i32::MAX as i128),
         "u32" | "uint32" => (0, u32::MAX as i128),
         "i64" | "int64" => (i64::MIN as i128, i64::MAX as i128),
+        // Named integer types: constants are range/float-checked like their
+        // underlying type (`var d time.duration = 1.5` is `(truncated)`).
+        "time.duration" => (i64::MIN as i128, i64::MAX as i128),
+        "time.month" | "time.weekday" => target_int_range(),
         "int" | "isize" => target_int_range(),
         "u64" | "uint64" => (0, u64::MAX as i128),
         "uint" | "usize" | "uintptr" => target_uint_range(),
