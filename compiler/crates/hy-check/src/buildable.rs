@@ -1223,6 +1223,35 @@ impl<'a> Collector<'a> {
         None
     }
 
+    /// #4705 — true when a rendered type spelling is a structural type
+    /// (`*T`, `[N]T`, `[]T`, `map[K]V`, `chan T`) whose spelling is
+    /// canonical enough for direct comparison. Named/alias spellings fail
+    /// open so `type K = [4]int` still compares by kind rules only.
+    fn is_structural_type_spelling(t: &str) -> bool {
+        let t = t.trim_start();
+        t.starts_with('*')
+            || t.starts_with('[')
+            || t.starts_with("map")
+            || t.starts_with("chan")
+            || t.starts_with("<-chan")
+            || t.starts_with("chan<-")
+    }
+
+    /// #4705 — `a == b` / map-index key mismatch on structural types whose
+    /// INNER scalar or array size differs (`*int32` vs `*int64`,
+    /// `[4]int32` vs `[4]int64`, `chan int32` vs `chan int64`). Both sides
+    /// must resolve to structural spellings; anything else fails open.
+    fn structural_type_names_differ(&self, a: Option<&str>, b: Option<&str>) -> bool {
+        match (a, b) {
+            (Some(x), Some(y)) => {
+                Self::is_structural_type_spelling(x)
+                    && Self::is_structural_type_spelling(y)
+                    && x.trim() != y.trim()
+            }
+            _ => false,
+        }
+    }
+
     /// #4693 — element/pointee scalar of a channel's element type:
     /// `chan []int32` -> `int32`, `chan map[string]int64` -> `int64`,
     /// `chan *int32` -> `int32`. Numeric element channels return `None`
@@ -6671,9 +6700,18 @@ impl<'a> Collector<'a> {
                         || (lk == OpKind::Int
                             && rk == OpKind::Float
                             && !self.is_untyped_int_const(lhs));
+                    // #4705: `p32 == p64` on `*int32`/`*int64`, `ch32 == ch64`
+                    // on `chan int32`/`chan int64`, `a32 == a64` on
+                    // `[4]int32`/`[4]int64` — same outer kind, different
+                    // inner scalar/size; Go refuses the comparison.
+                    let structural_conflict = self.structural_type_names_differ(
+                        self.typed_value_type_name(lhs).as_deref(),
+                        self.typed_value_type_name(rhs).as_deref(),
+                    );
                     if equality_kinds_conflict(&lk, &rk)
                         || int_float_conflict
                         || self.scalar_conflict(lhs, rhs)
+                        || structural_conflict
                         || self.sized_array_names_differ(
                             self.typed_value_type_name(lhs).as_deref(),
                             self.typed_value_type_name(rhs).as_deref(),
@@ -7287,9 +7325,17 @@ impl<'a> Collector<'a> {
                 let idx_scalar = self.typed_value_scalar(index);
                 let width_conflict = matches!((key_scalar, idx_scalar),
                     (Some(a), Some(b)) if a != b);
+                // #4705: `map[[4]int]V` indexed by `[3]int`, `map[*int32]V`
+                // indexed by `*int64` — the key kind matches but the inner
+                // scalar/size does not; Go refuses the index.
+                let structural_conflict = self.structural_type_names_differ(
+                    self.map_key_type_name(base_expr).as_deref(),
+                    self.typed_value_type_name(index).as_deref(),
+                );
                 let conflict = (**key_kind == OpKind::Float && *ik == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(key_kind, ik)
-                    || width_conflict;
+                    || width_conflict
+                    || structural_conflict;
                 if conflict {
                     // #3292: prefer the declared spellings over the kind
                     // labels, which collapse int32/int64 to `int` and make
