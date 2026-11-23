@@ -4,6 +4,8 @@
 // //go:generate line that keeps the generated file fresh.
 package main
 
+//go:generate hyb generate .
+
 import "fmt"
 
 func main() {
