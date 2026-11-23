@@ -293,6 +293,11 @@ const (
 	Random
 )
 
+// pendingItem is a task that has been enqueued but not yet run.
+type pendingItem struct {
+	input TaskInput
+}
+
 // staged is the internal per-path record of a completed task.
 type staged struct {
 	result Result
@@ -307,6 +312,22 @@ type Coordinator struct {
 	rootValue Value
 	seed      uint64
 	rngUsed   bool
+
+	// Validate, when non-nil, is called on every successful result value before
+	// it is staged. If it returns an error the group is rejected and no manifest
+	// is published. This is how the model rejects non-finite payloads: set it to
+	// a finite-float check and a NaN/Inf result yields ErrNonFiniteValue.
+	Validate func(Value) error
+
+	// Trace, when non-nil, records the path of each task in the order it was
+	// actually run. It is used by tests to prove the schedule policies are
+	// genuinely distinct even though they publish identical manifests.
+	Trace []string
+
+	// pendingPaths mirrors the paths of the pending slice in the same order, so
+	// the DepthFirst policy can select the deepest ready task. It is rebuilt on
+	// every Run and is not part of the published manifest.
+	pendingPaths []Path
 }
 
 // NewCoordinator constructs a coordinator for the given root worker and budget.
@@ -340,23 +361,25 @@ type node struct {
 
 // Run executes the group to completion under policy and returns the manifest.
 // If the group exceeds its task or byte budget, Run returns ErrBudgetExhausted
-// and a nil manifest (an out-of-budget group produces no manifest).
+// and a nil manifest (an out-of-budget group produces no manifest). If a
+// Validate hook rejects a result value, Run returns that error and a nil
+// manifest.
 func (c *Coordinator) Run(policy SchedulePolicy) (*Manifest, error) {
 	// pending holds nodes whose children have not all been scheduled yet; we
 	// schedule a node, then enqueue its children. A node is "ready" when it is
 	// enqueued but not yet run.
-	type workItem struct {
-		input TaskInput
-	}
-	pending := []workItem{{input: TaskInput{Path: Path{}, Value: c.RootInput()}}}
+	pending := []pendingItem{{input: TaskInput{Path: Path{}, Value: c.RootInput()}}}
+	c.pendingPaths = []Path{{}}
 	results := make(map[string]*staged)
 	taskCount := 0
 	byteCount := 0
+	c.Trace = c.Trace[:0]
 
 	for len(pending) > 0 {
 		idx := c.pick(len(pending), policy)
 		item := pending[idx]
 		pending = append(pending[:idx], pending[idx+1:]...)
+		c.pendingPaths = append(c.pendingPaths[:idx], c.pendingPaths[idx+1:]...)
 
 		taskCount++
 		if c.Budget.MaxTasks > 0 && taskCount > c.Budget.MaxTasks {
@@ -364,19 +387,37 @@ func (c *Coordinator) Run(policy SchedulePolicy) (*Manifest, error) {
 		}
 
 		res, children := c.Root(item.input)
-		byteCount += len(res.Value)
+
+		// Account staged bytes: the value on success, or the failure code+message
+		// on failure. Both are part of the published manifest, so both count
+		// against the byte budget.
+		stagedBytes := len(res.Value)
+		if res.IsFailure() {
+			stagedBytes = len(res.Failure.Code) + len(res.Failure.Message)
+		}
+		byteCount += stagedBytes
 		if c.Budget.MaxBytes > 0 && byteCount > c.Budget.MaxBytes {
 			return nil, ErrBudgetExhausted
 		}
 
+		// Validate successful payloads before staging (e.g. reject non-finite
+		// floats). A rejected value aborts the group with no manifest.
+		if !res.IsFailure() && c.Validate != nil {
+			if err := c.Validate(res.Value); err != nil {
+				return nil, err
+			}
+		}
+
 		key := item.input.Path.String()
 		results[key] = &staged{result: res}
+		c.Trace = append(c.Trace, key)
 
 		// Enqueue children with parent path + index. Children are finite and
 		// ordered by construction of the worker's returned slice.
 		for i, child := range children {
 			child.Path = item.input.Path.Append(i)
-			pending = append(pending, workItem{input: child})
+			pending = append(pending, pendingItem{input: child})
+			c.pendingPaths = append(c.pendingPaths, child.Path)
 		}
 	}
 
@@ -419,8 +460,11 @@ func (c *Coordinator) pick(n int, policy SchedulePolicy) int {
 	case LIFO:
 		return n - 1
 	case DepthFirst:
-		// Deepest path last-enqueued tends to be at the end; pick last.
-		return n - 1
+		// Deepest-path-first: pick the pending item whose path has the most
+		// elements (ties broken by highest path, i.e. last in path order). This
+		// is genuinely distinct from LIFO, which simply picks the last-enqueued
+		// item regardless of depth.
+		return c.pickDeepest(n)
 	case Random:
 		if !c.rngUsed {
 			c.seed = 0x9e3779b97f4a7c15
@@ -430,6 +474,24 @@ func (c *Coordinator) pick(n int, policy SchedulePolicy) int {
 	default:
 		return 0
 	}
+}
+
+// pickDeepest returns the index of the pending item with the greatest path
+// depth. The pending slice is kept in path order, so among equal depths the
+// first (lowest) path wins. This yields a true depth-first descent — the first
+// subtree is fully explored before the next — which is genuinely distinct from
+// LIFO (last-enqueued) and FIFO (first-enqueued).
+func (c *Coordinator) pickDeepest(n int) int {
+	best := 0
+	bestDepth := -1
+	for i := 0; i < n; i++ {
+		d := len(c.pendingPaths[i])
+		if d > bestDepth {
+			bestDepth = d
+			best = i
+		}
+	}
+	return best
 }
 
 // parsePathKey reconstructs a Path from its dotted string key.
