@@ -134,6 +134,24 @@ class RegistrationTests(unittest.TestCase):
             path.write_text("# suite\n", encoding="utf-8")
         return root, workflow
 
+    def test_attached_discovery_options_match_unittest(self):
+        root, _ = self.build("", ["tools/test_probe.py", "tools/test_other.py"])
+        (root / "tools/test_probe.py").write_text(
+            "import unittest\nclass Probe(unittest.TestCase):\n"
+            "    def test_probe(self): self.fail('probe executed')\n", encoding="utf-8")
+        for options in (["-stools", "-ptest_probe.py"],
+                        ["-s", "tools", "-ptest_probe.py"],
+                        ["-stools", "-p", "test_probe.py"],
+                        ["-s=tools", "-p=test_probe.py"]):
+            with self.subTest(options=options):
+                args = ["-m", "unittest", "discover", *options]
+                actual = subprocess.run([sys.executable, *args], cwd=root,
+                                        capture_output=True, text=True)
+                self.assertEqual(actual.returncode, 1)
+                self.assertIn("AssertionError: probe executed", actual.stderr)
+                missing = guard.unregistered(root, "python3 " + " ".join(args))
+                self.assertEqual([rel for rel, _ in missing], ["tools/test_other.py"])
+
     def test_glob_pattern_registers_a_whole_family(self):
         workflow = "          python3 -m unittest discover -s tools -p 'test_job*.py'\n"
         root, text = self.build(
