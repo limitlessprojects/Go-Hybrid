@@ -3119,3 +3119,38 @@ fn utf8_byte_escapes_emit_exact_utf8_strings_issue_1199() {
         go
     );
 }
+
+#[test]
+fn raw_string_with_bom_emits_constant_concat_issue_4670() {
+    let bom = '\u{feff}';
+    let src = format!("fn main() {{\n    r := `{bom}abc`\n    fmt.println(len(r))\n}}\n");
+    let go = emit(&src);
+    assert!(
+        !go.contains(bom),
+        "emitted Go must not contain a raw U+FEFF (invalid BOM in the middle of the file):\n{go}"
+    );
+    assert!(
+        go.contains("\"\\ufeff\" + `abc`"),
+        "expected the BOM spelled as a cooked escape concatenated with the raw tail, got:\n{go}"
+    );
+}
+
+#[test]
+fn raw_string_with_interior_and_double_bom_issue_4670() {
+    let bom = '\u{feff}';
+    let src = format!("fn main() {{\n    a := `x{bom}y`\n    b := `{bom}{bom}`\n    c := `plain\nraw\ttext`\n}}\n");
+    let go = emit(&src);
+    assert!(!go.contains(bom), "no raw U+FEFF in emitted Go:\n{go}");
+    assert!(
+        go.contains("`x` + \"\\ufeff\" + `y`"),
+        "interior BOM splits into head + cooked + tail:\n{go}"
+    );
+    assert!(
+        go.contains("\"\\ufeff\" + \"\\ufeff\""),
+        "adjacent BOMs emit two cooked pieces:\n{go}"
+    );
+    assert!(
+        go.contains("`plain\nraw\ttext`"),
+        "BOM-free raw literals stay verbatim:\n{go}"
+    );
+}

@@ -2350,6 +2350,30 @@ impl Default for Emitter {
 // String literals (cooked → Go quoting; raw → verbatim backticks)
 // ---------------------------------------------------------------------------
 
+/// Raw (backtick) literals stay verbatim — but Go's scanner rejects a
+/// U+FEFF anywhere but file start (`invalid BOM in the middle of the
+/// file`), so a BOM inside the value cannot be emitted raw. Split on the
+/// BOM into a constant concatenation: `` `head` + "\ufeff" + `tail` ``.
+/// Backtick pieces keep their verbatim semantics (embedded newlines etc.),
+/// empty pieces drop, and Go constant-folds the `+`, so the runtime value
+/// is byte-identical. Independent of `go_quote`: raw values never route
+/// through it.
+pub(crate) fn go_raw_quote(s: &str) -> String {
+    if !s.contains('\u{feff}') {
+        return format!("`{}`", s);
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for (i, piece) in s.split('\u{feff}').enumerate() {
+        if i > 0 {
+            parts.push("\"\\ufeff\"".to_string());
+        }
+        if !piece.is_empty() {
+            parts.push(format!("`{}`", piece));
+        }
+    }
+    parts.join(" + ")
+}
+
 pub(crate) fn go_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');

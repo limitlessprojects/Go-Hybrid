@@ -11,7 +11,8 @@
 use hy_syntax::*;
 
 use super::{
-    go_quote, special_member, to_go_name, BindingKind, EmitError, Emitter, MemberSpecial,
+    go_quote, go_raw_quote, special_member, to_go_name, BindingKind, EmitError, Emitter,
+    MemberSpecial,
 };
 
 use super::shapes::{
@@ -557,7 +558,7 @@ impl Emitter {
             LitKind::Int(s) | LitKind::Float(s) => s.clone(),
             LitKind::Bool(b) => b.to_string(),
             LitKind::Str(s) => go_quote(s),
-            LitKind::RawStr(s) => format!("`{}`", s),
+            LitKind::RawStr(s) => go_raw_quote(s),
             LitKind::Char(c) => format!("'\\U{:08x}'", *c as u32),
             LitKind::Nil => "nil".to_string(),
         }
