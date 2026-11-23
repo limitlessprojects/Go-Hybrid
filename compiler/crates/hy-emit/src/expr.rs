@@ -1063,6 +1063,24 @@ impl Emitter {
         // `r.URL.Query().Get("a")`); generic Foreign falls back to M4.
         if let Expr::Field { base, name, .. } = callee {
             let base = Self::selector_base(base);
+            let is_fmt_method = matches!(name.as_str(), "printf" | "fatalf" | "panicf");
+            if is_fmt_method && !args.is_empty() {
+                if let Expr::Interp { parts, .. } = &args[0].value {
+                    let (fmt_str, interp_args) = self.interp_parts(parts)?;
+                    let b = self.emit_expr(base, ATOM)?;
+                    let mut call_args = vec![go_quote(&fmt_str)];
+                    call_args.extend(interp_args);
+                    for a in &args[1..] {
+                        call_args.push(self.emit_call_arg(a)?);
+                    }
+                    let go_method = if let Some(bt) = self.type_of_expr(base) {
+                        lookup_member(bt, name).map(|m| m.go.to_string()).unwrap_or_else(|| to_go_name(name))
+                    } else {
+                        to_go_name(name)
+                    };
+                    return Ok(format!("{}.{}({})", b, go_method, call_args.join(", ")));
+                }
+            }
             if let Some(bt) = self.type_of_expr(base) {
                 if let Some(m) = lookup_member(bt, name) {
                     if m.kind == MemberKind::Method {
@@ -1605,21 +1623,32 @@ impl Emitter {
         // arguments into the call — `fmt.Fprintf(w, "%v+%v=%v\n", a, b, a+b)`.
         // (Wrapping the whole interp in Sprintf would print the %v's as
         // literals — Fprintf's format param consumes them.)
-        if (pkg == "fmt" && (name == "fprintf" || name == "printf")) && !args.is_empty() {
-            if let Expr::Interp { parts, .. } = &args[args.len() - 1].value {
-                let (fmt_str, interp_args) = self.interp_parts(parts)?;
-                let mut call_args = Vec::new();
-                for a in &args[..args.len() - 1] {
-                    call_args.push(self.emit_call_arg(a)?);
+        let fmt_pos = match (pkg, name) {
+            ("fmt", "printf" | "sprintf" | "errorf") => Some(0),
+            ("fmt", "fprintf") => Some(1),
+            ("log", "printf" | "fatalf" | "panicf") => Some(0),
+            _ => None,
+        };
+        if let Some(fmt_idx) = fmt_pos {
+            if args.len() > fmt_idx {
+                if let Expr::Interp { parts, .. } = &args[fmt_idx].value {
+                    let (fmt_str, interp_args) = self.interp_parts(parts)?;
+                    let mut call_args = Vec::new();
+                    for a in &args[..fmt_idx] {
+                        call_args.push(self.emit_call_arg(a)?);
+                    }
+                    call_args.push(go_quote(&fmt_str));
+                    call_args.extend(interp_args);
+                    for a in &args[fmt_idx + 1..] {
+                        call_args.push(self.emit_call_arg(a)?);
+                    }
+                    return Ok(format!(
+                        "{}.{}({})",
+                        pkg,
+                        to_go_name(name),
+                        call_args.join(", ")
+                    ));
                 }
-                call_args.push(go_quote(&fmt_str));
-                call_args.extend(interp_args);
-                return Ok(format!(
-                    "{}.{}({})",
-                    pkg,
-                    to_go_name(name),
-                    call_args.join(", ")
-                ));
             }
         }
 
