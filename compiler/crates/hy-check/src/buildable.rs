@@ -1,4 +1,4 @@
-//! buildable.rs — issue #134: an accepted program must emit buildable Go.
+﻿//! buildable.rs — issue #134: an accepted program must emit buildable Go.
 //!
 //! Go's front-end rejects four declaration shapes that `hyb check` used to
 //! accept with 0 diagnostics, so the emitted module could never build:
@@ -994,6 +994,31 @@ impl<'a> Collector<'a> {
         canonical_numeric_name(t)
     }
 
+    fn chan_container_elem_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let Expr::Ident { name, .. } = unwrap_parens(e) else {
+            return None;
+        };
+        let tname = self.lookup_type_name(name)?;
+        let t = tname.trim();
+        let t = t.strip_prefix("<-").unwrap_or(t).trim();
+        let t = t.strip_prefix("chan")?;
+        let t = t.trim_start();
+        let t = t.strip_prefix("<-").unwrap_or(t).trim();
+        if let Some(rest) = t.strip_prefix("[]") {
+            return canonical_numeric_name(rest.trim());
+        }
+        if let Some(rest) = t.strip_prefix('*') {
+            return canonical_numeric_name(rest.trim());
+        }
+        if let Some(rest) = t.strip_prefix("map[") {
+            if let Some(idx) = rest.find(']') {
+                let val_ty = rest[idx + 1..].trim();
+                return canonical_numeric_name(val_ty);
+            }
+        }
+        None
+    }
+
     /// A name that shadows checked defines but is not itself checked.
     fn exempt(&mut self, name: &str) {
         if name != "_" {
@@ -1194,6 +1219,24 @@ impl<'a> Collector<'a> {
                 if bk == OpKind::Str {
                     Some("uint8")
                 } else if let Some(be) = place_as_expr(base) {
+                    self.container_elem_scalar_of_expr(&be)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn place_container_elem_scalar(&self, p: &Place) -> Option<&'static str> {
+        match &p.kind {
+            PlaceKind::Ident(n) => self.lookup_container_elem_scalar(n),
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                self.struct_field_container_elem_scalar(&bk, name)
+            }
+            PlaceKind::Index { base, .. } => {
+                if let Some(be) = place_as_expr(base) {
                     self.container_elem_scalar_of_expr(&be)
                 } else {
                     None
@@ -6204,6 +6247,14 @@ impl<'a> Collector<'a> {
                 return;
             }
         }
+        if let (Some(w), Some(g)) =
+            (self.chan_container_elem_scalar(chan), self.container_elem_scalar_of_expr(value))
+        {
+            if w != g {
+                self.emit_send_mismatch(value, g, w);
+                return;
+            }
+        }
         // A typed int value reaches a float channel through the (Float, Int)
         // arm of `kinds_conflict`, which must stay open for untyped int
         // constants; the same #682 U5 disambiguation applies here.
@@ -6831,10 +6882,15 @@ impl<'a> Collector<'a> {
                         (self.place_scalar(target), self.typed_value_scalar(&values[0])),
                         (Some(t), Some(v)) if t != v
                     );
+                    let container_scalar_mismatch = matches!(
+                        (self.place_container_elem_scalar(target), self.container_elem_scalar_of_expr(&values[0])),
+                        (Some(t), Some(v)) if t != v
+                    );
                     // #2771: `b = a` between a `[4]int` and a `[3]int`.
                     if !is_loan_shape
                         && (conflict
                             || scalar_mismatch
+                            || container_scalar_mismatch
                             || self.sized_array_names_differ(
                                 self.place_type_name(target).as_deref(),
                                 self.typed_value_type_name(&values[0]).as_deref(),
@@ -6886,11 +6942,15 @@ impl<'a> Collector<'a> {
                             (self.place_scalar(t), self.typed_value_scalar(v)),
                             (Some(tp), Some(vp)) if tp != vp
                         );
+                        let container_scalar_mismatch = matches!(
+                            (self.place_container_elem_scalar(t), self.container_elem_scalar_of_expr(v)),
+                            (Some(tp), Some(vp)) if tp != vp
+                        );
                         let array_mismatch = self.sized_array_names_differ(
                             self.place_type_name(t).as_deref(),
                             self.typed_value_type_name(v).as_deref(),
                         );
-                        if conflict || scalar_mismatch || array_mismatch {
+                        if conflict || scalar_mismatch || container_scalar_mismatch || array_mismatch {
                             let (v_label, t_label) = if array_mismatch {
                                 (
                                     self.typed_value_type_name(v)
