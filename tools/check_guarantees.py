@@ -138,6 +138,7 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
 
     registry_path = root / table.get("registry", "compiler/crates/hy-diag/data/diagnostics.json")
     corpus_rel = table.get("corpus", "tests/checker-corpus")
+    corpus_dir = (root / corpus_rel).resolve()
     doc_rel = doc_override or table.get("doc", "GUARANTEES.md")
     codes = registry_codes(registry_path)
 
@@ -187,7 +188,7 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
             if not fixture.is_file():
                 problems.append(f"{where}: fixture {path_rel} does not exist")
                 continue
-            if not str(path_rel).startswith(corpus_rel):
+            if not fixture.resolve().is_relative_to(corpus_dir):
                 problems.append(f"{where}: fixture {path_rel} is outside {corpus_rel}")
             verdict, pinned = fixture_verdict(fixture)
             if verdict is None:

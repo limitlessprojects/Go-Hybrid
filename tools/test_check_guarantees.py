@@ -252,6 +252,33 @@ class Coverage(unittest.TestCase):
         self.assertIn("HYB-E9999", text)
         self.assertIn("not in the registry", text)
 
+    def test_sibling_prefix_outside_the_corpus_is_reported(self):
+        sneaky = "tests/checker-corpus-archive/fake.hy"
+        tmp, root = build(
+            rows=[row(fixtures=[{"path": sneaky, "expect": "reject"}])],
+            fixtures={sneaky: fixture("REJECT A1c")},
+        )
+        self.addCleanup(tmp.cleanup)
+        self.assertIn("is outside", joined(problems_of(root)))
+
+    def test_lexical_dotdot_escape_outside_the_corpus_is_reported(self):
+        sneaky = "tests/checker-corpus/../unregistered/fake.hy"
+        tmp, root = build(
+            rows=[row(fixtures=[{"path": sneaky, "expect": "reject"}])],
+            fixtures={sneaky: fixture("REJECT A1c")},
+        )
+        self.addCleanup(tmp.cleanup)
+        self.assertIn("is outside", joined(problems_of(root)))
+
+    def test_nested_corpus_subdirectory_still_passes(self):
+        deep = "tests/checker-corpus/nested/deep.hy"
+        tmp, root = build(
+            rows=[row(fixtures=[{"path": deep, "expect": "reject"}])],
+            fixtures={deep: fixture("REJECT A1c")},
+        )
+        self.addCleanup(tmp.cleanup)
+        self.assertEqual(problems_of(root), [])
+
     def test_rule_outside_the_scope_families_needs_no_row(self):
         registry = json.dumps(
             {
