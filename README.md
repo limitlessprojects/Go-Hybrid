@@ -114,11 +114,13 @@ skip the cgo runtime.
 
 ## Quick start
 
-One command, **no Rust toolchain** (the bridge staticlib ships prebuilt):
+One command, **no Rust toolchain** (Linux and macOS; the bridge staticlib ships prebuilt):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/limitlessprojects/Go-Hybrid/main/install.sh | sh
 ```
+
+For **Windows (x64)**, download the release archive from [Releases](https://github.com/limitlessprojects/Go-Hybrid/releases), extract it, and set `HYB_RUNTIME_DIR` and `PATH` as documented in `INSTALL.md`.
 
 Prefer building from source? The pins are the contract (Go 1.26.9 / Rust 1.99.0):
 
