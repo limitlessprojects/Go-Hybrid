@@ -2,8 +2,31 @@ package hybench
 
 import (
 	"math"
+	"math/big"
 	"testing"
 )
+
+func TestMeanDoesNotWrapWhenSampleSumExceedsInt64(t *testing.T) {
+	for _, samples := range [][]int64{
+		{math.MaxInt64, math.MaxInt64},
+		{math.MaxInt64, 1},
+		{math.MaxInt64, math.MaxInt64, math.MaxInt64, 0, 17},
+		{0, 1, 10, 1000},
+	} {
+		h := New()
+		sum := new(big.Int)
+		for _, sample := range samples {
+			h.Record(sample)
+			sum.Add(sum, big.NewInt(sample))
+		}
+		mean := new(big.Rat).SetFrac(sum, big.NewInt(int64(len(samples))))
+		want, _ := mean.Float64()
+		got := h.Mean()
+		if math.Abs(got-want) > math.Abs(want)*1e-15 {
+			t.Fatalf("samples %v: mean=%g, want %g", samples, got, want)
+		}
+	}
+}
 
 func TestRecordsAndRanks(t *testing.T) {
 	h := New()
