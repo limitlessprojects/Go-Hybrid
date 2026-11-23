@@ -850,3 +850,4 @@
 {"ts": "2026-11-23T11:42:18Z", "event": "rebase-tick", "pr": null, "verdict": null, "sha": null, "note": "rebase shepherd tick", "run": "https://github.com/limitlessprojects/Go-Hybrid/actions/runs/45165242004"}
 {"ts": "2026-11-23T11:45:54Z", "event": "board-refresh", "pr": null, "verdict": "ok", "sha": null, "note": "board + labels refreshed", "run": "https://github.com/limitlessprojects/Go-Hybrid/actions/runs/45156710105"}
 {"ts": "2026-11-23T12:32:04Z", "event": "board-refresh", "pr": null, "verdict": "ok", "sha": null, "note": "board + labels refreshed", "run": "https://github.com/limitlessprojects/Go-Hybrid/actions/runs/45174607360"}
+{"ts": "2026-11-23T13:57:52Z", "event": "dup-pass", "pr": null, "verdict": null, "sha": null, "note": "phase A/B pass complete", "run": "https://github.com/limitlessprojects/Go-Hybrid/actions/runs/45186169463"}
