@@ -337,6 +337,18 @@ impl<'a> Checker<'a> {
                     desc: desc.clone(),
                     moved_name: name.to_string(),
                 });
+                for (s_env, _, _) in st.closure_scoped_envs.values_mut() {
+                    if let Some(cb) = s_env.get_mut(m) {
+                        if cb.moved.is_none() {
+                            cb.moved = Some(MoveInfo {
+                                span,
+                                kind,
+                                desc: desc.clone(),
+                                moved_name: name.to_string(),
+                            });
+                        }
+                    }
+                }
             } else if let Some(cb) = self.consts.get(m).cloned() {
                 if !cb.shape.is_sendable_by_type() {
                     let mut frozen = cb;
