@@ -1,0 +1,3 @@
+program	orig_total	orig_code	acc_total	acc_code	managed	escapes	rewrite_tax	verdict
+errgroup_fanout	64	55	45	37	0	0	170.3%	ACCEPTED_CLEAN
+singleflight_coalesce	43	35	45	34	0	0	204.7%	ACCEPTED_CLEAN
