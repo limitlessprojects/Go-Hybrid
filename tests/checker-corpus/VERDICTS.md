@@ -1112,3 +1112,25 @@ the move freeze reach the send path as well.
 | struct-chan-shared-map-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct over the channel freezes that storage, so `m["after"] = 2` is a write through a live alias |
 
 With this registration the corpus is **139 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 92**.
+
+-------------------------------------------------------------------------------
+
+### fn-type-scalar-width-reject / fn-type-scalar-width-controls-accept — REJECT + ACCEPT (issue #4751: fn-type compatibility must compare scalar widths)
+
+`g` takes an `int64`, but the fn-typed variable declares `fn(int) int`.
+The kinds match (Int vs Int), so the checker used to accept the assignment
+and `go build` failed with `cannot use g (variable of type func(int64) int)
+as func(int) int value`. The reject fixture pins the var-init position;
+the same width-only gap at assignment, call argument, return, struct
+literal, map value, and fn-literal positions is pinned by unit tests in
+`hy-check/tests/fn_type_scalar_widths.rs`. The accept fixture pins the
+controls: the same width accepts, true aliases collapse to one canonical
+width (`byte` is `uint8`), and a declared type alias carries its target's
+width.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| fn-type-scalar-width-reject | REJECT | BUILDABLE | `HYB-E1002` | `fn(int64) int` assigned to `fn(int) int`: same kind, different scalar width |
+| fn-type-scalar-width-controls-accept | ACCEPT | — | — | same width accepts; `byte`/`uint8` collapse; `my_int = int64` alias carries int64's width |
+
+With this registration the corpus is **141 programs — ACCEPT 46 · ACCEPT-MANAGED 2 · REJECT 93**.
