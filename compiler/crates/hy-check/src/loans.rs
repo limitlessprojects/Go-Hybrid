@@ -1156,9 +1156,15 @@ impl<'a> Checker<'a> {
                 let mut caps = Vec::new();
                 collect_capture_idents_block(body, &mut cap_bound, &mut caps);
                 if let Some(&closure_last) = st.last_use.get(name) {
+                    // Clone the alias map so the chain walk does not
+                    // borrow `st` while `st.loans` is mutably borrowed.
+                    let aliases = st.aliases.clone();
                     for loan in &mut st.loans {
                         if let LoanTarget::MapSlot { binding, .. } = &loan.target {
-                            if caps.iter().any(|c| c == binding) {
+                            if caps
+                                .iter()
+                                .any(|c| Self::alias_chain_hits(&aliases, c, binding))
+                            {
                                 loan.last = loan.last.max(closure_last);
                             }
                         }
@@ -1189,6 +1195,40 @@ impl<'a> Checker<'a> {
                             .entry(name.to_string())
                             .or_default()
                             .extend(roots);
+                    }
+                }
+                // #1997 (closure half): copying a closure (`f2 := f`) must
+                // extend the captured MapSlot loan windows to the COPY's last
+                // use, exactly as the definition extended them to the
+                // original's. Re-derive the capture set from the copied
+                // definition's body and resolve each capture through aliases,
+                // mirroring the FnLit branch above.
+                if let Some(&copy_last) = st.last_use.get(name) {
+                    if let Some((cparams, cresults, cbody)) = st
+                        .closure_defs
+                        .get(src)
+                        .or_else(|| st.closure_defs.get(&resolved))
+                        .cloned()
+                    {
+                        let mut cbound: HashSet<String> =
+                            cparams.iter().map(|p| p.name.clone()).collect();
+                        cbound.extend(cresults.iter().filter_map(|r| r.name.clone()));
+                        let mut ccaps = Vec::new();
+                        collect_capture_idents_block(&cbody, &mut cbound, &mut ccaps);
+                        // Same chain rule as the FnLit branch above; the
+                        // alias map is cloned so the walk does not borrow
+                        // `st` while `st.loans` is mutably borrowed.
+                        let caliases = st.aliases.clone();
+                        for loan in &mut st.loans {
+                            if let LoanTarget::MapSlot { binding, .. } = &loan.target {
+                                if ccaps
+                                    .iter()
+                                    .any(|c| Self::alias_chain_hits(&caliases, c, binding))
+                                {
+                                    loan.last = loan.last.max(copy_last);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2232,6 +2272,88 @@ impl<'a> Checker<'a> {
             .unwrap_or(false)
     }
 
+    /// Does the alias chain starting at `name` pass through `target`?
+    /// (#1997) A closure capturing an alias of a slot loan (`p := s`)
+    /// uses the loan's storage, so the loan window must extend to the
+    /// closure's last use — but comparing canonical roots would be wrong:
+    /// `p` and `s` both resolve to the base map `m`, while a closure
+    /// capturing `m` alone does not use the slot. The chain walk needs
+    /// only the alias map, so callers clone `st.aliases` first and pass
+    /// it here — that keeps the walk from borrowing `st` while `st.loans`
+    /// is mutably borrowed.
+    fn alias_chain_hits(
+        aliases: &std::collections::HashMap<String, String>,
+        name: &str,
+        target: &str,
+    ) -> bool {
+        let mut cur = name;
+        for _ in 0..16 {
+            if cur == target {
+                return true;
+            }
+            match aliases.get(cur) {
+                Some(next) => cur = next,
+                None => return false,
+            }
+        }
+        cur == target
+    }
+
+    /// Does `name` denote a value that may carry shareable mutable GC storage
+    /// beyond what its DECLARED shape claims? (#1997) A binding carries share
+    /// when (a) its declared shape may share, (b) it already participates in
+    /// may-share edges (a literal embed, struct copy, or field store recorded
+    /// peers for it), or (c) it is an `Unknown`-shaped (`any`) value with a
+    /// non-owned origin (a parameter, receiver, or captured value handed in
+    /// from outside — its shape is unknown, so fail closed: the value, not
+    /// the declaration, is the ground truth). Scalar locals stay out: a local
+    /// `any` holding a literal has no origin and no peers, and
+    /// `shape_may_share` still says `Unknown` is NOT may-share in general —
+    /// this widens only the edge-recording sites, never the shape rule.
+    fn binding_carries_share(&self, st: &FnState, name: &str) -> bool {
+        let Some(b) = self.lookup_binding(st, name) else {
+            return false;
+        };
+        if self.shape_may_share(&b.shape) {
+            return true;
+        }
+        if st.may_share
+            .get(name)
+            .is_some_and(|peers| !peers.is_empty())
+        {
+            return true;
+        }
+        matches!(b.shape, TypeShape::Unknown) && b.non_owned_origin.is_some()
+    }
+
+    /// Does the stored value carry shareable storage? (#1997) Mirrors the
+    /// `carries` computation in `record_may_share`: a value whose shape may
+    /// share, an `Unknown`-shaped value, a literal, or a bare root ident is
+    /// checked against its reference roots, and a root counts when it
+    /// carries share per `binding_carries_share`. Scalar expressions
+    /// (`len(m)`, literals) stay out: their shape is primitive and they
+    /// have no bare root, so no root is consulted.
+    fn value_carries_share(&self, st: &FnState, value: &Expr) -> bool {
+        let inner = unwrap_parens(value);
+        let result = self.shape_of_expr(st, inner);
+        if self.shape_may_share(&result) {
+            return true;
+        }
+        let is_literal = matches!(
+            inner,
+            Expr::StructLit { .. } | Expr::MapLit { .. } | Expr::SliceLit { .. }
+        );
+        if !matches!(result, TypeShape::Unknown)
+            && inner.root_ident().is_none()
+            && !is_literal
+        {
+            return false;
+        }
+        let mut roots = Vec::new();
+        collect_ref_roots(value, &mut roots);
+        roots.iter().any(|r| self.binding_carries_share(st, r))
+    }
+
     /// Does `name` denote a mutable composite (including a scalar-field struct
     /// or primitive-element array whose `TypeShape` is `Primitive`) that shares
     /// backing storage when borrowed via `&x` or auto-addressed into a `*T`
@@ -2545,9 +2667,14 @@ impl<'a> Checker<'a> {
         value: &Expr,
         overwritten: &[String],
     ) {
+        // #1997: the gate must not rely solely on the ROOT struct's declared
+        // shape. Storing a live map into an `any` field makes the struct
+        // carry that reference regardless of what its declaration says, so
+        // the store records the edge when the stored VALUE carries share
+        // even if the root's shape claims none.
         if root.is_empty()
             || root == "_"
-            || !self.binding_may_share(st, root)
+            || (!self.binding_carries_share(st, root) && !self.value_carries_share(st, value))
             || self.call_returns_fresh_copy(pre_st, value)
         {
             return;
@@ -2633,7 +2760,11 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let root = t.root();
-            if root.is_empty() || root == "_" || !self.binding_may_share(st, root) {
+            // #1997: same carry-share rule as the place-store gate — a
+            // target whose root already carries peers (recorded by the
+            // per-target store above) belongs in the fanout group even when
+            // its declared shape claims no sharing.
+            if root.is_empty() || root == "_" || !self.binding_carries_share(st, root) {
                 continue;
             }
             if targets[(i + 1)..]
@@ -2674,7 +2805,12 @@ impl<'a> Checker<'a> {
         }
         match unwrap_parens(value) {
             Expr::Ident { name: src, .. } => {
-                if self.binding_may_share(st, src) {
+                // #1997: a copy carries the source's storage even when the
+                // source's DECLARED shape claims none — `s2 := s` must edge
+                // when `s` already carries may-share peers (e.g. from
+                // `s := box{f: m}`), or when `s` is an `any` value handed
+                // in from outside.
+                if self.binding_carries_share(st, src) {
                     st.share_edge(name, src);
                 }
             }
@@ -2773,7 +2909,12 @@ impl<'a> Checker<'a> {
                         // views the array's storage even when the element
                         // type is primitive - link it so a later move
                         // freezes the array too.
-                        if self.shape_may_share(&b.shape)
+                        // #1997: a root counts when it CARRIES share, not
+                        // only when its declared shape may share — `s :=
+                        // box{f: p}` must edge when `p` is an `any` value
+                        // handed in from outside, and `s := box{f: s2}`
+                        // when `s2` already carries may-share peers.
+                        if self.binding_carries_share(st, &root)
                             || self.expr_slices_addressable_array(st, value, &root)
                         {
                             st.share_edge(name, &root);

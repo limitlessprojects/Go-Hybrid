@@ -1112,3 +1112,22 @@ the move freeze reach the send path as well.
 | struct-chan-shared-map-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct over the channel freezes that storage, so `m["after"] = 2` is a write through a live alias |
 
 With this registration the corpus is **139 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 92**.
+
+-------------------------------------------------------------------------------
+
+### 1997-any-field-store-reject / 1997-any-field-store-controls-accept — REJECT + ACCEPT (issue #1997)
+
+A shared map stored into an `any`-typed struct field must still
+materialise the alias edge: before the fix the store gate only consulted
+the root struct's declared shape, and `shape_may_share` returns false
+when the only reference-carrying field is `any`, so the move froze only
+the struct and the later write through the sender's map binding was
+accepted. The accept twin pins the non-over-strict side: a scalar
+stored into the same `any` field carries no shared storage.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| 1997-any-field-store-reject | REJECT | A1b | `HYB-E3003` | the `any` field holds the sender's map header; moving the struct freezes that storage, so `shared["main"]++` is a write through a live alias |
+| 1997-any-field-store-controls-accept | ACCEPT | — | — | a scalar in the `any` field carries no shared storage; the move stays exclusive |
+
+With this registration the corpus is **141 programs — ACCEPT 46 · ACCEPT-MANAGED 2 · REJECT 93**.
