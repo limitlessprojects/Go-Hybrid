@@ -554,6 +554,45 @@ fn run_gofmt_with(gofmt: &std::path::Path, src: &str) -> Result<String, String> 
     String::from_utf8(out.stdout).map_err(|e| format!("gofmt output: {}", e))
 }
 
+/// A Go build constraint is a line comment in the source header, before code.
+/// Preserve the expression for Go to evaluate when the generated package is built.
+fn source_build_constraint(src: &str) -> Result<Option<&str>, &'static str> {
+    let mut constraint = None;
+    let mut rest = src.strip_prefix('\u{feff}').unwrap_or(src);
+    let mut line_start = true;
+    loop {
+        let text = rest.trim_start_matches([' ', '\t', '\r', '\n']);
+        line_start |= rest[..rest.len() - text.len()].contains('\n');
+        if let Some(comment) = text.strip_prefix("/*") {
+            let Some((_, tail)) = comment.split_once("*/") else {
+                break;
+            };
+            rest = tail;
+            line_start = false;
+        } else if text.starts_with("//") {
+            let (line, tail) = text.split_once('\n').unwrap_or((text, ""));
+            if line_start {
+                if let Some(expr) = line.trim_end().strip_prefix("//go:build") {
+                    if expr.is_empty() {
+                        return Err("empty //go:build constraint");
+                    }
+                    if expr.starts_with([' ', '\t']) {
+                        if constraint.is_some() {
+                            return Err("multiple //go:build constraints");
+                        }
+                        constraint = Some(line.trim_end());
+                    }
+                }
+            }
+            rest = tail;
+            line_start = true;
+        } else {
+            break;
+        }
+    }
+    Ok(constraint)
+}
+
 /// Generate one .hy file: parse → check (fail-closed) → infer the package
 /// from sibling .go files → emit <stem>.hy.go beside it (or --check it).
 fn generate_one(
@@ -651,11 +690,17 @@ fn generate_one(
     let go_src = hy_emit::emit_go_package(&ast, &pkg_name, binding_prefix)
         .map_err(|e| format!("[emit] {}: {}", hy.display(), e.message))?;
     let hy_name = hy.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-    let header = format!(
+    let mut header = format!(
         "{}{}. DO NOT EDIT.\n\n",
         GENERATED_HEADER_PREFIX,
         hy_name
     );
+    if let Some(line) =
+        source_build_constraint(&src).map_err(|e| format!("{}: {e}", hy.display()))?
+    {
+        header.push_str(line);
+        header.push_str("\n\n");
+    }
     let unformatted = format!("{}{}", header, go_src);
     // The checked-in file must be gofmt-CANONICAL (row 13's constraint:
     // reviewable, diffable, go build-clean) — so generate pipes it through
@@ -2357,6 +2402,20 @@ mod tests {
         assert!(libdir2.join("libhyrt.a").is_file());
         assert!(!libdir2.join("hyrt.lib").exists(), "gnu flavor must not alias");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_constraint_uses_only_standalone_header_comments() {
+        assert_eq!(
+            source_build_constraint("/* license */ //go:build inline\n//go:builder near\nfn f() {}\n//go:build late\n"),
+            Ok(None)
+        );
+        assert_eq!(
+            source_build_constraint("// copyright\r\n\t//go:build\t(linux || darwin) && pro\r\n"),
+            Ok(Some("//go:build\t(linux || darwin) && pro"))
+        );
+        assert!(source_build_constraint("//go:build a\n//go:build b\n").is_err());
+        assert!(source_build_constraint("//go:build \n").is_err());
     }
 
     #[test]
