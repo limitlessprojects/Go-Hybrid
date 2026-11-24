@@ -933,8 +933,12 @@ impl<'a> Collector<'a> {
             }
             Expr::SliceLit { elem: Some(t), .. } => {
                 match t.as_ref() {
-                    TypeExpr::Array { elem, .. } => Some(elem.render()),
-                    TypeExpr::Slice { elem, .. } => Some(elem.render()),
+                    // The literal's OWN element type is `t` -- the arms below
+                    // only exist for spellings that need peeling, so a nested
+                    // element (`[][]int{..}`, `[][3]int{..}`) must render
+                    // whole. Returning a peeled inner made `copy(dst,
+                    // [][]int{..})` compare `int` against `[]int`.
+                    TypeExpr::Array { .. } | TypeExpr::Slice { .. } => Some(t.render()),
                     _ => {
                         let r = t.render();
                         if let Some(elem) = r.strip_prefix("[]") {
@@ -1232,6 +1236,27 @@ impl<'a> Collector<'a> {
                 self.struct_field_type_name(&bk, name)
             }
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
+            // #3416: an inline composite literal is TYPED by its own spelling
+            // (`map[string]int32{...}` is a `map[string]int32`, not a bare
+            // `map`), and `make(chan int32, 1)` carries its type as the first
+            // argument. Without these the argument walk had no spelling to
+            // compare and failed open.
+            Expr::MapLit { key, value, .. } => {
+                Some(format!("map[{}]{}", key.render(), value.render()))
+            }
+            Expr::StructLit {
+                ty: Some(t),
+                fields,
+                ..
+            } if fields.is_empty() => Some(t.render()),
+            Expr::Call { callee, args, .. } => {
+                if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if name == "make") {
+                    args.first()
+                        .and_then(|a| self.typed_value_type_name(&a.value))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -1308,6 +1333,25 @@ impl<'a> Collector<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Go's channel-direction assignment rule, as a spelling helper:
+    /// `(direction, element)`. 0 = bidirectional, 1 = receive-only,
+    /// 2 = send-only. `None` for a spelling that is not a channel
+    /// (a bare alias), so the caller can fail open.
+    #[allow(dead_code)]
+    fn chan_dir_split(s: &str) -> Option<(u8, String)> {
+        let t = s.trim();
+        let (dir, rest) = if let Some(r) = t.strip_prefix("<-chan") {
+            (1u8, r)
+        } else if let Some(r) = t.strip_prefix("chan<-") {
+            (2u8, r)
+        } else if let Some(r) = t.strip_prefix("chan") {
+            (0u8, r)
+        } else {
+            return None;
+        };
+        Some((dir, rest.trim().to_string()))
     }
 
     /// #2771 — two KNOWN and DIFFERENT sized-array spellings. Slices, named
@@ -2229,7 +2273,20 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 // `a := [2]int{..}` / `b := a`: an inferred sized array keeps
                 // its length so `a = [3]int{..}`, `take(a)` etc. are compared.
-                if let Some(tn) = self.typed_value_type_name(val).filter(|t| is_sized_array_spelling(t)) {
+                // #3416: a composite literal is a TYPED local, and
+                // `typed_value_type_name` renders its full spelling
+                // (`map[string]int32{...}`, `make(chan int32, 1)`, and nested
+                // literals like `[][]int{...}`). Prefer that spelling so the
+                // argument, send and element-width walks compare the real
+                // type instead of a one-level-peeled one; the peel path stays
+                // as the fallback for sources with no own spelling.
+                let own_spelling = self.typed_value_type_name(val).filter(|t| {
+                    is_sized_array_spelling(t)
+                        || t.starts_with("[]")
+                        || t.starts_with("map[")
+                        || t.starts_with("chan ")
+                });
+                if let Some(tn) = own_spelling {
                     self.bind_type_name(name, tn);
                 } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
@@ -4822,8 +4879,29 @@ impl<'a> Collector<'a> {
                         inner.len() == 1 && inner.chars().all(|c| c.is_ascii_lowercase())
                     };
                     let container_or_alias_mismatch = match (&got_type_name, &want, &got) {
-                        (Some(gname), OpKind::Chan(_), OpKind::Chan(_))
-                        | (Some(gname), OpKind::Map(_, _), OpKind::Map(_, _))
+                        // A bidirectional channel ASSIGNS to a directioned
+                        // field (Go coercion), so the plain spelling compare
+                        // below is too strict here: `holder{rc: c}` with
+                        // `rc <-chan int` and `c chan int` is legal. Compare
+                        // element plus direction instead, and fail open on a
+                        // spelling that is not a channel literal (alias).
+                        (Some(gname), OpKind::Chan(_), OpKind::Chan(_)) => {
+                            if field_type_name == gname.as_str()
+                                || is_generic_ty(field_type_name)
+                                || is_generic_ty(gname)
+                            {
+                                false
+                            } else {
+                                match (
+                                    Self::chan_dir_split(field_type_name),
+                                    Self::chan_dir_split(gname.as_str()),
+                                ) {
+                                    (Some((wd, we)), Some((gd, ge))) => !(we == ge && (wd == gd || gd == 0)),
+                                    _ => false,
+                                }
+                            }
+                        }
+                        (Some(gname), OpKind::Map(_, _), OpKind::Map(_, _))
                         | (Some(gname), OpKind::Slice(_), OpKind::Slice(_))
                         | (Some(gname), OpKind::Pointer(_), OpKind::Pointer(_))
                         | (Some(gname), OpKind::Array(_), OpKind::Array(_)) => {
@@ -5629,21 +5707,42 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
+            // #3416/#4620 (argument half): the kind model also collapses
+            // container inners (`OpKind::Map(Str, Int)` fits
+            // `map[string]int64` as well as `map[string]int32`), so a TYPED
+            // container argument whose inner differs passed the equal-kind
+            // arm and failed `go build` (`cannot use ... as ... value in
+            // argument to ...`). Deep-compare the resolved spellings; aliases
+            // and type parameters fail open.
+            let deep_conflict = self
+                .deep_composite_conflict(&p.ty, self.typed_value_type_name(&a.value).as_deref());
             if kinds_conflict(&want, &got)
                 || int_to_float_conflict
                 || scalar_mismatch
+                || deep_conflict.is_some()
                 || self.sized_array_names_differ(
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
                 )
             {
+                let got_label = if deep_conflict.is_some() {
+                    self.typed_value_type_name(&a.value)
+                        .unwrap_or_else(|| got.label().to_string())
+                } else {
+                    got.label().to_string()
+                };
+                let want_label = if deep_conflict.is_some() {
+                    p.ty.render()
+                } else {
+                    want.label().to_string()
+                };
                 self.emit_e1002(
                     a.value.span(),
                     format!(
                         "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
                         a.value.render(),
-                        got.label(),
-                        want.label(),
+                        got_label,
+                        want_label,
                         name
                     ),
                     "argument types must match declared parameter types",
@@ -5697,21 +5796,37 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
+            // #3416/#4620 (argument half): method arguments get the same
+            // deep inner-spelling comparison as plain calls.
+            let deep_conflict = self
+                .deep_composite_conflict(&p.ty, self.typed_value_type_name(&a.value).as_deref());
             if kinds_conflict(&want, &got)
                 || int_to_float_conflict
                 || scalar_mismatch
+                || deep_conflict.is_some()
                 || self.sized_array_names_differ(
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
                 )
             {
+                let got_label = if deep_conflict.is_some() {
+                    self.typed_value_type_name(&a.value)
+                        .unwrap_or_else(|| got.label().to_string())
+                } else {
+                    got.label().to_string()
+                };
+                let want_label = if deep_conflict.is_some() {
+                    p.ty.render()
+                } else {
+                    want.label().to_string()
+                };
                 self.emit_e1002(
                     a.value.span(),
                     format!(
                         "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
                         a.value.render(),
-                        got.label(),
-                        want.label(),
+                        got_label,
+                        want_label,
                         sn,
                         name
                     ),
