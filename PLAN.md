@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — review queue survey completeness
+
+- At `af9d985`, a GraphQL error after the first page publishes the partial review queue and exits successfully. The survey now exits before opening its output on errors or a missing/repeated continuation cursor. Offline fixtures cover both failure paths, preservation of the previous survey, a successful multi-page refresh and a legitimately empty queue. The queue suite passes 20/20. Hosted CI and review pending.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.

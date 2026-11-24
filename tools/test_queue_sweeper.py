@@ -1,5 +1,4 @@
-"""Offline regressions for #1525: the review window is measured from the
-last reopen, not from created_at.
+"""Offline regressions for queue snapshots and the sweeper review window.
 
 Every API call is a fixture — the suite never touches the network, and in
 dry mode it hard-fails on any non-GET request, which is the sweeper's
@@ -8,8 +7,12 @@ import contextlib
 from datetime import datetime, timedelta, timezone
 import importlib.util
 import io
+import json
+import os
 from pathlib import Path
+import runpy
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -177,6 +180,77 @@ class ReviewWindowPolicyTests(unittest.TestCase):
                 comment = self.writes[1][2]["body"]
                 self.assertIn(f"review window ({window} days)", comment)
                 self.assertNotIn("20 days", comment)
+
+
+SNAPSHOT_SCRIPT = Path(__file__).with_name("queue_snapshot.py")
+
+
+def survey_page(numbers, more=False, cursor=None):
+    nodes = [{
+        "number": number, "createdAt": "2025-01-01T00:00:00Z",
+        "updatedAt": "2025-01-02T00:00:00Z", "isDraft": False, "mergeable": "MERGEABLE",
+        "labels": {"nodes": []}, "commits": {"nodes": []},
+    } for number in numbers]
+    return {"data": {"repository": {"pullRequests": {
+        "nodes": nodes, "pageInfo": {"hasNextPage": more, "endCursor": cursor},
+    }}}}
+
+
+class QueueSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.output = Path(directory.name) / "queue.json"
+        self.previous = b'[{"number": 42}]\n'
+        self.output.write_bytes(self.previous)
+
+    def survey(self, *responses):
+        pages = iter(responses)
+        self.cursors = []
+
+        def respond(request, timeout):
+            self.cursors.append(json.loads(request.data)["variables"]["cursor"])
+            return io.BytesIO(json.dumps(next(pages)).encode())
+
+        env = {"GH_TOKEN": "offline-test", "SURVEY_OUT": str(self.output)}
+        with patch.dict(os.environ, env), patch("urllib.request.urlopen", respond), \
+                patch("time.sleep"), contextlib.redirect_stdout(io.StringIO()):
+            runpy.run_path(str(SNAPSHOT_SCRIPT), run_name="__main__")
+
+    def test_later_graphql_error_preserves_previous_survey(self):
+        partial = survey_page([2])
+        partial["errors"] = [{"message": "field unavailable"}]
+        with self.assertRaises(SystemExit) as failure:
+            self.survey(survey_page([1], True, "page-two"), partial)
+        self.assertNotEqual(failure.exception.code, 0)
+        self.assertEqual(self.output.read_bytes(), self.previous)
+
+    def test_first_page_error_creates_no_survey(self):
+        self.output.unlink()
+        with self.assertRaises(SystemExit) as failure:
+            self.survey({"errors": [{"message": "rate limit"}]})
+        self.assertNotEqual(failure.exception.code, 0)
+        self.assertFalse(self.output.exists())
+
+    def test_complete_survey_replaces_previous_file(self):
+        self.survey(survey_page([3, 2], True, "second"), survey_page([1]))
+        self.assertEqual(self.cursors, [None, "second"])
+        rows = json.loads(self.output.read_text())
+        self.assertEqual([row["number"] for row in rows], [3, 2, 1])
+        self.assertTrue(all(row["_ci_rollup"] == "NONE" for row in rows))
+
+    def test_complete_empty_survey_replaces_previous_file(self):
+        self.survey(survey_page([]))
+        self.assertEqual(json.loads(self.output.read_text()), [])
+
+    def test_invalid_continuation_preserves_previous_survey(self):
+        for cursors in ((None,), ("first", "second", "first")):
+            with self.subTest(cursors=cursors):
+                pages = [survey_page([n], True, cursor) for n, cursor in enumerate(cursors)]
+                with self.assertRaises(SystemExit):
+                    self.survey(*pages, survey_page([99]))
+                self.assertEqual(len(self.cursors), len(cursors))
+                self.assertEqual(self.output.read_bytes(), self.previous)
 
 
 if __name__ == "__main__":
