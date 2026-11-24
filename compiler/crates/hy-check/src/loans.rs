@@ -2228,7 +2228,11 @@ impl<'a> Checker<'a> {
     /// composites (#125), which lower to package-level `var` in Go.
     fn binding_may_share(&self, st: &FnState, name: &str) -> bool {
         self.lookup_binding(st, name)
-            .map(|b| self.shape_may_share(&b.shape))
+            .map(|b| {
+                self.shape_may_share(&b.shape)
+                    || (matches!(b.shape, TypeShape::Array(_) | TypeShape::Struct(_))
+                        && b.ty.as_ref().is_some_and(|ty| self.ty_may_share(ty)))
+            })
             .unwrap_or(false)
     }
 

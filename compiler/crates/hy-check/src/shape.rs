@@ -134,6 +134,29 @@ impl<'a> Checker<'a> {
         self.shape_may_share_at(shape, 0)
     }
 
+    pub(crate) fn ty_may_share(&self, ty: &TypeExpr) -> bool {
+        self.ty_may_share_at(ty, 0)
+    }
+
+    /// Type-syntax companion to `shape_may_share_at` (#4755): `shape_of_type`
+    /// folds `any` into `TypeShape::Unknown` alongside genuinely unresolved
+    /// type names, whereas a declared `any` field or `[N]any` element can hold
+    /// a runtime map/slice/pointer header and must materialize may-share edges
+    /// when a reference-bearing value is stored into it (O5.2).
+    fn ty_may_share_at(&self, ty: &TypeExpr, depth: usize) -> bool {
+        if depth > 16 {
+            return true;
+        }
+        let resolved = self.resolve_type_alias(ty);
+        match &resolved {
+            TypeExpr::Named { name, .. } if name == "any" => true,
+            TypeExpr::Array { elem, .. } | TypeExpr::Option { elem, .. } => {
+                self.ty_may_share_at(elem, depth + 1)
+            }
+            _ => self.shape_may_share_at(&self.shape_of_type(&resolved), depth + 1),
+        }
+    }
+
     fn shape_may_share_at(&self, shape: &TypeShape, depth: usize) -> bool {
         if depth > 16 {
             return true;
@@ -157,9 +180,7 @@ impl<'a> Checker<'a> {
                 }
                 self.struct_fields_for_sname(name)
                     .map(|fields| {
-                        fields.iter().any(|(_, ty)| {
-                            self.shape_may_share_at(&self.shape_of_type(ty), depth + 1)
-                        })
+                        fields.iter().any(|(_, ty)| self.ty_may_share_at(ty, depth + 1))
                     })
                     .unwrap_or(false)
             }
