@@ -69,6 +69,7 @@ mod shape;
 mod try_context;
 mod tuple;
 mod walk;
+mod tag_family;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
