@@ -442,6 +442,122 @@ fn elem_types_conflict(want: &str, got: &str) -> bool {
     false
 }
 
+/// #4751 — split a `fn(...)` type spelling into its parameter and result
+/// type texts. `None` when the text is not a fn type.
+fn split_fn_type(t: &str) -> Option<(Vec<String>, Vec<String>)> {
+    let rest = t.trim().strip_prefix("fn(")?;
+    let bytes = rest.as_bytes();
+    let mut depth = 1i32;
+    let mut close = None;
+    for (i, b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    let params_part = &rest[..close];
+    let rest2 = rest[close + 1..].trim();
+    let results_part = if rest2.is_empty() {
+        ""
+    } else if rest2.starts_with('(') && rest2.ends_with(')') {
+        &rest2[1..rest2.len() - 1]
+    } else {
+        rest2
+    };
+    let split = |s: &str| -> Vec<String> {
+        if s.trim().is_empty() {
+            return vec![];
+        }
+        let mut out = vec![];
+        let mut depth = 0i32;
+        let mut cur = String::new();
+        for c in s.chars() {
+            match c {
+                '(' | '[' => {
+                    depth += 1;
+                    cur.push(c);
+                }
+                ')' | ']' => {
+                    depth -= 1;
+                    cur.push(c);
+                }
+                ',' if depth == 0 => {
+                    out.push(cur.trim().to_string());
+                    cur = String::new();
+                }
+                _ => cur.push(c),
+            }
+        }
+        out.push(cur.trim().to_string());
+        out
+    };
+    Some((split(params_part), split(results_part)))
+}
+
+/// #4751 — do two `fn(...)` type spellings conflict? `OpKind::Fn` collapses
+/// parameter/result widths (`fn() int64` and `fn() int` share a kind), so a
+/// value of one width silently builds where the other is declared even
+/// though `go build` refuses it. Compares the declared signature against
+/// the value's inferred fn spelling pairwise with the same element rules
+/// used for containers. Fail-open: texts that do not both parse as fn
+/// types, and arity mismatches (owned by the source-count rules), are not
+/// a conflict here.
+fn fn_signature_conflict(want: &str, got: &str) -> bool {
+    let (wp, wr) = match split_fn_type(want) {
+        Some(x) => x,
+        None => return false,
+    };
+    let (gp, gr) = match split_fn_type(got) {
+        Some(x) => x,
+        None => return false,
+    };
+    // The signatures differ when EITHER group differs; each group differs
+    // when its arity differs or some element pair conflicts. An empty
+    // group with equal arity on both sides is identical (`fn()` vs `fn()`).
+    let params_conflict =
+        wp.len() != gp.len() || wp.iter().zip(&gp).any(|(w, g)| fn_elem_conflict(w, g));
+    let results_conflict =
+        wr.len() != gr.len() || wr.iter().zip(&gr).any(|(w, g)| fn_elem_conflict(w, g));
+    params_conflict || results_conflict
+}
+
+/// #4751 — does one fn-signature element pair conflict? Only builtin type
+/// names are compared by spelling (`int` vs `string`, `int64` vs `int`);
+/// named aliases (`cb_fn`) and struct types fail open because their
+/// spellings cannot be trusted to match across the two sides.
+fn fn_elem_conflict(want: &str, got: &str) -> bool {
+    let w = want.trim();
+    let g = got.trim();
+    if let (Some(wn), Some(gn)) = (canonical_numeric_name(w), canonical_numeric_name(g)) {
+        return wn != gn;
+    }
+    if is_builtin_type_name(w) && is_builtin_type_name(g) {
+        return w != g;
+    }
+    if let (Some(wi), Some(gi)) = (w.strip_prefix("[]"), g.strip_prefix("[]")) {
+        return fn_elem_conflict(wi, gi);
+    }
+    false
+}
+
+/// #4751 — Go predeclared (non-numeric) type names, for fn-signature
+/// element comparison. Numeric names go through canonical_numeric_name.
+fn is_builtin_type_name(t: &str) -> bool {
+    matches!(
+        t,
+        "bool" | "string" | "error" | "any" | "float32" | "float64" | "complex64" | "complex128"
+    )
+}
+
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -1232,6 +1348,16 @@ impl<'a> Collector<'a> {
                 self.struct_field_type_name(&bk, name)
             }
             Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
+            // #4751: an inline fn literal spells its own signature.
+            Expr::FnLit { params, results, .. } => {
+                let ps: Vec<String> = params.iter().map(|p| p.ty.render()).collect();
+                let rs: Vec<String> = results.iter().map(|r| r.ty.render()).collect();
+                Some(match rs.len() {
+                    0 => format!("fn({})", ps.join(", ")),
+                    1 => format!("fn({}) {}", ps.join(", "), rs[0]),
+                    _ => format!("fn({}) ({})", ps.join(", "), rs.join(", ")),
+                })
+            }
             _ => None,
         }
     }
@@ -2151,6 +2277,12 @@ impl<'a> Collector<'a> {
                         Some(t.render().as_str()),
                         self.typed_value_type_name(&l.values[0]).as_deref(),
                     )
+                    // #4751: `var f fn() int = g` where `g` is an inferred
+                    // `fn() int64`.
+                    || fn_signature_conflict(
+                        t.render().as_str(),
+                        self.typed_value_type_name(&l.values[0]).as_deref().unwrap_or(""),
+                    )
                 {
                     self.emit_e1002(
                         l.span,
@@ -2182,6 +2314,11 @@ impl<'a> Collector<'a> {
                         || self.sized_array_names_differ(
                             Some(t.render().as_str()),
                             self.typed_value_type_name(v).as_deref(),
+                        )
+                        // #4751: differently typed fn values in multi-value inits.
+                        || fn_signature_conflict(
+                            t.render().as_str(),
+                            self.typed_value_type_name(v).as_deref().unwrap_or(""),
                         )
                     {
                         self.emit_e1002(
@@ -2227,9 +2364,15 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                // `a := [2]int{..}` / `b := a`: an inferred sized array keeps
-                // its length so `a = [3]int{..}`, `take(a)` etc. are compared.
-                if let Some(tn) = self.typed_value_type_name(val).filter(|t| is_sized_array_spelling(t)) {
+                // #4751: an inferred fn literal keeps its signature spelling
+                // (`g := fn() int64 {…}`) so passing/returning it where a
+                // differently-typed `fn(...)` is declared is compared.
+                // Named fn types bind through the typed branch above.
+                if let Expr::FnLit { .. } = unwrap_parens(val) {
+                    if let Some(tn) = self.typed_value_type_name(val) {
+                        self.bind_type_name(name, tn);
+                    }
+                } else if let Some(tn) = self.typed_value_type_name(val).filter(|t| is_sized_array_spelling(t)) {
                     self.bind_type_name(name, tn);
                 } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
@@ -5636,6 +5779,12 @@ impl<'a> Collector<'a> {
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
                 )
+                // #4751: `use(g)` where the parameter is a differently
+                // typed `fn(...)`.
+                || fn_signature_conflict(
+                    p.ty.render().as_str(),
+                    self.typed_value_type_name(&a.value).as_deref().unwrap_or(""),
+                )
             {
                 self.emit_e1002(
                     a.value.span(),
@@ -5703,6 +5852,12 @@ impl<'a> Collector<'a> {
                 || self.sized_array_names_differ(
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
+                )
+                // #4751: `use(g)` where the parameter is a differently
+                // typed `fn(...)`.
+                || fn_signature_conflict(
+                    p.ty.render().as_str(),
+                    self.typed_value_type_name(&a.value).as_deref().unwrap_or(""),
                 )
             {
                 self.emit_e1002(
@@ -5847,6 +6002,7 @@ impl<'a> Collector<'a> {
                         let got_s = self.typed_value_scalar(v);
                         self.report_numeric_return_mismatch(got_s, &got, i, v.span());
                         self.report_array_return_mismatch(v, i, v.span());
+                        self.report_fn_return_mismatch(v, i, v.span());
                     }
                 }
                 return;
@@ -5880,6 +6036,7 @@ impl<'a> Collector<'a> {
                 let got_s = self.typed_value_scalar(v);
                 self.report_numeric_return_mismatch(got_s, &got, i, v.span());
                 self.report_array_return_mismatch(v, i, v.span());
+                self.report_fn_return_mismatch(v, i, v.span());
             }
         }
     }
@@ -5895,6 +6052,25 @@ impl<'a> Collector<'a> {
                     "cannot return a value of type `{got_label}` from a function declaring `{want_name}` — Go refuses `cannot use ... as {want_name} value in return statement` (HYB-E1002)"
                 ),
                 "return values must match the declared result types exactly; array lengths cannot differ",
+            );
+        }
+    }
+
+    /// #4751 — a TYPED fn value returned into a result whose fn type
+    /// differs in parameter/result widths (`fn() int64` vs `fn() int`).
+    /// `OpKind::Fn` collapses the widths; the exact spellings decide.
+    /// Fires only when both sides spell a `fn(...)` type and the kind
+    /// check has not already reported this value.
+    fn report_fn_return_mismatch(&mut self, val: &Expr, idx: usize, span: Span) {
+        let Some(want_name) = self.fn_result_type_names.get(idx) else { return };
+        let Some(got_name) = self.typed_value_type_name(val) else { return };
+        if fn_signature_conflict(want_name.as_str(), got_name.as_str()) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot return a value of type `{got_name}` from a function declaring `{want_name}` — Go refuses `cannot use ... as ... value in return statement` (HYB-E1002)"
+                ),
+                "return values must match the declared result types exactly; fn signatures cannot differ",
             );
         }
     }
