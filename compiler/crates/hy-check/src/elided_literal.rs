@@ -328,7 +328,8 @@ impl<'a> Checker<'a> {
         }
 
         for f in fields {
-            if !declared.iter().any(|(n, _)| n == &f.name) {
+            // #4758 — a blank field is layout-only, never settable by name.
+            if f.name == "_" || !declared.iter().any(|(n, _)| n == &f.name) {
                 self.diags.push(
                     Diagnostic::error(
                         "HYB-E1002",
