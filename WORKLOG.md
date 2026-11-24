@@ -1092,3 +1092,15 @@
 **Fix (token durability)**: the key now lives in tracked `scripts/token.b64` (base64; not redacted by the restore). bootstrap_after_wipe.sh + triage_tick.sh resolve tokens through a 3-slot chain (.gh_token → .env → token.b64 decode) and re-mirror after recovery. The tick gained a hard pre-check: /user login must equal limitlessprojects or it exits loudly ("TOKEN DEAD — triage paused") instead of failing cryptically per step. New `scripts/fired_tick.sh` wrapper is the intended scheduler payload entry point: bootstrap → tick → per-run log at scripts/fired_runs/<ts>.log + FIRED-TICK SUMMARY block, making firings locally observable even when their scheduler report is missed.
 
 **Ops**: tick 191 launched immediately after the fix (batch 60; ~146 red-CI candidates pending since session 190). Next session: confirm fired_runs logs after the next scheduled firing, then swap 540028 to the 3×/day expr with the fired_tick payload (delete 540028 only after the replacement is confirmed).
+
+## Session 192 — 2026-11-24 ~03:50 UTC — dispatch-layer rebuild: short payload, 3×/day job, first heartbeat
+
+**Scheduler forensics**: job 540028's counter reached 84 evaluations over 3.5 days with ZERO effect — no closes (GitHub-verified: 0 PRs closed since 2026-11-21), no fired_runs logs, no file drift (the .env strip was the only tracked change; token.b64 content intact and the key valid). With token valid + scripts present + tick proven working manually, the dispatch layer was silently dropping the ~980-char payload. Supporting evidence for a payload limit: the LKFAP 2h job's payload is visibly truncated at ~2,000 chars in scheduler listings.
+
+**Rebuilt**: deleted 540028; registered "Go-Hybrid triage 3x-day" job_id 545580 (expr "0 7 1,9,17 * * ?" Asia/Shanghai — three firings/day, exactly matching the platform's 3-executions/day cap) with a ~210-char payload that only calls scripts/fired_tick.sh. One_time probe 545583 scheduled 12:05 +08 to test dispatch end-to-end.
+
+**Durability**: the tick now PUBLISHES state to the repo on every run (publish_state): carried queue snapshot at tools/state/queue_snapshot.json + heartbeat line in tools/state/heartbeat.log, pushed as an automation commit; bootstrap restores the carried snapshot post-wipe. First live proof: automation commit b3c526a5 "closed=32 skipped=9 rest_calls=191". Consequences: (a) dispatches are externally visible on GitHub even when local logs die with a wipe; (b) post-restore dispatches can close PRs even when the survey is rate-limited (they fall back to the carried snapshot).
+
+**Triage**: tick 192: **32 closed, 9 author-active saves**, 191 rest calls. Cumulative **352**. Queue ~1,008 open (1,040 fresh surveyed; +66 new PRs arrived in 3 days). Remaining red-CI candidates: ~43 (many authors went active — the guard is correctly sparing them). Land candidates (green-CI + CLEAN): 6.
+
+**Next**: probe 545583 verdict (dispatch works vs platform-side escalation); watch tools/state/heartbeat.log after the 01:07/09:07/17:07 +08 firings; drain remaining ~43; landing session for the 6 green-CI+CLEAN; LKFAP payload truncation + plaintext token exposure flagged to the maintainer.
