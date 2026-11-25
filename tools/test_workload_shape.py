@@ -65,6 +65,11 @@ class WorkloadShapeTests(unittest.TestCase):
         result = self.assert_check_preserves_tree(0)
         self.assertIn("triplet shapes in sync", result.stdout)
 
+    def test_go_alloc_uses_a_byte_per_lookup_entry(self):
+        source = (self.workloads / "go/main.go").read_text(encoding="utf-8")
+        # The Rust and Hybrid twins index a 64-byte table in their timed loops.
+        self.assertRegex(source, r"(?m)^var alphabet = \[\](?:byte|uint8)\{")
+
     def test_hybrid_alloc_caches_alphabet_outside_timed_work(self):
         """The Rust twin initializes its alphabet once; Hybrid must not
         rebuild a slice twice per byte inside the measured allocation loop.
