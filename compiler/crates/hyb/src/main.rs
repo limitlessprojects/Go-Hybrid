@@ -794,6 +794,35 @@ fn render_build_error(e: &BuildError) -> String {
     }
 }
 
+fn is_valid_go_package_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let first = chars.next();
+    name != "_"
+        && matches!(first, Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !matches!(name, "break" | "case" | "chan" | "const" | "continue" | "default"
+            | "defer" | "else" | "fallthrough" | "for" | "func" | "go" | "goto" | "if"
+            | "import" | "interface" | "map" | "package" | "range" | "return" | "select"
+            | "struct" | "switch" | "type" | "var")
+}
+
+/// The marked package source written by `--package` mode: the same
+/// generated-file header `-o` and `hyb generate` use, so a later rebuild can
+/// recognise (and replace) its own output without ever clobbering hand-written
+/// Go (issue #4439).
+fn package_source_with_header(file: &str, go_src: &str) -> String {
+    let name = std::path::Path::new(file)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("?")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n");
+    format!(
+        "{}{}. DO NOT EDIT.\n\n{}",
+        GENERATED_HEADER_PREFIX, name, go_src
+    )
+}
+
 fn cmd_build(args: &[String]) -> ExitCode {
     const USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--emit-proof] [--race] [--deny-managed] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
     // Validate the entire invocation before touching the filesystem or the
@@ -890,6 +919,15 @@ fn cmd_build(args: &[String]) -> ExitCode {
     if pkg_name.is_some() != out_dir.is_some() {
         eprintln!("error: --package and --out-dir must be supplied together\n{USAGE}");
         return ExitCode::from(2);
+    }
+    if let Some(pn) = &pkg_name {
+        if !is_valid_go_package_name(pn) {
+            eprintln!(
+                "error: invalid Go package name `{pn}` — must be a valid non-blank Go identifier \
+                 and not a Go keyword\n{USAGE}"
+            );
+            return ExitCode::from(2);
+        }
     }
     if emit_proof && pkg_name.is_some() {
         eprintln!("error: --emit-proof is not supported with --package (single-file builds only)\n{USAGE}");
@@ -1032,7 +1070,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
 
     // --- 4b. Package mode: assemble the package dir + runtime pieces. ---
     if let (Some(pn), Some(od)) = (&pkg_name, &out_dir) {
-        return cmd_build_package(od, pn, &bindings, &go_src, &binding_prefix);
+        return cmd_build_package(od, pn, &bindings, &go_src, &binding_prefix, &file);
     }
 
     let go_path = format!("{}.go", out_path);
@@ -1187,21 +1225,41 @@ fn cmd_build_package(
     bindings: &[&str],
     go_src: &str,
     binding_prefix: &str,
+    file: &str,
 ) -> ExitCode {
     let fail = |m: String| {
         eprintln!("{}", m);
         ExitCode::from(2)
     };
+    let od = std::path::Path::new(out_dir);
+    let pkg_go = od.join(format!("{}.go", pkg_name));
+    // Package mode shares `-o`/`generate`'s overwrite discipline: only a file
+    // carrying the generated header may be replaced. Checked before the
+    // runtime is located or any directory is created (issue #4439).
+    match std::fs::read_to_string(&pkg_go) {
+        Ok(existing) if !existing.starts_with(GENERATED_HEADER_PREFIX) => {
+            eprintln!(
+                "{} exists and is NOT hyb-generated — refusing to overwrite a hand-written file; \
+                 choose another --out-dir/--package or move the existing file after verifying \
+                 it is an old generated artifact",
+                pkg_go.display()
+            );
+            return ExitCode::from(2);
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return fail(format!("reading {}: {}", pkg_go.display(), e)),
+    }
     let rt = match runtime_dir() {
         Ok(p) => p,
         Err(BuildError::Tool(m)) => return fail(m),
         Err(_) => return fail("runtime dir error".to_string()),
     };
-    let od = std::path::Path::new(out_dir);
     if let Err(e) = std::fs::create_dir_all(od) {
         return fail(format!("creating {}: {}", od.display(), e));
     }
-    if let Err(e) = std::fs::write(od.join(format!("{}.go", pkg_name)), go_src) {
+    let marked = package_source_with_header(file, go_src);
+    if let Err(e) = std::fs::write(&pkg_go, marked) {
         return fail(format!("writing package source: {}", e));
     }
     let copy_pkg = |name: &str| -> Result<(), String> {
@@ -2411,5 +2469,36 @@ mod tests {
             "expected regenerated calc.hy.go to adopt `package newpkg`, got:\n{generated}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn valid_go_package_names() {
+        for ok in ["pkg", "my_pkg", "_internal", "pkg2"] {
+            assert!(is_valid_go_package_name(ok), "{ok} should be a valid package name");
+        }
+        for bad in [
+            "", "_", "2pkg", "bad-name", "../victim", "sub/pkg", "a.b", "default", "func",
+            "range", "type", "pkg ", "pkg\n", "café",
+        ] {
+            assert!(!is_valid_go_package_name(bad), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn package_source_carries_the_generated_header() {
+        let marked = package_source_with_header("/tmp/calc.hy", "package demo\n");
+        assert!(
+            marked.starts_with(GENERATED_HEADER_PREFIX),
+            "package output must carry the generated header, got:\n{marked}"
+        );
+        assert!(marked.contains("calc.hy. DO NOT EDIT."));
+        assert!(marked.ends_with("\npackage demo\n"));
+    }
+
+    #[test]
+    fn package_source_sanitizes_newlines_in_the_source_name() {
+        let marked = package_source_with_header("odd\r\nname.hy", "package demo\n");
+        assert!(marked.contains("odd\\r\\nname.hy"));
+        assert!(!marked.contains("odd\r\nname.hy"));
     }
 }
