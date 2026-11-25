@@ -44,7 +44,7 @@ class LauncherRuntimeTests(unittest.TestCase):
         supported_arch = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
         if platform.system() not in supported_os or platform.machine() not in supported_arch:
             self.skipTest("install.sh supports Linux/macOS on amd64/arm64")
-        required_tools = ("sh", "uname", "mktemp", "mkdir", "rm", "tar", "gzip", "cp", "chmod", "cat", "sed", "head")
+        required_tools = ("sh", "uname", "mktemp", "mkdir", "rm", "tar", "gzip", "cp", "mv", "chmod", "cat", "sed", "head")
         system_tools = {
             name: shutil.which(name, path=os.defpath)
             for name in (*required_tools, "sha256sum", "shasum")
@@ -264,6 +264,10 @@ class LauncherRuntimeTests(unittest.TestCase):
         for bad in ("../evil", "-rf", "..", "v1/2"):
             r = subprocess.run(["sh", str(ROOT / "install.sh")], env={**os.environ, "HYB_VERSION": bad}, capture_output=True, text=True, timeout=5)
             self.assertEqual(r.returncode, 2)
+
+    def test_relative_bin_dir_resolves_against_pwd(self):
+        r = subprocess.run(["sh", str(ROOT / "install.sh")], env={**self.env, "HYB_BIN_DIR": "rel-bin"}, cwd=self.root, capture_output=True, text=True, timeout=15)
+        self.assertIn(f'export PATH="{self.root}/rel-bin:$PATH"', r.stdout)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
