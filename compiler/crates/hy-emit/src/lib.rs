@@ -590,6 +590,9 @@ pub struct Emitter {
     /// Dotted associated-fn names declared in this file
     /// (`lru_cache.new`) — call sites mangle to `lru_cache_new[...]`.
     assoc_fns: BTreeSet<String>,
+    /// Top-level `pub fn` names lowered to exported PascalCase in package
+    /// mode (#4433): intra-package references must use the same Go name.
+    exported_pub_fns: BTreeSet<String>,
     /// The enclosing fn's single result type IF it is an option (`option[v]`)
     /// — `return none` lowers to that type's zero value.
     cur_option_result: Option<String>,
@@ -718,6 +721,7 @@ impl Emitter {
             in_main_closure: false,
             for_depth: 0,
             assoc_fns: BTreeSet::new(),
+            exported_pub_fns: BTreeSet::new(),
             cur_option_result: None,
             loop_labels: Vec::new(),
             loop_label_n: 0,
@@ -897,6 +901,13 @@ impl Emitter {
         self.ptr_returning_fns = file
             .fns()
             .filter(|f| f.results.first().is_some_and(|r| self.is_pointer_ty(&r.ty)))
+            .map(|f| f.name.clone())
+            .collect();
+        // Package mode exports top-level `pub fn` declarations as PascalCase
+        // (#4433); every intra-package reference must use the same Go name.
+        self.exported_pub_fns = file
+            .fns()
+            .filter(|f| self.export_pub && f.is_pub && f.receiver.is_none() && !f.name.contains('.'))
             .map(|f| f.name.clone())
             .collect();
         self.fn_ret_struct = file
