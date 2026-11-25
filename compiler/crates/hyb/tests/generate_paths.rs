@@ -366,3 +366,101 @@ fn valid_check_detects_drift_without_rewriting() {
         modified
     );
 }
+
+#[test]
+fn non_utf8_hand_written_output_is_preserved() {
+    for check in [false, true] {
+        let m = SampleModule::new(&format!("non-utf8-output-{}", check));
+        let generated = m.root.join("calc.hy.go");
+        let before = b"package demo\n// user-owned bytes: \xff\n";
+        fs::write(&generated, before).unwrap();
+        let modified = fs::metadata(&generated).unwrap().modified().unwrap();
+        let args = if check {
+            vec!["generate", "--check", "calc.hy"]
+        } else {
+            vec!["generate", "calc.hy"]
+        };
+        let (code, stdout, stderr) = m.hyb(&args);
+        assert_ne!(
+            code, 0,
+            "unreadable output must fail: {} {}",
+            stdout, stderr
+        );
+        assert!(stderr.contains("calc.hy.go"), "{}", stderr);
+        assert_eq!(fs::read(&generated).unwrap(), before);
+        assert_eq!(
+            fs::metadata(&generated).unwrap().modified().unwrap(),
+            modified
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn write_only_hand_written_output_is_preserved() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let m = SampleModule::new("write-only-output");
+    let generated = m.root.join("calc.hy.go");
+    let before = b"package demo\n// user-owned\n";
+    fs::write(&generated, before).unwrap();
+    let modified = fs::metadata(&generated).unwrap().modified().unwrap();
+    let permissions = fs::metadata(&generated).unwrap().permissions();
+    fs::set_permissions(&generated, fs::Permissions::from_mode(0o200)).unwrap();
+    if fs::read(&generated).is_ok() {
+        fs::set_permissions(&generated, permissions).unwrap();
+        eprintln!("skipping write-only case: this host can read mode-0200 files");
+        return;
+    }
+
+    let (code, stdout, stderr) = m.hyb(&["generate", "calc.hy"]);
+    fs::set_permissions(&generated, permissions).unwrap();
+    assert_ne!(
+        code, 0,
+        "unreadable output must fail: {} {}",
+        stdout, stderr
+    );
+    assert!(stderr.contains("calc.hy.go"), "{}", stderr);
+    assert_eq!(fs::read(&generated).unwrap(), before);
+    assert_eq!(
+        fs::metadata(&generated).unwrap().modified().unwrap(),
+        modified
+    );
+}
+
+#[test]
+fn utf8_hand_written_output_is_preserved() {
+    let m = SampleModule::new("utf8-hand-written-output");
+    let generated = m.root.join("calc.hy.go");
+    let before = b"package demo\n// user-owned\n";
+    fs::write(&generated, before).unwrap();
+    let modified = fs::metadata(&generated).unwrap().modified().unwrap();
+    let (code, stdout, stderr) = m.hyb(&["generate", "calc.hy"]);
+    assert_ne!(code, 0, "manual output must fail: {} {}", stdout, stderr);
+    assert!(stderr.contains("NOT hyb-generated"), "{}", stderr);
+    assert_eq!(fs::read(&generated).unwrap(), before);
+    assert_eq!(
+        fs::metadata(&generated).unwrap().modified().unwrap(),
+        modified
+    );
+}
+
+#[test]
+fn marked_stale_output_can_be_refreshed() {
+    let m = SampleModule::new("marked-stale-output");
+    let generated = m.root.join("calc.hy.go");
+    fs::write(&generated, STALE_GENERATED).unwrap();
+    let (code, stdout, stderr) = m.hyb(&["generate", "calc.hy"]);
+    assert_eq!(
+        code, 0,
+        "marked output should refresh: {} {}",
+        stdout, stderr
+    );
+    assert_ne!(fs::read_to_string(&generated).unwrap(), STALE_GENERATED);
+    let (code, stdout, stderr) = m.hyb(&["generate", "--check", "calc.hy"]);
+    assert_eq!(
+        code, 0,
+        "refreshed output should be fresh: {} {}",
+        stdout, stderr
+    );
+}
