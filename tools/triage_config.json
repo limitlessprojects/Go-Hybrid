@@ -1,5 +1,6 @@
 {
   "repo": "limitlessprojects/Go-Hybrid",
+  "board_issue": 940,
   "wildcard_holds": [336, 370, 379, 381, 384, 405, 412, 446, 452, 464, 474, 480, 488, 505, 507, 516, 545, 556, 566, 569, 572, 577, 616, 635, 637, 704, 709],
   "drafts_parked": [465, 531],
   "behind_threshold": 15,

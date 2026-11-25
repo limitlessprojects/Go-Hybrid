@@ -23,7 +23,10 @@ name = "hy-emit"
 version = "0.0.1"
 dependencies = [
  "hy-check",
+ "hy-diag",
  "hy-syntax",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
