@@ -111,12 +111,12 @@ func (h *Histogram) ValueAt(fraction float64) int64 {
 	if fraction >= 1 {
 		return h.maxVal
 	}
-	rank := int64(fraction*float64(h.count) + 0.5)
+	rank := int64(fraction * float64(h.count))
+	if rank < h.count && float64(rank)/float64(h.count) < fraction {
+		rank++
+	}
 	if rank < 1 {
 		rank = 1
-	}
-	if rank > h.count {
-		rank = h.count
 	}
 	var seen int64
 	for e := 0; e < 64; e++ {
