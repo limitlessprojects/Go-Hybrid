@@ -478,7 +478,7 @@ impl Emitter {
                     },
                     (Some(t), Some(v)) => {
                         self.hoist_tries_expr(v)?;
-                        let mut e = self.emit_expr(v, 0)?;
+                        let mut e = self.emit_expr_exp(v, 0, l.ty.as_ref())?;
                         if matches!(alias, Some((_, true))) {
                             e = format!("&{}", e);
                         }
@@ -2430,7 +2430,7 @@ impl Emitter {
         // fns whose error-returns shape is known (E3-capable fns).
         let mut vs = Vec::new();
         for (i, v) in values.iter().enumerate() {
-            if matches!(v, Expr::Ident { name, .. } if name == "none") {
+            if matches!(Self::peel_parens(v), Expr::Ident { name, .. } if name == "none") {
                 match &self.cur_option_result {
                     Some(opt) => vs.push(format!("{}{{}}", opt)),
                     None => {
