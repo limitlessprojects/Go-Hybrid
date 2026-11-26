@@ -49,12 +49,18 @@ log="${HYB_TEST_LOG:?}"
 printf '{"runtime": "%s", "cargo_bin": "%s", "target_dir": "%s", "exe": "%s", "path": "%s"}\n' \
     "${HYB_RUNTIME_DIR-<unset>}" "${HYB_CARGO_BIN-<unset>}" \
     "${CARGO_TARGET_DIR-<unset>}" "$0" "$PATH" >> "$log"
+source=$2
 out=""
 while [ $# -gt 0 ]; do
     if [ "$1" = "-o" ]; then out="$2"; shift; fi
     shift
 done
-printf '#!/bin/sh\necho "hello, Hybrid!"\n' > "$out"
+case "$source" in
+    */05-json-transform/*) leg=bridge; output='{"name":"ada"}' ;;
+    *) leg=hello; output='hello, Hybrid!' ;;
+esac
+[ "$leg" != "${HYB_TEST_FAIL_SMOKE:-}" ] || exit 7
+printf '%s\n' '#!/bin/sh' "echo '$output'" > "$out"
 chmod +x "$out"
 """
 
@@ -105,6 +111,9 @@ class PackageReleaseIsolationTests(unittest.TestCase):
         (self.repo / "compiler").mkdir()
         (self.repo / "examples" / "01-hello").mkdir(parents=True)
         (self.repo / "examples" / "01-hello" / "program.hy").write_text("fn main() {}\n")
+        bridge_example = self.repo / "examples" / "05-json-transform"
+        bridge_example.mkdir()
+        (bridge_example / "program.hy").write_text("fn main() {}\n")
 
         # Old artifacts sit at the crate-local paths the script copies from.
         (hyrt / "target" / "release").mkdir(parents=True)
@@ -149,13 +158,13 @@ class PackageReleaseIsolationTests(unittest.TestCase):
             "HYB_PKG_ARCH": PKG_ARCH,
         }
 
-    def package(self, **extra):
+    def package(self, *, expected_code=0, **extra):
         result = subprocess.run(
             ["sh", str(self.repo / "tools" / "package_release.sh"), VERSION],
             env={**self.env, **extra}, cwd=self.root,
             capture_output=True, text=True, timeout=60, check=False,
         )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, expected_code, result.stdout + result.stderr)
         return result
 
     def tarball(self):
@@ -266,6 +275,35 @@ class PackageReleaseIsolationTests(unittest.TestCase):
                     (directory / "cargo.exe").is_file() and os.access(directory / "cargo.exe", os.X_OK),
                     part,
                 )
+
+    def test_first_smoke_failure_does_not_publish_archive_or_checksum(self):
+        result = self.package(expected_code=1, HYB_TEST_FAIL_SMOKE="hello")
+        self.assertIn("SMOKE FAILED", result.stderr)
+        dist = self.tarball().parent
+        self.assertEqual(list(dist.iterdir()), [])
+
+    def test_failed_rebuild_keeps_previously_verified_archive_and_checksum(self):
+        self.package()
+        archive = self.tarball()
+        checksum = archive.with_name(f"{archive.name}.sha256")
+        previous = (archive.read_bytes(), checksum.read_bytes())
+        (self.repo / "runtime" / "go" / "hybridge" / "doc.go").write_text(
+            "package hybridge\n// Rebuild candidate.\n"
+        )
+        result = self.package(expected_code=1, HYB_TEST_FAIL_SMOKE="hello")
+        self.assertIn("SMOKE FAILED", result.stderr)
+        self.assertEqual((archive.read_bytes(), checksum.read_bytes()), previous)
+        self.assertEqual(set(archive.parent.iterdir()), {archive, checksum})
+
+    def test_bridge_smoke_failure_does_not_publish_archive_or_checksum(self):
+        result = self.package(
+            expected_code=1, HYB_PKG_OS="darwin", HYB_TEST_FAIL_SMOKE="bridge"
+        )
+        self.assertIn("smoke PASS (darwin/amd64)", result.stdout)
+        self.assertIn("BRIDGE SMOKE FAILED", result.stderr)
+        self.assertEqual(list(self.tarball().parent.iterdir()), [])
+        retried = self.package(HYB_PKG_OS="darwin")
+        self.assertIn("bridge smoke PASS", retried.stdout)
 
 
 if __name__ == "__main__":

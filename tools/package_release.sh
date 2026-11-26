@@ -33,7 +33,7 @@ unset CARGO_TARGET_DIR HYB_RUNTIME_DIR HYB_CARGO_BIN
 
 VER="${1:?usage: package_release.sh <version-tag, e.g. v0.1.0>}"
 # The version is a single path component in both the staging directory
-# (removed with rm -rf below) and the archive name. Reject path separators
+# and the archive name. Reject path separators
 # and other non-filename characters before starting any build or write.
 [ "$#" -eq 1 ] || { echo "invalid version: expected exactly one version tag" >&2; exit 2; }
 case "$VER" in
@@ -60,7 +60,6 @@ case "$ARCH" in
 esac
 DIST="$REPO_ROOT/dist"
 NAME="hybrid-${VER}-${PKG_OS}-${ARCH}"
-DIR="$DIST/hybrid-${VER}"
 # cargo's per-target linker env var, derived from the triple:
 # aarch64-unknown-linux-gnu -> CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
 if [ -n "$RUST_TARGET" ]; then
@@ -106,8 +105,11 @@ HYB_OUT_NAME=hyb
 [ -f "$HYB_BIN" ] || HYB_BIN="${HYB_BIN}.exe"
 [ -f "$HYB_BIN" ] || { echo "hyb binary not found after build" >&2; exit 1; }
 
-# --- 3. assemble the tree ---
-rm -rf "$DIR"
+# --- 3. assemble the tree privately until both smoke tests pass ---
+mkdir -p "$DIST"
+PACKAGE_TMP="$(mktemp -d "$DIST/.package.XXXXXX")"
+trap 'rm -rf -- "$PACKAGE_TMP"' EXIT
+DIR="$PACKAGE_TMP/hybrid-${VER}"
 mkdir -p "$DIR"
 cp "$HYB_BIN" "$DIR/$HYB_OUT_NAME"
 cp "$REPO_ROOT/tools/RELEASE-INSTALL.md" "$DIR/INSTALL.md"
@@ -132,20 +134,20 @@ done
 touch "$DIR/runtime/rust/hyrt/target/release/libhyrt.a"
 
 # --- 4. tar + checksum ---
-mkdir -p "$DIST"
-( cd "$DIST" && tar czf "$NAME.tar.gz" "hybrid-${VER}" )
+( cd "$PACKAGE_TMP" && tar czf "$NAME.tar.gz" "hybrid-${VER}" )
 if command -v sha256sum >/dev/null; then
-    ( cd "$DIST" && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
+    ( cd "$PACKAGE_TMP" && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
 else
-    ( cd "$DIST" && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
+    ( cd "$PACKAGE_TMP" && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
 fi
 
 # --- 5. smoke test from the ACTUAL tarball with cargo REMOVED from PATH ---
 # (the reply's bar: no Rust toolchain, ever, for users. The shipped
 #  staticlib's mtime must win ensure_staticlib()'s freshness check.)
 echo "==> smoke test from the tarball (PATH without cargo)"
-SMOKE="$(mktemp -d)"
-( cd "$SMOKE" && tar xzf "$DIST/$NAME.tar.gz" )
+SMOKE="$PACKAGE_TMP/smoke"
+mkdir "$SMOKE"
+( cd "$SMOKE" && tar xzf "$PACKAGE_TMP/$NAME.tar.gz" )
 # BSD paste (macOS) can't read stdin without a file operand — filter in shell
 RUSTLESS_PATH=""
 OLDIFS="$IFS"; IFS="::"
@@ -209,7 +211,13 @@ if { [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; } || [ "$PKG_
         exit 1
     fi
 fi
-rm -rf "$SMOKE"
+# Only smoke-tested artifacts go to the paths consumed by release uploads.
+if [ -d "$DIST/$NAME.tar.gz" ] || [ -d "$DIST/$NAME.tar.gz.sha256" ]; then
+    echo "release archive or checksum destination is a directory" >&2
+    exit 1
+fi
+mv -f "$PACKAGE_TMP/$NAME.tar.gz" "$DIST/$NAME.tar.gz"
+mv -f "$PACKAGE_TMP/$NAME.tar.gz.sha256" "$DIST/$NAME.tar.gz.sha256"
 
 echo "==> done:"
 ls -la "$DIST/$NAME.tar.gz" "$DIST/$NAME.tar.gz.sha256"
