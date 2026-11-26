@@ -61,7 +61,7 @@ jobs:
             cp tools/state/queue_snapshot.json /tmp/tick/queue_snapshot.json
           else
             echo "snapshot: surveying (GraphQL)"
-            if SURVEY_OUT=/tmp/tick/queue_snapshot.json timeout 2100 python3 tools/survey_queue.py; then
+            if SURVEY_OUT=/tmp/tick/queue_snapshot.json timeout 2100 python3 tools/queue_snapshot.py; then
               echo "snapshot: fresh"
             elif [ -s tools/state/queue_snapshot.json ]; then
               echo "snapshot: survey failed — falling back to carried copy (may be stale)"
