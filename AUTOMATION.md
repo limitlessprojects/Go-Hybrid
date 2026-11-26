@@ -144,7 +144,11 @@ default 40). Each run re-uses the carried snapshot in
 `tools/queue_snapshot.py`), dry-run gates the batch, and commits a heartbeat
 line + fresh snapshot back to `tools/state/` — that `automation:` commit is
 the externally visible evidence a run happened. First validation run
-(#45785005646) succeeded end-to-end on 2026-11-26.
+(#45785005646) succeeded end-to-end on 2026-11-26; session 194 added a
+`!tools/state/heartbeat.log` negation to `.gitignore` (the root `*.log`
+rule was silently excluding the heartbeat line, so evidence commits never
+landed) and dispatched run #45812557658 validated the full write path
+(4 closes, each with its evidence reply).
 
 Usage (any agent session; token required for writes, the survey is read-only):
 
