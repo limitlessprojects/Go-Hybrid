@@ -80,10 +80,11 @@ jobs:
           HYB_QEMU: ${{ matrix.rust-target == 'aarch64-unknown-linux-gnu' && 'qemu-aarch64-static -L /usr/aarch64-linux-gnu' || '' }}
         run: sh tools/package_release.sh "${{ inputs.version }}"
       - name: Go runtime suite under qemu (linux/arm64 — row 16 regression)
-        # The aarch64 bridge port's fleet regression: the full 5-package Go
-        # test suite (Batch L's 20 tests + the trampoline offsets canary)
-        # cross-compiled GOARCH=arm64 against the ARM64 staticlib and executed
-        # under qemu. Required leg — a red suite blocks the asset.
+        # The aarch64 bridge port's fleet regression: the full Go
+        # test suite (Batch L's 20 tests + the trampoline offsets canary
+        # + hybench's 6 histogram tests) cross-compiled GOARCH=arm64
+        # against the ARM64 staticlib and executed under qemu.
+        # Required leg — a red suite blocks the asset.
         if: matrix.rust-target == 'aarch64-unknown-linux-gnu'
         run: |
           set -e
@@ -92,13 +93,9 @@ jobs:
           cp -r runtime/go/* /tmp/goci-arm/
           cp runtime/rust/hyrt/target/aarch64-unknown-linux-gnu/release/libhyrt.a /tmp/goci-arm/lib/
           cd /tmp/goci-arm
-          for p in hybridge jsonbinding regexbinding sha3binding overheadbench; do
-            CGO_ENABLED=1 GOARCH=arm64 GOOS=linux CC=aarch64-linux-gnu-gcc \
-              go test -c -o "$p.test" "./$p/"
-            qemu-aarch64-static -L /usr/aarch64-linux-gnu "./$p.test"
-            echo "arm64 $p: PASS"
-          done
-          echo "arm64 go runtime suite PASS (5 packages)"
+          CGO_ENABLED=1 GOARCH=arm64 GOOS=linux CC=aarch64-linux-gnu-gcc \
+            go test -count=1 -exec 'qemu-aarch64-static -L /usr/aarch64-linux-gnu' ./...
+          echo "arm64 go runtime suite PASS"
       - name: Go runtime suite on macOS (native bridge regression)
         if: matrix.pkg-os == 'darwin'
         run: |
@@ -114,8 +111,8 @@ jobs:
       - name: Go runtime suite on windows (row 17 regression — the bridge smoke)
         # The Win64 trampoline port's fleet regression: call_win64.s is
         # assembled, linked against the GNU-flavored staticlib through mingw
-        # cgo, and the full 5-package Go suite (bridge crossings included)
-        # runs NATIVELY on the windows runner. Required leg — a red suite
+        # cgo, and the full Go suite (bridge crossings + hybench's 6 histogram
+        # tests) runs NATIVELY on the windows runner. Required leg — a red suite
         # blocks the asset, exactly like the arm64 one.
         if: matrix.pkg-os == 'windows'
         shell: bash
@@ -128,16 +125,13 @@ jobs:
           cd /tmp/goci-win
           export CGO_ENABLED=1
           # The Win64 bridge smoke (row 17): call_win64.s assembles, mingw
-          # cgo links the GNU-flavored staticlib, and the full 5-package Go
-          # suite (real crossings through the real trampolines) runs
+          # cgo links the GNU-flavored staticlib, and the full Go suite
+          # (real crossings through the real trampolines + hybench) runs
           # NATIVELY. The alignment contract is pinned by
           # overheadbench's TestStackAlignmentContract (the probe) — the
           # fleet crashes that shaped it are in PLAN row 17's history.
-          for p in hybridge jsonbinding regexbinding overheadbench sha3binding; do
-            go test -count=1 "./$p/"
-            echo "windows $p: PASS"
-          done
-          echo "windows go runtime suite PASS (5 packages) — the Win64 bridge crossing is fleet-proven"
+          go test -count=1 ./...
+          echo "windows go runtime suite PASS — the Win64 bridge crossing is fleet-proven"
       - uses: actions/upload-artifact@v4
         with:
           name: hybrid-${{ inputs.version }}-${{ matrix.pkg-os }}-${{ matrix.pkg-arch }}
