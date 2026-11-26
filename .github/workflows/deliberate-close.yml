@@ -1,0 +1,116 @@
+# Deliberate close runner on GitHub Actions.
+#
+# Why this exists (2026-11-26): the agent-workspace cron (z.ai platform) has a
+# broken dispatch layer — job 540028 fired 84x and job 545580 fired 7x with
+# ZERO dispatch effect (no fired-runs logs, no tools/state/heartbeat.log on
+# GitHub), independent of payload size (980 chars and ~210 chars both failed).
+# The evidence-gated close tick therefore moves INTO the repo and runs on
+# GitHub's own scheduler, which does not depend on that dispatch path.
+#
+# Doctrine is unchanged (owner doctrine 2026-10-30, tools/pr_triage_runner.py):
+#   - never merge; landing stays human (AUTOMATION.md)
+#   - never close green/no-CI PRs — they are land candidates for review
+#   - never touch protected PRs (triage:wildcard-hold / triage:pareto /
+#     triage:keep, tools/triage_config.json, recently reopened)
+#   - closes need evidence (CI FAILURE, or CONFLICTING + idle >= 10d) on top
+#     of age >= 5d, always with a written PR-specific reply and reopen path,
+#     closed as not_planned
+#   - dry-run gate before every execute, capped batch, REST budget guard
+name: deliberate-close
+
+on:
+  schedule:
+    - cron: "23 */6 * * *" # every 6 hours at :23 UTC
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: "Dry run only (list candidates, no writes)"
+        type: boolean
+        default: true
+      max:
+        description: "Max closes this run"
+        required: false
+        default: "40"
+
+permissions:
+  contents: write # heartbeat + carried snapshot commit (tools/state/)
+  pull-requests: write # close + reply comments
+  issues: write # state_reason=not_planned PATCH lives on the Issues API
+
+concurrency:
+  group: deliberate-close
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Survey open PRs (reuse carried snapshot when fresh)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/tick
+          if [ -s tools/state/queue_snapshot.json ] && [ -z "$(find tools/state/queue_snapshot.json -mmin +1440)" ]; then
+            echo "snapshot: carried copy is fresh (<24h) — reusing"
+            cp tools/state/queue_snapshot.json /tmp/tick/queue_snapshot.json
+          else
+            echo "snapshot: surveying (GraphQL)"
+            if SURVEY_OUT=/tmp/tick/queue_snapshot.json timeout 2100 python3 tools/queue_snapshot.py; then
+              echo "snapshot: fresh"
+            elif [ -s tools/state/queue_snapshot.json ]; then
+              echo "snapshot: survey failed — falling back to carried copy (may be stale)"
+              cp tools/state/queue_snapshot.json /tmp/tick/queue_snapshot.json
+            else
+              echo "snapshot: none available — aborting tick"
+              exit 1
+            fi
+          fi
+
+      - name: Dry-run gate, then execute capped batch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRIAGE_LOG: /tmp/tick/runner.log
+          TRIAGE_REST_BUDGET: "700"
+        run: |
+          MAX="${{ inputs.max || '40' }}"
+          if [ "${{ inputs.dry }}" = "true" ]; then
+            python3 tools/pr_triage_runner.py --dry --max "$MAX" --survey /tmp/tick/queue_snapshot.json
+            echo "DRY RUN ONLY (dispatched with dry=true) — nothing was closed" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 tools/pr_triage_runner.py --dry --max "$MAX" --survey /tmp/tick/queue_snapshot.json > /tmp/tick/dry.log 2>&1 || true
+          N=$(grep -c "CLOSE not_planned" /tmp/tick/dry.log || true); N=${N:-0}
+          echo "dry-run: $N candidates in window"
+          if [ "$N" -eq 0 ]; then
+            echo "no close-candidates this tick (queue drained or all guarded)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 tools/pr_triage_runner.py --execute --max "$MAX" --survey /tmp/tick/queue_snapshot.json | tail -6
+          if [ -s /tmp/tick/runner.log ]; then
+            tail -1 /tmp/tick/runner.log | head -c 2000 >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Publish heartbeat + carried snapshot (durable evidence)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "triage-bot"
+          git config user.email "triage-bot@users.noreply.github.com"
+          mkdir -p tools/state
+          cp /tmp/tick/queue_snapshot.json tools/state/queue_snapshot.json 2>/dev/null || true
+          echo "$(date -u +%FT%TZ) deliberate-close run ${GITHUB_RUN_ID} — see the Actions tab for the log" >> tools/state/heartbeat.log
+          tail -200 tools/state/heartbeat.log > /tmp/hb.tmp && mv /tmp/hb.tmp tools/state/heartbeat.log
+          git add tools/state
+          if git diff --cached --quiet; then
+            echo "heartbeat: nothing new to commit"
+          else
+            git commit -q -m "automation: deliberate-close heartbeat (run ${GITHUB_RUN_ID})" || true
+            git push origin HEAD:main && echo "heartbeat: pushed" || echo "heartbeat: push failed (non-fatal)"
+          fi
