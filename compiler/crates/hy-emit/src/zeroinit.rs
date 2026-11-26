@@ -138,7 +138,30 @@ impl Emitter {
         }
         let (params, fields) = self.n5_generic_structs.get(head)?;
         let args_str = name.strip_prefix(head)?.strip_prefix('[')?.strip_suffix(']')?;
-        let src = format!("fn _f({}) {{}}\n", args_str.split(',').enumerate().map(|(idx, a)| format!("_p{idx} {}", a.trim())).collect::<Vec<_>>().join(", "));
+        let mut arg_parts = Vec::new();
+        let mut depth = 0usize;
+        let mut start = 0usize;
+        for (pos, ch) in args_str.char_indices() {
+            match ch {
+                '[' => depth += 1,
+                ']' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    arg_parts.push(args_str[start..pos].trim());
+                    start = pos + 1;
+                }
+                _ => {}
+            }
+        }
+        arg_parts.push(args_str[start..].trim());
+        let src = format!(
+            "fn _f({}) {{}}\n",
+            arg_parts
+                .iter()
+                .enumerate()
+                .map(|(idx, a)| format!("_p{idx} {a}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let Decl::Fn(func) = parse_file("n5.hy", &src).ok()?.decls.into_iter().next()? else { return None };
         (func.params.len() == params.len()).then(|| {
             let arg_tys: Vec<TypeExpr> = func.params.into_iter().map(|p| p.ty).collect();
