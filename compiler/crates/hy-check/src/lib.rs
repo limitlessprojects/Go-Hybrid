@@ -916,6 +916,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             }
 
             Stmt::Defer { call, .. } => {
+                ck.extend_map_slot_loans_for_defer(&mut st, call, idx, flat.stmts.len());
                 ck.mark_move_in_value(
                     &mut st,
                     call,

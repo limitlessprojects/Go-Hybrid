@@ -547,11 +547,63 @@ impl<'a> Checker<'a> {
             return;
         };
         let alias_last = st.last_use.get(alias_name).copied().unwrap_or(idx).max(idx);
-        let resolved_src = crate::freeze::resolve_alias(st, src);
+        let resolved_src = st
+            .slot_loan_aliases
+            .get(src)
+            .cloned()
+            .unwrap_or_else(|| crate::freeze::resolve_alias(st, src));
+        let mut matched_binding: Option<String> = None;
         for loan in &mut st.loans {
             if let LoanTarget::MapSlot { binding, .. } = &loan.target {
                 if (binding == src || *binding == resolved_src) && loan.created <= idx {
                     loan.last = loan.last.max(alias_last);
+                    matched_binding.get_or_insert_with(|| binding.clone());
+                }
+            }
+        }
+        if let Some(b) = matched_binding {
+            if alias_name != b {
+                st.slot_loan_aliases.insert(alias_name.to_string(), b);
+            }
+        }
+    }
+
+    /// Extend any live `LoanTarget::MapSlot` window referenced by a `defer`
+    /// statement (directly, via alias, or through a local closure) to function
+    /// exit, because `defer` executes at return rather than its lexical site.
+    pub(crate) fn extend_map_slot_loans_for_defer(
+        &self,
+        st: &mut FnState,
+        call: &Expr,
+        idx: usize,
+        fn_end: usize,
+    ) {
+        let mut worklist = Vec::new();
+        collect_capture_idents_expr(call, &mut HashSet::new(), &mut worklist);
+        let mut visited = HashSet::new();
+        while let Some(ident) = worklist.pop() {
+            if !visited.insert(ident.clone()) {
+                continue;
+            }
+            if let Some((params, results, body)) = st.closure_defs.get(&ident) {
+                let mut bound: HashSet<String> =
+                    params.iter().map(|p| p.name.clone()).collect();
+                bound.extend(results.iter().filter_map(|r| r.name.clone()));
+                collect_capture_idents_block(body, &mut bound, &mut worklist);
+            }
+        }
+        let mut targets = HashSet::new();
+        for ident in &visited {
+            targets.insert(ident.clone());
+            targets.insert(crate::freeze::resolve_alias(st, ident));
+            if let Some(b) = st.slot_loan_aliases.get(ident) {
+                targets.insert(b.clone());
+            }
+        }
+        for loan in &mut st.loans {
+            if let LoanTarget::MapSlot { binding, .. } = &loan.target {
+                if loan.created <= idx && targets.contains(binding) {
+                    loan.last = loan.last.max(fn_end);
                 }
             }
         }
