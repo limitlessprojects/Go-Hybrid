@@ -113,7 +113,7 @@ keeps everything to artifacts + evidence comments, `SHEPHERD_MODE`
 problem taxonomy (63.4% of open bugs = const-eval + bounds), and the
 pre-declared bake-off protocol: **AUTHOR-STAGE.md**.
 
-## Deliberate close runner (local agent sessions, from session-188)
+## Deliberate close runner (session-188; on GitHub Actions since 2026-11-26)
 
 The retired sweep's replacement for the red-CI drain: `tools/pr_triage_runner.py`
 (+ `tools/queue_snapshot.py` for the GraphQL survey). Doctrine unchanged — the
@@ -132,6 +132,46 @@ land candidates (`$TRIAGE_STATE_DIR/land_candidates.json`) for a landing
 session. Every close carries a PR-specific evidence reply with the reopen
 path, and `state_reason: not_planned` is set via the issues API (the
 pulls-API PATCH silently drops the reason).
+
+**Where it runs now.** The agent-workspace cron (z.ai) has a dead dispatch
+layer — jobs 540028 (~980-char payload, 84 firings) and 545580 (~210-char
+payload, 7 firings) both produced zero dispatch effect, so payload length is
+ruled out — and since 2026-11-26 the same runner file therefore drives
+`.github/workflows/deliberate-close.yml` on GitHub's own scheduler: every
+6 hours at :23 UTC plus manual dispatch (`dry` input defaults true, `max`
+default 40). Each run re-uses the carried snapshot in
+`tools/state/queue_snapshot.json` when it is < 24 h old (else re-surveys via
+`tools/queue_snapshot.py`), dry-run gates the batch, and commits a heartbeat
+line + fresh snapshot back to `tools/state/` — that `automation:` commit is
+the externally visible evidence a run happened. First validation run
+(#45785005646) succeeded end-to-end on 2026-11-26; session 194 added a
+`!tools/state/heartbeat.log` negation to `.gitignore` (the root `*.log`
+rule was silently excluding the heartbeat line, so evidence commits never
+landed) and dispatched run #45812557658 validated the full write path
+(4 closes, each with its evidence reply).
+
+**State commits live on the `automation/state` branch (session 195).** main
+is branch-protected and the classic protection API offers no bypass for the
+Actions app on a personal (non-org) repo: run #45856859601 closed 7 PRs and
+then lost its heartbeat to `failed to push some refs`, and the PATCH that
+would grant a bypass 422s on `restrictions` whichever way it is expressed
+(`null`, `{}`, full-empty all rejected). So the runner force-pushes its
+heartbeat + snapshot + land-candidate export to
+`refs/heads/automation/state` instead, and the survey step prefers a <24 h
+copy from that branch, then main's carried copy, else surveys fresh. Dry run
+#45858411583 validated the route end-to-end (heartbeat commit 92340766 on
+the branch). The tick no longer depends on owner pushes for snapshot
+freshness; agent sessions may still refresh main's carried copy.
+
+**Mergeability is REST-fixed at survey time (session 195).** GitHub computes
+mergeability lazily, so the bulk GraphQL survey recorded
+`mergeStateStatus: UNKNOWN` for ~1,020 open PRs and the land-candidate
+export stayed empty forever. The surveyor now walks the green-CI +
+non-draft + hold-free subset with individual REST GETs (which return the
+real value on first fetch) and overwrites `mergeable`/`mergeStateStatus`;
+rate limits stop the walk early and affected PRs keep their survey values.
+First pass over 132 candidates: **7 land candidates (clean)**, 124 behind,
+0 dirty, 0 unknown.
 
 Usage (any agent session; token required for writes, the survey is read-only):
 
