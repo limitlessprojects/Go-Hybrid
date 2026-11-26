@@ -112,3 +112,53 @@ keeps everything to artifacts + evidence comments, `SHEPHERD_MODE`
 (unchanged) still guards the landing. Brain/harness decisions, the
 problem taxonomy (63.4% of open bugs = const-eval + bounds), and the
 pre-declared bake-off protocol: **AUTHOR-STAGE.md**.
+
+## Deliberate close runner (session-188; on GitHub Actions since 2026-11-26)
+
+The retired sweep's replacement for the red-CI drain: `tools/pr_triage_runner.py`
+(+ `tools/queue_snapshot.py` for the GraphQL survey). Doctrine unchanged — the
+bot never merges, closes are deliberate, no silent closes. A PR is closed as
+not_planned only if ALL of:
+
+  - it is unprotected (no hold labels, not in `triage_config.json`),
+  - age >= `TRIAGE_MIN_AGE_DAYS` (default 5),
+  - hard evidence: CI rollup FAILURE (or CONFLICTING + idle >= 10d),
+  - it is not wildcard-titled (catches unlabeled M1 submissions),
+  - its author has not commented in the last 3 days,
+  - it was not reopened inside `TRIAGE_REOPEN_WINDOW_DAYS` (default 5).
+
+Green-CI and no-CI PRs are NEVER closed; green-CI + CLEAN PRs are exported as
+land candidates (`$TRIAGE_STATE_DIR/land_candidates.json`) for a landing
+session. Every close carries a PR-specific evidence reply with the reopen
+path, and `state_reason: not_planned` is set via the issues API (the
+pulls-API PATCH silently drops the reason).
+
+**Where it runs now.** The agent-workspace cron (z.ai) has a dead dispatch
+layer — jobs 540028 (~980-char payload, 84 firings) and 545580 (~210-char
+payload, 7 firings) both produced zero dispatch effect, so payload length is
+ruled out — and since 2026-11-26 the same runner file therefore drives
+`.github/workflows/deliberate-close.yml` on GitHub's own scheduler: every
+6 hours at :23 UTC plus manual dispatch (`dry` input defaults true, `max`
+default 40). Each run re-uses the carried snapshot in
+`tools/state/queue_snapshot.json` when it is < 24 h old (else re-surveys via
+`tools/queue_snapshot.py`), dry-run gates the batch, and commits a heartbeat
+line + fresh snapshot back to `tools/state/` — that `automation:` commit is
+the externally visible evidence a run happened. First validation run
+(#45785005646) succeeded end-to-end on 2026-11-26; session 194 added a
+`!tools/state/heartbeat.log` negation to `.gitignore` (the root `*.log`
+rule was silently excluding the heartbeat line, so evidence commits never
+landed) and dispatched run #45812557658 validated the full write path
+(4 closes, each with its evidence reply).
+
+Usage (any agent session; token required for writes, the survey is read-only):
+
+```bash
+export TRIAGE_STATE_DIR=/tmp/gh-triage
+python3 tools/queue_snapshot.py                       # GraphQL survey, ~4 min
+python3 tools/pr_triage_runner.py --dry --max 40      # review decisions first
+python3 tools/pr_triage_runner.py --execute --max 40  # capped batch, idempotent
+```
+
+Runs are bounded (REST budget guard, rate-limit sleeps) and safely
+re-runnable: already-closed, reopened, author-active and protected PRs are
+re-checked live and skipped, so a stale snapshot never double-closes.
