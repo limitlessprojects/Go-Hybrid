@@ -613,9 +613,21 @@ impl Emitter {
         ty: &TypeExpr,
         fields: &[FieldInit],
     ) -> Result<String, EmitError> {
-        let field_decls = match self.n5_resolve_alias(ty) {
-            TypeExpr::Named { name, .. } => self.struct_lit_field_decls(&name),
+        let resolved_ty = self.n5_resolve_alias(ty);
+        let field_decls = match &resolved_ty {
+            TypeExpr::Named { name, .. } => self.struct_lit_field_decls(name),
             _ => None,
+        };
+        let foreign_ty = if field_decls.is_none() {
+            let inner = match &resolved_ty {
+                TypeExpr::Pointer { to, .. } => self.n5_resolve_alias(to),
+                other => other.clone(),
+            };
+            super::base_ty_name(&inner).filter(|n| {
+                n.split('[').next().unwrap_or(n.as_str()).contains('.')
+            })
+        } else {
+            None
         };
         let mut parts = Vec::new();
         for f in fields {
@@ -625,7 +637,15 @@ impl Emitter {
                     .map(|d| d.ty.clone())
             });
             let v = self.emit_expr_exp(&f.value, 0, exp_ty.as_ref())?;
-            parts.push(format!("{}: {}", f.name, v));
+            let key = if let Some(ref ft) = foreign_ty {
+                match lookup_member(ft, &f.name) {
+                    Some(m) if m.kind == MemberKind::Field => m.go.to_string(),
+                    _ => to_go_name(&f.name),
+                }
+            } else {
+                f.name.clone()
+            };
+            parts.push(format!("{}: {}", key, v));
         }
         let extra = self.n5_missing_fields(ty, fields);
         parts.extend(extra);
@@ -828,14 +848,9 @@ impl Emitter {
                 // typing — `stats.mu` and `o.sub.mu` resolve through
                 // var_struct + struct_fields when the field's declared
                 // type is shape-known (18: sync.mutex).
-                if let Some(sn) = self.user_struct_name_of(base.as_ref()) {
-                    if let Some((_, fty)) = self.struct_fields.get(sn).and_then(|fs| fs.iter().find(|(f, _)| f == name)) {
-                        let mut cur = fty.clone();
-                        for _ in 0..16 {
-                            if let Some((k, _)) = super::shapes::SHAPES.iter().find(|(k, _)| *k == cur) { return Some(k); }
-                            let Some(next) = self.n5_aliases.get(&cur).and_then(super::base_ty_name) else { break };
-                            cur = next;
-                        }
+                if let Some(fty) = self.user_struct_field_ty(base, name) {
+                    if let Some(BindingKind::ForeignTy(k)) = self.binding_kind_of_ty(&fty) {
+                        return Some(k);
                     }
                 }
                 None
@@ -928,16 +943,59 @@ impl Emitter {
                     MemberKind::Method => m.go.to_string(),
                 };
             }
-        }
-        if let Expr::Ident { name: root, .. } = Self::unwrap_parens_and_addr(base) {
-            if matches!(
-                self.bindings.get(root),
-                Some(BindingKind::Foreign) | Some(BindingKind::ForeignTy(_))
-            ) {
-                return to_go_name(name);
-            }
+            return to_go_name(name);
         }
         self.member_name(base, name)
+    }
+
+    pub(crate) fn is_foreign_expr(&self, e: &Expr) -> bool {
+        let e = Self::unwrap_parens_and_addr(e);
+        if let Expr::Ident { name, .. } = e {
+            if self.is_unshadowed_pkg_root(name) {
+                return true;
+            }
+        }
+        self.type_of_expr(e).is_some()
+            || matches!(
+                self.binding_kind_of(e),
+                BindingKind::Foreign | BindingKind::ForeignTy(_)
+            )
+    }
+
+    pub(crate) fn user_struct_field_ty(&self, base: &Expr, field: &str) -> Option<TypeExpr> {
+        let inst = self.user_struct_inst_ty(base)?;
+        let decls = self.struct_lit_field_decls(&inst).or_else(|| {
+            self.resolve_to_struct_name(&inst)
+                .and_then(|sn| self.n5_structs.get(sn).cloned())
+        })?;
+        decls.into_iter().find(|d| d.name == field).map(|d| d.ty)
+    }
+
+    fn user_struct_inst_ty(&self, e: &Expr) -> Option<String> {
+        match Self::unwrap_parens_and_addr(e) {
+            Expr::Ident { name, .. } => self
+                .var_ty
+                .get(name)
+                .map(|(t, _)| t.clone())
+                .filter(|t| self.resolve_to_struct_name(t).is_some())
+                .or_else(|| self.var_struct.get(name).cloned()),
+            Expr::Try { operand, .. } | Expr::Move { operand, .. } => {
+                self.user_struct_inst_ty(operand)
+            }
+            Expr::StructLit { ty: Some(t), .. } => self.inst_struct_ty_name(t),
+            Expr::Field { base, name, .. } => {
+                self.inst_struct_ty_name(&self.user_struct_field_ty(base, name)?)
+            }
+            _ => self.user_struct_name_of(e).map(str::to_string),
+        }
+    }
+
+    pub(crate) fn inst_struct_ty_name(&self, ty: &TypeExpr) -> Option<String> {
+        let inner = match self.resolve_type_alias(ty) {
+            TypeExpr::Pointer { to, .. } => self.resolve_type_alias(to),
+            other => other,
+        };
+        super::base_ty_name(inner).filter(|n| self.resolve_to_struct_name(n).is_some())
     }
 
     fn unwrap_parens(mut e: &Expr) -> &Expr {
@@ -947,7 +1005,7 @@ impl Emitter {
         e
     }
 
-    fn unwrap_parens_and_addr(mut e: &Expr) -> &Expr {
+    pub(crate) fn unwrap_parens_and_addr(mut e: &Expr) -> &Expr {
         loop {
             match e {
                 Expr::Paren { inner, .. } => e = inner,
@@ -1063,30 +1121,28 @@ impl Emitter {
         // `r.URL.Query().Get("a")`); generic Foreign falls back to M4.
         if let Expr::Field { base, name, .. } = callee {
             let base = Self::selector_base(base);
-            if let Some(bt) = self.type_of_expr(base) {
-                if let Some(m) = lookup_member(bt, name) {
-                    if m.kind == MemberKind::Method {
-                        let b = self.emit_expr(base, ATOM)?;
-                        let mut parts = Vec::new();
-                        for a in args {
-                            parts.push(self.emit_call_arg(a)?);
-                        }
-                        return Ok(format!("{}.{}({})", b, m.go, parts.join(", ")));
-                    }
-                    // MethodZero called WITH args (or a Field called) is a
-                    // surface error — fall through; Go rejects Field(args)
-                    // — a clean failure, never a wrong emission.
-                }
-            }
-            if let Expr::Ident { name: root, .. } = Self::unwrap_parens_and_addr(base) {
-                if let Some(BindingKind::Foreign) = self.bindings.get(root) {
+            let known_member = self
+                .type_of_expr(base)
+                .and_then(|bt| lookup_member(bt, name));
+            if let Some(m) = known_member {
+                if m.kind == MemberKind::Method {
                     let b = self.emit_expr(base, ATOM)?;
                     let mut parts = Vec::new();
                     for a in args {
                         parts.push(self.emit_call_arg(a)?);
                     }
-                    return Ok(format!("{}.{}({})", b, to_go_name(name), parts.join(", ")));
+                    return Ok(format!("{}.{}({})", b, m.go, parts.join(", ")));
                 }
+                // MethodZero called WITH args (or a Field called) is a
+                // surface error — fall through; Go rejects Field(args)
+                // — a clean failure, never a wrong emission.
+            } else if !(name == "pop" && args.is_empty()) && self.is_foreign_expr(base) {
+                let b = self.emit_expr(base, ATOM)?;
+                let mut parts = Vec::new();
+                for a in args {
+                    parts.push(self.emit_call_arg(a)?);
+                }
+                return Ok(format!("{}.{}({})", b, to_go_name(name), parts.join(", ")));
             }
         }
 
