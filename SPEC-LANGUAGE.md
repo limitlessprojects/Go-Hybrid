@@ -2085,6 +2085,13 @@ numeric conversions are spelled `T(x)`; narrowing truncates high bits
 No implicit conversions between distinct numeric types; untyped constants
 convert implicitly on first use only.
 
+Slice conversions do not convert elements individually: known source and
+target element types must be identical, including numeric width and
+signedness and nested slice/array elements. Go/Hybrid spellings of the same
+type remain interchangeable (`byte`/`uint8`/`u8`, `rune`/`int32`/`i32`);
+`int` and `int64` remain distinct even on a 64-bit host. A conversion from
+a string to `[]byte` or `[]rune` remains valid.
+
 ```hy
 pi := 3.9
 n  := int(pi)               // expect: 3  (truncation toward zero)

@@ -1,5 +1,32 @@
 # Hybrid Language: Development Plan
 
+## Contributor amendment — slice conversion elements (#1838, 2026-11-27)
+
+- Base `67ba97f5078408f56edcb403f7b6dcd3db2a06c3` accepts `[]byte(s)` for
+  `var s []int` with zero diagnostics; Go 1.26.9 rejects the same conversion.
+  The #2725 kind check already rejects cross-kind conversions, but erases
+  numeric width/signedness. Compare known element spellings with the existing
+  alias-aware, recursive element-type comparison as well.
+  Array dimensions use parsed integer values so equivalent octal/decimal
+  spellings remain compatible.
+- Verdict amendment (SPEC-LANGUAGE X4 / Row 13 BUILDABLE): eight invalid
+  integer, float, and nested slice/array conversions now reject HYB-E1002.
+  Eleven identical-type/alias controls and existing string conversions remain
+  accepted. The new rejection test fails on base and the focused suite passes
+  after the fix; no existing corpus fixture is edited.
+- Final native Linux aarch64 validation (Rust 1.99.0 / Go 1.26.9): all 508
+  workspace unit/integration/bin/doc target commands pass (3295 tests, none
+  ignored), corpus 139/139, differential 47/47 accept build+run and 92/92
+  reject, examples 10/10, and eleven valid conversion controls build and run.
+  Registration, census, claims, guarantees, version, conflict-marker,
+  changed-test formatting and whitespace checks pass.
+- The one-shot workspace build exhausted disk, so the complete target set was
+  executed separately, removing each test executable after use. Pipeline
+  builds use a test-only adapter delegating to pinned Go with
+  `build -buildvcs=false`: `hyb` overrides GOFLAGS, and VCS stamping fails in
+  isolated scratch workspaces. This changes metadata only. Hosted CI,
+  maintainer review and any award remain pending.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.
