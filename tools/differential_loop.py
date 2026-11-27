@@ -293,49 +293,37 @@ def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None,
         return False, "no a.out produced"
     try:
         run = subprocess.run(
-            [binary], cwd=workdir, capture_output=True, text=True, timeout=60
+            [binary], cwd=workdir, capture_output=True, timeout=60
         )
     except subprocess.TimeoutExpired as exc:
         return False, f"run timed out after {exc.timeout}s"
     except OSError as exc:
         return False, f"run could not be run: {exc}"
-    # The race detector reports on stderr and then lets the program run to
-    # a normal exit, so exit 0 does NOT mean race-free. Check the text
-    # explicitly, and check it before the exit-code branch.
-    if race and "DATA RACE" in (run.stderr or ""):
-        known = documented_race(run.stderr, hazards)
-        if known is not None:
-            # Already admitted by the corpus; say so and keep going.
-            detail = f"documented RUNTIME-HAZARD race (pre-registered: {known})"
-            if expected_output is not None:
-                stdout = run.stdout.replace("\r\n", "\n")
-                if stdout not in (expected_output, expected_output + "\n"):
-                    return False, (f"stdout mismatch: expected "
-                                   f"{expected_output[:200]!r}, "
-                                   f"got {run.stdout[:200]!r}")
-            return True, detail
-        first = next(
-            (l for l in (run.stderr or "").splitlines() if l.strip()),
-            "DATA RACE",
-        )
-        return False, f"data race detected: {first.strip()[:160]}"
-
+    # Text-mode pipes translate a lone CR into LF. Keep stdout as bytes for
+    # the corpus assertion and decode diagnostic text only for reporting.
+    stderr = run.stderr.decode("utf-8", errors="backslashreplace")
     detail = "exit 0"
-    if run.returncode != 0:
+    if race and "DATA RACE" in stderr:
+        known = documented_race(stderr, hazards)
+        if known is None:
+            first = next((line for line in stderr.splitlines() if line.strip()), "DATA RACE")
+            return False, f"data race detected: {first.strip()[:160]}"
+        detail = f"documented RUNTIME-HAZARD race (pre-registered: {known})"
+    elif run.returncode != 0:
         # A Go fatal normally exits 2; GOTRACEBACK=crash aborts on Unix.
         # Matching text must not hide a different exit or a killed process.
         go_fatal_exit = run.returncode == 2 or (
             os.name == "posix" and run.returncode == -signal.SIGABRT
         )
-        if go_fatal_exit and documented_runtime_hazard(run.stderr, hazards):
+        if go_fatal_exit and documented_runtime_hazard(stderr, hazards):
             detail = "documented RUNTIME-HAZARD fatal (pre-registered)"
         else:
-            return False, f"run exit {run.returncode}: {(run.stderr or run.stdout)[-200:]}"
+            message = stderr or run.stdout[-200:].decode("utf-8", errors="backslashreplace")
+            return False, f"run exit {run.returncode}: {message[-200:]}"
     if expected_output is not None:
-        stdout = run.stdout.replace("\r\n", "\n")
-        if stdout not in (expected_output, expected_output + "\n"):
-            return False, (f"stdout mismatch: expected {expected_output[:200]!r}, "
-                           f"got {run.stdout[:200]!r}")
+        expected = expected_output.encode("utf-8")
+        if run.stdout not in (expected, expected + b"\n", expected + b"\r\n"):
+            return False, f"stdout mismatch: expected {expected[:200]!r}, got {run.stdout[:200]!r}"
     return True, detail
 
 

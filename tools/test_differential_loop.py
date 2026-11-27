@@ -112,7 +112,7 @@ class RuntimeHazardTests(unittest.TestCase):
     def test_registered_fatal_abort_mode_remains_allowed(self):
         build = subprocess.CompletedProcess([], 0, "", "")
         run = subprocess.CompletedProcess(
-            [], -signal.SIGABRT, "", "fatal error: concurrent map writes\n")
+            [], -signal.SIGABRT, b"", b"fatal error: concurrent map writes\n")
         with patch.object(HARNESS_MOD.subprocess, "run", side_effect=[build, run]), \
              patch.object(HARNESS_MOD.os.path, "exists", return_value=True):
             ok, detail = HARNESS_MOD.build_and_run(
@@ -122,7 +122,7 @@ class RuntimeHazardTests(unittest.TestCase):
     def test_matching_fatal_with_exit_one_is_not_agreement(self):
         build = subprocess.CompletedProcess([], 0, "", "")
         run = subprocess.CompletedProcess(
-            [], 1, "", "fatal error: concurrent map writes\n")
+            [], 1, b"", b"fatal error: concurrent map writes\n")
         with patch.object(HARNESS_MOD.subprocess, "run", side_effect=[build, run]), \
              patch.object(HARNESS_MOD.os.path, "exists", return_value=True):
             ok, detail = HARNESS_MOD.build_and_run(
@@ -133,7 +133,7 @@ class RuntimeHazardTests(unittest.TestCase):
     def test_matching_fatal_with_exit_137_is_not_agreement(self):
         build = subprocess.CompletedProcess([], 0, "", "")
         run = subprocess.CompletedProcess(
-            [], 137, "", "fatal error: concurrent map writes\n")
+            [], 137, b"", b"fatal error: concurrent map writes\n")
         with patch.object(HARNESS_MOD.subprocess, "run", side_effect=[build, run]), \
              patch.object(HARNESS_MOD.os.path, "exists", return_value=True):
             ok, detail = HARNESS_MOD.build_and_run(
@@ -405,7 +405,7 @@ class TimeoutCorpusTests(unittest.TestCase):
                 if first_run_pending and timeout_stage == "run":
                     first_run_pending = False
                     raise subprocess.TimeoutExpired(command, kwargs["timeout"])
-                return subprocess.CompletedProcess(command, 0, "", "")
+                return subprocess.CompletedProcess(command, 0, b"", b"")
 
             output = io.StringIO()
             with patch.object(sys, "argv", [
@@ -498,14 +498,14 @@ class RaceDetectorTests(unittest.TestCase):
     the gap this option closes.
     """
 
-    def run_race_case(self, stderr, hazards=(), stdout="", exit_code=0):
+    def run_race_case(self, stderr, hazards=(), stdout="", exit_code=0, expected_output=None):
         build = subprocess.CompletedProcess([], 0, "", "")
-        run = subprocess.CompletedProcess([], exit_code, stdout, stderr)
+        run = subprocess.CompletedProcess([], exit_code, stdout.encode(), stderr.encode())
         with patch.object(HARNESS_MOD.subprocess, "run",
                           side_effect=[build, run]), \
              patch.object(HARNESS_MOD.os.path, "exists", return_value=True):
             return HARNESS_MOD.build_and_run(
-                "hyb", "case.hy", ".", list(hazards), race=True)
+                "hyb", "case.hy", ".", list(hazards), race=True, expected_output=expected_output)
 
     def test_race_with_no_registered_hazard_fails(self):
         ok, detail = self.run_race_case(RACE_ON_MAP)
@@ -517,6 +517,13 @@ class RaceDetectorTests(unittest.TestCase):
             RACE_ON_MAP, ["concurrent map writes (Go fatal, pre-registered)"])
         self.assertTrue(ok, detail)
         self.assertIn("documented RUNTIME-HAZARD race", detail)
+
+    def test_documented_race_still_checks_the_output_terminator(self):
+        for stdout, expected_ok in (("idle\r", False), ("idle\r\n", True)):
+            with self.subTest(stdout=stdout):
+                ok, detail = self.run_race_case(
+                    RACE_ON_MAP, ["concurrent map writes"], stdout=stdout, expected_output="idle")
+                self.assertEqual(ok, expected_ok, detail)
 
     def test_race_on_other_object_is_not_covered_by_map_hazard(self):
         ok, detail = self.run_race_case(
@@ -536,7 +543,7 @@ class RaceDetectorTests(unittest.TestCase):
         new capability is strictly opt-in.
         """
         build = subprocess.CompletedProcess([], 0, "", "")
-        run = subprocess.CompletedProcess([], 0, "", RACE_ON_MAP)
+        run = subprocess.CompletedProcess([], 0, b"", RACE_ON_MAP.encode())
         with patch.object(HARNESS_MOD.subprocess, "run",
                           side_effect=[build, run]), \
              patch.object(HARNESS_MOD.os.path, "exists", return_value=True):
@@ -563,7 +570,8 @@ class RaceFlagPlumbingTests(unittest.TestCase):
             state["calls"] += 1
             if state["calls"] == 1:
                 captured["cmd"] = list(cmd)
-            return subprocess.CompletedProcess(list(cmd), 0, "", "")
+                return subprocess.CompletedProcess(list(cmd), 0, "", "")
+            return subprocess.CompletedProcess(list(cmd), 0, b"", b"")
 
         with patch.object(HARNESS_MOD.subprocess, "run", side_effect=fake_run), \
              patch.object(HARNESS_MOD.os.path, "exists", return_value=True):
