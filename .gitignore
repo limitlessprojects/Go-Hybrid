@@ -28,8 +28,6 @@ results/
 
 # Logs & caches
 *.log
-# the automation tick's durable heartbeat line is evidence, not a throwaway log
-!tools/state/heartbeat.log
 .cache/
 # NOTE: Cargo.lock and go.sum ARE committed per SPEC.md Phase 5 (reproducible builds)
 /

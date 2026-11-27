@@ -81,38 +81,6 @@ for p in prs:
     p["_suite_concls"] = {}
     p["_labels"] = [l["name"] for l in p["labels"]["nodes"]]
 
-# Session-195 fixup: GitHub computes mergeability lazily, so the bulk GraphQL
-# survey records UNKNOWN for nearly every open PR while individual REST GETs
-# return the real value. Walk the green-CI + non-draft + hold-free subset
-# (the only PRs whose merge state feeds a decision — land candidates) and
-# overwrite the surveyed fields with REST ground truth. Rate limits stop the
-# walk early; affected PRs simply keep their UNKNOWN survey values.
-REST_PROTECTED = {"triage:wildcard-hold", "triage:pareto", "triage:keep"}
-rest_target = [p for p in prs if p["_ci_rollup"] == "SUCCESS" and not p["isDraft"]
-               and not (set(p["_labels"]) & REST_PROTECTED)]
-print(f"\nREST mergeability fixup: {len(rest_target)} green-CI hold-free PRs", flush=True)
-fixed = 0
-for p in rest_target:
-    try:
-        req = urllib.request.Request(
-            f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{p['number']}",
-            headers={"Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json",
-                     "User-Agent": "queue-snapshot"})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            pr = json.loads(r.read().decode())
-        p["mergeable"] = "MERGEABLE" if pr.get("mergeable") else "CONFLICTING"
-        p["mergeStateStatus"] = str(pr.get("mergeable_state") or "unknown").upper()
-        fixed += 1
-        time.sleep(0.5)
-    except urllib.error.HTTPError as e:
-        if e.code in (403, 429):
-            print(f"  rate-limited at #{p['number']} — fixup stops early", flush=True)
-            break
-        print(f"  #{p['number']}: HTTP {e.code}", flush=True)
-    except Exception as ex:
-        print(f"  #{p['number']}: {ex}", flush=True)
-print(f"mergeability fixed for {fixed}/{len(rest_target)}", flush=True)
-
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 with open(OUT, "w") as f: json.dump(prs, f, indent=1, default=str)
 

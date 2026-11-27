@@ -37,7 +37,7 @@ import argparse, json, os, sys, time, urllib.request, urllib.error
 from datetime import datetime, timezone
 
 REPO = "limitlessprojects/Go-Hybrid"
-TOKEN = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+TOKEN = os.environ.get("GH_TOKEN", "")
 if not TOKEN:
     sys.exit("GH_TOKEN missing")
 
@@ -46,32 +46,21 @@ MIN_AGE = float(os.environ.get("TRIAGE_MIN_AGE_DAYS", "5"))
 CONFLICT_IDLE = float(os.environ.get("TRIAGE_CONFLICT_IDLE_DAYS", "10"))
 REOPEN_WINDOW = float(os.environ.get("TRIAGE_REOPEN_WINDOW_DAYS", "5"))
 MAX_REST_BUDGET = int(os.environ.get("TRIAGE_REST_BUDGET", "1800"))
-LOG = os.environ.get("TRIAGE_LOG", os.path.join(os.path.dirname(os.path.abspath(__file__)), "triage_runner.log"))
+LOG = os.environ.get("TRIAGE_LOG", os.path.join(
+    os.environ.get("TRIAGE_STATE_DIR", "/tmp/gh-triage"), "triage_runner.log"))
+STATE_DIR = os.environ.get("TRIAGE_STATE_DIR", "/tmp/gh-triage")
 
 _config = None
-def _config_file():
-    # works in BOTH layouts: repo checkout (tools/triage_config.json next to
-    # this script) and the agent workspace (../Go-Hybrid/tools/...)
-    here = os.path.dirname(os.path.abspath(__file__))
-    for cand in (os.path.join(here, "triage_config.json"),
-                 os.path.join(here, "..", "Go-Hybrid", "tools", "triage_config.json"),
-                 "/home/z/my-project/Go-Hybrid/tools/triage_config.json"):
-        if os.path.isfile(cand):
-            return cand
-    return None
-
 def config_protected():
     global _config
     if _config is None:
-        _config = set()
-        path = _config_file()
         try:
-            if path:
-                with open(path) as f:
-                    cfg = json.load(f)
-                _config = set(cfg.get("wildcard_holds", [])) | set(cfg.get("drafts_parked", []))
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "triage_config.json")) as f:
+                cfg = json.load(f)
+            _config = set(cfg.get("wildcard_holds", [])) | set(cfg.get("drafts_parked", []))
         except Exception as e:
-            print(f"  (config unreadable: {e})")
+            print(f"  (config unreadable: {e})"); _config = set()
     return _config
 
 rest_used = 0
@@ -211,9 +200,11 @@ def main():
     ap.add_argument("--dry", action="store_true", default=not "--execute" in sys.argv)
     ap.add_argument("--execute", action="store_true")
     ap.add_argument("--max", type=int, default=40, help="max closes per run")
-    ap.add_argument("--survey", default=os.environ.get("SURVEY_JSON", os.path.join(os.path.dirname(os.path.abspath(__file__)), "queue_snapshot.json")))
+    ap.add_argument("--survey", default=os.environ.get(
+        "SURVEY_JSON", os.path.join(STATE_DIR, "queue_snapshot.json")))
     ap.add_argument("--label-only", action="store_true", help="skip closes even if evidence exists")
     args = ap.parse_args()
+    os.makedirs(STATE_DIR, exist_ok=True)
 
     with open(args.survey) as f: prs = json.load(f)
     now = datetime.now(timezone.utc)
@@ -236,7 +227,7 @@ def main():
                   if p["_ci_rollup"] == "SUCCESS" and p.get("mergeStateStatus") == "CLEAN"
                   and not (set(p["_labels"]) & PROTECTED_LABELS)
                   and int(p["number"]) not in config_protected()]
-    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "land_candidates.json"), "w") as f:
+    with open(os.path.join(STATE_DIR, "land_candidates.json"), "w") as f:
         json.dump([{"number": p["number"], "title": p["title"], "age_days": p["_age_days"],
                     "author": (p.get("author") or {}).get("login")} for p in land_cands], f, indent=1)
     print(f"land candidates (green CI + CLEAN, open): {len(land_cands)} -> land_candidates.json")
