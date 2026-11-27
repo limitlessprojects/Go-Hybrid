@@ -1121,6 +1121,36 @@ impl<'a> Checker<'a> {
     /// The closure's own params are excluded: they are fresh bindings.
     pub(crate) fn record_closure_mutations(&self, st: &mut FnState, name: &str, value: &Expr) {
         match unwrap_parens(value) {
+            Expr::Field {
+                base,
+                name: method_name,
+                ..
+            } => {
+                let Some(sname) = self.method_expr_struct(st, base) else {
+                    return;
+                };
+                let Some(decl) = self.method_decls.get(&(sname, method_name.clone())).copied()
+                else {
+                    return;
+                };
+                let mut params: Vec<hy_syntax::Param> = Vec::new();
+                if let Some(r) = &decl.receiver {
+                    params.push(hy_syntax::Param {
+                        name: r.name.clone(),
+                        ty: r.ty.clone(),
+                        span: value.span(),
+                    });
+                }
+                params.extend(decl.params.iter().cloned());
+                let fn_ty = hy_syntax::TypeExpr::Fn {
+                    params,
+                    results: decl.results.iter().map(|r| r.ty.clone()).collect(),
+                    span: value.span(),
+                };
+                if let Some(b) = st.env_lookup_mut(name) {
+                    b.ty = Some(fn_ty);
+                }
+            }
             Expr::FnLit {
                 params,
                 results,
@@ -3324,6 +3354,21 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn method_expr_struct(&self, st: &FnState, base: &Expr) -> Option<String> {
+        let Expr::Ident { name, .. } = crate::model::unwrap_parens(base) else {
+            return None;
+        };
+        if self.lookup_binding(st, name).is_some() || self.consts.contains_key(name.as_str()) {
+            return None;
+        }
+        let head = Self::base_named_type_str(name).to_string();
+        if self.structs.contains_key(&head) || self.method_decls.keys().any(|(s, _)| s == &head) {
+            Some(head)
+        } else {
+            None
+        }
+    }
+
     fn resolve_callee_slots_and_body<'c>(
         &self,
         st: &FnState,
@@ -3406,17 +3451,21 @@ impl<'a> Checker<'a> {
                         return None;
                     }
                 }
-                let recv_struct = match self.shape_of_expr(st, base) {
-                    TypeShape::Struct(Some(s)) => {
-                        Some(Self::base_named_type_str(&s).to_string())
-                    }
-                    TypeShape::Pointer(inner) => match *inner {
+                let mexpr_struct = self.method_expr_struct(st, base);
+                let recv_struct = match &mexpr_struct {
+                    Some(s) => Some(s.clone()),
+                    None => match self.shape_of_expr(st, base) {
                         TypeShape::Struct(Some(s)) => {
                             Some(Self::base_named_type_str(&s).to_string())
                         }
+                        TypeShape::Pointer(inner) => match *inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(&s).to_string())
+                            }
+                            _ => None,
+                        },
                         _ => None,
                     },
-                    _ => None,
                 };
                 let decl = if let Some(s) = recv_struct {
                     self.method_decls
@@ -3442,15 +3491,24 @@ impl<'a> Checker<'a> {
                 bound.extend(decl.results.iter().filter_map(|r| r.name.clone()));
                 if let Some(r) = &decl.receiver {
                     bound.insert(r.name.clone());
+                    let recv_source = if mexpr_struct.is_some() {
+                        match cr.args.first() {
+                            Some(arg) => CalleeSlotSource::Arg(&arg.value),
+                            None => CalleeSlotSource::Arg(base.as_ref()),
+                        }
+                    } else {
+                        CalleeSlotSource::Arg(base.as_ref())
+                    };
                     slots.push((
                         r.name.clone(),
                         self.shape_of_type(&r.ty),
                         Some(r.ty.clone()),
-                        CalleeSlotSource::Arg(base.as_ref()),
+                        recv_source,
                     ));
                 }
+                let arg_shift = usize::from(mexpr_struct.is_some());
                 for (i, p) in decl.params.iter().enumerate() {
-                    if let Some(arg) = cr.args.get(i) {
+                    if let Some(arg) = cr.args.get(i + arg_shift) {
                         slots.push((
                             p.name.clone(),
                             self.shape_of_type(&p.ty),
@@ -4827,7 +4885,8 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let head = Self::base_named_type_str(method_name);
-                let recv_struct = self
+                let mexpr_struct = self.method_expr_struct(st, base);
+                let recv_struct = mexpr_struct.or_else(|| self
                     .ty_of_expr(st, base)
                     .map(|t| self.resolve_type_alias(&t))
                     .and_then(|t| Self::base_named_type(&t))
@@ -4842,7 +4901,7 @@ impl<'a> Checker<'a> {
                             _ => None,
                         },
                         _ => None,
-                    });
+                    }));
                 let decl = if let Some(s) = recv_struct {
                     self.method_decls.get(&(s, head.to_string())).copied()
                 } else {
@@ -7991,15 +8050,25 @@ impl<'a> Checker<'a> {
             ..
         } = callee
         {
-            let recv_base = match self.shape_of_expr(st, base) {
-                TypeShape::Struct(Some(s)) => Some(s),
-                TypeShape::Pointer(inner) => match *inner {
+            let mexpr_struct = self.method_expr_struct(st, base);
+            let recv_expr = if mexpr_struct.is_some() {
+                cr.args.first().map(|a| &a.value)
+            } else {
+                Some(base.as_ref())
+            };
+            let recv_base = match &mexpr_struct {
+                Some(s) => Some(s.clone()),
+                None => match self.shape_of_expr(st, base) {
                     TypeShape::Struct(Some(s)) => Some(s),
+                    TypeShape::Pointer(inner) => match *inner {
+                        TypeShape::Struct(Some(s)) => Some(s),
+                        _ => None,
+                    },
                     _ => None,
                 },
-                _ => None,
             };
             if let Some(rname) = recv_base {
+                let recv_expr = recv_expr.unwrap_or(base.as_ref());
                 let rbase = Self::base_named_type_str(&rname).to_string();
                 if let Some(decl) = self
                     .method_decls
@@ -8010,8 +8079,8 @@ impl<'a> Checker<'a> {
                         let ptr_recv =
                             r.is_pointer || matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. });
                         let recv_const = if ptr_recv {
-                            self.const_arg_root(st, base, declared).or_else(|| {
-                                let base_inner = crate::model::unwrap_parens(base);
+                            self.const_arg_root(st, recv_expr, declared).or_else(|| {
+                                let base_inner = crate::model::unwrap_parens(recv_expr);
                                 let mut roots: Vec<String> = Vec::new();
                                 if let Some(root) = base_inner.root_ident() {
                                     roots.push(root.to_string());
@@ -8025,17 +8094,17 @@ impl<'a> Checker<'a> {
                                     .find_map(|root| {
                                         let place = Place {
                                             kind: PlaceKind::Ident(root),
-                                            span: base.span(),
+                                            span: recv_expr.span(),
                                         };
                                         self.const_write_root(st, &place)
                                     })
                             })
                         } else {
-                            self.const_arg_root(st, base, declared)
+                            self.const_arg_root(st, recv_expr, declared)
                         };
                         if let Some(const_name) = recv_const {
                             if self.fn_mutates_const_param(decl, &r.name, 0) {
-                                hits.push((const_name, base.span()));
+                                hits.push((const_name, recv_expr.span()));
                             }
                         }
                     }
@@ -8163,19 +8232,24 @@ impl<'a> Checker<'a> {
                         };
                         (false, mutates)
                     } else {
-                        let recv_base = match self.shape_of_expr(st, base) {
-                            TypeShape::Struct(Some(s)) => Some(s),
-                            TypeShape::Pointer(inner) => match *inner {
+                        let mexpr_struct = self.method_expr_struct(st, base);
+                        let recv_base = match &mexpr_struct {
+                            Some(s) => Some(s.clone()),
+                            None => match self.shape_of_expr(st, base) {
                                 TypeShape::Struct(Some(s)) => Some(s),
+                                TypeShape::Pointer(inner) => match *inner {
+                                    TypeShape::Struct(Some(s)) => Some(s),
+                                    _ => None,
+                                },
                                 _ => None,
                             },
-                            _ => None,
                         };
+                        let arg_shift = usize::from(mexpr_struct.is_some());
                         if let Some(decl) = recv_base.as_ref().and_then(|rb| {
                             let rbase = Self::base_named_type_str(rb).to_string();
                             self.method_decls.get(&(rbase, method_name.clone())).copied()
                         }) {
-                            match decl.params.get(i) {
+                            match decl.params.get(i + arg_shift) {
                                 Some(p) => {
                                     let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
                                         || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
