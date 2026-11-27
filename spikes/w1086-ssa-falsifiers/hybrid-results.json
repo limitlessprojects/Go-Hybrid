@@ -1,0 +1,23 @@
+{
+  "alias_write": {
+    "error_codes": [
+      "HYB-E3003"
+    ],
+    "verdict": "reject"
+  },
+  "clone_write": {
+    "error_codes": [],
+    "verdict": "accept"
+  },
+  "loop_fresh": {
+    "error_codes": [],
+    "verdict": "accept"
+  },
+  "loop_reconsume": {
+    "error_codes": [
+      "HYB-E3003",
+      "HYB-E3003"
+    ],
+    "verdict": "reject"
+  }
+}
