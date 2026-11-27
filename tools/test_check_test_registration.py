@@ -122,6 +122,78 @@ class PatternExtractionTests(unittest.TestCase):
             ["test_live.py"])
 
 
+class MultilineQuoteTests(unittest.TestCase):
+    def script(self, quote):
+        return ("printf '%s\\n' " + quote + "\n"
+                "python3 -m unittest discover -s tools -p test_hidden.py\n"
+                "python3 tests/test_hidden.py\n" + quote + "\n")
+
+    def workflow(self, script):
+        return ("jobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - run: |\n"
+                + "".join("          " + line + "\n" for line in script.splitlines()))
+
+    def test_quoted_shell_text_does_not_register_tests(self):
+        for quote in ("'", '"'):
+            for as_workflow in (False, True):
+                with self.subTest(quote=quote, workflow=as_workflow):
+                    text = self.script(quote)
+                    if as_workflow:
+                        text = self.workflow(text)
+                    self.assertEqual(guard.registered_patterns(text), [])
+                    self.assertFalse(guard.is_registered_direct("tests/test_hidden.py", text))
+
+    def test_real_command_after_closing_quote_is_registered(self):
+        text = self.script('"') + "python3 tests/test_live.py\n"
+        self.assertFalse(guard.is_registered_direct("tests/test_hidden.py", text))
+        self.assertTrue(guard.is_registered_direct("tests/test_live.py", text))
+
+    def test_comment_quotes_do_not_hide_real_commands(self):
+        text = "# an unmatched quote: '\npython3 tests/test_live.py\n"
+        self.assertTrue(guard.is_registered_direct("tests/test_live.py", text))
+
+    def test_escaped_quote_does_not_end_multiline_string(self):
+        text = ('printf "%s\\n" "escaped \\"\n'
+                'python3 tests/test_hidden.py\n"\n'
+                'python3 tests/test_live.py\n')
+        self.assertFalse(guard.is_registered_direct("tests/test_hidden.py", text))
+        self.assertTrue(guard.is_registered_direct("tests/test_live.py", text))
+
+    def test_quote_state_does_not_leak_between_steps(self):
+        text = self.workflow('printf "%s\\n" "unterminated\n')
+        text += "      - run: python3 tests/test_live.py\n"
+        self.assertTrue(guard.is_registered_direct("tests/test_live.py", text))
+
+    def test_shell_only_prints_failing_tests_and_guard_rejects_them(self):
+        with tempfile.TemporaryDirectory(prefix="hybrid-quoted-registration-") as temporary:
+            root = Path(temporary)
+            for directory in ("tools", "tests"):
+                target = root / directory / "test_hidden.py"
+                target.parent.mkdir()
+                target.write_text("raise RuntimeError('HIDDEN TEST EXECUTED')\n", encoding="utf-8")
+            control = root / "tests" / "test_live.py"
+            control.write_text("pass\n", encoding="utf-8")
+            script = self.script('"') + "python3 tests/test_live.py\n"
+            shell = subprocess.run(["/bin/sh", "-eu", "-c", script], cwd=root,
+                                   capture_output=True, text=True, timeout=15)
+            self.assertEqual(shell.returncode, 0, shell.stderr)
+            self.assertIn("python3 tests/test_hidden.py", shell.stdout)
+            for target in ("tools/test_hidden.py", "tests/test_hidden.py"):
+                failing = subprocess.run([sys.executable, target], cwd=root,
+                                         capture_output=True, text=True, timeout=15)
+                self.assertNotEqual(failing.returncode, 0)
+                self.assertIn("HIDDEN TEST EXECUTED", failing.stderr)
+            workflow = root / "ci.yml"
+            workflow.write_text(self.workflow(script), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(Path(guard.__file__).resolve()),
+                 "--root", str(root), "--workflow", str(workflow)],
+                capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("tools/test_hidden.py", result.stdout + result.stderr)
+            self.assertIn("tests/test_hidden.py", result.stdout + result.stderr)
+
+
 class RegistrationTests(unittest.TestCase):
     def build(self, workflow, suites):
         """Write a temp root with `suites` and return (root, workflow_text)."""
