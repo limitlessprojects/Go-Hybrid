@@ -30,6 +30,24 @@ use hy_syntax::{Block, Expr, ForKind, MatchPattern, Param, Place, PlaceKind, Sel
 impl<'a> Checker<'a> {
     /// `target` of an assignment (any operator, including `++`/`--`).
     pub(crate) fn check_assign_target_addressable(&mut self, st: &FnState, target: &Place) {
+        // #4009: An address-of expression `&x` is never an assignable place in Go.
+        // Assigning to `&x`, `&x += 1`, or `&x++` emits `cannot assign to &x` in Go.
+        // Row 13 (BUILDABLE) / HYB-E2010.
+        if matches!(target.kind, PlaceKind::AddrOf { .. }) {
+            let msg = format!(
+                "cannot assign to `{}` — an address-of expression is not an assignable place in Go (HYB-E2010)",
+                target.render()
+            );
+            let notes = vec![
+                "why: in Go, an address-of expression yields a pointer value and is not an assignable place (`cannot assign to …`)".to_string(),
+                "fix: assign to the variable or dereferenced pointer directly (e.g. `x = …` or `*p = …`)".to_string(),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E2010", self.path.clone(), target.span, msg).with_notes(notes),
+            );
+            return;
+        }
+
         let Some(elem) = self.place_unassignable_at(st, target) else {
             return;
         };
@@ -171,7 +189,8 @@ impl<'a> Checker<'a> {
                 Some(TypeShape::Struct(_)) => self.place_unaddressable_at(st, base),
                 _ => None,
             },
-            PlaceKind::AddrOf { base } => self.place_unaddressable_at(st, base),
+            // #4009: `&x` is a value, never an addressable place.
+            PlaceKind::AddrOf { .. } => Some(p),
             PlaceKind::Ident(_) => None,
         }
     }
