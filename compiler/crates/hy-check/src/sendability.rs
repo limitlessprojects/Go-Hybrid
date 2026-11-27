@@ -144,7 +144,10 @@ impl<'a> Checker<'a> {
                     self.binding_ty_str(b)
                 )],
             }),
-            shape if self.shape_holds_closure(shape, &mut Vec::new()) => {
+            shape
+                if st.closure_bindings.contains(name)
+                    || self.shape_holds_closure(shape, &mut Vec::new()) =>
+            {
                 Outcome::Rejected(RejectInfo {
                     value: name.to_string(),
                     ty: self.binding_ty_str(b),
@@ -155,7 +158,10 @@ impl<'a> Checker<'a> {
                     )],
                 })
             }
-            shape if self.shape_holds_unmovable_leaf(shape, &mut Vec::new()) => {
+            shape
+                if st.unmovable_leaf_bindings.contains(name)
+                    || self.shape_holds_unmovable_leaf(shape, &mut Vec::new()) =>
+            {
                 Outcome::Rejected(RejectInfo {
                     value: name.to_string(),
                     ty: self.binding_ty_str(b),
@@ -582,6 +588,34 @@ impl<'a> Checker<'a> {
                 desc: self.managed_desc(name, b),
                 risky: !b.shape.is_sendable_by_type(),
             };
+        }
+        if !matches!(
+            b.shape,
+            TypeShape::Unknown
+                | TypeShape::Closure
+                | TypeShape::BorrowHandle(_)
+                | TypeShape::ForeignOpaque(_)
+        ) {
+            if st.closure_bindings.contains(name) {
+                return Outcome::Rejected(RejectInfo {
+                    value: name.to_string(),
+                    ty: self.binding_ty_str(b),
+                    notes: vec![format!(
+                        "`{}` holds a closure value; closures capture their environment by reference and cannot cross task/channel boundaries in Tier 0 (A5 perimeter, #4847)",
+                        name
+                    )],
+                });
+            }
+            if st.unmovable_leaf_bindings.contains(name) {
+                return Outcome::Rejected(RejectInfo {
+                    value: name.to_string(),
+                    ty: self.binding_ty_str(b),
+                    notes: vec![format!(
+                        "`{}` holds a borrow handle or foreign opaque value that cannot cross task/channel boundaries (O4/O7/A5, #4847)",
+                        name
+                    )],
+                });
+            }
         }
         // Issue #188: `const` composites carrying reference storage (maps,
         // slices, pointers, or structs/arrays containing them), closures,

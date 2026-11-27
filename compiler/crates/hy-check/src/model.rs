@@ -296,6 +296,16 @@ pub(crate) struct FnState {
     /// composite literal containing `&...`), for O2 `LOAN-ESCAPE` on
     /// named-result / variable returns (`out = &x; return` / `return out`).
     pub borrow_bindings: HashSet<String>,
+    /// Bindings into which a closure value (or closure-holding container) was
+    /// dynamically stored (e.g. via an `any`-typed struct field or `[N]any` slot),
+    /// closing the A5 closure-laundering gap at `move`/send boundaries (#4847).
+    pub closure_bindings: HashSet<String>,
+    pub closure_binding_scopes: Vec<HashSet<String>>,
+    /// Bindings into which a `BorrowHandle` or `ForeignOpaque` was dynamically
+    /// stored (e.g. via an `any`-typed struct field), closing the O4/O7/A5
+    /// unmovable-leaf laundering gap at `move`/send boundaries (#4847).
+    pub unmovable_leaf_bindings: HashSet<String>,
+    pub unmovable_leaf_binding_scopes: Vec<HashSet<String>>,
     /// Local closure bindings -> `(params, results, body)` recorded at define/rebind
     /// time so call sites can analyze parameter/capture stores (`record_callee_param_stores`).
     pub closure_defs:
@@ -316,6 +326,9 @@ impl FnState {
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
         self.shadow_link_scopes.push(self.shadow_links.clone());
+        self.closure_binding_scopes.push(self.closure_bindings.clone());
+        self.unmovable_leaf_binding_scopes
+            .push(self.unmovable_leaf_bindings.clone());
         self.fnlit_scopes.push(Vec::new());
     }
 
@@ -440,7 +453,27 @@ impl FnState {
                 }
             }
         }
+        let surviving_closures: Vec<String> = self
+            .closure_bindings
+            .iter()
+            .filter(|n| !popped_scope.contains_key(*n))
+            .cloned()
+            .collect();
+        let surviving_unmovables: Vec<String> = self
+            .unmovable_leaf_bindings
+            .iter()
+            .filter(|n| !popped_scope.contains_key(*n))
+            .cloned()
+            .collect();
         self.scopes.pop();
+        if let Some(mut outer_closures) = self.closure_binding_scopes.pop() {
+            outer_closures.extend(surviving_closures);
+            self.closure_bindings = outer_closures;
+        }
+        if let Some(mut outer_unmovables) = self.unmovable_leaf_binding_scopes.pop() {
+            outer_unmovables.extend(surviving_unmovables);
+            self.unmovable_leaf_bindings = outer_unmovables;
+        }
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
         }

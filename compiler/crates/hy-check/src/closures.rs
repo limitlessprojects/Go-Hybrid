@@ -247,6 +247,8 @@ fn check_one_closure(
         type_params: st.type_params.clone(),
         closure_defs: st.closure_defs.clone(),
         closure_fnlits: st.closure_fnlits.clone(),
+        closure_bindings: st.closure_bindings.clone(),
+        unmovable_leaf_bindings: st.unmovable_leaf_bindings.clone(),
         ..FnState::default()
     };
     for (k, b) in cst.env.iter_mut() {

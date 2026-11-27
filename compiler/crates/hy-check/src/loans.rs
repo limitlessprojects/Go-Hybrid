@@ -2222,6 +2222,124 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// True when `e` evaluates to or embeds a closure value (including through
+    /// an `any`-typed composite field/element or a binding already tainted in
+    /// `st.closure_bindings`, #4847).
+    pub(crate) fn expr_carries_closure(&self, st: &FnState, e: &Expr) -> bool {
+        self.expr_carries_closure_at(st, e, 0)
+    }
+
+    fn expr_carries_closure_at(&self, st: &FnState, e: &Expr, depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        match unwrap_parens(e) {
+            Expr::FnLit { .. } => true,
+            Expr::Ident { name, .. } => {
+                if st.closure_bindings.contains(name)
+                    || st.closure_defs.contains_key(name)
+                    || st.closure_fnlits.contains_key(name)
+                {
+                    return true;
+                }
+                self.lookup_binding(st, name).is_some_and(|b| {
+                    matches!(b.shape, TypeShape::Closure)
+                        || self.shape_holds_closure(&b.shape, &mut Vec::new())
+                })
+            }
+            Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. } => self.expr_carries_closure_at(st, operand, depth + 1),
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| self.expr_carries_closure_at(st, &f.value, depth + 1)),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .any(|it| self.expr_carries_closure_at(st, it, depth + 1)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                self.expr_carries_closure_at(st, k, depth + 1)
+                    || self.expr_carries_closure_at(st, v, depth + 1)
+            }),
+            Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::Slice { base, .. } => {
+                let sh = self.shape_of_expr(st, unwrap_parens(e));
+                if matches!(sh, TypeShape::Closure)
+                    || self.shape_holds_closure(&sh, &mut Vec::new())
+                {
+                    return true;
+                }
+                matches!(sh, TypeShape::Unknown)
+                    && self.expr_carries_closure_at(st, base, depth + 1)
+            }
+            other => {
+                let sh = self.shape_of_expr(st, other);
+                matches!(sh, TypeShape::Closure)
+                    || self.shape_holds_closure(&sh, &mut Vec::new())
+            }
+        }
+    }
+
+    /// True when `e` evaluates to or embeds a `BorrowHandle` or `ForeignOpaque`
+    /// (including through an `any`-typed composite field/element or a binding
+    /// already tainted in `st.unmovable_leaf_bindings`, #4847).
+    pub(crate) fn expr_carries_unmovable_leaf(&self, st: &FnState, e: &Expr) -> bool {
+        self.expr_carries_unmovable_leaf_at(st, e, 0)
+    }
+
+    fn expr_carries_unmovable_leaf_at(&self, st: &FnState, e: &Expr, depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                if st.unmovable_leaf_bindings.contains(name) {
+                    return true;
+                }
+                self.lookup_binding(st, name).is_some_and(|b| {
+                    matches!(
+                        b.shape,
+                        TypeShape::BorrowHandle(_) | TypeShape::ForeignOpaque(_)
+                    ) || self.shape_holds_unmovable_leaf(&b.shape, &mut Vec::new())
+                })
+            }
+            Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. } => {
+                self.expr_carries_unmovable_leaf_at(st, operand, depth + 1)
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| self.expr_carries_unmovable_leaf_at(st, &f.value, depth + 1)),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .any(|it| self.expr_carries_unmovable_leaf_at(st, it, depth + 1)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                self.expr_carries_unmovable_leaf_at(st, k, depth + 1)
+                    || self.expr_carries_unmovable_leaf_at(st, v, depth + 1)
+            }),
+            Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::Slice { base, .. } => {
+                let sh = self.shape_of_expr(st, unwrap_parens(e));
+                if matches!(
+                    sh,
+                    TypeShape::BorrowHandle(_) | TypeShape::ForeignOpaque(_)
+                ) || self.shape_holds_unmovable_leaf(&sh, &mut Vec::new())
+                {
+                    return true;
+                }
+                matches!(sh, TypeShape::Unknown)
+                    && self.expr_carries_unmovable_leaf_at(st, base, depth + 1)
+            }
+            other => {
+                let sh = self.shape_of_expr(st, other);
+                matches!(
+                    sh,
+                    TypeShape::BorrowHandle(_) | TypeShape::ForeignOpaque(_)
+                ) || self.shape_holds_unmovable_leaf(&sh, &mut Vec::new())
+            }
+        }
+    }
+
 
     /// Does the binding `name` denote a value that a shallow Go copy
     /// would share mutable GC storage with? Includes file-level `const`
@@ -4340,6 +4458,16 @@ impl<'a> Checker<'a> {
             if name == "_" {
                 continue;
             }
+            if self.expr_carries_closure(st, value) {
+                st.closure_bindings.insert(name.clone());
+            } else {
+                st.closure_bindings.remove(name);
+            }
+            if self.expr_carries_unmovable_leaf(st, value) {
+                st.unmovable_leaf_bindings.insert(name.clone());
+            } else {
+                st.unmovable_leaf_bindings.remove(name);
+            }
             let borrow_slot = field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
             if (l.names.len() == l.values.len() || borrow_slot) && self.expr_carries_borrow(st, value) {
                 st.borrow_bindings.insert(name.clone());
@@ -4400,11 +4528,32 @@ impl<'a> Checker<'a> {
             } else {
                 return;
             };
-            for (t, (v, shape)) in targets.iter().zip(shaped_values) {
+            let rhs_taints: Vec<(bool, bool)> = shaped_values
+                .iter()
+                .map(|(v, _)| {
+                    (
+                        self.expr_carries_closure(st, v),
+                        self.expr_carries_unmovable_leaf(st, v),
+                    )
+                })
+                .collect();
+            for ((t, (v, shape)), (carries_closure, carries_unmovable)) in
+                targets.iter().zip(shaped_values).zip(rhs_taints)
+            {
                 let carries_borrow = self.expr_carries_borrow(st, v);
                 if let PlaceKind::Ident(name) = &t.kind {
                     if name == "_" {
                         continue;
+                    }
+                    if carries_closure {
+                        st.closure_bindings.insert(name.clone());
+                    } else {
+                        st.closure_bindings.remove(name);
+                    }
+                    if carries_unmovable {
+                        st.unmovable_leaf_bindings.insert(name.clone());
+                    } else {
+                        st.unmovable_leaf_bindings.remove(name);
                     }
                     let borrow_slot =
                         field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
@@ -4445,6 +4594,12 @@ impl<'a> Checker<'a> {
                     }
                 } else {
                     let root = t.root();
+                    if !root.is_empty() && carries_closure {
+                        st.closure_bindings.insert(root.to_string());
+                    }
+                    if !root.is_empty() && carries_unmovable {
+                        st.unmovable_leaf_bindings.insert(root.to_string());
+                    }
                     if !root.is_empty() && carries_borrow {
                         st.borrow_bindings.insert(root.to_string());
                         if move_operand_ident(v).is_none() {
@@ -6344,6 +6499,8 @@ impl<'a> Checker<'a> {
         self.preserve_peers_before_sever(st, name, shadows_outer);
         st.aliases.remove(name);
         st.share_clear(name);
+        st.closure_bindings.remove(name);
+        st.unmovable_leaf_bindings.remove(name);
         for cp in closure_peers {
             st.share_edge(name, &cp);
         }
