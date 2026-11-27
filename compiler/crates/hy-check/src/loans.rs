@@ -636,6 +636,14 @@ impl<'a> Checker<'a> {
         let LoanTarget::MapSlot { binding, .. } = &loan.target else {
             unreachable!("filtered above");
         };
+        if self.diags.iter().any(|d| {
+            d.code == "HYB-E3102"
+                && d.span == span
+                && d.message.contains(&format!("loan `{}`", binding))
+        }) {
+            return;
+        }
+        let eff_last = self.effective_loan_last(st, loan);
         let msg = format!(
             "{} on `{}` aliases the live slot loan `{}`",
             what, path, binding
@@ -652,6 +660,128 @@ impl<'a> Checker<'a> {
         ];
         self.diags
             .push(Diagnostic::error("HYB-E3102", self.path.clone(), span, msg).with_notes(notes));
+    }
+
+    /// Issue #3257: O8 uniqueness — reading the loaned slot through its container
+    /// (or passing the container to an opaque call) during a live O8 slot loan window
+    /// observes the stale pre-loan value because the loan lowers to copy-out / store-back.
+    pub(crate) fn check_slot_loan_container_access(
+        &mut self,
+        st: &FnState,
+        stmt: &Stmt,
+        idx: usize,
+    ) {
+        // 1. Direct index reads within this statement's expressions
+        let mut reads = Vec::new();
+        walk::own_index_reads(stmt, &mut reads);
+        for (base, index, span) in reads {
+            let Some(base_path) = walk::expr_path(base) else {
+                continue;
+            };
+            let read_key = walk::lit_index_key(index);
+            self.emit_o8_alias_if_live(
+                st,
+                &base_path,
+                read_key.as_deref(),
+                None,
+                span,
+                idx,
+                "a read",
+            );
+        }
+
+        // 2. Container passed to a call
+        let mut calls = Vec::new();
+        walk::own_calls(stmt, &mut calls);
+        for cr in calls {
+            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
+                if matches!(name.as_str(), "len" | "cap" | "delete" | "clear") {
+                    continue;
+                }
+            }
+            for (i, a) in cr.args.iter().enumerate() {
+                let Some(arg_path) = walk::is_direct_container_path(&a.value) else {
+                    continue;
+                };
+                let has_conflict = st.loans.iter().any(|l| {
+                    let eff_last = self.effective_loan_last(st, l);
+                    matches!(&l.target, LoanTarget::MapSlot { binding, path, .. }
+                        if path_root(&arg_path) != binding.as_str()
+                            && a3_paths_conflict(st, path, &arg_path))
+                        && l.created <= idx
+                        && idx <= eff_last
+                });
+                if !has_conflict {
+                    continue;
+                }
+
+                let is_safe = match self.resolve_call(st, &cr) {
+                    Resolved::Fn { name } => {
+                        if let Some(decl) = self.fns.get(&name) {
+                            if let Some(p) = decl.params.get(i) {
+                                self.fn_is_len_cap_only(decl, &p.name)
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                if !is_safe {
+                    self.emit_a3_if_live(
+                        st,
+                        &arg_path,
+                        a.value.span(),
+                        idx,
+                        &format!("use in `{}`", cr.callee.render()),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Check if a helper function only ever queries `len(param)` or `cap(param)`
+    /// without reading any elements, mutating, or escaping `param`.
+    fn fn_is_len_cap_only(&self, decl: &FnDecl, param_name: &str) -> bool {
+        let Some(body) = &decl.body else {
+            return false;
+        };
+        let flat = walk::flatten(body);
+        for (stmt, _) in &flat.stmts {
+            let mut uses = Vec::new();
+            walk::own_uses(stmt, &mut uses);
+            if !uses.iter().any(|u| u.name == param_name) {
+                continue;
+            }
+            if uses.iter().any(|u| u.name == param_name && (u.is_write || u.via_move)) {
+                return false;
+            }
+            let mut calls = Vec::new();
+            walk::own_calls(stmt, &mut calls);
+            let mut param_in_len_cap = 0;
+            for cr in &calls {
+                if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
+                    if name == "len" || name == "cap" {
+                        for a in cr.args {
+                            if let Expr::Ident { name: aname, .. } =
+                                crate::model::unwrap_parens(&a.value)
+                            {
+                                if aname == param_name {
+                                    param_in_len_cap += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let total_param_uses = uses.iter().filter(|u| u.name == param_name).count();
+            if param_in_len_cap != total_param_uses || total_param_uses == 0 {
+                return false;
+            }
+        }
+        true
     }
 
     // -----------------------------------------------------------------------
