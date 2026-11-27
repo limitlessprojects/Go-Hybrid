@@ -1180,6 +1180,94 @@ impl<'a> Collector<'a> {
         None
     }
 
+    /// #4693 — element/pointee numeric scalar of an assignment target place:
+    /// slice/array element, map value, or pointer base. `None` fails open.
+    fn place_container_elem_scalar(&self, p: &Place) -> Option<&'static str> {
+        match &p.kind {
+            PlaceKind::Ident(n) => self.lookup_container_elem_scalar(n),
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                self.struct_field_container_elem_scalar(&bk, name)
+            }
+            PlaceKind::Index { base, .. } => self.place_container_elem_scalar(base),
+            PlaceKind::AddrOf { .. } => None,
+        }
+    }
+
+    /// #4693 — the numeric scalar one container/pointer level inside a
+    /// rendered type name (`[]int32` -> `int32`, `map[string]int64` ->
+    /// `int64`, `*int32` -> `int32`, `[4]int16` -> `int16`). `None` when the
+    /// name is not a recognized container spelling — fail-open.
+    fn elem_scalar_of_type_name(&self, tname: &str) -> Option<&'static str> {
+        let t = tname.trim();
+        if let Some(rest) = t.strip_prefix("[]") {
+            return self.scalar_of_type_name(rest.trim());
+        }
+        if let Some(rest) = t.strip_prefix('*') {
+            return self.scalar_of_type_name(rest.trim());
+        }
+        if let Some(rest) = t.strip_prefix('[') {
+            if let Some(close) = rest.find(']') {
+                return self.scalar_of_type_name(rest[close + 1..].trim());
+            }
+            return None;
+        }
+        if let Some(rest) = t.strip_prefix("map") {
+            let rest = rest.trim_start();
+            if let Some(inner) = rest.strip_prefix('[') {
+                if let Some(close) = inner.find(']') {
+                    return self.elem_scalar_of_type_name(inner[close + 1..].trim());
+                }
+            }
+        }
+        None
+    }
+
+    /// #4705 — true when a rendered type spelling is a structural type
+    /// (`*T`, `[N]T`, `[]T`, `map[K]V`, `chan T`) whose spelling is
+    /// canonical enough for direct comparison. Named/alias spellings fail
+    /// open so `type K = [4]int` still compares by kind rules only.
+    fn is_structural_type_spelling(t: &str) -> bool {
+        let t = t.trim_start();
+        t.starts_with('*')
+            || t.starts_with('[')
+            || t.starts_with("map")
+            || t.starts_with("chan")
+            || t.starts_with("<-chan")
+            || t.starts_with("chan<-")
+    }
+
+    /// #4705 — `a == b` / map-index key mismatch on structural types whose
+    /// INNER scalar or array size differs (`*int32` vs `*int64`,
+    /// `[4]int32` vs `[4]int64`, `chan int32` vs `chan int64`). Both sides
+    /// must resolve to structural spellings; anything else fails open.
+    fn structural_type_names_differ(&self, a: Option<&str>, b: Option<&str>) -> bool {
+        match (a, b) {
+            (Some(x), Some(y)) => {
+                Self::is_structural_type_spelling(x)
+                    && Self::is_structural_type_spelling(y)
+                    && x.trim() != y.trim()
+            }
+            _ => false,
+        }
+    }
+
+    /// #4693 — element/pointee scalar of a channel's element type:
+    /// `chan []int32` -> `int32`, `chan map[string]int64` -> `int64`,
+    /// `chan *int32` -> `int32`. Numeric element channels return `None`
+    /// here; `chan_element_scalar` owns that case.
+    fn chan_elem_container_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let Expr::Ident { name, .. } = unwrap_parens(e) else {
+            return None;
+        };
+        let tname = self.lookup_type_name(name)?;
+        let t = tname.trim();
+        let t = t.strip_prefix("<-").unwrap_or(t).trim();
+        let t = t.strip_prefix("chan")?.trim_start();
+        let t = t.strip_prefix("<-").unwrap_or(t).trim();
+        self.elem_scalar_of_type_name(t)
+    }
+
     /// #2770 — the canonical numeric spelling of a simple local target, for the
     /// assignment/argument scalar comparison. Non-ident places fail open.
     fn place_scalar(&self, p: &Place) -> Option<&'static str> {
@@ -1437,10 +1525,9 @@ impl<'a> Collector<'a> {
                 self.scalar_of_ty(elem)
             }
             TypeExpr::Map { value, .. } => self.scalar_of_ty(value),
-            TypeExpr::Pointer { to, .. } => match to.as_ref() {
-                TypeExpr::Array { elem, .. } => self.scalar_of_ty(elem),
-                _ => None,
-            },
+            TypeExpr::Pointer { to, .. } => self
+                .container_elem_scalar_of_ty(to)
+                .or_else(|| self.scalar_of_ty(to)),
             _ => None,
         }
     }
@@ -6204,6 +6291,18 @@ impl<'a> Collector<'a> {
                 return;
             }
         }
+        // #4693: `ch <- v` where the channel carries a container/pointer
+        // whose element width differs (`chan []int32` <- `[]int64`) — the
+        // kinds are equal, so only the element scalar can see it.
+        if let (Some(w), Some(g)) = (
+            self.chan_elem_container_scalar(chan),
+            self.container_elem_scalar_of_expr(value),
+        ) {
+            if w != g {
+                self.emit_send_mismatch(value, g, w);
+                return;
+            }
+        }
         // A typed int value reaches a float channel through the (Float, Int)
         // arm of `kinds_conflict`, which must stay open for untyped int
         // constants; the same #682 U5 disambiguation applies here.
@@ -6601,9 +6700,18 @@ impl<'a> Collector<'a> {
                         || (lk == OpKind::Int
                             && rk == OpKind::Float
                             && !self.is_untyped_int_const(lhs));
+                    // #4705: `p32 == p64` on `*int32`/`*int64`, `ch32 == ch64`
+                    // on `chan int32`/`chan int64`, `a32 == a64` on
+                    // `[4]int32`/`[4]int64` — same outer kind, different
+                    // inner scalar/size; Go refuses the comparison.
+                    let structural_conflict = self.structural_type_names_differ(
+                        self.typed_value_type_name(lhs).as_deref(),
+                        self.typed_value_type_name(rhs).as_deref(),
+                    );
                     if equality_kinds_conflict(&lk, &rk)
                         || int_float_conflict
                         || self.scalar_conflict(lhs, rhs)
+                        || structural_conflict
                         || self.sized_array_names_differ(
                             self.typed_value_type_name(lhs).as_deref(),
                             self.typed_value_type_name(rhs).as_deref(),
@@ -6831,10 +6939,17 @@ impl<'a> Collector<'a> {
                         (self.place_scalar(target), self.typed_value_scalar(&values[0])),
                         (Some(t), Some(v)) if t != v
                     );
+                    // #4693: `s32 = s64` between `[]int32` and `[]int64` —
+                    // same kind, different element width.
+                    let elem_mismatch = self.scalar_names_conflict(
+                        self.place_container_elem_scalar(target),
+                        self.container_elem_scalar_of_expr(&values[0]),
+                    );
                     // #2771: `b = a` between a `[4]int` and a `[3]int`.
                     if !is_loan_shape
                         && (conflict
                             || scalar_mismatch
+                            || elem_mismatch
                             || self.sized_array_names_differ(
                                 self.place_type_name(target).as_deref(),
                                 self.typed_value_type_name(&values[0]).as_deref(),
@@ -6886,11 +7001,17 @@ impl<'a> Collector<'a> {
                             (self.place_scalar(t), self.typed_value_scalar(v)),
                             (Some(tp), Some(vp)) if tp != vp
                         );
+                        // #4693: positional pairs must also match element
+                        // width (`s1, m1 = s2, m2` on int32/int64 mixes).
+                        let elem_mismatch = self.scalar_names_conflict(
+                            self.place_container_elem_scalar(t),
+                            self.container_elem_scalar_of_expr(v),
+                        );
                         let array_mismatch = self.sized_array_names_differ(
                             self.place_type_name(t).as_deref(),
                             self.typed_value_type_name(v).as_deref(),
                         );
-                        if conflict || scalar_mismatch || array_mismatch {
+                        if conflict || scalar_mismatch || elem_mismatch || array_mismatch {
                             let (v_label, t_label) = if array_mismatch {
                                 (
                                     self.typed_value_type_name(v)
@@ -7204,9 +7325,17 @@ impl<'a> Collector<'a> {
                 let idx_scalar = self.typed_value_scalar(index);
                 let width_conflict = matches!((key_scalar, idx_scalar),
                     (Some(a), Some(b)) if a != b);
+                // #4705: `map[[4]int]V` indexed by `[3]int`, `map[*int32]V`
+                // indexed by `*int64` — the key kind matches but the inner
+                // scalar/size does not; Go refuses the index.
+                let structural_conflict = self.structural_type_names_differ(
+                    self.map_key_type_name(base_expr).as_deref(),
+                    self.typed_value_type_name(index).as_deref(),
+                );
                 let conflict = (**key_kind == OpKind::Float && *ik == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(key_kind, ik)
-                    || width_conflict;
+                    || width_conflict
+                    || structural_conflict;
                 if conflict {
                     // #3292: prefer the declared spellings over the kind
                     // labels, which collapse int32/int64 to `int` and make
