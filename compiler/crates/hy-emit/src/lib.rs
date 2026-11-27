@@ -454,19 +454,6 @@ pub(crate) fn to_go_name(name: &str) -> String {
 /// The base NAMED type of a TypeExpr, if any (`*atomic.int64` →
 /// "atomic.int64", `env` → "env", `map[string]int` → None). Batch I's
 /// receiver tables key on this.
-/// (Go value-result count, ends in `error`) for a declared result list: a
-/// trailing `error` is the error slot, not a value (#726).
-pub(crate) fn result_shape(results: &[FnResult]) -> (usize, bool) {
-    let err = matches!(
-        results.last(),
-        Some(FnResult {
-            ty: TypeExpr::Named { name, .. },
-            ..
-        }) if name == "error"
-    );
-    let n = if err { results.len() - 1 } else { results.len() };
-    (n, err)
-}
 
 pub(crate) fn base_ty_name(t: &TypeExpr) -> Option<String> {
     match t {
@@ -647,6 +634,10 @@ pub struct Emitter {
     /// The current (non-main) fn's per-result RETURN texts when its results
     /// end in `error` — E3 propagates via `return <zeros…, err>`.
     cur_fn_error_returns: Option<Vec<String>>,
+    /// Type parameter names in scope for the current function (declared +
+    /// receiver type params), so alias-to-`error` checks never treat a
+    /// shadowing type parameter as the builtin `error` type.
+    cur_fn_type_params: Vec<String>,
     /// Names assigned inside any closure literal of the current fn (#2386):
     /// a call can run such a closure inside an O8 slot-loan window, so any
     /// slot loan keyed by one of these names snapshots its key into `hyKeyN`.
@@ -732,6 +723,7 @@ impl Emitter {
             binding_prefix: "hybrid.program".to_string(),
             export_pub: false,
             cur_fn_error_returns: None,
+            cur_fn_type_params: Vec::new(),
             closure_written: BTreeSet::new(),
             cur_fn_has_named_results: false,
             fn_shapes: BTreeMap::new(),
@@ -803,6 +795,71 @@ impl Emitter {
             }
         }
         ty
+    }
+
+    pub(crate) fn fn_decl_type_param_names(f: &FnDecl) -> Vec<String> {
+        let mut out = Vec::new();
+        for tp in &f.type_params {
+            if !tp.name.is_empty() && tp.name != "_" {
+                out.push(tp.name.clone());
+            }
+        }
+        if let Some(r) = &f.receiver {
+            let mut cur = &r.ty;
+            while let TypeExpr::Pointer { to, .. } = cur {
+                cur = to;
+            }
+            if let TypeExpr::Named { name, .. } = cur {
+                if let Some((_, rest)) = name.split_once('[') {
+                    if let Some(inner) = rest.strip_suffix(']') {
+                        for part in inner.split(',') {
+                            let tp = part.trim();
+                            if !tp.is_empty() && tp != "_" {
+                                out.push(tp.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    pub(crate) fn is_error_ty(&self, ty: &TypeExpr, type_params: &[String]) -> bool {
+        let mut cur = ty;
+        let mut seen = BTreeSet::new();
+        while let TypeExpr::Named { name, .. } = cur {
+            if type_params.iter().any(|tp| tp == name) {
+                return false;
+            }
+            if !seen.insert(name.as_str()) {
+                return false;
+            }
+            if let Some(target) = self.n5_aliases.get(name) {
+                cur = target;
+            } else {
+                break;
+            }
+        }
+        matches!(cur, TypeExpr::Named { name, .. } if name == "error")
+            && !type_params.iter().any(|tp| tp == "error")
+            && !self.n5_structs.contains_key("error")
+            && !self.n5_generic_structs.contains_key("error")
+    }
+
+    /// (Go value-result count, ends in `error`) for a declared result list:
+    /// a trailing `error` (including through user type aliases) is the error
+    /// slot, not a value (#726).
+    pub(crate) fn result_shape(
+        &self,
+        results: &[FnResult],
+        type_params: &[String],
+    ) -> (usize, bool) {
+        let err = results
+            .last()
+            .is_some_and(|r| self.is_error_ty(&r.ty, type_params));
+        let n = if err { results.len() - 1 } else { results.len() };
+        (n, err)
     }
 
     pub(crate) fn is_pointer_ty(&self, ty: &TypeExpr) -> bool {
@@ -902,7 +959,8 @@ impl Emitter {
         self.fn_ret_struct = file
             .fns()
             .filter_map(|f| {
-                if result_shape(&f.results).0 == 0 {
+                let tps = Self::fn_decl_type_param_names(f);
+                if self.result_shape(&f.results, &tps).0 == 0 {
                     return None;
                 }
                 let ret_sn = f
@@ -925,13 +983,8 @@ impl Emitter {
         self.fn_shapes = file
             .fns()
             .map(|f| {
-                let err = matches!(
-                    f.results.last(),
-                    Some(FnResult {
-                        ty: TypeExpr::Named { name, .. },
-                        ..
-                    }) if name == "error"
-                );
+                let tps = Self::fn_decl_type_param_names(f);
+                let (value_count, err) = self.result_shape(&f.results, &tps);
                 let kind = f
                     .results
                     .first()
@@ -944,11 +997,6 @@ impl Emitter {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                // E3: a trailing error result is the error slot, not a value.
-                // `fn step() error` has ONE Go result; counting it as a value
-                // made the ? hoister emit `hyT0, hyErr1 := step()` against a
-                // `func ... error` (assignment mismatch, accepted-then-fails-go-build).
-                let value_count = if err { f.results.len() - 1 } else { f.results.len() };
                 let key = match &f.receiver {
                     Some(recv) => base_ty_name(&recv.ty)
                         .and_then(|n| self.resolve_to_struct_name(&n))
@@ -1511,11 +1559,9 @@ impl Emitter {
             Self::collect_closure_writes_block(body, false, &mut self.closure_written);
         }
         self.cur_fn_has_named_results = f.results.iter().any(|r| r.name.is_some());
+        self.cur_fn_type_params = Self::fn_decl_type_param_names(f);
         if !is_main && !f.results.is_empty() && !main_needs_wrapper {
-            let last_is_err = matches!(
-                &f.results.last().unwrap().ty,
-                TypeExpr::Named { name, .. } if name == "error"
-            );
+            let last_is_err = self.is_error_ty(&f.results.last().unwrap().ty, &self.cur_fn_type_params);
             if last_is_err {
                 let mut texts = Vec::new();
                 for (i, r) in f.results.iter().enumerate() {
