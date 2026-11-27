@@ -305,6 +305,20 @@ class ManagedReportCliTests(unittest.TestCase):
                 self.assertIn("verdict agreement: 1/1", run.stdout)
                 self.assertNotIn("Traceback", run.stderr)
 
+    def test_missing_or_null_report_on_accept_fails_closed(self):
+        # Issue #3251: an accepted response lacking summary.managed must fail closed
+        # instead of silently aggregating missing data as zero counters.
+        self.assert_invalid_report(None)
+        payload = {
+            "summary": {"verdict": "accept", "errors": 0, "warnings": 0},
+            "diagnostics": [],
+        }
+        run = self.run_cases([("ACCEPT", payload, 0)])
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("harness-error", run.stdout)
+        self.assertIn("verdict agreement: 0/1", run.stdout)
+        self.assertNotIn("Traceback", run.stderr)
+
     def test_report_validation_only_applies_with_report_flag(self):
         for managed in (False, 0, "", [], [1], "x",
                         {"managed_blocks": -1, "sites_via_managed": 5,
