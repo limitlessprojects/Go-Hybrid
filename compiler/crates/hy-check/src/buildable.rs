@@ -1180,6 +1180,65 @@ impl<'a> Collector<'a> {
         None
     }
 
+    /// #4693 — element/pointee numeric scalar of an assignment target place:
+    /// slice/array element, map value, or pointer base. `None` fails open.
+    fn place_container_elem_scalar(&self, p: &Place) -> Option<&'static str> {
+        match &p.kind {
+            PlaceKind::Ident(n) => self.lookup_container_elem_scalar(n),
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                self.struct_field_container_elem_scalar(&bk, name)
+            }
+            PlaceKind::Index { base, .. } => self.place_container_elem_scalar(base),
+            PlaceKind::AddrOf { .. } => None,
+        }
+    }
+
+    /// #4693 — the numeric scalar one container/pointer level inside a
+    /// rendered type name (`[]int32` -> `int32`, `map[string]int64` ->
+    /// `int64`, `*int32` -> `int32`, `[4]int16` -> `int16`). `None` when the
+    /// name is not a recognized container spelling — fail-open.
+    fn elem_scalar_of_type_name(&self, tname: &str) -> Option<&'static str> {
+        let t = tname.trim();
+        if let Some(rest) = t.strip_prefix("[]") {
+            return self.scalar_of_type_name(rest.trim());
+        }
+        if let Some(rest) = t.strip_prefix('*') {
+            return self.scalar_of_type_name(rest.trim());
+        }
+        if let Some(rest) = t.strip_prefix('[') {
+            if let Some(close) = rest.find(']') {
+                return self.scalar_of_type_name(rest[close + 1..].trim());
+            }
+            return None;
+        }
+        if let Some(rest) = t.strip_prefix("map") {
+            let rest = rest.trim_start();
+            if let Some(inner) = rest.strip_prefix('[') {
+                if let Some(close) = inner.find(']') {
+                    return self.elem_scalar_of_type_name(inner[close + 1..].trim());
+                }
+            }
+        }
+        None
+    }
+
+    /// #4693 — element/pointee scalar of a channel's element type:
+    /// `chan []int32` -> `int32`, `chan map[string]int64` -> `int64`,
+    /// `chan *int32` -> `int32`. Numeric element channels return `None`
+    /// here; `chan_element_scalar` owns that case.
+    fn chan_elem_container_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let Expr::Ident { name, .. } = unwrap_parens(e) else {
+            return None;
+        };
+        let tname = self.lookup_type_name(name)?;
+        let t = tname.trim();
+        let t = t.strip_prefix("<-").unwrap_or(t).trim();
+        let t = t.strip_prefix("chan")?.trim_start();
+        let t = t.strip_prefix("<-").unwrap_or(t).trim();
+        self.elem_scalar_of_type_name(t)
+    }
+
     /// #2770 — the canonical numeric spelling of a simple local target, for the
     /// assignment/argument scalar comparison. Non-ident places fail open.
     fn place_scalar(&self, p: &Place) -> Option<&'static str> {
@@ -1437,10 +1496,9 @@ impl<'a> Collector<'a> {
                 self.scalar_of_ty(elem)
             }
             TypeExpr::Map { value, .. } => self.scalar_of_ty(value),
-            TypeExpr::Pointer { to, .. } => match to.as_ref() {
-                TypeExpr::Array { elem, .. } => self.scalar_of_ty(elem),
-                _ => None,
-            },
+            TypeExpr::Pointer { to, .. } => self
+                .container_elem_scalar_of_ty(to)
+                .or_else(|| self.scalar_of_ty(to)),
             _ => None,
         }
     }
@@ -6204,6 +6262,18 @@ impl<'a> Collector<'a> {
                 return;
             }
         }
+        // #4693: `ch <- v` where the channel carries a container/pointer
+        // whose element width differs (`chan []int32` <- `[]int64`) — the
+        // kinds are equal, so only the element scalar can see it.
+        if let (Some(w), Some(g)) = (
+            self.chan_elem_container_scalar(chan),
+            self.container_elem_scalar_of_expr(value),
+        ) {
+            if w != g {
+                self.emit_send_mismatch(value, g, w);
+                return;
+            }
+        }
         // A typed int value reaches a float channel through the (Float, Int)
         // arm of `kinds_conflict`, which must stay open for untyped int
         // constants; the same #682 U5 disambiguation applies here.
@@ -6831,10 +6901,17 @@ impl<'a> Collector<'a> {
                         (self.place_scalar(target), self.typed_value_scalar(&values[0])),
                         (Some(t), Some(v)) if t != v
                     );
+                    // #4693: `s32 = s64` between `[]int32` and `[]int64` —
+                    // same kind, different element width.
+                    let elem_mismatch = self.scalar_names_conflict(
+                        self.place_container_elem_scalar(target),
+                        self.container_elem_scalar_of_expr(&values[0]),
+                    );
                     // #2771: `b = a` between a `[4]int` and a `[3]int`.
                     if !is_loan_shape
                         && (conflict
                             || scalar_mismatch
+                            || elem_mismatch
                             || self.sized_array_names_differ(
                                 self.place_type_name(target).as_deref(),
                                 self.typed_value_type_name(&values[0]).as_deref(),
@@ -6886,11 +6963,17 @@ impl<'a> Collector<'a> {
                             (self.place_scalar(t), self.typed_value_scalar(v)),
                             (Some(tp), Some(vp)) if tp != vp
                         );
+                        // #4693: positional pairs must also match element
+                        // width (`s1, m1 = s2, m2` on int32/int64 mixes).
+                        let elem_mismatch = self.scalar_names_conflict(
+                            self.place_container_elem_scalar(t),
+                            self.container_elem_scalar_of_expr(v),
+                        );
                         let array_mismatch = self.sized_array_names_differ(
                             self.place_type_name(t).as_deref(),
                             self.typed_value_type_name(v).as_deref(),
                         );
-                        if conflict || scalar_mismatch || array_mismatch {
+                        if conflict || scalar_mismatch || elem_mismatch || array_mismatch {
                             let (v_label, t_label) = if array_mismatch {
                                 (
                                     self.typed_value_type_name(v)
