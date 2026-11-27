@@ -91,6 +91,9 @@ impl<'a> Checker<'a> {
             ConstFold::NotConst => {}
             ConstFold::TooBig => {
                 let span = value.span();
+                if self.has_e6002_within(span) {
+                    return;
+                }
                 let msg = format!(
                     "constant expression `{}` overflows declared type `{}` of `{}` (HYB-E6002)",
                     value.render(),
@@ -260,6 +263,9 @@ impl<'a> Checker<'a> {
             ConstFold::NotConst => {}
             ConstFold::TooBig => {
                 let span = value.span();
+                if self.has_e6002_within(span) {
+                    return;
+                }
                 let msg = format!(
                     "constant expression `{}` overflows declared type `{}` of `{}` (HYB-E6002)",
                     value.render(),
@@ -370,7 +376,7 @@ impl<'a> Checker<'a> {
         }
 
         let span = value.span();
-        if self.diags.iter().any(|d| d.code == "HYB-E6002" && d.span == span) {
+        if self.has_e6002_within(span) {
             return;
         }
         let msg = format!(
@@ -777,9 +783,14 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn check_expr_type_conversions(&mut self, expr: &Expr) {
         match expr {
-            Expr::Binary { lhs, rhs, .. } => {
+            Expr::Binary {
+                op, lhs, rhs, span, ..
+            } => {
                 self.check_expr_type_conversions(lhs);
                 self.check_expr_type_conversions(rhs);
+                if matches!(op, BinOp::Shl) {
+                    self.check_const_shift_512_overflow(lhs, rhs, *span);
+                }
             }
             Expr::Unary { operand, .. }
             | Expr::AddrOf { operand, .. }
@@ -1382,7 +1393,258 @@ impl<'a> Checker<'a> {
             .push(Diagnostic::error("HYB-E6006", self.path.clone(), span, msg).with_notes(notes));
     }
 
+    fn has_e6002_within(&self, outer: Span) -> bool {
+        self.diags
+            .iter()
+            .any(|d| d.code == "HYB-E6002" && (span_contains(outer, d.span) || span_contains(d.span, outer)))
+    }
 
+    fn check_const_shift_512_overflow(&mut self, lhs: &Expr, rhs: &Expr, span: Span) {
+        if self.diags.iter().any(|d| {
+            (d.code == "HYB-E6002" || d.code == "HYB-E6005")
+                && (span_contains(d.span, span) || span_contains(span, d.span))
+        }) {
+            return;
+        }
+        let overflows = match (self.const_int512_at(lhs, 0), self.const_int512_at(rhs, 0)) {
+            (Const512::Val { mag, .. }, _) if u512_is_zero(&mag) => false,
+            (Const512::Val { mag, .. }, Const512::Val { neg: false, mag: rmag }) => {
+                u512_shl(&mag, u512_as_shift(&rmag)).is_none()
+            }
+            (Const512::Val { .. }, Const512::OverflowPos)
+            | (Const512::OverflowPos | Const512::OverflowNeg, Const512::Val { neg: false, .. } | Const512::OverflowPos) => true,
+            _ => false,
+        };
+        if !overflows {
+            return;
+        }
+        let rendered = format!("{} << {}", lhs.render(), rhs.render());
+        let msg = format!("constant shift `{rendered}` overflows Go's 512-bit constant limit (HYB-E6002)");
+        let notes = vec![
+            format!("why: Go caps constant integer shifts below 2^512 and rejects `{rendered}` at compile time (`constant shift overflow`, issue #4829)"),
+            "fix: keep the constant shift result below 2^512 (`1 << 511` is the largest power-of-two shift), or compute larger multi-precision values via `math/big`".to_string(),
+        ];
+        self.diags.push(Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes));
+    }
+
+    fn const_int512_at(&self, e: &Expr, depth: u32) -> Const512 {
+        if depth >= 16 {
+            return Const512::NotConst;
+        }
+        match unwrap_parens(e) {
+            Expr::Lit { kind: LitKind::Int(s), .. } => match u512_parse_lit(s) {
+                Some(mag) => Const512::Val { neg: false, mag },
+                None => Const512::OverflowPos,
+            },
+            Expr::Lit { kind: LitKind::Char(c), .. } => Const512::Val { neg: false, mag: u512_from_u128(*c as u128) },
+            Expr::Ident { name, span: id_span } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                    let Some(init_expr) = sight.constant_initializer() else { return Const512::NotConst };
+                    if sight.ty.as_ref().is_some_and(|ty| self.is_non_int_type(ty))
+                        || (sight.pos.line, sight.pos.col) == (id_span.start.line, id_span.start.col)
+                    {
+                        return Const512::NotConst;
+                    }
+                    return self.const_int512_at(init_expr, depth + 1);
+                }
+                if self.is_lexical_binder_at(name, id_span.start) {
+                    return Const512::NotConst;
+                }
+                self.const_values.get(name).map_or(Const512::NotConst, |v| self.const_int512_at(v, depth + 1))
+            }
+            Expr::Unary { op: UnOp::Neg, operand, .. } => match self.const_int512_at(operand, depth + 1) {
+                Const512::Val { neg, mag } => Const512::Val { neg: !u512_is_zero(&mag) && !neg, mag },
+                Const512::OverflowPos => Const512::OverflowNeg,
+                Const512::OverflowNeg => Const512::OverflowPos,
+                Const512::NotConst => Const512::NotConst,
+            },
+            Expr::Binary { op, lhs, rhs, .. } => {
+                fold_512(*op, self.const_int512_at(lhs, depth + 1), self.const_int512_at(rhs, depth + 1))
+            }
+            Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
+                let Expr::Ident { name, span } = unwrap_parens(callee) else { return Const512::NotConst };
+                if self.is_shadowed_ident_at(name, span.start) || fixed_width_int_range(name).is_none() {
+                    return Const512::NotConst;
+                }
+                match self.const_int_fold_at(e, None, depth) {
+                    ConstFold::Val(v) => Const512::Val { neg: v < 0, mag: u512_from_u128(v.unsigned_abs()) },
+                    _ => Const512::NotConst,
+                }
+            }
+            _ => Const512::NotConst,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Const512 {
+    Val { neg: bool, mag: [u64; 8] },
+    OverflowPos,
+    OverflowNeg,
+    NotConst,
+}
+
+fn span_contains(outer: Span, inner: Span) -> bool {
+    (inner.start.line, inner.start.col) >= (outer.start.line, outer.start.col)
+        && (inner.end.line, inner.end.col) <= (outer.end.line, outer.end.col)
+}
+
+fn u512_is_zero(a: &[u64; 8]) -> bool { a.iter().all(|&w| w == 0) }
+fn u512_from_u128(v: u128) -> [u64; 8] { [v as u64, (v >> 64) as u64, 0, 0, 0, 0, 0, 0] }
+fn u512_as_shift(m: &[u64; 8]) -> u128 {
+    if m[2..].iter().any(|&w| w != 0) { 513 } else { (m[0] as u128) | ((m[1] as u128) << 64) }
+}
+
+fn u512_bit_len(a: &[u64; 8]) -> u32 {
+    (0..8).rev().find(|&i| a[i] != 0).map_or(0, |i| (i as u32) * 64 + (64 - a[i].leading_zeros()))
+}
+
+fn u512_ge(a: &[u64; 8], b: &[u64; 8]) -> bool {
+    (0..8).rev().find(|&i| a[i] != b[i]).map_or(true, |i| a[i] > b[i])
+}
+
+fn u512_add(a: &[u64; 8], b: &[u64; 8]) -> Option<[u64; 8]> {
+    let (mut out, mut carry) = ([0u64; 8], 0u128);
+    for i in 0..8 {
+        let sum = (a[i] as u128) + (b[i] as u128) + carry;
+        out[i] = sum as u64;
+        carry = sum >> 64;
+    }
+    (carry == 0).then_some(out)
+}
+
+fn u512_sub_ge(a: &[u64; 8], b: &[u64; 8]) -> [u64; 8] {
+    let (mut out, mut borrow) = ([0u64; 8], 0u64);
+    for i in 0..8 {
+        let (d1, b1) = a[i].overflowing_sub(b[i]);
+        let (d2, b2) = d1.overflowing_sub(borrow);
+        out[i] = d2;
+        borrow = u64::from(b1 || b2);
+    }
+    out
+}
+
+fn u512_mul(a: &[u64; 8], b: &[u64; 8]) -> Option<[u64; 8]> {
+    let mut out = [0u64; 8];
+    for i in 0..8 {
+        if a[i] == 0 { continue; }
+        let mut carry = 0u128;
+        for j in 0..(8 - i) {
+            let prod = (a[i] as u128) * (b[j] as u128) + (out[i + j] as u128) + carry;
+            out[i + j] = prod as u64;
+            carry = prod >> 64;
+        }
+        if carry != 0 || b[(8 - i)..8].iter().any(|&w| w != 0) {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+fn u512_shl(a: &[u64; 8], n: u128) -> Option<[u64; 8]> {
+    if u512_is_zero(a) { return Some([0; 8]); }
+    if n > 512 || u512_bit_len(a) + (n as u32) > 512 { return None; }
+    let (s, mut out) = (n as usize, [0u64; 8]);
+    if s == 0 { return Some(*a); }
+    let (word, bit) = (s / 64, s % 64);
+    for i in 0..(8 - word) {
+        out[i + word] |= a[i] << bit;
+        if bit > 0 && i + word + 1 < 8 { out[i + word + 1] |= a[i] >> (64 - bit); }
+    }
+    Some(out)
+}
+
+fn u512_shr_logical(a: &[u64; 8], n: u128) -> [u64; 8] {
+    if n >= 512 { return [0; 8]; }
+    let (s, mut out) = (n as usize, [0u64; 8]);
+    if s == 0 { return *a; }
+    let (word, bit) = (s / 64, s % 64);
+    for i in word..8 {
+        out[i - word] |= a[i] >> bit;
+        if bit > 0 && i + 1 < 8 { out[i - word] |= a[i + 1] << (64 - bit); }
+    }
+    out
+}
+
+fn u512_parse_lit(s: &str) -> Option<[u64; 8]> {
+    let clean: String = s.chars().filter(|&c| c != '_').collect();
+    let s = clean.as_str();
+    let (radix, digits) = if let Some(r) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        (16u64, r)
+    } else if let Some(r) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        (2, r)
+    } else if let Some(r) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
+        (8, r)
+    } else if s.len() > 1 && s.starts_with('0') {
+        if s.chars().any(|c| c == '8' || c == '9') { return None; }
+        (8, s)
+    } else {
+        (10, s)
+    };
+    if digits.is_empty() { return None; }
+    let (rad, mut acc) = ([radix, 0, 0, 0, 0, 0, 0, 0], [0u64; 8]);
+    for ch in digits.chars() {
+        let d = [ch.to_digit(radix as u32)? as u64, 0, 0, 0, 0, 0, 0, 0];
+        acc = u512_mul(&acc, &rad).and_then(|p| u512_add(&p, &d))?;
+    }
+    Some(acc)
+}
+
+fn signed_512_add(aneg: bool, am: [u64; 8], bneg: bool, bm: [u64; 8]) -> Const512 {
+    if aneg == bneg {
+        return match u512_add(&am, &bm) {
+            Some(mag) => Const512::Val { neg: aneg && !u512_is_zero(&mag), mag },
+            None => if aneg { Const512::OverflowNeg } else { Const512::OverflowPos },
+        };
+    }
+    if u512_ge(&am, &bm) {
+        let mag = u512_sub_ge(&am, &bm);
+        Const512::Val { neg: aneg && !u512_is_zero(&mag), mag }
+    } else {
+        Const512::Val { neg: bneg, mag: u512_sub_ge(&bm, &am) }
+    }
+}
+
+fn fold_512(op: BinOp, l: Const512, r: Const512) -> Const512 {
+    let (Const512::Val { neg: an, mag: am }, Const512::Val { neg: bn, mag: bm }) = (l, r) else {
+        return Const512::NotConst;
+    };
+    match op {
+        BinOp::Add => signed_512_add(an, am, bn, bm),
+        BinOp::Sub => signed_512_add(an, am, !u512_is_zero(&bm) && !bn, bm),
+        BinOp::Mul => {
+            if u512_is_zero(&am) || u512_is_zero(&bm) {
+                return Const512::Val { neg: false, mag: [0; 8] };
+            }
+            let neg = an ^ bn;
+            match u512_mul(&am, &bm) {
+                Some(mag) => Const512::Val { neg, mag },
+                None => if neg { Const512::OverflowNeg } else { Const512::OverflowPos },
+            }
+        }
+        BinOp::Shl => {
+            if u512_is_zero(&am) {
+                return Const512::Val { neg: false, mag: [0; 8] };
+            }
+            if bn {
+                return Const512::NotConst;
+            }
+            match u512_shl(&am, u512_as_shift(&bm)) {
+                Some(out) => Const512::Val { neg: an, mag: out },
+                None => if an { Const512::OverflowNeg } else { Const512::OverflowPos },
+            }
+        }
+        BinOp::Shr if !bn => {
+            let shift = u512_as_shift(&bm);
+            if !an || u512_is_zero(&am) {
+                return Const512::Val { neg: false, mag: u512_shr_logical(&am, shift) };
+            }
+            let one = [1, 0, 0, 0, 0, 0, 0, 0];
+            let sh = u512_shr_logical(&u512_sub_ge(&am, &one), shift);
+            u512_add(&sh, &one).map_or(Const512::OverflowNeg, |out| Const512::Val { neg: true, mag: out })
+        }
+        _ => Const512::NotConst,
+    }
 }
 
 
