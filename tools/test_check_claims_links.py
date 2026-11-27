@@ -51,6 +51,27 @@ class CheckClaimsLinksTest(unittest.TestCase):
         self.assertEqual(report["refs"], 2)
         self.assertEqual(report["issues"], [])
 
+    def test_optional_table_borders_preserve_missing_evidence(self):
+        claims = self.root / "GUARANTEES.md"
+        (self.root / "SPEC-LANGUAGE.md").unlink()
+        reference = self.run_tool()
+        self.assertEqual(reference.returncode, 1)
+        expected = json.loads(reference.stdout)
+        self.assertEqual(expected["issues"], [
+            {"row": 1, "kind": "missing", "target": "SPEC-LANGUAGE.md"},
+        ])
+        for leading, trailing in ((True, False), (False, True), (False, False)):
+            with self.subTest(leading=leading, trailing=trailing):
+                text = CLAIMS
+                if not leading:
+                    text = text.replace("\n|", "\n")
+                if not trailing:
+                    text = text.replace("|\n", "\n")
+                claims.write_text(text, encoding="utf-8")
+                result = self.run_tool()
+                self.assertEqual(result.returncode, reference.returncode, result.stdout)
+                self.assertEqual(json.loads(result.stdout), expected)
+
     def test_missing_file_is_reported(self):
         (self.root / "tests" / "checker-corpus" / "15-good.hy").unlink()
         result = self.run_tool()
