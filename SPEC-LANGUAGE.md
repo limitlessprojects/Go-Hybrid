@@ -1815,7 +1815,7 @@ machine-applicable Fix/Edit model — the data structure fix-its need):
 | `HYB-E1nnn` | resolve (names, imports, visibility) | |
 | `HYB-E2nnn` | type errors | |
 | `HYB-E3nnn` | ownership & sendability | `E30xx` send/move/freeze; `E31xx` loans |
-| `HYB-E4nnn` | nil / zero-value safety | the null-safety feature's codes |
+| `HYB-E4nnn` | nil / zero-value safety | the null-safety feature's codes; `E4004`/`E4005` are the linear channel-capability lifecycle codes (SPSC split, #4200) and were numbered here before the family was narrowed — the registry is append-only, so the family note carries them |
 | `HYB-E5nnn` | exhaustiveness & patterns | |
 | `HYB-E6nnn` | integer overflow / bounds | |
 | `HYB-E7nnn` | boundary (ABI, layout, foreign calls) | |

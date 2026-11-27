@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "updated": "2026-10-18",
+  "updated": "2026-11-27",
   "format": "HYB-Exxxx registry (SPEC-LANGUAGE.md §9.6; append-only, never renumbered, never reused)",
   "categories": {
     "E0": "parse / lexical",
     "E1": "resolve (names, imports, visibility)",
     "E2": "type errors",
     "E3": "ownership & sendability (E30xx send/move/freeze, E31xx loans)",
-    "E4": "nil / zero-value safety",
+    "E4": "nil / zero-value safety; linear channel-capability lifecycle (E4004-E4005)",
     "E5": "exhaustiveness & patterns",
     "E6": "integer overflow / bounds",
     "E7": "boundary (ABI, layout, foreign calls)",
@@ -564,6 +564,38 @@
       "example": "var x = nil   // reject: HYB-E4003 — Go: use of untyped nil in variable declaration",
       "rule": "N",
       "tier0_rule_id": "N1"
+    },
+    {
+      "code": "HYB-E4004",
+      "name": "send-capability-not-closed",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "a linear send capability did not reach `Closed` before its scope exited",
+      "summary": "`hy.pipe[T]()` splits into a `hy.send_cap[T]` and a `hy.recv_cap[T]`; the send side is linear, so every handle must reach the terminal state `Closed` (`tx.close()`) before the scope that owns it exits. A handle that is neither closed nor moved into a spawned task leaves the receiver waiting on a channel that is never closed (the drain cannot terminate). This is the nursery exit terminal invariant of the SPSC capability split (P3 of `spikes/w-spsc-channel-liveness-4200`).",
+      "fixits": [
+        "call `tx.close()` once on every path that leaves the scope (the state is not implicitly closed at scope exit)",
+        "or transfer the handle out with `task worker(move tx)` — the subtask then assumes the obligation and must close it",
+        "if the channel is meant to stay open for the lifetime of the process, keep the handle in a scope that outlives the reader instead of creating the pipe in a short-lived block"
+      ],
+      "example": "fn main() {\n    tx, rx := hy.pipe[int]()\n    tx.send(1)\n    rx.drain()\n}   // reject: HYB-E4004 — tx was never closed, so the drain cannot terminate",
+      "rule": "",
+      "tier0_rule_id": null
+    },
+    {
+      "code": "HYB-E4005",
+      "name": "recv-capability-not-drained",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "a linear receive capability did not reach `Drained` before its scope exited",
+      "summary": "The receive side of `hy.pipe[T]()` is linear: every `hy.recv_cap[T]` handle must reach the terminal state `Drained` (`rx.drain()`, or a drain via `for v in rx` where the checker models it) before the scope that owns it exits, so the reader cannot be abandoned while values are still in flight. This is the nursery exit terminal invariant of the SPSC capability split (P3 of `spikes/w-spsc-channel-liveness-4200`).",
+      "fixits": [
+        "call `rx.drain()` once on every path that leaves the scope",
+        "or transfer the handle out with `task consumer(move rx)` so the subtask owns the obligation and drains it",
+        "if a single value is all the reader needs, still drain afterwards — `recv` alone does not reach `Drained`"
+      ],
+      "example": "fn main() {\n    tx, rx := hy.pipe[int]()\n    tx.close()\n}   // reject: HYB-E4005 — rx was never drained",
+      "rule": "",
+      "tier0_rule_id": null
     },
     {
       "code": "HYB-E5001",
