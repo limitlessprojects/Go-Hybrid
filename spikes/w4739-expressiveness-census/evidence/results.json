@@ -1,0 +1,126 @@
+{
+  "baseline_tests": {
+    "count": 3,
+    "packages": [
+      "golang.org/x/sync/errgroup",
+      "golang.org/x/sync/singleflight"
+    ],
+    "passed_test_events": 53,
+    "test_events_by_name": {
+      "golang.org/x/sync/errgroup::ExampleGroup_parallel": 1,
+      "golang.org/x/sync/errgroup::TestCancelCause": 3,
+      "golang.org/x/sync/errgroup::TestGoLimit": 3,
+      "golang.org/x/sync/errgroup::TestTryGo": 3,
+      "golang.org/x/sync/errgroup::TestWithContext": 3,
+      "golang.org/x/sync/errgroup::TestZeroGroup": 3,
+      "golang.org/x/sync/singleflight::ExampleGroup": 1,
+      "golang.org/x/sync/singleflight::TestDo": 3,
+      "golang.org/x/sync/singleflight::TestDoChan": 3,
+      "golang.org/x/sync/singleflight::TestDoDupSuppress": 3,
+      "golang.org/x/sync/singleflight::TestDoErr": 3,
+      "golang.org/x/sync/singleflight::TestForget": 3,
+      "golang.org/x/sync/singleflight::TestGoexitDo": 3,
+      "golang.org/x/sync/singleflight::TestPanicDo": 3,
+      "golang.org/x/sync/singleflight::TestPanicDoChan": 3,
+      "golang.org/x/sync/singleflight::TestPanicDoSharedByDoChan": 3,
+      "golang.org/x/sync/singleflight::TestPanicErrorUnwrap": 3,
+      "golang.org/x/sync/singleflight::TestPanicErrorUnwrap/panicError_wraps_error_type": 3,
+      "golang.org/x/sync/singleflight::TestPanicErrorUnwrap/panicError_wraps_non-error_type": 3
+    },
+    "unique_test_names": 19
+  },
+  "candidate_tests": {
+    "count": 3,
+    "packages": [
+      "golang.org/x/sync/errgroup",
+      "golang.org/x/sync/singleflight"
+    ],
+    "passed_test_events": 53,
+    "test_events_by_name": {
+      "golang.org/x/sync/errgroup::ExampleGroup_parallel": 1,
+      "golang.org/x/sync/errgroup::TestCancelCause": 3,
+      "golang.org/x/sync/errgroup::TestGoLimit": 3,
+      "golang.org/x/sync/errgroup::TestTryGo": 3,
+      "golang.org/x/sync/errgroup::TestWithContext": 3,
+      "golang.org/x/sync/errgroup::TestZeroGroup": 3,
+      "golang.org/x/sync/singleflight::ExampleGroup": 1,
+      "golang.org/x/sync/singleflight::TestDo": 3,
+      "golang.org/x/sync/singleflight::TestDoChan": 3,
+      "golang.org/x/sync/singleflight::TestDoDupSuppress": 3,
+      "golang.org/x/sync/singleflight::TestDoErr": 3,
+      "golang.org/x/sync/singleflight::TestForget": 3,
+      "golang.org/x/sync/singleflight::TestGoexitDo": 3,
+      "golang.org/x/sync/singleflight::TestPanicDo": 3,
+      "golang.org/x/sync/singleflight::TestPanicDoChan": 3,
+      "golang.org/x/sync/singleflight::TestPanicDoSharedByDoChan": 3,
+      "golang.org/x/sync/singleflight::TestPanicErrorUnwrap": 3,
+      "golang.org/x/sync/singleflight::TestPanicErrorUnwrap/panicError_wraps_error_type": 3,
+      "golang.org/x/sync/singleflight::TestPanicErrorUnwrap/panicError_wraps_non-error_type": 3
+    },
+    "unique_test_names": 19
+  },
+  "census_verdict": "INCONCLUSIVE",
+  "descriptive_median_managed_per_100_hybrid_lines": 3.101503759398496,
+  "descriptive_median_total_tax_percent": 166.228,
+  "ports": [
+    {
+      "added": 65,
+      "behavior": "UNCHANGED_UPSTREAM_TESTS_PASS_RACE",
+      "classification": "ESCAPED",
+      "deleted": 140,
+      "go_escape_inventory": [
+        "WithContext retained in Go: context is outside M5; returned heap pointer cannot be represented as a returning Hybrid loan",
+        "sync.Once.Do callback with captured writes at two source sites",
+        "two managed spawn regions"
+      ],
+      "helper_go_lines": 19,
+      "hybrid_diff_tax_percent": 135.762,
+      "hybrid_lines": 76,
+      "independent_review": "PENDING",
+      "managed_blocks": 2,
+      "naive_to_accepted_added": 15,
+      "naive_to_accepted_deleted": 12,
+      "original_lines": 151,
+      "primary_census_eligible": false,
+      "program": "errgroup",
+      "reversal_codes": [
+        "HYB-E3001",
+        "HYB-E3013"
+      ],
+      "total_tax_including_helpers_percent": 148.344
+    },
+    {
+      "added": 101,
+      "behavior": "UNCHANGED_UPSTREAM_TESTS_PASS_RACE",
+      "classification": "ESCAPED",
+      "deleted": 203,
+      "go_escape_inventory": [
+        "Go panicError and newPanicError retained with runtime/debug, errors and bytes",
+        "Goexit and panic classification supplied as Go callbacks",
+        "sync.Map storage/lookup/delete Go callbacks replace pointer-valued map field forbidden by HYB-E3103",
+        "result extraction to Go callback avoids returning Hybrid loan (HYB-E3104)",
+        "DoChan delivery callback constructs the original exported Result channel payload",
+        "four managed regions; not a pure Tier-0 port"
+      ],
+      "helper_go_lines": 90,
+      "hybrid_diff_tax_percent": 142.056,
+      "hybrid_lines": 112,
+      "independent_review": "PENDING",
+      "managed_blocks": 4,
+      "naive_to_accepted": "NOT_AVAILABLE_EXPLORATORY_PORT",
+      "original_lines": 214,
+      "primary_census_eligible": false,
+      "program": "singleflight",
+      "reversal_codes": [
+        "HYB-E3001",
+        "HYB-E3005"
+      ],
+      "total_tax_including_helpers_percent": 184.112
+    }
+  ],
+  "reason": "production sources exceed size target; singleflight exploratory; independent review and seven other ports outstanding",
+  "sweep_histogram": {
+    "HYB-E0001": 5011
+  },
+  "sweep_source_files": 47
+}

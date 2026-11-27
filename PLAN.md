@@ -1,5 +1,10 @@
 # Hybrid Language: Development Plan
 
+## Contributor pilot — expressiveness census #4739 (2026-11-28)
+
+- Two escaped production x/sync ports pass unchanged upstream tests with race detection and count=3 on pinned Windows toolchains; the evidence runner has 11 passing regressions. Reproduction, actual diffs, 47-file lexical sweep and limitations are in `spikes/w4739-expressiveness-census/RESULTS.md`.
+- No compiler changes or self-awarded milestone. Independent replication, seven other programs, hosted Linux checks, maintainer review and reward eligibility remain pending. Chyalls retains proposal attribution.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.

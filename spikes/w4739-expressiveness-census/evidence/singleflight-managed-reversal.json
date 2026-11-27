@@ -1,0 +1,437 @@
+{
+  "diagnostics": [
+    {
+      "code": "HYB-E3001",
+      "file": "<run>\\singleflight-without-managed.hy",
+      "fixits": [
+        {
+          "description": "route updates through a channel instead of sharing the value"
+        },
+        {
+          "description": "copy the data the task needs and send the copy"
+        },
+        {
+          "description": "transfer ownership: `task worker(move counter)` \u2014 the binding (and every alias) must be unused afterward"
+        },
+        {
+          "description": "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+        }
+      ],
+      "message": "`c` (*call) is not sendable across tasks",
+      "name": "not-sendable-spawn",
+      "notes": [
+        "this pointer is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 107,
+          "line": 60
+        },
+        "start": {
+          "col": 9,
+          "line": 60
+        }
+      },
+      "tier0_rule": "A1c"
+    },
+    {
+      "code": "HYB-E3001",
+      "file": "<run>\\singleflight-without-managed.hy",
+      "fixits": [
+        {
+          "description": "route updates through a channel instead of sharing the value"
+        },
+        {
+          "description": "copy the data the task needs and send the copy"
+        },
+        {
+          "description": "transfer ownership: `task worker(move counter)` \u2014 the binding (and every alias) must be unused afterward"
+        },
+        {
+          "description": "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+        }
+      ],
+      "message": "`work` (fn() (any, error)) is not sendable across tasks",
+      "name": "not-sendable-spawn",
+      "notes": [
+        "this closure is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 107,
+          "line": 60
+        },
+        "start": {
+          "col": 9,
+          "line": 60
+        }
+      },
+      "tier0_rule": "A1c"
+    },
+    {
+      "code": "HYB-E3001",
+      "file": "<run>\\singleflight-without-managed.hy",
+      "fixits": [
+        {
+          "description": "route updates through a channel instead of sharing the value"
+        },
+        {
+          "description": "copy the data the task needs and send the copy"
+        },
+        {
+          "description": "transfer ownership: `task worker(move counter)` \u2014 the binding (and every alias) must be unused afterward"
+        },
+        {
+          "description": "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+        }
+      ],
+      "message": "`exit_error` (error) is not sendable across tasks",
+      "name": "not-sendable-spawn",
+      "notes": [
+        "this foreign value is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 107,
+          "line": 60
+        },
+        "start": {
+          "col": 9,
+          "line": 60
+        }
+      },
+      "tier0_rule": "A1c"
+    },
+    {
+      "code": "HYB-E3001",
+      "file": "<run>\\singleflight-without-managed.hy",
+      "fixits": [
+        {
+          "description": "route updates through a channel instead of sharing the value"
+        },
+        {
+          "description": "copy the data the task needs and send the copy"
+        },
+        {
+          "description": "transfer ownership: `task worker(move counter)` \u2014 the binding (and every alias) must be unused afterward"
+        },
+        {
+          "description": "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+        }
+      ],
+      "message": "`is_panic` (fn() bool) is not sendable across tasks",
+      "name": "not-sendable-spawn",
+      "notes": [
+        "this closure is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 107,
+          "line": 60
+        },
+        "start": {
+          "col": 9,
+          "line": 60
+        }
+      },
+      "tier0_rule": "A1c"
+    },
+    {
+      "code": "HYB-E3001",
+      "file": "<run>\\singleflight-without-managed.hy",
+      "fixits": [
+        {
+          "description": "route updates through a channel instead of sharing the value"
+        },
+        {
+          "description": "copy the data the task needs and send the copy"
+        },
+        {
+          "description": "transfer ownership: `task worker(move counter)` \u2014 the binding (and every alias) must be unused afterward"
+        },
+        {
+          "description": "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+        }
+      ],
+      "message": "`make_panic` (fn() error) is not sendable across tasks",
+      "name": "not-sendable-spawn",
+      "notes": [
+        "this closure is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 107,
+          "line": 60
+        },
+        "start": {
+          "col": 9,
+          "line": 60
+        }
+      },
+      "tier0_rule": "A1c"
+    },
+    {
+      "code": "HYB-E3001",
+      "file": "<run>\\singleflight-without-managed.hy",
+      "fixits": [
+        {
+          "description": "route updates through a channel instead of sharing the value"
+        },
+        {
+          "description": "copy the data the task needs and send the copy"
+        },
+        {
+          "description": "transfer ownership: `task worker(move counter)` \u2014 the binding (and every alias) must be unused afterward"
+        },
+        {
+          "description": "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+        }
+      ],
+      "message": "`exit_fn` (fn()) is not sendable across tasks",
+      "name": "not-sendable-spawn",
+      "notes": [
+        "this closure is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 107,
+          "line": 60
+        },
+        "start": {
+          "col": 9,
+          "line": 60
+        }
+      },
+      "tier0_rule": "A1c"
+    },
+    {
+      "code": "HYB-E3001",
+      "file": "<run>\\singleflight-without-managed.hy",
+      "fixits": [
+        {
+          "description": "route updates through a channel instead of sharing the value"
+        },
+        {
+          "description": "copy the data the task needs and send the copy"
+        },
+        {
+          "description": "transfer ownership: `task worker(move counter)` \u2014 the binding (and every alias) must be unused afterward"
+        },
+        {
+          "description": "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+        }
+      ],
+      "message": "`lookup` (fn(*sync.map_, string) *call) is not sendable across tasks",
+      "name": "not-sendable-spawn",
+      "notes": [
+        "this closure is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 107,
+          "line": 60
+        },
+        "start": {
+          "col": 9,
+          "line": 60
+        }
+      },
+      "tier0_rule": "A1c"
+    },
+    {
+      "code": "HYB-E3001",
+      "file": "<run>\\singleflight-without-managed.hy",
+      "fixits": [
+        {
+          "description": "route updates through a channel instead of sharing the value"
+        },
+        {
+          "description": "copy the data the task needs and send the copy"
+        },
+        {
+          "description": "transfer ownership: `task worker(move counter)` \u2014 the binding (and every alias) must be unused afterward"
+        },
+        {
+          "description": "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+        }
+      ],
+      "message": "`finish` (fn(*call, bool)) is not sendable across tasks",
+      "name": "not-sendable-spawn",
+      "notes": [
+        "this closure is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 107,
+          "line": 60
+        },
+        "start": {
+          "col": 9,
+          "line": 60
+        }
+      },
+      "tier0_rule": "A1c"
+    },
+    {
+      "code": "HYB-E3001",
+      "file": "<run>\\singleflight-without-managed.hy",
+      "fixits": [
+        {
+          "description": "route updates through a channel instead of sharing the value"
+        },
+        {
+          "description": "copy the data the task needs and send the copy"
+        },
+        {
+          "description": "transfer ownership: `task worker(move counter)` \u2014 the binding (and every alias) must be unused afterward"
+        },
+        {
+          "description": "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+        }
+      ],
+      "message": "`put` (fn(*sync.map_, string, *call)) is not sendable across tasks",
+      "name": "not-sendable-spawn",
+      "notes": [
+        "this closure is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 107,
+          "line": 60
+        },
+        "start": {
+          "col": 9,
+          "line": 60
+        }
+      },
+      "tier0_rule": "A1c"
+    },
+    {
+      "code": "HYB-E3001",
+      "file": "<run>\\singleflight-without-managed.hy",
+      "fixits": [
+        {
+          "description": "route updates through a channel instead of sharing the value"
+        },
+        {
+          "description": "copy the data the task needs and send the copy"
+        },
+        {
+          "description": "transfer ownership: `task worker(move counter)` \u2014 the binding (and every alias) must be unused afterward"
+        },
+        {
+          "description": "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+        }
+      ],
+      "message": "`drop` (fn(*sync.map_, string)) is not sendable across tasks",
+      "name": "not-sendable-spawn",
+      "notes": [
+        "this closure is shared across tasks: mutable shared state must cross a boundary the checker can see (Tier-0 rule O4)"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 107,
+          "line": 60
+        },
+        "start": {
+          "col": 9,
+          "line": 60
+        }
+      },
+      "tier0_rule": "A1c"
+    },
+    {
+      "code": "HYB-E3005",
+      "file": "<run>\\singleflight-without-managed.hy",
+      "fixits": [
+        {
+          "description": "ascribe the type at the declaration (`var x map[string]int = ...`) so the checker can classify it"
+        },
+        {
+          "description": "route the value through a channel of a known sendable element type instead of sharing it"
+        },
+        {
+          "description": "if the share is genuinely guarded, wrap the site in `managed(\"why this bypass is safe\", \"category\") { ... }` \u2014 the explicit, auditable hatch (counted by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+        }
+      ],
+      "message": "`g.do_call` cannot be proven safe across tasks \u2014 its type did not resolve, so the checker cannot verify the share",
+      "name": "unproven-at-boundary",
+      "notes": [
+        "why: the checker can only prove spawns of declared top-level `fn`s \u2014 `g.do_call` is a method value or a computed callee, which the spawn-callee proof (O4.0) cannot verify",
+        "the checker is fail-closed at boundaries: what it cannot prove, it will not call safe (O4.9) \u2014 a wrong silent pass here would void the Tier-0 guarantee for the whole program",
+        "fix: ascribe the type at the declaration (`var x map[string]int = ...`) or route the value through a channel of a known sendable element type",
+        "if the share is genuinely guarded, wrap this site in `managed(\"why this bypass is safe\", \"category\") { ... }` \u2014 the explicit, auditable hatch (HYB-E8001, counted by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 107,
+          "line": 60
+        },
+        "start": {
+          "col": 9,
+          "line": 60
+        }
+      },
+      "tier0_rule": "FC"
+    },
+    {
+      "code": "HYB-E3001",
+      "file": "<run>\\singleflight-without-managed.hy",
+      "fixits": [
+        {
+          "description": "route updates through a channel instead of sharing the value"
+        },
+        {
+          "description": "copy the data the task needs and send the copy"
+        },
+        {
+          "description": "transfer ownership: `task worker(move counter)` \u2014 the binding (and every alias) must be unused afterward"
+        },
+        {
+          "description": "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+        }
+      ],
+      "message": "`fn(...) {...}` (closure) is not sendable across tasks",
+      "name": "not-sendable-spawn",
+      "notes": [
+        "the spawned callee is a closure: closures capture their environment, so spawning one shares every capture with the new task (A5) \u2014 spawn a declared top-level `fn` instead",
+        "if the closure is the design (an actor loop, a worker body), wrap the site in `managed(\"why this bypass is safe\", \"actor\") { ... }` \u2014 the explicit, auditable hatch (HYB-E8001, counted by --report-managed)"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 53,
+          "line": 80
+        },
+        "start": {
+          "col": 25,
+          "line": 80
+        }
+      },
+      "tier0_rule": "A1c"
+    }
+  ],
+  "summary": {
+    "errors": 12,
+    "file": "<run>\\singleflight-without-managed.hy",
+    "managed": {
+      "managed_blocks": 0,
+      "sites_via_managed": 0,
+      "total_sites": 2
+    },
+    "verdict": "reject",
+    "warnings": 0
+  },
+  "version": 1
+}
