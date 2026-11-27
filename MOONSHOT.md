@@ -195,6 +195,26 @@ wall is is worth exactly as much here as an accepted one.
   Deliberately accepted as the price of not being blind-sided by the idea
   we would have rejected.
 
+### Contribution learning — atomic exchange and Treiber progress (#833)
+
+- **Proposal:** [#833](https://github.com/limitlessprojects/Go-Hybrid/issues/833),
+  @magomedta's linear atomic pointer swaps; independent executable feasibility
+  work in [spikes/atomic-box-833](spikes/atomic-box-833/README.md).
+- **Experimental outcome (maintainer review pending):** three million disjoint
+  buffer exchanges pass `-race`; Swap measures 10.83–11.58 ns/op on linux/arm64.
+  The no-Load API does not directly express ordinary Treiber pop. Taking the
+  whole stack instead has a repeatable non-progress cycle while its owner is
+  paused; restoring unchecked Load produces a real `Next` pointee race.
+- **Learning:** disjoint exchange is promising, but graph separation, protected
+  link observation and progress need their own rules. The negative Load test is
+  outside the proposed no-Load subset, not a falsification of that subset's race
+  freedom. Row 11 remains unchanged. See the [pre-registration, results and
+  limits](spikes/atomic-box-833/RESULTS.md), including the unrun full Treiber
+  campaign. This note assigns no ledger status, acceptance or payout.
+- **Cost:** a standard-library-only Go spike and its CI invocation; no compiler
+  or production runtime changes. Related family: W-022; original proposal credit
+  remains with @magomedta.
+
 ---
 
 ## Failure wall

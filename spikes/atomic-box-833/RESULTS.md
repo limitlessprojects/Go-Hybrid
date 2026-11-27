@@ -46,4 +46,73 @@ typable algorithm exists; it cannot validate a forbidden Load or a spinlock.
 
 ## Results
 
-Pending execution of the pre-registered experiments.
+Measured 2026-11-27 with **Go 1.26.9, linux/arm64**, native GCC, no
+external services. The pre-registration was committed as `a1aef77` before running
+these experiments. The original local Go installation lacked `runtime/race`;
+that first attempt failed at build time and is not counted as a test result.
+A clean official `go1.26.9.linux-arm64.tar.gz` was downloaded, SHA256 verified
+(`4a97373d49fcacdcf3694fea368a500b00ee3e963974f3e7514132717632f052`),
+and all experiment stages below were then executed successfully.
+
+| Gate | Observed result | Interpretation |
+|---|---|---|
+| Exclusive buffer exchange | 1,000,000 exchanges at each of CPU=8,16,32; 33 unique buffers conserved, payload integrity checked, 0 race reports | Positive runtime evidence for disjoint whole-graph exchange under caller discipline |
+| CAS outcomes and contenders | Failure retains replacement and returns nil; success acquires old pointer; exactly one winner among 64 contenders | Runtime contract controls pass; no static ownership or ABA proof |
+| Small controls stress | Five top-level controls, each 1,000 repetitions at CPU=8,16,32; `-race` pass (11.925s) | 3,000 executions of each small control, excluding the separate million-exchange tests |
+| Treiber graph witness | CAS(head, tail) returns head whose Next equals the still-published tail | This replacement violates the exclusive-input premise; ordinary Treiber pop needs a richer ownership rule |
+| Take-and-return progress | 10,000 peer attempts complete zero operations, return to the same nil state; operation succeeds after owner resumes | The fallback has a repeatable non-progress cycle and is blocking |
+| Unchecked Load negative | Actual Go `WARNING: DATA RACE` on Next; expected test process failure, checked separately | Restoring raw Load is unsafe; this is deliberately outside the proposed no-Load subset, **not** its G1 falsification |
+| G2, non-race single-CPU Swap | 10.85, 10.83, 10.83, 11.20, 11.58 ns/op; every sample 0 B/op, 0 allocs/op | Meets <15 ns target on this host; >30 ns kill threshold did not fire |
+
+Exact machine-readable measurements: [measurements.json](measurements.json).
+Actual negative-control output: [race-report.txt](race-report.txt). The full
+unmodified local run transcript is retained by the submitting worker; CI runs
+[verify.py](verify.py) to reproduce the experiments.
+
+## Learning outcome
+
+**The exchange-only buffer experiment succeeds; the direct route from that
+result to a guaranteed lock-free Treiber stack fails its expressibility and
+progress prerequisites.** The safety invariant for the positive control is
+simple: the cell and each worker own disjoint graphs before every exchange;
+atomic Swap permutes those owners without duplicating an owner. This reasoning
+depends on the caller satisfying that invariant. The Go wrapper itself cannot
+make an arbitrary raw pointer unique, revoke aliases, or validate a graph.
+
+For the proposed Treiber case, banning Load removes the observation of Next
+needed to form the CAS replacement. Taking the full graph instead recovers
+exclusive field access but makes all peers depend on the holder resuming. The
+nil-to-nil retry transition repeats without changing the state, so adding more
+iterations cannot establish lock-free progress for that algorithm. This is
+stronger than merely observing a slow test, and does not depend on a timeout.
+It also does not rule out a future design with helping, protected immutable
+links, graph separation, or an independently specified reclamation protocol.
+
+A CAS expected pointer must be treated as an opaque identity until acquisition;
+CAS success alone does not grant exclusive ownership of a tail that remains
+reachable from both the returned node and the published head. These requirements
+are not addressed by naming a type Sendable Class 2. The detailed example and
+remaining proof obligations are in [README.md](README.md).
+
+**Disposition:** retain GUARANTEES Row 11 and raw pointer fail-closed behavior.
+Publish this as a feasibility learning for #833, with maintainer review and any
+award undecided. No ledger ID, M1 acceptance, M2 payment, compiler diagnostic,
+or human validation is claimed. This is an independently executed research
+artifact, not a reuse of #1254's model or evidence.
+
+## Limits against the original proposal
+
+- The raw-Load negative does not kill the disjoint exchange hypothesis: it
+  intentionally adds an operation the proposed checked subset excludes.
+- The issue's 64-task, million-node Treiber implementation and its full
+  `-count=1000 -cpu=8,16,32` success campaign were **not run**. A typable lock-free
+  algorithm is missing under the stated API; the fallback tested here is not
+  presented as that algorithm. Three million buffer operations and the repeated
+  small controls must not be represented as satisfying that Treiber campaign.
+- No compiler classification, method shape, move/alias/loan enforcement,
+  conditional CAS typing, emitted Go, or four requested M2 corpus verdicts are
+  implemented or claimed. No production `runtime/go` API is added.
+- Timing is host-specific and excludes `-race`. No channel baseline, x86
+  instruction, RCU grace period, or end-to-end lock-free throughput was measured.
+- G1 is evidence from executions, not a proof. The new progress witness concerns
+  the explicit take-and-return algorithm, not every possible data structure.
