@@ -4950,6 +4950,107 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn resolved_array_details(&self, name: &str) -> Option<(String, String)> {
+        let base = Checker::base_named_type_str(name);
+        if is_sized_array_spelling(name) {
+            let close = name.find(']')?;
+            let len_str = name[1..close].trim().to_string();
+            let elem_str = name[close + 1..].trim().to_string();
+            return Some((len_str, elem_str));
+        }
+        if let Some(alias) = self.ck.type_aliases.get(base) {
+            let resolved = self.ck.resolve_type_alias(alias);
+            if let hy_syntax::TypeExpr::Array { len, elem, .. } = resolved {
+                let len_str = len.as_ref().map(|l| l.render()).unwrap_or_default();
+                let elem_resolved = self.ck.resolve_type_alias(&elem);
+                let elem_str = elem_resolved.render();
+                return Some((len_str, elem_str));
+            }
+        }
+        None
+    }
+
+    fn expr_array_details(&self, e: &Expr) -> Option<(String, String)> {
+        let bare = unwrap_parens(e);
+        if let Some((len, elem, _)) = bare.as_array_lit() {
+            let len_str = len.map(|l| l.render()).unwrap_or_default();
+            let elem_resolved = self.ck.resolve_type_alias(elem);
+            return Some((len_str, elem_resolved.render()));
+        }
+        if let Expr::Ident { name, .. } = bare {
+            if let Some(tname) = self.lookup_type_name(name) {
+                return self.resolved_array_details(&tname);
+            }
+        }
+        None
+    }
+
+    fn expr_slice_elem_details(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        if let Expr::SliceLit { elem: Some(t), .. } = bare {
+            let elem_resolved = self.ck.resolve_type_alias(t);
+            return Some(elem_resolved.render());
+        }
+        if let Expr::Ident { name, .. } = bare {
+            if let Some(tname) = self.lookup_type_name(name) {
+                if let Some(elem) = tname.strip_prefix("[]") {
+                    return Some(elem.trim().to_string());
+                }
+                let base = Checker::base_named_type_str(&tname);
+                if let Some(alias) = self.ck.type_aliases.get(base) {
+                    let resolved = self.ck.resolve_type_alias(alias);
+                    if let hy_syntax::TypeExpr::Slice { elem, .. } = resolved {
+                        let elem_resolved = self.ck.resolve_type_alias(&elem);
+                        return Some(elem_resolved.render());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// #3132: array type conversions require matching array lengths and identical element types.
+    fn array_conversion_mismatch(
+        &self,
+        name: &str,
+        target: &OpKind,
+        arg: &Expr,
+        arg_kind: &OpKind,
+    ) -> bool {
+        if !matches!(target, OpKind::Array(_)) {
+            return false;
+        }
+        let Some((target_len, target_elem)) = self.resolved_array_details(name) else {
+            return false;
+        };
+
+        match arg_kind {
+            OpKind::Array(_) => {
+                if let Some((arg_len, arg_elem)) = self.expr_array_details(arg) {
+                    if !target_len.is_empty() && !arg_len.is_empty() && target_len != arg_len {
+                        return true;
+                    }
+                    let t_scalar = canonical_numeric_name(&target_elem).unwrap_or(target_elem.as_str());
+                    let a_scalar = canonical_numeric_name(&arg_elem).unwrap_or(arg_elem.as_str());
+                    if t_scalar != a_scalar {
+                        return true;
+                    }
+                }
+            }
+            OpKind::Slice(_) => {
+                if let Some(arg_elem) = self.expr_slice_elem_details(arg) {
+                    let t_scalar = canonical_numeric_name(&target_elem).unwrap_or(target_elem.as_str());
+                    let a_scalar = canonical_numeric_name(&arg_elem).unwrap_or(arg_elem.as_str());
+                    if t_scalar != a_scalar {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -5001,7 +5102,8 @@ impl<'a> Collector<'a> {
         // #2811: `string`↔slice conversions are restricted to byte/rune
         // elements; `OpKind::Int` cannot tell `int64` from `uint8`.
         let element_mismatch = self.string_slice_conversion_element_mismatch(name, &k, arg, &arg_k);
-        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch {
+        let array_mismatch = self.array_conversion_mismatch(name, &k, arg, &arg_k);
+        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch || array_mismatch {
             let note = if matches!(k, OpKind::Struct(_)) {
                 "structs cannot be instantiated via function-call conversions; write a struct literal like `T{...}` instead"
             } else {
