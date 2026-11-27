@@ -1,0 +1,22 @@
+{
+  "cases": [
+    {
+      "name": "multi_race_second_undocumented_fails",
+      "hazards": ["concurrent map writes (Go fatal, pre-registered)"],
+      "exit_code": 66,
+      "expect_ok": false
+    },
+    {
+      "name": "source_path_noun_does_not_mask_race",
+      "hazards": ["concurrent map writes"],
+      "exit_code": 66,
+      "expect_ok": false
+    },
+    {
+      "name": "documented_race_with_unrelated_panic_fails",
+      "hazards": ["concurrent map writes"],
+      "exit_code": 2,
+      "expect_ok": false
+    }
+  ]
+}

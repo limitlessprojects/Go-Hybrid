@@ -206,8 +206,107 @@ def documented_runtime_hazard(stderr, hazards):
     return False
 
 
+_SOURCE_LOC_RE = re.compile(r":\d+(?:\s+\+0x[0-9a-fA-F]+)?\Z")
+_RACE_SUMMARY_RE = re.compile(r"^Found \d+ data race\(s\)\Z")
+_QUALIFIERS = {"concurrent", "simultaneous", "unsynchronized", "racy"}
+_VERBS = {
+    "read", "reads", "write", "writes", "access", "accesses",
+    "update", "updates", "mutation", "mutations",
+}
+
+
+def _split_race_reports(stderr):
+    """Split stderr into (race_blocks, remaining_non_race_stderr).
+
+    Go's race detector (`-race`, `halt_on_error=0` by default) emits one
+    `==================\\nWARNING: DATA RACE\\n...\\n==================` block
+    per race and lets execution continue. Every block must be inspected so an
+    early documented race cannot mask a second undocumented race or a later
+    unrelated panic/fatal printed outside the race reports.
+    """
+    lines = (stderr or "").splitlines()
+    blocks = []
+    outside = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        stripped = lines[i].strip()
+        if (
+            stripped == "=================="
+            and i + 1 < n
+            and "DATA RACE" in lines[i + 1]
+        ):
+            i += 1
+            stripped = lines[i].strip()
+        if "DATA RACE" in lines[i]:
+            block = [lines[i]]
+            i += 1
+            while i < n:
+                cur = lines[i].strip()
+                if cur == "==================":
+                    i += 1
+                    break
+                if "DATA RACE" in lines[i]:
+                    break
+                block.append(lines[i])
+                i += 1
+            blocks.append(block)
+            continue
+        if stripped != "==================" and not _RACE_SUMMARY_RE.match(stripped):
+            outside.append(lines[i])
+        i += 1
+    return blocks, "\n".join(outside).strip()
+
+
+def _racing_symbol_frames(block_lines):
+    """Extract normalized symbol call frames for the racing accesses only.
+
+    Excludes:
+      - `Goroutine N (...) created at:` stacks (where a goroutine was spawned,
+        not what memory object raced), and
+      - indented `file.go:line +0x...` source-path lines (otherwise a corpus
+        filename such as `02-shared-map-managed` satisfies a `map` hazard for
+        any unrelated slice/counter race in that file).
+    """
+    symbols = []
+    in_creation_stack = False
+    for line in block_lines[1:]:
+        if not line.strip():
+            continue
+        if not line.startswith((" ", "\t")):
+            in_creation_stack = line.lstrip().startswith("Goroutine ")
+            continue
+        if in_creation_stack:
+            continue
+        stripped = line.strip()
+        if _SOURCE_LOC_RE.search(stripped):
+            continue
+        # Split camelCase before lowercasing so `syncMap` exposes `map` as a
+        # subword while `semaphore` / `bitmap` remain single tokens.
+        spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", stripped).lower()
+        symbols.append(spaced)
+    return "\n".join(symbols)
+
+
+def _match_block_hazard(block_lines, hazards):
+    frames = _racing_symbol_frames(block_lines)
+    if not frames:
+        return None
+    for hazard in hazards:
+        phrase = re.split(r"\(|—|--", hazard, maxsplit=1)[0].strip().lower()
+        words = [
+            w for w in re.findall(r"[a-z0-9]+", phrase)
+            if w not in _QUALIFIERS and w not in _VERBS
+        ]
+        if words and all(
+            re.search(rf"(?<![a-z0-9]){re.escape(w)}", frames) for w in words
+        ):
+            return hazard
+    return None
+
+
 def documented_race(stderr, hazards):
-    """Is a race-detector report an instance of a registered RUNTIME-HAZARD?
+    """Is every race-detector report in stderr an instance of a registered RUNTIME-HAZARD?
 
     A corpus file that declares `RUNTIME-HAZARD: concurrent map writes`
     has already told us this program tears a map on purpose — that is what
@@ -218,45 +317,22 @@ def documented_race(stderr, hazards):
     The race detector catches the same defect earlier and reports it
     completely differently (`runtime.mapaccess1_faststr`, goroutine ids).
     Failing on that would just re-report a hazard the corpus already
-    admits, and would leave --race permanently red — so a race whose
-    racing operations name the registered hazard's subject counts as
-    documented, and anything else is a genuine surprise.
-
-    Matching is deliberately narrow: the hazard's significant words must
-    appear in the racing frames, not merely anywhere in the report.
+    admits, and would leave --race permanently red — so a run whose every
+    reported race names a registered hazard's subject in its racing symbol
+    frames counts as documented, and anything else is a genuine surprise.
     """
     if not hazards:
         return None
-    lines = stderr.splitlines()
-    start = next((i for i, l in enumerate(lines) if "DATA RACE" in l), None)
-    if start is None:
+    blocks, _ = _split_race_reports(stderr)
+    if not blocks:
         return None
-
-    # Match against the RACING FRAMES only — not the surrounding prose.
-    # The frames are the indented `pkg.func()` / `file:line` lines; they are
-    # what actually names the contended object.
-    frames = "\n".join(
-        l.strip().lower()
-        for l in lines[start:start + 60]
-        if l.startswith((" ", "\t")) and l.strip()
-    )
-    if not frames:
-        return None
-
-    # "concurrent" is true of every race, and the verb says HOW it was
-    # touched, not WHAT was touched — the detector writes `mapaccess1` or
-    # `mapassign`, never "writes". So match on the subject: the noun the
-    # hazard names. That is the part both vocabularies agree on.
-    qualifiers = {"concurrent", "simultaneous", "unsynchronized", "racy"}
-    verbs = {"read", "reads", "write", "writes", "access", "accesses",
-             "update", "updates", "mutation", "mutations"}
-    for hazard in hazards:
-        phrase = hazard.split("(", 1)[0].strip().lower()
-        words = [w for w in phrase.split()
-                 if w not in qualifiers and w not in verbs]
-        if words and all(w in frames for w in words):
-            return hazard
-    return None
+    matched = []
+    for block in blocks:
+        hit = _match_block_hazard(block, hazards)
+        if hit is None:
+            return None
+        matched.append(hit)
+    return matched[0]
 
 
 def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None,
@@ -300,12 +376,31 @@ def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None,
     except OSError as exc:
         return False, f"run could not be run: {exc}"
     # The race detector reports on stderr and then lets the program run to
-    # a normal exit, so exit 0 does NOT mean race-free. Check the text
-    # explicitly, and check it before the exit-code branch.
+    # exit (status 66 by default, or 0 when GORACE overrides exitcode), so
+    # exit 0 does NOT mean race-free — and a documented race must not hide a
+    # later undocumented panic, fatal, or abnormal exit status.
     if race and "DATA RACE" in (run.stderr or ""):
         known = documented_race(run.stderr, hazards)
         if known is not None:
-            # Already admitted by the corpus; say so and keep going.
+            _, outside_stderr = _split_race_reports(run.stderr)
+            outside_first = next(
+                (l.strip().lower() for l in outside_stderr.splitlines() if l.strip()),
+                "",
+            )
+            if run.returncode in (0, 66):
+                if outside_first.startswith(("panic:", "fatal error:")) and not (
+                    documented_runtime_hazard(outside_stderr, hazards)
+                ):
+                    return False, f"unexpected runtime failure after race: {outside_stderr[-200:]}"
+            else:
+                go_fatal_exit = run.returncode == 2 or (
+                    os.name == "posix" and run.returncode == -signal.SIGABRT
+                )
+                if not (go_fatal_exit and documented_runtime_hazard(outside_stderr, hazards)):
+                    return False, (
+                        f"run exit {run.returncode}: "
+                        f"{(outside_stderr or run.stderr or run.stdout)[-200:]}"
+                    )
             detail = f"documented RUNTIME-HAZARD race (pre-registered: {known})"
             if expected_output is not None:
                 stdout = run.stdout.replace("\r\n", "\n")
@@ -314,9 +409,18 @@ def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None,
                                    f"{expected_output[:200]!r}, "
                                    f"got {run.stdout[:200]!r}")
             return True, detail
-        first = next(
-            (l for l in (run.stderr or "").splitlines() if l.strip()),
-            "DATA RACE",
+        blocks, _ = _split_race_reports(run.stderr)
+        undoc = next(
+            (b for b in blocks if _match_block_hazard(b, hazards) is None),
+            None,
+        )
+        first = (
+            undoc[0]
+            if undoc
+            else next(
+                (l for l in (run.stderr or "").splitlines() if l.strip()),
+                "DATA RACE",
+            )
         )
         return False, f"data race detected: {first.strip()[:160]}"
 
