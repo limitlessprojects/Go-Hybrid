@@ -158,7 +158,19 @@ impl<'a> Checker<'a> {
                 self.struct_fields_for_sname(name)
                     .map(|fields| {
                         fields.iter().any(|(_, ty)| {
-                            self.shape_may_share_at(&self.shape_of_type(ty), depth + 1)
+                            let resolved = self.resolve_type_alias(ty);
+                            // `any`/`interface{}` can hold a map, slice, or
+                            // pointer, so a struct carrying one may share
+                            // storage even though the erased shape is
+                            // `Unknown` (issue #4755).
+                            if matches!(
+                                &resolved,
+                                TypeExpr::Named { name, .. }
+                                    if name == "any" || name == "interface{}"
+                            ) {
+                                return true;
+                            }
+                            self.shape_may_share_at(&self.shape_of_type(&resolved), depth + 1)
                         })
                     })
                     .unwrap_or(false)
