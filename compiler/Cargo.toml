@@ -5,6 +5,7 @@ members = [
     "crates/hy-syntax",
     "crates/hy-check",
     "crates/hy-emit",
+    "crates/hy-distinguish",
     "crates/hyb",
 ]
 

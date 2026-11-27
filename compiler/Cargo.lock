@@ -19,6 +19,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hy-distinguish"
+version = "0.0.1"
+dependencies = [
+ "hy-syntax",
+]
+
+[[package]]
 name = "hy-emit"
 version = "0.0.1"
 dependencies = [
@@ -41,6 +48,7 @@ version = "0.0.1"
 dependencies = [
  "hy-check",
  "hy-diag",
+ "hy-distinguish",
  "hy-emit",
  "hy-syntax",
  "serde_json",

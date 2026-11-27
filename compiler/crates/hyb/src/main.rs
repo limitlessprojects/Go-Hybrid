@@ -45,6 +45,7 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("explain") => cmd_explain(&args[1..]),
         Some("check") => cmd_check(&args[1..]),
+        Some("distinguish") => cmd_distinguish(&args[1..]),
         Some("build") => cmd_build(&args[1..]),
         Some("generate") => cmd_generate(&args[1..]),
         Some("vendor-runtime") => cmd_vendor_runtime(&args[1..]),
@@ -54,6 +55,7 @@ fn main() -> ExitCode {
             eprintln!();
             eprintln!("usage:");
             eprintln!("  hyb check <file.hy> [--json] [--report-managed] [--deny-managed]");
+            eprintln!("  hyb distinguish [--out <pack.json>] <name>=<file.hy> ...");
             eprintln!("  hyb generate [--check] [--binding-prefix <path>] <paths...>  (existing go.mod projects)");
             eprintln!("  hyb vendor-runtime <dir>  (vendored runtime for a go.mod project)");
             eprintln!("  hyb explain <HYB-Exxxx | Exxxx | xxxx | machine-name>");
@@ -67,6 +69,275 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn cmd_distinguish(args: &[String]) -> ExitCode {
+    const USAGE: &str =
+        "usage: hyb distinguish [--out <pack.json>] [--function <name>] [--max-product-states <n>] [--max-states-per-recognizer <n>] [--max-cover-nodes <n>] <name>=<file.hy> ...";
+    let mut out_path: Option<String> = None;
+    let mut function_name = "recognize".to_string();
+    let mut max_product_states = 250_000usize;
+    let mut max_states_per_recognizer = 10_000usize;
+    let mut max_cover_nodes = 1_000_000usize;
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    let mut arguments = args.iter();
+    while let Some(argument) = arguments.next() {
+        let value_for = |option: &str, arguments: &mut std::slice::Iter<'_, String>| {
+            arguments.next().cloned().ok_or_else(|| {
+                eprintln!("error: {option} requires a value\n{USAGE}");
+            })
+        };
+        match argument.as_str() {
+            "--out" => {
+                out_path = Some(match value_for("--out", &mut arguments) {
+                    Ok(value) => value,
+                    Err(()) => return ExitCode::from(2),
+                })
+            }
+            "--function" => {
+                function_name = match value_for("--function", &mut arguments) {
+                    Ok(value) => value,
+                    Err(()) => return ExitCode::from(2),
+                }
+            }
+            "--max-product-states" => {
+                let value = match value_for("--max-product-states", &mut arguments) {
+                    Ok(value) => value,
+                    Err(()) => return ExitCode::from(2),
+                };
+                max_product_states = match value.parse() {
+                    Ok(value) if value > 0 => value,
+                    _ => {
+                        eprintln!("error: --max-product-states must be a positive integer");
+                        return ExitCode::from(2);
+                    }
+                };
+            }
+            "--max-states-per-recognizer" => {
+                let value = match value_for("--max-states-per-recognizer", &mut arguments) {
+                    Ok(value) => value,
+                    Err(()) => return ExitCode::from(2),
+                };
+                max_states_per_recognizer = match value.parse() {
+                    Ok(value) if value > 0 => value,
+                    _ => {
+                        eprintln!("error: --max-states-per-recognizer must be a positive integer");
+                        return ExitCode::from(2);
+                    }
+                };
+            }
+            "--max-cover-nodes" => {
+                let value = match value_for("--max-cover-nodes", &mut arguments) {
+                    Ok(value) => value,
+                    Err(()) => return ExitCode::from(2),
+                };
+                max_cover_nodes = match value.parse() {
+                    Ok(value) if value > 0 => value,
+                    _ => {
+                        eprintln!("error: --max-cover-nodes must be a positive integer");
+                        return ExitCode::from(2);
+                    }
+                };
+            }
+            option if option.starts_with('-') => {
+                eprintln!("error: unknown distinguish option: {option}\n{USAGE}");
+                return ExitCode::from(2);
+            }
+            candidate => {
+                let Some((name, path)) = candidate.split_once('=') else {
+                    eprintln!("error: candidate must be <name>=<file.hy>\n{USAGE}");
+                    return ExitCode::from(2);
+                };
+                if name.is_empty() || path.is_empty() {
+                    eprintln!("error: candidate name and path must be non-empty\n{USAGE}");
+                    return ExitCode::from(2);
+                }
+                if candidates.iter().any(|(old, _)| old == name) {
+                    eprintln!("error: duplicate candidate name `{name}`");
+                    return ExitCode::from(2);
+                }
+                candidates.push((name.to_string(), path.to_string()));
+            }
+        }
+    }
+    if candidates.is_empty() {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
+
+    let mut recognizers = Vec::with_capacity(candidates.len());
+    for (name, path) in &candidates {
+        let source = match std::fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(error) => {
+                eprintln!("error reading {path}: {error}");
+                return ExitCode::from(2);
+            }
+        };
+        let ast = match hy_syntax::parse_file(path, &source) {
+            Ok(ast) => ast,
+            Err(diagnostics) => {
+                for diagnostic in diagnostics {
+                    eprintln!("{}", diagnostic.render_head());
+                }
+                return ExitCode::FAILURE;
+            }
+        };
+        let checked = hy_check::check_file(&ast);
+        if checked
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == hy_diag::Severity::Error)
+        {
+            for diagnostic in checked.diagnostics {
+                eprintln!("{}", diagnostic.render_head());
+            }
+            return ExitCode::FAILURE;
+        }
+        match hy_distinguish::extract_recognizer(
+            name,
+            path,
+            &source,
+            &function_name,
+            hy_distinguish::ExtractLimits {
+                max_states: max_states_per_recognizer,
+            },
+        ) {
+            Ok(recognizer) => recognizers.push(recognizer),
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let analysis = hy_distinguish::analyze(
+        &recognizers,
+        hy_distinguish::AnalysisLimits {
+            max_product_states,
+            max_cover_nodes,
+        },
+    );
+    let probes: Vec<serde_json::Value> = analysis
+        .probes
+        .iter()
+        .enumerate()
+        .map(|(index, probe)| {
+            serde_json::json!({
+                "index": index,
+                "input_base64": base64(&probe.input),
+                "input_hex": hex(&probe.input),
+                "answers": probe.answers,
+            })
+        })
+        .collect();
+    let classes: Vec<Vec<&str>> = analysis
+        .equivalence_classes
+        .iter()
+        .map(|class| {
+            class
+                .iter()
+                .map(|&index| analysis.candidate_names[index].as_str())
+                .collect()
+        })
+        .collect();
+    let mut signatures: std::collections::BTreeMap<String, Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for name_index in 0..analysis.candidate_names.len() {
+        let signature: String = analysis
+            .probes
+            .iter()
+            .map(|probe| if probe.answers[name_index] { '1' } else { '0' })
+            .collect();
+        signatures
+            .entry(signature)
+            .or_default()
+            .push(analysis.candidate_names[name_index].as_str());
+    }
+    let identification: Vec<serde_json::Value> = signatures
+        .into_iter()
+        .map(|(signature, matches)| {
+            serde_json::json!({
+                "signature": signature,
+                "matches": matches,
+            })
+        })
+        .collect();
+    let certificate = &analysis.certificate;
+    let document = serde_json::json!({
+        "schema": "hyb.recognizer-probe-pack/v1",
+        "function": function_name,
+        "recognizer_subset": "checked []byte -> bool; scalar finite state; deterministic total byte loop",
+        "candidates": analysis.candidate_names,
+        "per_candidate_states": analysis.per_candidate_states,
+        "probes": probes,
+        "equivalence_classes": classes,
+        "equivalence_proven": certificate.product_exhaustive,
+        "identification": identification,
+        "certificate": {
+            "status": certificate.status.as_str(),
+            "product_states": certificate.product_states,
+            "distinct_answer_vectors": certificate.distinct_answer_vectors,
+            "distinguishable_pairs": certificate.distinguishable_pairs,
+            "product_exhaustive": certificate.product_exhaustive,
+            "cover_exhaustive": certificate.cover_exhaustive,
+            "cover_nodes": certificate.cover_nodes,
+            "probe_count": certificate.probe_count,
+            "total_probe_bytes": certificate.total_probe_bytes,
+            "max_probe_bytes": certificate.max_probe_bytes,
+        },
+        "runtime_semantics": {
+            "all_probes_must_run": true,
+            "one_signature_match": "identified",
+            "multiple_class_members": "ambiguous-equivalent",
+            "no_signature_match": "unknown"
+        }
+    });
+    let text = serde_json::to_string_pretty(&document).expect("JSON document is serializable");
+    if let Some(path) = out_path {
+        if let Err(error) = std::fs::write(&path, format!("{text}\n")) {
+            eprintln!("error writing {path}: {error}");
+            return ExitCode::from(2);
+        }
+    } else {
+        println!("{text}");
+    }
+    ExitCode::SUCCESS
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        output.push(char::from(ALPHABET[usize::from(first >> 2)]));
+        output.push(char::from(
+            ALPHABET[usize::from(((first & 0x03) << 4) | (second >> 4))],
+        ));
+        output.push(if chunk.len() > 1 {
+            char::from(ALPHABET[usize::from(((second & 0x0f) << 2) | (third >> 6))])
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            char::from(ALPHABET[usize::from(third & 0x3f)])
+        } else {
+            '='
+        });
+    }
+    output
 }
 
 fn cmd_explain(args: &[String]) -> ExitCode {
