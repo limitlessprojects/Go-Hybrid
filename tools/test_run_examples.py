@@ -123,6 +123,23 @@ class ExampleExitTests(unittest.TestCase):
         self.check_streams([EXAMPLE])
 
 
+class ScratchDirectoryTests(unittest.TestCase):
+    def test_invalid_tmpdir_fails_before_example_dispatch(self):
+        with tempfile.TemporaryDirectory(prefix="hybrid-example-test-") as directory:
+            invalid_tmpdir = Path(directory) / "not-a-directory"
+            invalid_tmpdir.touch()
+            result = subprocess.run(
+                ["bash", str(ROOT / "tools" / "run_examples.sh"),
+                 "nonexistent-example-for-scratch-test"],
+                env={**os.environ, "TMPDIR": str(invalid_tmpdir)},
+                capture_output=True, text=True, encoding="utf-8", timeout=15,
+            )
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("cannot create an example work directory", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+
 class StandardExampleExitTests(unittest.TestCase):
     # Reuse the shared fake-builder fixture without re-running the base
     # class's example-10 scenarios under this example's name.
