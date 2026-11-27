@@ -49,6 +49,9 @@ log="${HYB_TEST_LOG:?}"
 printf '{"runtime": "%s", "cargo_bin": "%s", "target_dir": "%s", "exe": "%s", "path": "%s"}\n' \
     "${HYB_RUNTIME_DIR-<unset>}" "${HYB_CARGO_BIN-<unset>}" \
     "${CARGO_TARGET_DIR-<unset>}" "$0" "$PATH" >> "$log"
+if [ "${HYB_TEST_FAIL_SMOKE:-}" = 1 ]; then
+    exit 1
+fi
 out=""
 while [ $# -gt 0 ]; do
     if [ "$1" = "-o" ]; then out="$2"; shift; fi
@@ -149,13 +152,13 @@ class PackageReleaseIsolationTests(unittest.TestCase):
             "HYB_PKG_ARCH": PKG_ARCH,
         }
 
-    def package(self, **extra):
+    def package(self, *, expected_status=0, **extra):
         result = subprocess.run(
             ["sh", str(self.repo / "tools" / "package_release.sh"), VERSION],
             env={**self.env, **extra}, cwd=self.root,
             capture_output=True, text=True, timeout=60, check=False,
         )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, expected_status, result.stdout + result.stderr)
         return result
 
     def tarball(self):
@@ -173,6 +176,7 @@ class PackageReleaseIsolationTests(unittest.TestCase):
 
     def test_clean_env_ships_fresh_artifacts_checksum_and_fresh_lib(self):
         self.package()
+        self.assertFalse(Path(self.smoke_env()[0]["exe"]).parent.parent.exists())
         self.assertEqual(
             self.shipped("runtime/rust/hyrt/target/release/libhyrt.a"),
             "FRESH-LIB\n",
@@ -200,6 +204,11 @@ class PackageReleaseIsolationTests(unittest.TestCase):
                     newest_source = max(newest_source, member.mtime)
         self.assertIsNotNone(lib_mtime)
         self.assertGreaterEqual(lib_mtime, newest_source)
+
+    def test_failed_smoke_removes_extracted_archive(self):
+        result = self.package(expected_status=1, HYB_TEST_FAIL_SMOKE="1")
+        self.assertIn("SMOKE FAILED (linux/amd64)", result.stderr)
+        self.assertFalse(Path(self.smoke_env()[0]["exe"]).parent.parent.exists())
 
     def test_shared_cargo_target_dir_does_not_ship_stale_artifacts(self):
         # env.sh exports CARGO_TARGET_DIR. Cargo then writes there, while the
