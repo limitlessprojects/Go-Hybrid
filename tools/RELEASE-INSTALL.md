@@ -14,7 +14,9 @@
 - A C linker (ordinary Go/cgo requirement).
 - **No Rust toolchain needed.** The bridge staticlib ships prebuilt; `hyb`
   reuses it unless you modify the bridge sources yourself (contributors
-  only — rebuild with Rust 1.99.0, pinned).
+  only — rebuild with Rust 1.99.0, pinned). The Rust pin is checked at exactly
+  that rebuild: the rustc on your PATH is irrelevant to a bridge-free build, and
+  only a build that has to rebuild the staticlib refuses with HYB-E9001.
 
 ## Setup (two lines)
 
