@@ -42,7 +42,10 @@ class ExactAccumulator:
         if self._finalized:
             raise RuntimeError("HYB-E7001: accumulator already finalized; affine reuse forbidden")
         self._finalized = True
-        f = float(Fraction(self._units, 1 << 1074))
+        try:
+            f = float(Fraction(self._units, 1 << 1074))
+        except OverflowError as exc:
+            raise OverflowError("HYB-E7003: exact sum overflows binary64 on final conversion") from exc
         if math.isinf(f):
             raise OverflowError("HYB-E7003: exact sum overflows binary64 on final conversion")
         # Ensure exact zero maps to +0.0

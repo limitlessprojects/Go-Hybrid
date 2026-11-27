@@ -74,6 +74,27 @@ class TestExactSum(unittest.TestCase):
             acc.add(2.0)
         self.assertIn("HYB-E7001", str(cm.exception))
 
+    def test_final_overflow_has_the_region_diagnostic(self):
+        """True final overflow raises HYB-E7003 across worker counts and rounding boundary."""
+        for limit in (sys.float_info.max, -sys.float_info.max):
+            for workers in (1, 2, 3, 7, 16):
+                with self.subTest(limit=limit, workers=workers):
+                    with self.assertRaisesRegex(OverflowError, "^HYB-E7003:"):
+                        partitioned_exact_sum([limit, limit], workers)
+
+        # Half-ULP tie at binary64 max rounds away from max and overflows.
+        half_ulp_at_max = 2.0**970
+        with self.assertRaisesRegex(OverflowError, "^HYB-E7003:"):
+            partitioned_exact_sum([sys.float_info.max, half_ulp_at_max], 2)
+
+    def test_oversized_partial_can_cancel_to_a_finite_result(self):
+        """Oversized worker partials that cancel before finalize stay exact and finite."""
+        # With two workers, the first worker receives both same-sign values.
+        for limit in (sys.float_info.max, -sys.float_info.max):
+            with self.subTest(limit=limit):
+                result = partitioned_exact_sum([limit, -limit, limit], 2)
+                self.assertEqual(result.hex(), limit.hex())
+
     def test_exact_zero_maps_to_positive_zero(self):
         """Exact zero from cancellation maps to +0.0, not -0.0."""
         values = [1.0, -1.0]

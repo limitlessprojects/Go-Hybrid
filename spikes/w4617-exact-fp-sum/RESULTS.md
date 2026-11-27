@@ -12,8 +12,9 @@ The spike breaks the assumption that a source loop commits the program to its in
 - **G3: Nonfinite Input Rejection**: `NaN` and `Inf` inputs are rejected with diagnostic `HYB-E7002: nonfinite input rejected from exact summation region`.
 - **G4: Affine Accumulator Reuse Rejection**: Attempting to reuse a finalized accumulator is rejected with `HYB-E7001: accumulator already finalized; affine reuse forbidden`.
 - **G5: Signed Zero Correctness**: Exact zero from cancellation maps to `+0.0`, never `-0.0`.
+- **G6: Final-Conversion Overflow & Oversized-Partial Cancellation**: Oversized intermediate worker partials can cancel back into `binary64` range (`[MAX, -MAX, MAX]`), while true final overflow (`[MAX, MAX]`, `[-MAX, -MAX]`, and half-ULP overflow at `MAX`) raises `HYB-E7003: exact sum overflows binary64 on final conversion`.
 
-## Conformance Matrix Results (7/7 Passed)
+## Conformance Matrix Results (9/9 Passed)
 | Test Case | Description | Expected | Result |
 |:---|:---|:---:|:---:|
 | `test_cancellation_dataset_exact_across_worker_counts` | [1e16, 1, -1e16]*31 across 5 worker counts | Bit-identical | PASS |
@@ -22,4 +23,6 @@ The spike breaks the assumption that a source loop commits the program to its in
 | `test_ordinary_fold_disagrees_with_exact` | Ordinary left-fold vs oracle | Disagrees | PASS |
 | `test_nonfinite_input_rejected_with_e7002` | NaN and Inf rejection | `HYB-E7002` | PASS |
 | `test_finalized_accumulator_reuse_rejected_with_e7001` | Affine reuse after finalize | `HYB-E7001` | PASS |
+| `test_final_overflow_has_the_region_diagnostic` | `[MAX, MAX]`, `[-MAX, -MAX]`, and half-ULP boundary | `HYB-E7003` | PASS |
+| `test_oversized_partial_can_cancel_to_a_finite_result` | Oversized worker partial cancelling to `±MAX` | `±MAX` (exact) | PASS |
 | `test_exact_zero_maps_to_positive_zero` | 1.0 + (-1.0) = +0.0 | +0.0 | PASS |
