@@ -42,6 +42,11 @@ if not TOKEN:
     sys.exit("GH_TOKEN missing")
 
 PROTECTED_LABELS = {"triage:wildcard-hold", "triage:pareto", "triage:keep"}
+CLOSE_PROTECTED_LABELS = PROTECTED_LABELS | {
+    "bot:ready-to-land",
+    "bot:verified",
+    "bot:human-needed",
+}
 MIN_AGE = float(os.environ.get("TRIAGE_MIN_AGE_DAYS", "5"))
 CONFLICT_IDLE = float(os.environ.get("TRIAGE_CONFLICT_IDLE_DAYS", "10"))
 REOPEN_WINDOW = float(os.environ.get("TRIAGE_REOPEN_WINDOW_DAYS", "5"))
@@ -191,14 +196,15 @@ def decide(pr):
     Green-CI / no-CI PRs are never closed — they stay for human review and
     the daily board (triage_bot scan --post) owns their labels."""
     labels = set(pr["_labels"])
-    if labels & PROTECTED_LABELS: return "skip", [], ""
+    if labels & CLOSE_PROTECTED_LABELS: return "skip", [], ""
     if int(pr["number"]) in config_protected(): return "skip", [], ""
     title = (pr.get("title") or "").lower()
     # Wildcard-experiment submissions are never swept (M1 doctrine); some
     # never received the hold label — catch them by title, flag for review.
     if "wildcard" in title: return "skip", [], ""
-    if pr["_age_days"] < MIN_AGE: return "skip", [], []
+    if pr["_age_days"] < MIN_AGE: return "skip", [], ""
     ci = pr["_ci_rollup"]; mergeable = pr.get("mergeable"); idle = pr["_idle_days"]
+    if ci in ("SUCCESS", "PENDING"): return "skip", [], ""
     evidence = []
     if ci == "FAILURE": evidence.append("ci-failure")
     if mergeable == "CONFLICTING" and idle >= CONFLICT_IDLE: evidence.append("conflicts")

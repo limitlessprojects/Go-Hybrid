@@ -100,9 +100,16 @@ for p in rest_target:
                      "User-Agent": "queue-snapshot"})
         with urllib.request.urlopen(req, timeout=30) as r:
             pr = json.loads(r.read().decode())
-        p["mergeable"] = "MERGEABLE" if pr.get("mergeable") else "CONFLICTING"
+        m = pr.get("mergeable")
+        if m is True:
+            p["mergeable"] = "MERGEABLE"
+            fixed += 1
+        elif m is False:
+            p["mergeable"] = "CONFLICTING"
+            fixed += 1
+        else:
+            p["mergeable"] = p.get("mergeable") or "UNKNOWN"
         p["mergeStateStatus"] = str(pr.get("mergeable_state") or "unknown").upper()
-        fixed += 1
         time.sleep(0.5)
     except urllib.error.HTTPError as e:
         if e.code in (403, 429):
