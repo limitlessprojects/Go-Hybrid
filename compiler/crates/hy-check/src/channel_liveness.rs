@@ -20,6 +20,12 @@ pub enum ChannelTypestate {
     Moved,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapParamKind {
+    Send,
+    Recv,
+}
+
 #[derive(Debug, Clone)]
 pub struct PipeInfo {
     pub tx: String,
@@ -33,6 +39,8 @@ pub struct PipeInfo {
 pub struct ScopeState {
     pub pipes: Vec<PipeInfo>,
     pub moved_caps: HashSet<String>,
+    shadowed: HashSet<String>,
+    prev_caps: HashMap<String, usize>,
 }
 
 pub struct ChannelLivenessChecker {
@@ -41,6 +49,7 @@ pub struct ChannelLivenessChecker {
     scope_stack: Vec<ScopeState>,
     cap_to_pipe: HashMap<String, usize>,
     pipes_all: Vec<PipeInfo>,
+    type_aliases: HashMap<String, TypeExpr>,
 }
 
 impl ChannelLivenessChecker {
@@ -51,10 +60,16 @@ impl ChannelLivenessChecker {
             scope_stack: vec![ScopeState::default()],
             cap_to_pipe: HashMap::new(),
             pipes_all: Vec::new(),
+            type_aliases: HashMap::new(),
         }
     }
 
     pub fn check_file(mut self, file: &File) -> Vec<Diagnostic> {
+        for decl in &file.decls {
+            if let Decl::TypeAlias(ta) = decl {
+                self.type_aliases.insert(ta.name.clone(), ta.ty.clone());
+            }
+        }
         for decl in &file.decls {
             if let Decl::Fn(f) = decl {
                 self.check_fn(f);
@@ -64,15 +79,102 @@ impl ChannelLivenessChecker {
     }
 
     fn push_scope(&mut self) {
-        self.scope_stack.push(ScopeState::default());
+        self.scope_stack.push(ScopeState {
+            prev_caps: self.cap_to_pipe.clone(),
+            ..ScopeState::default()
+        });
     }
 
     fn pop_scope(&mut self) {
         if let Some(scope) = self.scope_stack.pop() {
             self.check_terminal_invariants(&scope);
+            self.cap_to_pipe = scope.prev_caps;
             if let Some(parent) = self.scope_stack.last_mut() {
-                parent.moved_caps.extend(scope.moved_caps);
+                for m in scope.moved_caps {
+                    let owned_here = scope.pipes.iter().any(|p| p.tx == m || p.rx == m);
+                    if !owned_here && !scope.shadowed.contains(&m) {
+                        parent.moved_caps.insert(m);
+                    }
+                }
             }
+        }
+    }
+
+    fn shadow_non_cap(&mut self, name: &str) {
+        if !name.is_empty() && name != "_" {
+            self.cap_to_pipe.remove(name);
+            if let Some(cur) = self.scope_stack.last_mut() {
+                cur.shadowed.insert(name.to_string());
+            }
+        }
+    }
+
+    fn push_single_cap(&mut self, name: &str, kind: CapParamKind, state: ChannelTypestate, span: Span) {
+        let pipe = match kind {
+            CapParamKind::Send => PipeInfo {
+                tx: name.to_string(),
+                rx: String::new(),
+                tx_state: state,
+                rx_state: ChannelTypestate::Drained,
+                def_span: span,
+            },
+            CapParamKind::Recv => PipeInfo {
+                tx: String::new(),
+                rx: name.to_string(),
+                tx_state: ChannelTypestate::Closed,
+                rx_state: state,
+                def_span: span,
+            },
+        };
+        let p_idx = self.pipes_all.len();
+        self.pipes_all.push(pipe.clone());
+        self.cap_to_pipe.insert(name.to_string(), p_idx);
+        if let Some(cur) = self.scope_stack.last_mut() {
+            cur.shadowed.remove(name);
+            cur.pipes.push(pipe);
+        }
+    }
+
+    fn lookup_active_cap(&self, name: &str) -> Option<(CapParamKind, ChannelTypestate)> {
+        for scope in self.scope_stack.iter().rev() {
+            if scope.shadowed.contains(name) {
+                return None;
+            }
+            for p in scope.pipes.iter().rev() {
+                if p.tx == name {
+                    return Some((CapParamKind::Send, p.tx_state));
+                }
+                if p.rx == name {
+                    return Some((CapParamKind::Recv, p.rx_state));
+                }
+            }
+        }
+        None
+    }
+
+    fn cap_param_kind<'a>(&'a self, mut ty: &'a TypeExpr) -> Option<CapParamKind> {
+        for _ in 0..16 {
+            let TypeExpr::Named { name, .. } = ty else {
+                return None;
+            };
+            let head = name.split('[').next().unwrap_or(name.as_str());
+            match head {
+                "hy.send_cap" => return Some(CapParamKind::Send),
+                "hy.recv_cap" => return Some(CapParamKind::Recv),
+                _ => ty = self.type_aliases.get(head)?,
+            }
+        }
+        None
+    }
+
+    fn register_cap_binding(&mut self, name: &str, ty: &TypeExpr, span: Span) {
+        if name.is_empty() || name == "_" {
+            return;
+        }
+        if let Some(kind) = self.cap_param_kind(ty) {
+            self.push_single_cap(name, kind, ChannelTypestate::Fresh, span);
+        } else {
+            self.shadow_non_cap(name);
         }
     }
 
@@ -91,14 +193,71 @@ impl ChannelLivenessChecker {
         self.cap_to_pipe.insert(rx_name, p_idx);
 
         if let Some(cur) = self.scope_stack.last_mut() {
+            cur.shadowed.remove(&pipe.tx);
+            cur.shadowed.remove(&pipe.rx);
             cur.pipes.push(pipe);
         }
+    }
+
+    fn handle_cap_bind(&mut self, lhs: &str, rhs: &Expr, span: Span, is_decl: bool) -> bool {
+        let mut peeled = rhs;
+        while let Expr::Paren { inner, .. } = peeled {
+            peeled = inner;
+        }
+        if let Expr::Move { operand, span: mv_span } = peeled {
+            if let Some(src_cap) = self.get_cap_name(operand) {
+                if self.is_moved(&src_cap) {
+                    self.diags.push(Diagnostic::error(
+                        "HYB-E3001",
+                        &self.file_path,
+                        *mv_span,
+                        format!("affine capability '{}' moved more than once", src_cap),
+                    ));
+                    if is_decl {
+                        self.shadow_non_cap(lhs);
+                    }
+                    return true;
+                }
+                if let Some((kind, state)) = self.lookup_active_cap(&src_cap) {
+                    if lhs == "_" {
+                        self.mark_moved(&src_cap);
+                        if kind == CapParamKind::Send && state != ChannelTypestate::Closed {
+                            self.diags.push(Diagnostic::error("HYB-E4004", &self.file_path, span, format!("linear send capability '{}' was not closed before scope exit", src_cap)));
+                        } else if kind == CapParamKind::Recv && state != ChannelTypestate::Drained {
+                            self.diags.push(Diagnostic::error("HYB-E4005", &self.file_path, span, format!("linear receive capability '{}' was not drained before scope exit", src_cap)));
+                        }
+                    } else if lhs != src_cap {
+                        self.mark_moved(&src_cap);
+                        self.push_single_cap(lhs, kind, state, span);
+                    }
+                    return true;
+                }
+            }
+        }
+        if let Some(src_cap) = self.get_cap_name(peeled) {
+            if lhs != "_" && (is_decl || lhs != src_cap) {
+                let msg = if self.is_moved(&src_cap) {
+                    format!("use of moved linear capability '{}'", src_cap)
+                } else {
+                    format!("linear capability '{}' cannot be copied; transfer ownership with 'move'", src_cap)
+                };
+                self.diags.push(Diagnostic::error("HYB-E3001", &self.file_path, span, msg));
+                if is_decl {
+                    self.shadow_non_cap(lhs);
+                }
+                return true;
+            }
+        }
+        false
     }
 
     fn check_terminal_invariants(&mut self, scope: &ScopeState) {
         for pipe in &scope.pipes {
             // Check send capability terminal state
-            if !scope.moved_caps.contains(&pipe.tx) && pipe.tx_state != ChannelTypestate::Closed {
+            if !pipe.tx.is_empty()
+                && !scope.moved_caps.contains(&pipe.tx)
+                && pipe.tx_state != ChannelTypestate::Closed
+            {
                 self.diags.push(Diagnostic::error(
                     "HYB-E4004",
                     &self.file_path,
@@ -112,7 +271,10 @@ impl ChannelLivenessChecker {
 
             // Check receive capability terminal state
             // If rx was moved into a subtask, the subtask assumed lifecycle responsibility
-            if !scope.moved_caps.contains(&pipe.rx) && pipe.rx_state != ChannelTypestate::Drained {
+            if !pipe.rx.is_empty()
+                && !scope.moved_caps.contains(&pipe.rx)
+                && pipe.rx_state != ChannelTypestate::Drained
+            {
                 self.diags.push(Diagnostic::error(
                     "HYB-E4005",
                     &self.file_path,
@@ -127,11 +289,25 @@ impl ChannelLivenessChecker {
     }
 
     fn check_fn(&mut self, f: &FnDecl) {
+        let Some(body) = &f.body else {
+            return;
+        };
+        self.scope_stack = vec![ScopeState::default()];
+        self.cap_to_pipe.clear();
+        self.pipes_all.clear();
         self.push_scope();
-        if let Some(body) = &f.body {
-            for stmt in &body.stmts {
-                self.check_stmt(stmt);
+        if let Some(recv) = &f.receiver {
+            if !recv.is_pointer {
+                self.register_cap_binding(&recv.name, &recv.ty, f.span);
+            } else {
+                self.shadow_non_cap(&recv.name);
             }
+        }
+        for param in &f.params {
+            self.register_cap_binding(&param.name, &param.ty, param.span);
+        }
+        for stmt in &body.stmts {
+            self.check_stmt(stmt);
         }
         self.pop_scope();
     }
@@ -145,15 +321,31 @@ impl ChannelLivenessChecker {
                         return;
                     }
                 }
+                if decl.names.len() == 1
+                    && decl.values.len() == 1
+                    && self.handle_cap_bind(&decl.names[0], &decl.values[0], decl.span, true)
+                {
+                    return;
+                }
                 for v in &decl.values {
                     self.check_expr(v);
                 }
+                for n in &decl.names {
+                    self.shadow_non_cap(n);
+                }
             }
-            Stmt::Assign { targets, values, span, .. } => {
+            Stmt::Assign { targets, values, span, op } => {
                 if targets.len() == 2 && values.len() == 1 && self.is_pipe_call(&values[0]) {
                     if let (PlaceKind::Ident(tx_name), PlaceKind::Ident(rx_name)) = (&targets[0].kind, &targets[1].kind) {
                         self.register_pipe(tx_name.clone(), rx_name.clone(), *span);
                         return;
+                    }
+                }
+                if *op == AssignOp::Assign && targets.len() == 1 && values.len() == 1 {
+                    if let PlaceKind::Ident(lhs) = &targets[0].kind {
+                        if self.handle_cap_bind(lhs, &values[0], *span, false) {
+                            return;
+                        }
                     }
                 }
                 for v in values {
@@ -173,7 +365,9 @@ impl ChannelLivenessChecker {
                 match kind {
                     ForKind::Iterate { expr, .. } => {
                         if let Some(cap) = self.get_cap_name(expr) {
-                            self.mark_rx_drained(&cap);
+                            if !self.is_moved(&cap) {
+                                self.mark_rx_drained(&cap);
+                            }
                         }
                         self.check_expr(expr);
                     }
@@ -317,6 +511,10 @@ impl ChannelLivenessChecker {
     }
 
     fn check_task_arg(&mut self, arg: &Expr, _call_span: Span) {
+        let mut arg = arg;
+        while let Expr::Paren { inner, .. } = arg {
+            arg = inner;
+        }
         match arg {
             Expr::Move { operand, span } => {
                 if let Some(cap) = self.get_cap_name(operand) {
@@ -396,8 +594,11 @@ impl ChannelLivenessChecker {
             Expr::Try { operand, .. } => {
                 self.check_expr(operand);
             }
-            Expr::FnLit { body, .. } => {
+            Expr::FnLit { params, body, .. } => {
                 self.push_scope();
+                for param in params {
+                    self.register_cap_binding(&param.name, &param.ty, param.span);
+                }
                 for s in &body.stmts {
                     self.check_stmt(s);
                 }
@@ -437,13 +638,6 @@ impl ChannelLivenessChecker {
                 for a in args {
                     self.check_expr(&a.value);
                 }
-            }
-            Expr::FnLit { body, .. } => {
-                self.push_scope();
-                for s in &body.stmts {
-                    self.check_stmt(s);
-                }
-                self.pop_scope();
             }
             Expr::Receive { chan, span } => {
                 if let Some(cap) = self.get_cap_name(chan) {
@@ -545,8 +739,14 @@ impl ChannelLivenessChecker {
 
     fn is_moved(&self, name: &str) -> bool {
         for scope in self.scope_stack.iter().rev() {
+            if scope.shadowed.contains(name) {
+                return false;
+            }
             if scope.moved_caps.contains(name) {
                 return true;
+            }
+            if scope.pipes.iter().any(|p| p.tx == name || p.rx == name) {
+                return false;
             }
         }
         false
@@ -560,6 +760,9 @@ impl ChannelLivenessChecker {
 
     fn mark_tx_closed(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
+            if scope.shadowed.contains(name) {
+                return;
+            }
             for p in &mut scope.pipes {
                 if p.tx == name {
                     p.tx_state = ChannelTypestate::Closed;
@@ -571,6 +774,9 @@ impl ChannelLivenessChecker {
 
     fn mark_tx_active(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
+            if scope.shadowed.contains(name) {
+                return;
+            }
             for p in &mut scope.pipes {
                 if p.tx == name && p.tx_state == ChannelTypestate::Fresh {
                     p.tx_state = ChannelTypestate::Active;
@@ -582,6 +788,9 @@ impl ChannelLivenessChecker {
 
     fn mark_rx_drained(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
+            if scope.shadowed.contains(name) {
+                return;
+            }
             for p in &mut scope.pipes {
                 if p.rx == name {
                     p.rx_state = ChannelTypestate::Drained;
@@ -593,6 +802,9 @@ impl ChannelLivenessChecker {
 
     fn mark_rx_active(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
+            if scope.shadowed.contains(name) {
+                return;
+            }
             for p in &mut scope.pipes {
                 if p.rx == name && p.rx_state == ChannelTypestate::Fresh {
                     p.rx_state = ChannelTypestate::Active;
