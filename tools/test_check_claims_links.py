@@ -51,6 +51,44 @@ class CheckClaimsLinksTest(unittest.TestCase):
         self.assertEqual(report["refs"], 2)
         self.assertEqual(report["issues"], [])
 
+    def test_inline_code_examples_do_not_count_as_links(self):
+        original = "[spec](SPEC-LANGUAGE.md)"
+        samples = (
+            '`[example](input/data.json)`',
+            '`handlers[key]("input/data.json")`',
+            '``[example](input/data.json) ` [other](other.md)``',
+        )
+        for sample in samples:
+            with self.subTest(sample=sample):
+                (self.root / "GUARANTEES.md").write_text(
+                    CLAIMS.replace(original, f"{sample} and {original}"), encoding="utf-8")
+                result = self.run_tool()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                report = json.loads(result.stdout)
+                self.assertEqual(report["links"], 4)
+                self.assertEqual(report["refs"], 2)
+
+    def test_real_links_near_backticks_are_still_checked(self):
+        row = next(line for line in CLAIMS.splitlines() if line.startswith("| 1 |"))
+        prefix = row.rsplit("|", 2)[0]
+        samples = (
+            '`[example](input/data.json)` and [`spec`](missing.md)',
+            '``unclosed ` span [spec](missing.md)',
+            r'\`escaped [spec](missing.md)`',
+            '`[example](`[spec](missing.md)',
+        )
+        for evidence in samples:
+            with self.subTest(evidence=evidence):
+                (self.root / "GUARANTEES.md").write_text(
+                    CLAIMS.replace(row, f"{prefix}| {evidence} |"), encoding="utf-8")
+                result = self.run_tool()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                report = json.loads(result.stdout)
+                self.assertEqual(report["links"], 2)
+                self.assertEqual(report["issues"], [
+                    {"row": 1, "kind": "missing", "target": "missing.md"},
+                ])
+
     def test_missing_file_is_reported(self):
         (self.root / "tests" / "checker-corpus" / "15-good.hy").unlink()
         result = self.run_tool()
