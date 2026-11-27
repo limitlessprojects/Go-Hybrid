@@ -1,0 +1,34 @@
+{
+  "suite": "check_guarantees_fail_closed_cases",
+  "cases": [
+    {
+      "id": "sibling_prefix_corpus_dir_rejected",
+      "fixture_path": "tests/checker-corpus-extra/01-outside.hy",
+      "expect_problem": "is outside tests/checker-corpus"
+    },
+    {
+      "id": "second_unclaimed_diagnostic_rejected",
+      "diagnostics": [
+        "HYB-E3001",
+        "HYB-E3002"
+      ],
+      "row_rules": [
+        "HYB-E3001"
+      ],
+      "expect_problem": "pins HYB-E3002"
+    },
+    {
+      "id": "evidence_link_anchor_stripped_and_parent_traversal_rejected",
+      "valid_link": "GUARANTEES.md#the-claims-table",
+      "invalid_link": "../outside-target.md"
+    },
+    {
+      "id": "inverted_begin_end_markers_rejected",
+      "markers": [
+        "END",
+        "BEGIN"
+      ],
+      "expect_misuse_on_render": true
+    }
+  ]
+}
