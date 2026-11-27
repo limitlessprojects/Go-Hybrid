@@ -495,7 +495,11 @@ impl<'a> Checker<'a> {
                     if let Some(a0) = args.first() {
                         let tname = match unwrap_parens(&a0.value) {
                             Expr::Ident { name, .. } => Some(name.clone()),
-                            Expr::Index { base, index, .. } => Some(format!("{}[{}]", base.render(), index.render())),
+                            Expr::Index { base, index, .. } => Some(format!(
+                                "{}[{}]",
+                                Self::render_type_arg_expr(base),
+                                Self::render_type_arg_expr(index)
+                            )),
                             _ => None,
                         };
                         if let Some(name) = tname { self.check_type_expr_with_state(Some(st), &TypeExpr::Named { name, span: a0.value.span() }); }
@@ -1125,6 +1129,219 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                self.check_named_generic_struct_comparable(st, name, *span);
+            }
+        }
+    }
+
+    fn render_type_arg_expr(e: &Expr) -> String {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => name.clone(),
+            Expr::Index { base, index, .. } => {
+                format!("{}[{}]", Self::render_type_arg_expr(base), Self::render_type_arg_expr(index))
+            }
+            Expr::SliceLit { items, .. } if items.is_empty() => {
+                if let Some((_, _, arr_ty)) = e.as_array_lit() {
+                    arr_ty.render()
+                } else if let Expr::SliceLit { elem: Some(t), .. } = unwrap_parens(e) {
+                    format!("[]{}", t.render())
+                } else {
+                    e.render()
+                }
+            }
+            Expr::MapLit { key, value, entries, .. } if entries.is_empty() => {
+                format!("map[{}]{}", key.render(), value.render())
+            }
+            Expr::StructLit { ty: Some(t), fields, .. } if fields.is_empty() => t.render(),
+            other => other.render(),
+        }
+    }
+
+    fn check_type_arg_generic_structs(&mut self, st: Option<&FnState>, ty: &TypeExpr, span: Span) {
+        match ty {
+            TypeExpr::Named { name, .. } => self.check_named_generic_struct_comparable(st, name, span),
+            TypeExpr::Pointer { to, .. }
+            | TypeExpr::Slice { elem: to, .. }
+            | TypeExpr::Array { elem: to, .. }
+            | TypeExpr::Chan { elem: to, .. }
+            | TypeExpr::Option { elem: to, .. } => self.check_type_arg_generic_structs(st, to, span),
+            TypeExpr::Map { key, value, .. } => {
+                self.check_type_arg_generic_structs(st, key, span);
+                self.check_type_arg_generic_structs(st, value, span);
+            }
+            TypeExpr::Fn { params, results, .. } => {
+                for p in params {
+                    self.check_type_arg_generic_structs(st, &p.ty, span);
+                }
+                for r in results {
+                    self.check_type_arg_generic_structs(st, r, span);
+                }
+            }
+        }
+    }
+
+    fn check_named_generic_struct_comparable(&mut self, st: Option<&FnState>, name: &str, span: Span) {
+        let Some((head, type_args)) = Self::parse_generic_type_args(name) else { return };
+        for arg_ty in &type_args {
+            self.check_type_arg_generic_structs(st, arg_ty, span);
+        }
+        if st.is_some_and(|s| s.env_lookup(head).is_some() || s.type_params.contains(head))
+            || self.is_enclosing_decl_type_param(head, span.start)
+        {
+            return;
+        }
+        let Some(tparams) = self.struct_type_params.get(head).cloned() else { return };
+        if tparams.is_empty() || tparams.len() != type_args.len() {
+            return;
+        }
+        for (tp, arg_ty) in tparams.iter().zip(type_args.iter()) {
+            let mut visited = std::collections::HashSet::new();
+            if !self.struct_type_param_needs_comparable(head, &tp.name, &mut visited)
+                || self.type_mentions_enclosing_type_param(st, arg_ty, span.start)
+            {
+                continue;
+            }
+            let Some(noun) = self.incomparable_noun(&self.shape_of_type(arg_ty)) else { continue };
+            let rendered = arg_ty.render();
+            let msg = format!(
+                "type argument `{rendered}` for `{}` in `{name}` does not satisfy `comparable` ({noun} has no `==` in Go) (HYB-E1002)",
+                tp.name
+            );
+            let notes = vec![
+                format!(
+                    "why: generic struct `{head}` requires `{}` to satisfy `comparable`, so Go rejects `{name}` at compile time (`{rendered} does not satisfy comparable`, issue #4827, GUARANTEES Row 13)",
+                    tp.name
+                ),
+                "fix: instantiate the comparable type parameter with a comparable type (`int`, `string`, a pointer, a channel, or a struct/array of comparable fields)".to_string(),
+            ];
+            self.diags.push(Diagnostic::error("HYB-E1002", self.path.clone(), span, msg).with_notes(notes));
+        }
+    }
+
+    fn is_enclosing_decl_type_param(&self, target: &str, pos: hy_diag::Pos) -> bool {
+        let contains = |s: Span| {
+            (pos.line, pos.col) >= (s.start.line, s.start.col)
+                && (pos.line, pos.col) <= (s.end.line, s.end.col)
+        };
+        self.file.decls.iter().any(|d| match d {
+            hy_syntax::Decl::Struct(s) if contains(s.span) => s.type_params.iter().any(|tp| tp.name == target),
+            hy_syntax::Decl::Fn(f) if contains(f.span) => {
+                f.type_params.iter().any(|tp| tp.name == target)
+                    || f.receiver.as_ref().is_some_and(|r| self.receiver_type_params(&r.ty).iter().any(|p| p == target))
+            }
+            _ => false,
+        })
+    }
+
+    fn type_mentions_enclosing_type_param(&self, st: Option<&FnState>, ty: &TypeExpr, pos: hy_diag::Pos) -> bool {
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                if let Some((head, args)) = Self::parse_generic_type_args(name) {
+                    return st.is_some_and(|s| s.type_params.contains(head))
+                        || self.is_enclosing_decl_type_param(head, pos)
+                        || args.iter().any(|a| self.type_mentions_enclosing_type_param(st, a, pos));
+                }
+                st.is_some_and(|s| s.type_params.contains(name.as_str()))
+                    || self.is_enclosing_decl_type_param(name, pos)
+            }
+            TypeExpr::Pointer { to, .. }
+            | TypeExpr::Slice { elem: to, .. }
+            | TypeExpr::Array { elem: to, .. }
+            | TypeExpr::Chan { elem: to, .. }
+            | TypeExpr::Option { elem: to, .. } => self.type_mentions_enclosing_type_param(st, to, pos),
+            TypeExpr::Map { key, value, .. } => {
+                self.type_mentions_enclosing_type_param(st, key, pos)
+                    || self.type_mentions_enclosing_type_param(st, value, pos)
+            }
+            TypeExpr::Fn { params, results, .. } => {
+                params.iter().any(|p| self.type_mentions_enclosing_type_param(st, &p.ty, pos))
+                    || results.iter().any(|r| self.type_mentions_enclosing_type_param(st, r, pos))
+            }
+        }
+    }
+
+    fn struct_type_param_needs_comparable(
+        &self,
+        struct_name: &str,
+        param: &str,
+        visited: &mut std::collections::HashSet<(String, String)>,
+    ) -> bool {
+        if !visited.insert((struct_name.to_string(), param.to_string())) {
+            return false;
+        }
+        if self.struct_type_params.get(struct_name).is_some_and(|tps| {
+            tps.iter().any(|tp| tp.name == param && tp.constraint.as_deref() == Some("comparable"))
+        }) {
+            return true;
+        }
+        self.structs
+            .get(struct_name)
+            .is_some_and(|fs| fs.iter().any(|(_, fty)| self.type_uses_param_as_comparable(fty, param, visited)))
+    }
+
+    fn key_ty_mentions_param(&self, ty: &TypeExpr, param: &str, depth: usize) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                if name == param {
+                    return true;
+                }
+                if let Some((head, args)) = Self::parse_generic_type_args(name) {
+                    return self.structs.contains_key(head)
+                        && args.iter().any(|a| self.key_ty_mentions_param(a, param, depth + 1));
+                }
+                self.type_aliases
+                    .get(name.as_str())
+                    .is_some_and(|a| self.key_ty_mentions_param(a, param, depth + 1))
+            }
+            TypeExpr::Array { elem, .. } => self.key_ty_mentions_param(elem, param, depth + 1),
+            _ => false,
+        }
+    }
+
+    fn type_uses_param_as_comparable(
+        &self,
+        ty: &TypeExpr,
+        param: &str,
+        visited: &mut std::collections::HashSet<(String, String)>,
+    ) -> bool {
+        let resolved = match ty {
+            TypeExpr::Named { name, .. } if name != param && self.type_aliases.contains_key(name.as_str()) => {
+                self.resolve_type_alias(ty)
+            }
+            _ => ty.clone(),
+        };
+        match &resolved {
+            TypeExpr::Map { key, value, .. } => {
+                self.key_ty_mentions_param(key, param, 0)
+                    || self.type_uses_param_as_comparable(key, param, visited)
+                    || self.type_uses_param_as_comparable(value, param, visited)
+            }
+            TypeExpr::Pointer { to, .. }
+            | TypeExpr::Slice { elem: to, .. }
+            | TypeExpr::Array { elem: to, .. }
+            | TypeExpr::Chan { elem: to, .. }
+            | TypeExpr::Option { elem: to, .. } => self.type_uses_param_as_comparable(to, param, visited),
+            TypeExpr::Fn { params, results, .. } => {
+                params.iter().any(|p| self.type_uses_param_as_comparable(&p.ty, param, visited))
+                    || results.iter().any(|r| self.type_uses_param_as_comparable(r, param, visited))
+            }
+            TypeExpr::Named { name, .. } => {
+                let Some((sub_head, sub_args)) = Self::parse_generic_type_args(name) else { return false };
+                if sub_head == "set" && !self.structs.contains_key("set") && sub_args.len() == 1 {
+                    return self.key_ty_mentions_param(&sub_args[0], param, 0)
+                        || self.type_uses_param_as_comparable(&sub_args[0], param, visited);
+                }
+                let Some(sub_tparams) = self.struct_type_params.get(sub_head).cloned() else {
+                    return sub_args.iter().any(|a| self.type_uses_param_as_comparable(a, param, visited));
+                };
+                sub_tparams.iter().zip(sub_args.iter()).any(|(sub_tp, sub_arg)| {
+                    self.type_uses_param_as_comparable(sub_arg, param, visited)
+                        || (self.key_ty_mentions_param(sub_arg, param, 0)
+                            && self.struct_type_param_needs_comparable(sub_head, &sub_tp.name, visited))
+                })
             }
         }
     }
