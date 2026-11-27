@@ -55,9 +55,9 @@ def table_rows(text):
         yield int(match.group(1)), "|".join(cells[5:-1]).strip()
 
 
-def code_span_ranges(text):
+def code_span_ranges(text, position=0):
     """Yield the offsets of inline code spans delimited by equal backtick runs."""
-    runs = list(BACKTICK_RUN_RE.finditer(text))
+    runs = list(BACKTICK_RUN_RE.finditer(text, position))
     next_run = 0
     while next_run < len(runs):
         opening = runs[next_run]
@@ -94,6 +94,11 @@ def markdown_links(text):
         else:
             yield match
             position = match.end()
+            if span is not None and span[0] < position:
+                # The link consumed this opener. Scan fresh after the link so
+                # a backtick in its destination or title cannot hide later links.
+                spans = iter(code_span_ranges(text, position))
+                span = next(spans, None)
 
 
 def is_checkable(target):

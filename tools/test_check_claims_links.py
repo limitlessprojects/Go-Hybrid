@@ -89,6 +89,26 @@ class CheckClaimsLinksTest(unittest.TestCase):
                     {"row": 1, "kind": "missing", "target": "missing.md"},
                 ])
 
+    def test_backticks_in_destinations_and_titles_do_not_open_code_spans(self):
+        (self.root / 'evidence`notes.md').write_text('evidence\n', encoding='utf-8')
+        cases = (
+            ('[ok](SPEC-LANGUAGE.md "backtick: `")', '`code`'),
+            ('[ok](<evidence`notes.md>)', '`[sample](example.md)`'),
+            ('[`label`](SPEC-LANGUAGE.md "backtick: `")', '`[sample](example.md)`'),
+        )
+        for existing, code in cases:
+            with self.subTest(existing=existing):
+                evidence = f'{existing} and [bad](missing.md) and {code}'
+                claims = CLAIMS.replace('[spec](SPEC-LANGUAGE.md)', evidence)
+                (self.root / 'GUARANTEES.md').write_text(claims, encoding='utf-8')
+                result = self.run_tool()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                report = json.loads(result.stdout)
+                self.assertEqual(report['links'], 5)
+                self.assertEqual(report['issues'], [
+                    {'row': 1, 'kind': 'missing', 'target': 'missing.md'},
+                ])
+
     def test_missing_file_is_reported(self):
         (self.root / "tests" / "checker-corpus" / "15-good.hy").unlink()
         result = self.run_tool()
