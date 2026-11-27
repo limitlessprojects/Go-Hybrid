@@ -256,5 +256,68 @@ class CliTests(unittest.TestCase):
             self.assertIn("conflict marker", res.stderr.lower())
 
 
+class UndecodableByteTests(unittest.TestCase):
+    """Issue #2124: one invalid byte must not hide ASCII evidence.
+
+    Both scanners used to open candidates with a strict UTF-8 decode and turn a
+    `UnicodeDecodeError` into "no markers", so an unrelated corrupt byte
+    suppressed a complete conflict block (or a spilled column-zero command) that
+    sat in the same read. The scanners decode leniently now; these cases pin
+    that evidence survives, and that an invalid byte on its own is still not a
+    finding (this is not a UTF-8 validator).
+    """
+
+    BLOCK = b"<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> other\n"
+
+    def _bytes_tree(self, files):
+        tmp = tempfile.TemporaryDirectory(prefix="markers-bytes-")
+        root = Path(tmp.name)
+        for rel, payload in files.items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(payload)
+        self.addCleanup(tmp.cleanup)
+        return root
+
+    def test_invalid_byte_does_not_hide_a_conflict_block(self):
+        root = self._bytes_tree({"fixture.go": b"// invalid byte: \xff\n" + self.BLOCK})
+        hits = list(MOD.scan(str(root)))
+        self.assertEqual(len(hits), 1, hits)
+        self.assertEqual(hits[0][0], "fixture.go")
+        self.assertEqual(hits[0][1], 2)
+
+    def test_invalid_byte_alone_is_not_a_finding(self):
+        root = self._bytes_tree({"fixture.go": b"// invalid byte: \xff\nok\n"})
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+    def test_invalid_byte_does_not_hide_a_spilled_shell_line(self):
+        root = self._bytes_tree(
+            {
+                ".github/workflows/ci.yml": (
+                    b"# invalid byte: \xff\non: push\njobs:\n  a:\n    steps: []\n"
+                    b"echo spilled-out-of-run-block\n"
+                )
+            }
+        )
+        hits = list(MOD.scan(str(root)))
+        self.assertEqual(len(hits), 1, hits)
+        self.assertEqual(hits[0][1], 6)
+
+    def test_binary_extension_with_invalid_bytes_is_still_skipped(self):
+        root = self._bytes_tree({"blob.exe": b"\xff\xfe" + self.BLOCK})
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+    def test_cli_exits_one_and_names_the_block_behind_an_invalid_byte(self):
+        root = self._bytes_tree({"fixture.go": b"// invalid byte: \xff\n" + self.BLOCK})
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--root", str(root)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        # Findings go to stderr, like every other finding this tool prints.
+        self.assertIn("fixture.go:2", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
