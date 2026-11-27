@@ -1,0 +1,206 @@
+{
+  "scope": "finite Python IR only; no Hybrid lowering, Go runtime, or timings",
+  "cases": {
+    "diamond": {
+      "completed_schedules": 6,
+      "blocked_schedules": 0,
+      "distinct_completed_answers": 1,
+      "witnesses": [
+        {
+          "schedule": [
+            0,
+            1,
+            1,
+            2,
+            2,
+            3,
+            3
+          ],
+          "snapshot": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "task_observations": [
+            [],
+            [
+              [
+                0
+              ]
+            ],
+            [
+              [
+                0
+              ]
+            ],
+            [
+              [
+                1,
+                2
+              ]
+            ]
+          ]
+        }
+      ]
+    },
+    "unseeded_cycle": {
+      "completed_schedules": 0,
+      "blocked_schedules": 1,
+      "distinct_completed_answers": 0,
+      "witnesses": []
+    },
+    "seeded_cycle": {
+      "completed_schedules": 1,
+      "blocked_schedules": 0,
+      "distinct_completed_answers": 1,
+      "witnesses": [
+        {
+          "schedule": [
+            1,
+            1,
+            0,
+            0
+          ],
+          "snapshot": [
+            0,
+            1
+          ],
+          "task_observations": [
+            [
+              [
+                1
+              ]
+            ],
+            [
+              [
+                0
+              ]
+            ]
+          ]
+        }
+      ]
+    },
+    "live_read": {
+      "completed_schedules": 2,
+      "blocked_schedules": 0,
+      "distinct_completed_answers": 2,
+      "witnesses": [
+        {
+          "schedule": [
+            0,
+            1
+          ],
+          "snapshot": [
+            0
+          ],
+          "task_observations": [
+            [],
+            [
+              [
+                0
+              ]
+            ]
+          ]
+        },
+        {
+          "schedule": [
+            1,
+            0
+          ],
+          "snapshot": [
+            0
+          ],
+          "task_observations": [
+            [],
+            [
+              []
+            ]
+          ]
+        }
+      ]
+    },
+    "put_flag": {
+      "completed_schedules": 2,
+      "blocked_schedules": 0,
+      "distinct_completed_answers": 2,
+      "witnesses": [
+        {
+          "schedule": [
+            0,
+            1
+          ],
+          "snapshot": [
+            0
+          ],
+          "task_observations": [
+            [
+              true
+            ],
+            [
+              false
+            ]
+          ]
+        },
+        {
+          "schedule": [
+            1,
+            0
+          ],
+          "snapshot": [
+            0
+          ],
+          "task_observations": [
+            [
+              false
+            ],
+            [
+              true
+            ]
+          ]
+        }
+      ]
+    },
+    "overwrite": {
+      "completed_schedules": 2,
+      "blocked_schedules": 0,
+      "distinct_completed_answers": 2,
+      "witnesses": [
+        {
+          "schedule": [
+            0,
+            1
+          ],
+          "snapshot": [
+            1
+          ],
+          "task_observations": [
+            [],
+            []
+          ]
+        },
+        {
+          "schedule": [
+            1,
+            0
+          ],
+          "snapshot": [
+            0
+          ],
+          "task_observations": [
+            [],
+            []
+          ]
+        }
+      ]
+    }
+  },
+  "generated": {
+    "programs": 7396,
+    "completed_schedules": 21782,
+    "blocked_schedules": 2275,
+    "completed_programs": 5377,
+    "blocked_programs": 2019,
+    "oracle_comparisons": 24057
+  }
+}
