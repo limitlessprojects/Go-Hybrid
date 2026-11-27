@@ -1,0 +1,9 @@
+2026-11-24T03:38:15Z closed=32 skipped=9 rest_calls=191
+2026-11-26T08:39:17Z agent-session tick: closed=11 processed=17 candidates=19 rest_calls=77 (queue 1036 -> ~1025)
+2026-11-26T17:08:06Z no close-candidates this tick (queue drained or all guarded)
+2026-11-27T01:08:06Z closed=1 skipped=1 rest_calls=32
+2026-11-27T09:08:32Z closed=4 skipped=1 rest_calls=46
+2026-11-27T16:32:38Z aborted: no queue snapshot (survey failed)
+2026-11-27T16:58:50Z closed=5 skipped=1 rest_calls=28
+2026-11-27T17:07:54Z no close-candidates this tick (queue drained or all guarded)
+2026-11-27T17:28:00Z corrections: reopened #4559 #4607 #4641 (board-cancel misread as CI failure); runner evidence gates hardened
