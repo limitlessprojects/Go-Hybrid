@@ -144,6 +144,20 @@ If useful programs require a forbidden observation or unknown effect, narrow
 or stop that design rather than weaken the guarantee. Nothing here changes
 the existing ownership checker or `GUARANTEES.md` claims.
 
+## Repository validation
+
+On native Linux/aarch64 with pinned Rust 1.99.0 and Go 1.26.9, all **504
+workspace test targets / 3,293 tests** passed (zero failed or ignored), as
+did workspace doctests, the **139/139** checker corpus, and the differential
+loop (**47/47** accept-side build/run and **92/92** reject-side checks).
+Disk exhaustion prevented the initial monolithic workspace build. The same
+targets were then run individually with test-executable cleanup; after
+freeing completed-build intermediates, the unchanged tested compiler and
+runtime passed the full differential retry. No source or test was weakened
+to address the resource limit. Repository conflict-marker, test-registration,
+corpus-census, claims-link, guarantees, workflow parsing, and whitespace
+checks also passed. Hosted CI remains pending.
+
 Prior art remains [LVars](https://doi.org/10.1145/2535838.2535842), as credited
 by #482. This experiment claims neither the invention of monotone shared
 state nor acceptance into the Wildcard ledger. Selection, hosted CI, final
