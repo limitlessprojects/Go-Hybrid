@@ -28,7 +28,9 @@ hyb build program.hy -o app && ./app
 `HYB_RUNTIME_DIR` must point at this release's `runtime/` directory (it
 defaults to a source checkout only).
 
-Or use the one-command installer, which wires both lines for you:
+Or use the one-command installer, which wires both lines for you
+(Linux and macOS only — `install.sh` exits "unsupported OS" on Windows;
+use the manual `HYB_RUNTIME_DIR`/`PATH` setup above there):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/limitlessprojects/Go-Hybrid/main/install.sh | sh
