@@ -2531,6 +2531,13 @@ impl<'a> Collector<'a> {
                         // The loop head always reads the counter.
                         self.exempt(var);
                         self.bind_kind(var, OpKind::Int);
+                        // #4661: `for i in lo..hi` lowers to `for i := lo`,
+                        // so the counter carries lo's Go type — `int` for an
+                        // untyped literal bound, the declared width for a
+                        // typed one. Without the scalar every width check on
+                        // `i` was skipped and check passed unbuildable Go.
+                        let counter_scalar = self.initializer_scalar(lo);
+                        self.set_scalar(var, counter_scalar);
                     }
                     ForKind::Iterate { vars, expr } => {
                         self.check_repeated_bindings(vars, *span);
