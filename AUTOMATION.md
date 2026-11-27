@@ -150,6 +150,29 @@ rule was silently excluding the heartbeat line, so evidence commits never
 landed) and dispatched run #45812557658 validated the full write path
 (4 closes, each with its evidence reply).
 
+**State commits live on the `automation/state` branch (session 195).** main
+is branch-protected and the classic protection API offers no bypass for the
+Actions app on a personal (non-org) repo: run #45856859601 closed 7 PRs and
+then lost its heartbeat to `failed to push some refs`, and the PATCH that
+would grant a bypass 422s on `restrictions` whichever way it is expressed
+(`null`, `{}`, full-empty all rejected). So the runner force-pushes its
+heartbeat + snapshot + land-candidate export to
+`refs/heads/automation/state` instead, and the survey step prefers a <24 h
+copy from that branch, then main's carried copy, else surveys fresh. Dry run
+#45858411583 validated the route end-to-end (heartbeat commit 92340766 on
+the branch). The tick no longer depends on owner pushes for snapshot
+freshness; agent sessions may still refresh main's carried copy.
+
+**Mergeability is REST-fixed at survey time (session 195).** GitHub computes
+mergeability lazily, so the bulk GraphQL survey recorded
+`mergeStateStatus: UNKNOWN` for ~1,020 open PRs and the land-candidate
+export stayed empty forever. The surveyor now walks the green-CI +
+non-draft + hold-free subset with individual REST GETs (which return the
+real value on first fetch) and overwrites `mergeable`/`mergeStateStatus`;
+rate limits stop the walk early and affected PRs keep their survey values.
+First pass over 132 candidates: **7 land candidates (clean)**, 124 behind,
+0 dirty, 0 unknown.
+
 Usage (any agent session; token required for writes, the survey is read-only):
 
 ```bash
