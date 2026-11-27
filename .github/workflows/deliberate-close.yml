@@ -51,20 +51,32 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Survey open PRs (reuse carried snapshot when fresh)
+      - name: Survey open PRs (reuse freshest snapshot, else survey)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p /tmp/tick
-          if [ -s tools/state/queue_snapshot.json ] && [ -z "$(find tools/state/queue_snapshot.json -mmin +1440)" ]; then
-            echo "snapshot: carried copy is fresh (<24h) — reusing"
+          # The tick cannot push to protected main (classic branch protection
+          # offers no bypass for the Actions app on a personal repo), so its
+          # own carried snapshot lives on the automation/state branch. Prefer
+          # that copy when fresh, then main's carried copy, else survey.
+          git fetch origin automation/state --depth=1 2>/dev/null || true
+          git show FETCH_HEAD:tools/state/queue_snapshot.json > /tmp/tick/branch_snapshot.json 2>/dev/null || true
+          if [ -s /tmp/tick/branch_snapshot.json ] && [ -z "$(find /tmp/tick/branch_snapshot.json -mmin +1440)" ]; then
+            echo "snapshot: automation/state copy is fresh (<24h) — reusing"
+            mv /tmp/tick/branch_snapshot.json /tmp/tick/queue_snapshot.json
+          elif [ -s tools/state/queue_snapshot.json ] && [ -z "$(find tools/state/queue_snapshot.json -mmin +1440)" ]; then
+            echo "snapshot: main carried copy is fresh (<24h) — reusing"
             cp tools/state/queue_snapshot.json /tmp/tick/queue_snapshot.json
           else
-            echo "snapshot: surveying (GraphQL)"
+            echo "snapshot: surveying (GraphQL + REST mergeability fixup)"
             if SURVEY_OUT=/tmp/tick/queue_snapshot.json timeout 2100 python3 tools/queue_snapshot.py; then
               echo "snapshot: fresh"
+            elif [ -s /tmp/tick/branch_snapshot.json ]; then
+              echo "snapshot: survey failed — falling back to automation/state copy (may be stale)"
+              mv /tmp/tick/branch_snapshot.json /tmp/tick/queue_snapshot.json
             elif [ -s tools/state/queue_snapshot.json ]; then
-              echo "snapshot: survey failed — falling back to carried copy (may be stale)"
+              echo "snapshot: survey failed — falling back to main carried copy (may be stale)"
               cp tools/state/queue_snapshot.json /tmp/tick/queue_snapshot.json
             else
               echo "snapshot: none available — aborting tick"
@@ -105,6 +117,7 @@ jobs:
           git config user.email "triage-bot@users.noreply.github.com"
           mkdir -p tools/state
           cp /tmp/tick/queue_snapshot.json tools/state/queue_snapshot.json 2>/dev/null || true
+          cp tools/land_candidates.json tools/state/land_candidates.json 2>/dev/null || true
           echo "$(date -u +%FT%TZ) deliberate-close run ${GITHUB_RUN_ID} — see the Actions tab for the log" >> tools/state/heartbeat.log
           tail -200 tools/state/heartbeat.log > /tmp/hb.tmp && mv /tmp/hb.tmp tools/state/heartbeat.log
           git add tools/state
@@ -112,5 +125,11 @@ jobs:
             echo "heartbeat: nothing new to commit"
           else
             git commit -q -m "automation: deliberate-close heartbeat (run ${GITHUB_RUN_ID})" || true
-            git push origin HEAD:main && echo "heartbeat: pushed" || echo "heartbeat: push failed (non-fatal)"
+            # main is branch-protected and the classic protection API has no
+            # bypass for the Actions app on a personal repo (run 45856859601
+            # closed 7 PRs and then lost its heartbeat to that wall), so the
+            # evidence commit lands on the dedicated unprotected branch.
+            git push --force origin HEAD:refs/heads/automation/state \
+              && echo "heartbeat: pushed to automation/state" \
+              || echo "heartbeat: push failed (non-fatal)"
           fi
