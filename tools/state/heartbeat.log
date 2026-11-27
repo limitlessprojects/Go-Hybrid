@@ -3,3 +3,4 @@
 2026-11-26T17:08:06Z no close-candidates this tick (queue drained or all guarded)
 2026-11-27T01:08:06Z closed=1 skipped=1 rest_calls=32
 2026-11-27T09:08:32Z closed=4 skipped=1 rest_calls=46
+2026-11-27T16:32:38Z aborted: no queue snapshot (survey failed)
