@@ -1,0 +1,103 @@
+{
+  "diagnostics": [
+    {
+      "code": "HYB-E8001",
+      "file": "ports\\errgroup\\accepted.hy",
+      "fixits": [
+        {
+          "description": "prefer the channel redesign (per-task state, merge over a channel)"
+        },
+        {
+          "description": "keep or add a lock if the share is genuinely guarded"
+        },
+        {
+          "description": "accept the hatch knowingly: audit it via --report-managed"
+        }
+      ],
+      "message": "spawn/send site inside a `managed` block: `fn(...) {...}` (closure) shared across tasks (unchecked)",
+      "name": "managed-share",
+      "notes": [
+        "the `managed` hatch suppresses the sendability check (O6.1): the contract is Go's DRF-SC discipline with `-race` as the backstop",
+        "managed does not remove Go's own runtime fatals (concurrent map writes are still a runtime fatal) \u2014 prefer the channel redesign or add a lock",
+        "counted by --report-managed \u2014 the hatch is greppable, auditable, countable (O6.3)"
+      ],
+      "severity": "warning",
+      "span": {
+        "end": {
+          "col": 12,
+          "line": 39
+        },
+        "start": {
+          "col": 9,
+          "line": 30
+        }
+      },
+      "tier0_rule": "MANAGED"
+    },
+    {
+      "code": "HYB-E8001",
+      "file": "ports\\errgroup\\accepted.hy",
+      "fixits": [
+        {
+          "description": "prefer the channel redesign (per-task state, merge over a channel)"
+        },
+        {
+          "description": "keep or add a lock if the share is genuinely guarded"
+        },
+        {
+          "description": "accept the hatch knowingly: audit it via --report-managed"
+        }
+      ],
+      "message": "spawn/send site inside a `managed` block: `fn(...) {...}` (closure) shared across tasks (unchecked)",
+      "name": "managed-share",
+      "notes": [
+        "the `managed` hatch suppresses the sendability check (O6.1): the contract is Go's DRF-SC discipline with `-race` as the backstop",
+        "managed does not remove Go's own runtime fatals (concurrent map writes are still a runtime fatal) \u2014 prefer the channel redesign or add a lock",
+        "counted by --report-managed \u2014 the hatch is greppable, auditable, countable (O6.3)"
+      ],
+      "severity": "warning",
+      "span": {
+        "end": {
+          "col": 12,
+          "line": 61
+        },
+        "start": {
+          "col": 9,
+          "line": 52
+        }
+      },
+      "tier0_rule": "MANAGED"
+    }
+  ],
+  "summary": {
+    "errors": 0,
+    "file": "ports\\errgroup\\accepted.hy",
+    "managed": {
+      "blocks": [
+        {
+          "category": "interop",
+          "reason": "group lifetime joined by Wait; sync.Once guards first error",
+          "tickets": [
+            "GH-4739"
+          ]
+        },
+        {
+          "category": "interop",
+          "reason": "group lifetime joined by Wait; sync.Once guards first error",
+          "tickets": [
+            "GH-4739"
+          ]
+        }
+      ],
+      "categories": {
+        "interop": 2
+      },
+      "managed_blocks": 2,
+      "sites_via_managed": 2,
+      "total_sites": 4
+    },
+    "verdict": "accept",
+    "warnings": 2
+  },
+  "version": 1
+}

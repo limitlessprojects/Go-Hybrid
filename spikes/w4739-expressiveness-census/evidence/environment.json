@@ -1,0 +1,7 @@
+{
+  "compiler_binary_sha256": "9450107b43d998c69afe7b0cf8b007404c69347da6ef347ae59803cee2d0a155",
+  "compiler_source_commit": "82037c3da4f3b888eef2e21ee1cb5e347e74a0c4",
+  "go": "go version go1.26.9 windows/amd64",
+  "platform": "win32",
+  "rust": "rustc 1.99.0 (b940084d7 2026-09-28)"
+}

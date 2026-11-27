@@ -1,0 +1,31 @@
+name: expressiveness-census-pilot
+on:
+  pull_request:
+    paths:
+      - 'spikes/w4739-expressiveness-census/**'
+      - '.github/workflows/census-pilot.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.9'
+          cache: false
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.99.0 --profile minimal && rustup default 1.99.0
+      - name: Build checker
+        run: cargo build --locked --manifest-path compiler/Cargo.toml -p hyb -j2
+      - name: Evidence regressions
+        run: python3 -B -m unittest discover -s spikes/w4739-expressiveness-census -p test_census.py -v
+      - name: Reproduce original and ported upstream tests
+        env:
+          HYB_RUNTIME_DIR: ${{ github.workspace }}/runtime
+        run: >-
+          python3 -B spikes/w4739-expressiveness-census/census.py
+          --hyb compiler/target/debug/hyb --out "${{ runner.temp }}/census" --count 3

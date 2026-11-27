@@ -1,0 +1,111 @@
+{
+  "diagnostics": [
+    {
+      "code": "HYB-E0002",
+      "file": "ports\\errgroup\\naive.hy",
+      "fixits": [
+        {
+          "description": "read the pointed-to site \u2014 the unexpected token is named in the message"
+        },
+        {
+          "description": "check the line above: unterminated braces, strings, or missing separators surface on the following line"
+        }
+      ],
+      "message": "parse error: expected expression, found keyword `case` (at 49:13)",
+      "name": "parse-error",
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 13,
+          "line": 49
+        },
+        "start": {
+          "col": 13,
+          "line": 49
+        }
+      }
+    },
+    {
+      "code": "HYB-E0002",
+      "file": "ports\\errgroup\\naive.hy",
+      "fixits": [
+        {
+          "description": "read the pointed-to site \u2014 the unexpected token is named in the message"
+        },
+        {
+          "description": "check the line above: unterminated braces, strings, or missing separators surface on the following line"
+        }
+      ],
+      "message": "parse error: expected declaration (import/const/struct/enum/type/fn), found identifier `g` (at 53:5)",
+      "name": "parse-error",
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 5,
+          "line": 53
+        },
+        "start": {
+          "col": 5,
+          "line": 53
+        }
+      }
+    },
+    {
+      "code": "HYB-E0002",
+      "file": "ports\\errgroup\\naive.hy",
+      "fixits": [
+        {
+          "description": "read the pointed-to site \u2014 the unexpected token is named in the message"
+        },
+        {
+          "description": "check the line above: unterminated braces, strings, or missing separators surface on the following line"
+        }
+      ],
+      "message": "parse error: expected declaration (import/const/struct/enum/type/fn), found `}` (at 65:1)",
+      "name": "parse-error",
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 1,
+          "line": 65
+        },
+        "start": {
+          "col": 1,
+          "line": 65
+        }
+      }
+    },
+    {
+      "code": "HYB-E0002",
+      "file": "ports\\errgroup\\naive.hy",
+      "fixits": [
+        {
+          "description": "read the pointed-to site \u2014 the unexpected token is named in the message"
+        },
+        {
+          "description": "check the line above: unterminated braces, strings, or missing separators surface on the following line"
+        }
+      ],
+      "message": "parse error: expected expression, found `;` (at 68:27)",
+      "name": "parse-error",
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 27,
+          "line": 68
+        },
+        "start": {
+          "col": 27,
+          "line": 68
+        }
+      }
+    }
+  ],
+  "summary": {
+    "errors": 4,
+    "file": "ports\\errgroup\\naive.hy",
+    "verdict": "reject",
+    "warnings": 0
+  },
+  "version": 1
+}

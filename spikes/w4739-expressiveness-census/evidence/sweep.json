@@ -1,0 +1,385 @@
+{
+  "histogram": {
+    "HYB-E0001": 5011
+  },
+  "ownership_inference": "none: lexical/parse rejection is reported separately",
+  "records": [
+    {
+      "errors": {
+        "HYB-E0001": 1182
+      },
+      "file": "stdlib-sync-atomic-atomic_test.go",
+      "sha256": "5d2b57bd263cc93ff6c084981aee004e17de59b3a6ec8eddbd236b7479006b25",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 34
+      },
+      "file": "stdlib-sync-atomic-doc.go",
+      "sha256": "fb448dacfc6b4d5c74ae203224dc31088c2cf45fc42391a4fdb04a47ccc62413",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 14
+      },
+      "file": "stdlib-sync-atomic-doc_32.go",
+      "sha256": "851b68cecc0ce83d1d19fec013ae302694f889297b51008cb9d24e57ba3c44b4",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 14
+      },
+      "file": "stdlib-sync-atomic-doc_64.go",
+      "sha256": "0434f660a650bc6a1eaf9b8c48205ed0ce8c18b53001e949dde7662d04bde9ea",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 24
+      },
+      "file": "stdlib-sync-atomic-example_test.go",
+      "sha256": "c495e020af4039e921cc50eda51c2f0687b3bc3944cb9bc7dcda1e55bd8e0b4e",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 167
+      },
+      "file": "stdlib-sync-atomic-type.go",
+      "sha256": "448abbf2d0dfe655fc8d096d2aed2fa37e43b10558c2132f1d0b17c8e4de69b9",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 80
+      },
+      "file": "stdlib-sync-atomic-value.go",
+      "sha256": "e87f0ad5c37b11b69effbb2c58b34b3fd7d4d4300b9e83a63847ff3b4835b8cc",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 120
+      },
+      "file": "stdlib-sync-atomic-value_test.go",
+      "sha256": "80425334279b68aba866d836c5b2268c26db6f18e87e6b75ca1685bd97d2172f",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 37
+      },
+      "file": "stdlib-sync-cond.go",
+      "sha256": "324314fd3a484897ce540a242f9de85d00407040c8cd2ee7db5d5761f5d14d4f",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 138
+      },
+      "file": "stdlib-sync-cond_test.go",
+      "sha256": "4a9f237bcc8b6ffd12def921543ce421990118a3536479bc9db53aee2b3ff25e",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 29
+      },
+      "file": "stdlib-sync-example_pool_test.go",
+      "sha256": "818bc52c400dbe92651abdf8d5b4974d6dc5cf259f9f4f55f642e0f747692b3c",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 30
+      },
+      "file": "stdlib-sync-example_test.go",
+      "sha256": "64bea84e5604afbe0b640bed13e63ee1346e6bfbe8d241fa102a5f63ab0a5509",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 40
+      },
+      "file": "stdlib-sync-export_test.go",
+      "sha256": "d2cbda43e2c8b965475d67ca652a01e60d3ab22773b6c124d6e7fac1a7253063",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 33
+      },
+      "file": "stdlib-sync-map.go",
+      "sha256": "ea2b7b418426ba83ed9b77c5926dcb28a6a94dc84b26ea7b581c782a36a646b4",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 355
+      },
+      "file": "stdlib-sync-map_bench_test.go",
+      "sha256": "7050e9ef63c01c27cca62ca1f8e2c77d15ce16f6e0f98e12916fd3add180b6f7",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 119
+      },
+      "file": "stdlib-sync-map_reference_test.go",
+      "sha256": "43d66aa6b59abade75f2489f4670f9c7a62f0d5ca416324faa6ab67c5dc1b60c",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 210
+      },
+      "file": "stdlib-sync-map_test.go",
+      "sha256": "188604a8799daafa278d90bcdf2efe1a739de00704ea95276772155e026bc730",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 15
+      },
+      "file": "stdlib-sync-mutex.go",
+      "sha256": "3dec4264678744c4ce15a05ba0cc88e5e8b155f071b71d74eb7ed229ca72c114",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 143
+      },
+      "file": "stdlib-sync-mutex_test.go",
+      "sha256": "68beedb950fc08693e5a55b3b23263f9d34a51db32f6effb9d18de7be6693a46",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 14
+      },
+      "file": "stdlib-sync-once.go",
+      "sha256": "3bc00bab32acd134ddf50c87fdbd1dd70502f224b7684a801a077dfe0a05eb3f",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 27
+      },
+      "file": "stdlib-sync-once_test.go",
+      "sha256": "edf7c5a6a208aa7c2dda2bddb6eabd610e6769a83a5e7fc1cd0972ed7c2d9a16",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 27
+      },
+      "file": "stdlib-sync-oncefunc.go",
+      "sha256": "0853c1ad885c593d2810e601c495f00abe197b10d12b679f94badf3efe5fa365",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 235
+      },
+      "file": "stdlib-sync-oncefunc_test.go",
+      "sha256": "437d47bf448984ed6091996d3967fc9d61e7798645d2d8843ee6b2cd46432948",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 114
+      },
+      "file": "stdlib-sync-pool.go",
+      "sha256": "d03a971c04ba5be782e997ba2c20e24d313f3540595b0a51b52f0081143a29c2",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 205
+      },
+      "file": "stdlib-sync-pool_test.go",
+      "sha256": "bac5cbda5779acfecbdf261e041566d4a2fbdffe8ea311a6c3783af04fb2a30a",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 78
+      },
+      "file": "stdlib-sync-poolqueue.go",
+      "sha256": "25b900ffeb803a9ecd4c1926a5faaa3ba8d7b4adcd71bbfbd373cb8606910dae",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 18
+      },
+      "file": "stdlib-sync-runtime.go",
+      "sha256": "a2be85512b59e11270b099f264581343cc1589bb782e03a476102406defd5f33",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 3
+      },
+      "file": "stdlib-sync-runtime2.go",
+      "sha256": "5bc4014718a892af6591e26e6c87105a001b7d1d1f93c3ec4c289128c80f6ba4",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 3
+      },
+      "file": "stdlib-sync-runtime2_lockrank.go",
+      "sha256": "425d173cb9125b8fb5f2b176705df1b0a9acf650015d6074bc7588d270c57c50",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 32
+      },
+      "file": "stdlib-sync-runtime_sema_test.go",
+      "sha256": "df0e817e2dc507bdf9855f7715272527d026b394171d55206d2a54f25b4a2319",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 143
+      },
+      "file": "stdlib-sync-rwmutex.go",
+      "sha256": "4ecc9b2fa7771cbe37e1670e4caefd7a28939683bfe1614fcf5e9d545261d17f",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 127
+      },
+      "file": "stdlib-sync-rwmutex_test.go",
+      "sha256": "b11c9cd27eabb2d9dfe88dbb6914d189866ae792d8a573dfda3bef03da0dbe4b",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 71
+      },
+      "file": "stdlib-sync-waitgroup.go",
+      "sha256": "274e43a7cbc76eb0da4635a2680785200dfaf94d85e2d55cdd5122c76a4791d9",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 120
+      },
+      "file": "stdlib-sync-waitgroup_test.go",
+      "sha256": "5384a1ed2fa0a76232b3555e11548011434e3b331d8cdecb267544143519f26e",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 28
+      },
+      "file": "xsync-errgroup-errgroup.go",
+      "sha256": "e9b05788dfed041f46e4df7521188ce0dc71ed259e1ec7b57446bdc5eea26019",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 27
+      },
+      "file": "xsync-errgroup-errgroup_example_md5all_test.go",
+      "sha256": "9dfbb3dcf07488e4574ea5bb7540a405c4e03e50cce13d12184be60f3b8d8c76",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 129
+      },
+      "file": "xsync-errgroup-errgroup_test.go",
+      "sha256": "74112329eecfc0817f92ac13637fe141b17d33bf9c7a7d28c5ebebbb84d0b845",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 46
+      },
+      "file": "xsync-semaphore-semaphore.go",
+      "sha256": "c36737088c3a0f8404a813ebd113b472ac819090b241d57f121fe9b40ec2e2af",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 64
+      },
+      "file": "xsync-semaphore-semaphore_bench_test.go",
+      "sha256": "51f020b32d030e4963262b76be68ebc6a9877d1bf70418a0163336851f0ad393",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 17
+      },
+      "file": "xsync-semaphore-semaphore_example_test.go",
+      "sha256": "7e00fd84cb54ed114dbefa225d37a41a5cc228df82eff8a5397644a225660885",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 127
+      },
+      "file": "xsync-semaphore-semaphore_test.go",
+      "sha256": "640c2521e2e4393f4ca127e080199aa52ce7b8792d375a8bc5cd0758f8cfd6fc",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 60
+      },
+      "file": "xsync-singleflight-singleflight.go",
+      "sha256": "3ab234a431a14594f1bc46e76d9d35928fa18d05947801e167df1015834719a8",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 205
+      },
+      "file": "xsync-singleflight-singleflight_test.go",
+      "sha256": "1635e9114a1597fad55ceb4cc7f58f4170cf371f40a65b8fb55f8bc1159f6276",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 2
+      },
+      "file": "xsync-syncmap-map.go",
+      "sha256": "b56b0d009241f7ac1d9482b62cfbfbac57cf931137715dd7a94ed1e870c7324b",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 141
+      },
+      "file": "xsync-syncmap-map_bench_test.go",
+      "sha256": "8186ca9ff8b8d2ab8cd20a571c88636b2b9f1dbc9a72bb4f40d241ef73f64da6",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 60
+      },
+      "file": "xsync-syncmap-map_reference_test.go",
+      "sha256": "589e5797685b210a67138d800def54162083c52d5677a449b1b3661ee970c78a",
+      "verdict": "reject"
+    },
+    {
+      "errors": {
+        "HYB-E0001": 104
+      },
+      "file": "xsync-syncmap-map_test.go",
+      "sha256": "47f5e34c4c2747254f98ac0df724fbe85c435d0cb30f1dac7d0e6fff917891ea",
+      "verdict": "reject"
+    }
+  ],
+  "unit": "untranslated source files, not complete programs"
+}

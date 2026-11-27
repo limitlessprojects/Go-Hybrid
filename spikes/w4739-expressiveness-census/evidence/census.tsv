@@ -1,0 +1,3 @@
+program	original_lines	hybrid_lines	helper_go_lines	added	deleted	managed_blocks	total_tax_including_helpers_percent	classification	behavior
+errgroup	151	76	19	65	140	2	148.344	ESCAPED	UNCHANGED_UPSTREAM_TESTS_PASS_RACE
+singleflight	214	112	90	101	203	4	184.112	ESCAPED	UNCHANGED_UPSTREAM_TESTS_PASS_RACE

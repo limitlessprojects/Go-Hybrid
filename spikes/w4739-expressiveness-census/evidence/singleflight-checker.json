@@ -1,0 +1,118 @@
+{
+  "diagnostics": [
+    {
+      "code": "HYB-E8001",
+      "file": "ports\\singleflight\\accepted.hy",
+      "fixits": [
+        {
+          "description": "prefer the channel redesign (per-task state, merge over a channel)"
+        },
+        {
+          "description": "keep or add a lock if the share is genuinely guarded"
+        },
+        {
+          "description": "accept the hatch knowingly: audit it via --report-managed"
+        }
+      ],
+      "message": "spawn/send site inside a `managed` block: `work` (fn() (any, error)), `exit_error` (error), `is_panic` (fn() bool), `make_panic` (fn() error), `exit_fn` (fn()), `lookup` (fn(*sync.map_, string) *call), `finish` (fn(*call, bool)), `put` (fn(*sync.map_, string, *call)), `drop` (fn(*sync.map_, string)), `g.do_call` (unproven \u2014 the checker can only prove spawns of declared top-level `fn`s \u2014 `g.do_call` is a method value or a computed callee, which the spawn-callee proof (O4.0) cannot verify) shared across tasks (unchecked)",
+      "name": "managed-share",
+      "notes": [
+        "the `managed` hatch suppresses the sendability check (O6.1): the contract is Go's DRF-SC discipline with `-race` as the backstop",
+        "managed does not remove Go's own runtime fatals (concurrent map writes are still a runtime fatal) \u2014 prefer the channel redesign or add a lock",
+        "counted by --report-managed \u2014 the hatch is greppable, auditable, countable (O6.3)"
+      ],
+      "severity": "warning",
+      "span": {
+        "end": {
+          "col": 107,
+          "line": 60
+        },
+        "start": {
+          "col": 9,
+          "line": 60
+        }
+      },
+      "tier0_rule": "MANAGED"
+    },
+    {
+      "code": "HYB-E8001",
+      "file": "ports\\singleflight\\accepted.hy",
+      "fixits": [
+        {
+          "description": "prefer the channel redesign (per-task state, merge over a channel)"
+        },
+        {
+          "description": "keep or add a lock if the share is genuinely guarded"
+        },
+        {
+          "description": "accept the hatch knowingly: audit it via --report-managed"
+        }
+      ],
+      "message": "spawn/send site inside a `managed` block: `fn(...) {...}` (closure) shared across tasks (unchecked)",
+      "name": "managed-share",
+      "notes": [
+        "the `managed` hatch suppresses the sendability check (O6.1): the contract is Go's DRF-SC discipline with `-race` as the backstop",
+        "managed does not remove Go's own runtime fatals (concurrent map writes are still a runtime fatal) \u2014 prefer the channel redesign or add a lock",
+        "counted by --report-managed \u2014 the hatch is greppable, auditable, countable (O6.3)"
+      ],
+      "severity": "warning",
+      "span": {
+        "end": {
+          "col": 53,
+          "line": 80
+        },
+        "start": {
+          "col": 25,
+          "line": 80
+        }
+      },
+      "tier0_rule": "MANAGED"
+    }
+  ],
+  "summary": {
+    "errors": 0,
+    "file": "ports\\singleflight\\accepted.hy",
+    "managed": {
+      "blocks": [
+        {
+          "category": "mutex",
+          "reason": "map protected by mutex, completed call published by WaitGroup",
+          "tickets": [
+            "GH-4739"
+          ]
+        },
+        {
+          "category": "interop",
+          "reason": "callbacks send to original buffered Go result channels; mutex guards map",
+          "tickets": [
+            "GH-4739"
+          ]
+        },
+        {
+          "category": "interop",
+          "reason": "retain double-defer panic versus Goexit protocol; Go callbacks are escapes",
+          "tickets": [
+            "GH-4739"
+          ]
+        },
+        {
+          "category": "interop",
+          "reason": "panic must terminate the process as in upstream DoChan",
+          "tickets": [
+            "GH-4739"
+          ]
+        }
+      ],
+      "categories": {
+        "interop": 3,
+        "mutex": 1
+      },
+      "managed_blocks": 4,
+      "sites_via_managed": 2,
+      "total_sites": 2
+    },
+    "verdict": "accept",
+    "warnings": 2
+  },
+  "version": 1
+}

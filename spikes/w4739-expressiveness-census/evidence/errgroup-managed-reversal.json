@@ -1,0 +1,152 @@
+{
+  "diagnostics": [
+    {
+      "code": "HYB-E3001",
+      "file": "<run>\\errgroup-without-managed.hy",
+      "fixits": [
+        {
+          "description": "route updates through a channel instead of sharing the value"
+        },
+        {
+          "description": "copy the data the task needs and send the copy"
+        },
+        {
+          "description": "transfer ownership: `task worker(move counter)` \u2014 the binding (and every alias) must be unused afterward"
+        },
+        {
+          "description": "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+        }
+      ],
+      "message": "`fn(...) {...}` (closure) is not sendable across tasks",
+      "name": "not-sendable-spawn",
+      "notes": [
+        "the spawned callee is a closure: closures capture their environment, so spawning one shares every capture with the new task (A5) \u2014 spawn a declared top-level `fn` instead",
+        "if the closure is the design (an actor loop, a worker body), wrap the site in `managed(\"why this bypass is safe\", \"actor\") { ... }` \u2014 the explicit, auditable hatch (HYB-E8001, counted by --report-managed)"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 12,
+          "line": 39
+        },
+        "start": {
+          "col": 9,
+          "line": 30
+        }
+      },
+      "tier0_rule": "A1c"
+    },
+    {
+      "code": "HYB-E3013",
+      "file": "<run>\\errgroup-without-managed.hy",
+      "fixits": [
+        {
+          "description": "wrap the foreign call site in `managed(\"why\", \"interop\")` so the escape is an auditable decision"
+        },
+        {
+          "description": "make the captured binding `const` so the closure cannot write it"
+        },
+        {
+          "description": "pass a value that carries no shared reference storage (a fresh copy) instead of the captured binding"
+        }
+      ],
+      "message": "closure writes the captured binding `g` and is passed to a foreign Go call \u2014 the escape must be explicit (HYB-E3013)",
+      "name": "go-escape-captured-write",
+      "notes": [
+        "SPEC-LANGUAGE \u00a78.5 C9: a closure that writes a captured mutable binding and escapes into foreign Go code must take `managed(\"...\", \"interop\")` at the call site, or the capture must be `const`/non-`may_share`"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 15,
+          "line": 37
+        },
+        "start": {
+          "col": 13,
+          "line": 34
+        }
+      },
+      "tier0_rule": "A5"
+    },
+    {
+      "code": "HYB-E3001",
+      "file": "<run>\\errgroup-without-managed.hy",
+      "fixits": [
+        {
+          "description": "route updates through a channel instead of sharing the value"
+        },
+        {
+          "description": "copy the data the task needs and send the copy"
+        },
+        {
+          "description": "transfer ownership: `task worker(move counter)` \u2014 the binding (and every alias) must be unused afterward"
+        },
+        {
+          "description": "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
+        }
+      ],
+      "message": "`fn(...) {...}` (closure) is not sendable across tasks",
+      "name": "not-sendable-spawn",
+      "notes": [
+        "the spawned callee is a closure: closures capture their environment, so spawning one shares every capture with the new task (A5) \u2014 spawn a declared top-level `fn` instead",
+        "if the closure is the design (an actor loop, a worker body), wrap the site in `managed(\"why this bypass is safe\", \"actor\") { ... }` \u2014 the explicit, auditable hatch (HYB-E8001, counted by --report-managed)"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 12,
+          "line": 61
+        },
+        "start": {
+          "col": 9,
+          "line": 52
+        }
+      },
+      "tier0_rule": "A1c"
+    },
+    {
+      "code": "HYB-E3013",
+      "file": "<run>\\errgroup-without-managed.hy",
+      "fixits": [
+        {
+          "description": "wrap the foreign call site in `managed(\"why\", \"interop\")` so the escape is an auditable decision"
+        },
+        {
+          "description": "make the captured binding `const` so the closure cannot write it"
+        },
+        {
+          "description": "pass a value that carries no shared reference storage (a fresh copy) instead of the captured binding"
+        }
+      ],
+      "message": "closure writes the captured binding `g` and is passed to a foreign Go call \u2014 the escape must be explicit (HYB-E3013)",
+      "name": "go-escape-captured-write",
+      "notes": [
+        "SPEC-LANGUAGE \u00a78.5 C9: a closure that writes a captured mutable binding and escapes into foreign Go code must take `managed(\"...\", \"interop\")` at the call site, or the capture must be `const`/non-`may_share`"
+      ],
+      "severity": "error",
+      "span": {
+        "end": {
+          "col": 15,
+          "line": 59
+        },
+        "start": {
+          "col": 13,
+          "line": 56
+        }
+      },
+      "tier0_rule": "A5"
+    }
+  ],
+  "summary": {
+    "errors": 4,
+    "file": "<run>\\errgroup-without-managed.hy",
+    "managed": {
+      "managed_blocks": 0,
+      "sites_via_managed": 0,
+      "total_sites": 4
+    },
+    "verdict": "reject",
+    "warnings": 0
+  },
+  "version": 1
+}

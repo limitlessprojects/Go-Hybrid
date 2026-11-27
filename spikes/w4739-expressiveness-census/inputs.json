@@ -1,0 +1,42 @@
+{
+  "compiler_commit": "82037c3da4f3b888eef2e21ee1cb5e347e74a0c4",
+  "upstream": {
+    "module": "golang.org/x/sync",
+    "version": "v0.18.0",
+    "commit": "1966f539bbd7664efd5bb7462ae94d9db67f4502",
+    "sum": "h1:kr88TuHDroi+UVf+0hZnirlk8o8T+4MrK6mr60WkH/I="
+  },
+  "ports": {
+    "errgroup": {
+      "escapes": [
+        "WithContext retained in Go: context is outside M5; returned heap pointer cannot be represented as a returning Hybrid loan",
+        "sync.Once.Do callback with captured writes at two source sites",
+        "two managed spawn regions"
+      ]
+    },
+    "singleflight": {
+      "escapes": [
+        "Go panicError and newPanicError retained with runtime/debug, errors and bytes",
+        "Goexit and panic classification supplied as Go callbacks",
+        "sync.Map storage/lookup/delete Go callbacks replace pointer-valued map field forbidden by HYB-E3103",
+        "result extraction to Go callback avoids returning Hybrid loan (HYB-E3104)",
+        "DoChan delivery callback constructs the original exported Result channel payload",
+        "four managed regions; not a pure Tier-0 port"
+      ]
+    }
+  },
+  "sha256": {
+    "ports/errgroup/accepted.hy": "89b5751ad841f5297ee7c898c8e2d9f68bb7727ccb3b7c6fa2bfad466b155242",
+    "ports/errgroup/api.go": "5bd73d87d1623c30d4201ab59a5d70a1f52bb73b05eee61c539d5e4a2cb39cdc",
+    "ports/errgroup/naive.hy": "d77677bb9852c5814a9a8f021cb53b82caba3a7c80f1ad65814caf7f1b952f4f",
+    "ports/singleflight/accepted.hy": "80f615109281013874fcae88194a7beef37f319e82933b2ec36e8367abd3045f",
+    "ports/singleflight/api.go": "c467841b3062a17c75997570edd0de5f80ef78aff6d5c24b01faaca04ad07283",
+    "upstream/errgroup/errgroup.go": "e9b05788dfed041f46e4df7521188ce0dc71ed259e1ec7b57446bdc5eea26019",
+    "upstream/errgroup/errgroup_example_md5all_test.go": "9dfbb3dcf07488e4574ea5bb7540a405c4e03e50cce13d12184be60f3b8d8c76",
+    "upstream/errgroup/errgroup_test.go": "74112329eecfc0817f92ac13637fe141b17d33bf9c7a7d28c5ebebbb84d0b845",
+    "upstream/LICENSE": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+    "upstream/singleflight/singleflight.go": "3ab234a431a14594f1bc46e76d9d35928fa18d05947801e167df1015834719a8",
+    "upstream/singleflight/singleflight_test.go": "1635e9114a1597fad55ceb4cc7f58f4170cf371f40a65b8fb55f8bc1159f6276",
+    "sweep-origins.json": "dea6613df6d8ea5f7d4df1b830155173ce53f751fc34dd025a95ed8505a7f1c4"
+  }
+}
