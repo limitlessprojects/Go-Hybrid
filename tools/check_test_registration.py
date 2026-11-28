@@ -54,6 +54,27 @@ def shell_words(line):
     return list(lexer)
 
 
+def single_line_shell_commands(lines):
+    """Keep quoted continuations opaque, within one shell script.
+
+    A physical line inside a multiline string is data, not a new command.
+    Consume the entire quoted command before considering subsequent lines;
+    multiline commands themselves remain outside the single-line contract.
+    Discard unfinished input at the script boundary (each Actions run step
+    launches a separate shell).
+    """
+    pending = []
+    for line in lines:
+        pending.append(line)
+        try:
+            shell_words("\n".join(pending))
+        except ValueError:
+            continue
+        if len(pending) == 1:
+            yield line
+        pending.clear()
+
+
 def yaml_fields(lines, indent=None):
     """Read direct block-mapping fields, keeping scalar bodies opaque.
 
@@ -120,7 +141,7 @@ def workflow_run_lines(workflow_text):
     lines = workflow_text.splitlines()
     workflow = yaml_fields(lines, indent=0)
     if "jobs" not in workflow:
-        yield from lines
+        yield from single_line_shell_commands(lines)
         return
     jobs = block_fields(workflow["jobs"])
     if jobs is None:
@@ -157,7 +178,7 @@ def workflow_run_lines(workflow_text):
             value, commands = run
             scalar = re.split(r"\s+#", value.strip(), 1)[0]
             if re.fullmatch(r"\|(?:[1-9][+-]?|[+-][1-9]?)?", scalar):
-                yield from commands
+                yield from single_line_shell_commands(commands)
             elif scalar.startswith(">"):
                 continue
             elif not any(line.strip() and not line.lstrip().startswith("#")
