@@ -168,3 +168,43 @@ fn previously_generated_output_can_be_updated_and_rebuilt() {
         "rebuilding unchanged source preserves generated content"
     );
 }
+
+#[test]
+fn build_accepts_output_names_that_go_filters_as_source_files() {
+    for name in [
+        "ordinary",
+        "_hidden",
+        ".hidden",
+        "latest_test",
+        "_hidden.exe",
+        ".hidden.exe",
+    ] {
+        let inputs = Inputs::new();
+        let output = Command::new(env!("CARGO_BIN_EXE_hyb"))
+            .args(["build", "good.hy", "-o", name])
+            .env("HYB_ALLOW_TOOLCHAIN_DRIFT", "1")
+            .current_dir(&inputs.0)
+            .output()
+            .expect("run actual hyb build CLI");
+
+        assert_exit(&output, 0);
+        assert!(
+            inputs.0.join(name).is_file(),
+            "successful build should produce {name}"
+        );
+        assert!(
+            inputs.0.join(format!("{name}.go")).is_file(),
+            "the generated Go sidecar remains available for {name}"
+        );
+        assert!(
+            !fs::read_dir(&inputs.0).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("hyb-build-")
+            }),
+            "temporary Go build source is removed for {name}"
+        );
+    }
+}
