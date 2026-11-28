@@ -61,15 +61,20 @@ def gql(query, variables):
     raise SystemExit("GraphQL failed after retries")
 
 prs, cursor, pages = [], None, 0
+seen_cursors = set()
 while True:
     d = gql(QUERY, {"cursor": cursor})
-    if d.get("errors"): print("GraphQL errors:", d["errors"][:2]); break
+    if d.get("errors"):
+        raise SystemExit(f"Survey incomplete on page {pages + 1}: {d['errors'][:2]}")
     conn = d["data"]["repository"]["pullRequests"]
     prs.extend(conn["nodes"])
     pages += 1
     print(f"page {pages}: +{len(conn['nodes'])} (total {len(prs)})", flush=True)
     if not conn["pageInfo"]["hasNextPage"]: break
     cursor = conn["pageInfo"]["endCursor"]
+    if not cursor or cursor in seen_cursors:
+        raise SystemExit(f"Survey incomplete: no new continuation cursor on page {pages}")
+    seen_cursors.add(cursor)
     time.sleep(1)
 
 now = datetime.now(timezone.utc)
