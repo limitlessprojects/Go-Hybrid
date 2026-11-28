@@ -1,5 +1,16 @@
 # Hybrid Language: Development Plan
 
+## Contributor feasibility learning — atomic exchange (#833, 2026-11-27)
+
+- Independent, pre-registered Go experiment in `spikes/atomic-box-833`: three
+  million exclusive buffer exchanges race-clean; five small controls repeated
+  1,000 times at CPU=8,16,32; expected unchecked-Load pointee race verified.
+- A take-and-return stack has a repeating non-progress state when its owner is
+  paused. Ordinary Treiber pop additionally requires a protected Next read and
+  separation of the removed node from its tail. Retain Row 11; no compiler
+  guarantee, ledger acceptance or payout claimed. Measured Swap 10.83–11.58
+  ns/op on Go 1.26.9 linux/arm64; complete results/limits in the spike directory.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.

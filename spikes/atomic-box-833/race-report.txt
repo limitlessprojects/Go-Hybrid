@@ -1,0 +1,42 @@
+Actual opt-in negative control output; absolute checkout/toolchain prefixes replaced with $REPO/$GO_ROOT.
+$ go test -race -count=1 -timeout=2m -run=^TestUncheckedTreiberLoadRace$ -v ./...
+=== RUN   TestUncheckedTreiberLoadRace
+==================
+WARNING: DATA RACE
+Read at 0x00c00002a318 by goroutine 9:
+  hybrid.spikes/atomic-box-833.TestUncheckedTreiberLoadRace.func1()
+      $REPO/spikes/atomic-box-833/work/box_test.go:237 +0xa0
+
+Previous write at 0x00c00002a318 by goroutine 8:
+  hybrid.spikes/atomic-box-833.TestUncheckedTreiberLoadRace()
+      $REPO/spikes/atomic-box-833/work/box_test.go:250 +0x3c0
+  testing.tRunner()
+      $GO_ROOT/src/testing/testing.go:2036 +0x164
+  testing.(*T).Run.gowrap1()
+      $GO_ROOT/src/testing/testing.go:2101 +0x34
+
+Goroutine 9 (running) created at:
+  hybrid.spikes/atomic-box-833.TestUncheckedTreiberLoadRace()
+      $REPO/spikes/atomic-box-833/work/box_test.go:231 +0x318
+  testing.tRunner()
+      $GO_ROOT/src/testing/testing.go:2036 +0x164
+  testing.(*T).Run.gowrap1()
+      $GO_ROOT/src/testing/testing.go:2101 +0x34
+
+Goroutine 8 (running) created at:
+  testing.(*T).Run()
+      $GO_ROOT/src/testing/testing.go:2101 +0x7bc
+  testing.runTests.func1()
+      $GO_ROOT/src/testing/testing.go:2585 +0x74
+  testing.tRunner()
+      $GO_ROOT/src/testing/testing.go:2036 +0x164
+  testing.runTests()
+      $GO_ROOT/src/testing/testing.go:2583 +0x7a0
+  testing.(*M).Run()
+      $GO_ROOT/src/testing/testing.go:2443 +0xb38
+  main.main()
+      _testmain.go:60 +0x100
+==================
+FAIL	hybrid.spikes/atomic-box-833	0.017s
+FAIL
+EXPECTED FAILURE: raw Load/Next access reported a real pointee race

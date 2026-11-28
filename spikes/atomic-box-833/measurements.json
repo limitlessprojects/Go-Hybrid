@@ -1,0 +1,22 @@
+{
+  "verified_at": "2026-11-27T08:33:50.375549+00:00",
+  "go": "go1.26.9",
+  "platform": "linux/arm64",
+  "buffer_exchanges": 3000000,
+  "buffer_cpu_settings": [
+    8,
+    16,
+    32
+  ],
+  "small_control_repetitions_per_cpu": 1000,
+  "raw_load_negative": "actual race report, expected subprocess exit 1",
+  "swap_ns_samples": [
+    10.85,
+    10.83,
+    10.83,
+    11.2,
+    11.58
+  ],
+  "allocations_per_op": 0,
+  "full_treiber_campaign_run": false
+}
