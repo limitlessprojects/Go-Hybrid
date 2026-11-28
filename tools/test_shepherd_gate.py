@@ -185,5 +185,154 @@ class CmdProbeTests(unittest.TestCase):
             Path(p).unlink(missing_ok=True)
 
 
+class StateLabelReconciliationTests(unittest.TestCase):
+    """#986: sync-labels must diff against current_labels and remove stale
+    state labels (`bot:land-candidate`, `bot:conflict`, `bot:stale-base`), and
+    W2 rebase must clear a stale `bot:conflict` when live `mergeable` is True."""
+
+    def test_plan_sync_labels_noop_when_already_current(self):
+        it = _item(10, bucket="LAND-CANDIDATE",
+                   current_labels=["bot:land-candidate", "triage:pareto"])
+        self.assertEqual(sh.plan_sync_labels(it), ([], []))
+
+    def test_plan_sync_labels_replaces_stale_conflict_and_stale_base(self):
+        it = _item(11, bucket="LAND-CANDIDATE",
+                   current_labels=["bot:conflict", "bot:stale-base", "triage:bug"])
+        self.assertEqual(
+            sh.plan_sync_labels(it),
+            (["bot:land-candidate"], ["bot:conflict", "bot:stale-base"]),
+        )
+
+    def test_plan_sync_labels_clears_state_labels_on_unmapped_bucket(self):
+        it = _item(12, bucket="RECON", current_labels=["bot:conflict"])
+        self.assertEqual(sh.plan_sync_labels(it), ([], ["bot:conflict"]))
+
+    def test_plan_sync_labels_skips_wildcard_and_draft(self):
+        w = _item(13, bucket="CONFLICTS", wildcard_hold=True,
+                  current_labels=["bot:land-candidate"])
+        d = _item(14, bucket="CONFLICTS", draft_parked=True,
+                  current_labels=["bot:land-candidate"])
+        self.assertEqual(sh.plan_sync_labels(w), ([], []))
+        self.assertEqual(sh.plan_sync_labels(d), ([], []))
+
+    def test_cmd_sync_labels_posts_only_delta_and_deletes_stale(self):
+        import json, tempfile
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        scan_data = {
+            "items": [
+                _item(101, bucket="LAND-CANDIDATE",
+                      current_labels=["bot:land-candidate"]),
+                _item(102, bucket="LAND-CANDIDATE",
+                      current_labels=["bot:conflict"]),
+                _item(103, bucket="RECON",
+                      current_labels=["bot:stale-base"]),
+            ]
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
+            json.dump(scan_data, tf)
+            scan_path = tf.name
+
+        posts, reqs = [], []
+
+        class FakeGh:
+            repo = "limitlessprojects/Go-Hybrid"
+            calls = 0
+            remaining = 4900
+
+            def __init__(self, repo, token):
+                pass
+
+            def post(self, path, payload):
+                self.calls += 1
+                posts.append((path, payload))
+                return {}
+
+            def req(self, method, path, payload=None):
+                self.calls += 1
+                reqs.append((method, path, payload))
+                return 200, {}
+
+        try:
+            with patch.object(sh.tb, "Gh", FakeGh), \
+                 patch.object(sh.tb, "load_token", return_value="tok"), \
+                 patch.object(sh, "ensure_palette"):
+                sh.cmd_sync_labels(SimpleNamespace(from_scan=scan_path, dry=False))
+
+            # #101 is untouched; #102 gets +bot:land-candidate and -bot:conflict;
+            # #103 gets -bot:stale-base.
+            self.assertEqual(
+                posts,
+                [("/repos/limitlessprojects/Go-Hybrid/issues/102/labels",
+                  {"labels": ["bot:land-candidate"]})],
+            )
+            self.assertEqual(
+                reqs,
+                [
+                    ("DELETE",
+                     "/repos/limitlessprojects/Go-Hybrid/issues/102/labels/bot%3Aconflict",
+                     None),
+                    ("DELETE",
+                     "/repos/limitlessprojects/Go-Hybrid/issues/103/labels/bot%3Astale-base",
+                     None),
+                ],
+            )
+        finally:
+            Path(scan_path).unlink(missing_ok=True)
+
+    def test_cmd_rebase_clears_stale_bot_conflict_when_mergeable_true(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        reqs = []
+
+        class FakeGh:
+            repo = "limitlessprojects/Go-Hybrid"
+            calls = 0
+            remaining = 4900
+
+            def __init__(self, repo, token):
+                pass
+
+            def get(self, path):
+                if path.endswith("/commits/main"):
+                    return {"sha": "mainsha123456"}
+                if path.endswith("/pulls/711"):
+                    return {"mergeable": True, "head": {"sha": "head711abcdef"}}
+                if "/compare/" in path:
+                    return {"behind_by": 60}
+                return {}
+
+            def paginate(self, path):
+                return [{
+                    "number": 711,
+                    "draft": False,
+                    "created_at": "2026-10-20T00:00:00Z",
+                    "labels": [{"name": "bot:conflict"}],
+                }]
+
+            def req(self, method, path, payload=None):
+                reqs.append((method, path, payload))
+                return 202, {}
+
+        with patch.object(sh.tb, "Gh", FakeGh), \
+             patch.object(sh.tb, "load_token", return_value="tok"):
+            sh.cmd_rebase(SimpleNamespace(dry=False))
+
+        self.assertIn(
+            ("DELETE",
+             "/repos/limitlessprojects/Go-Hybrid/issues/711/labels/bot%3Aconflict",
+             None),
+            reqs,
+        )
+        self.assertIn(
+            ("PUT",
+             "/repos/limitlessprojects/Go-Hybrid/pulls/711/update-branch",
+             {"expected_head_sha": "head711abcdef"}),
+            reqs,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
