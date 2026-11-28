@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — monotone task region finite model (2026-11-27)
+
+- Proposal #482's first experiment is reproducible in `spikes/monotone-task-regions-482/RESULTS.md`: 7,396 closed finite programs, 24,057 maximal schedules, no discrepancies against an independent closure interpreter; blocked executions remain distinct from completion. All three forbidden-observation/update controls have replayable divergent answers; 16 tests pass and CI invokes them. No Hybrid admission/lowering, synchronized Go runtime, workload performance, or language guarantee change is claimed. Hosted CI, maintainer review and any award remain pending.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.

@@ -95,6 +95,11 @@ jobs:
           python3 "$GITHUB_WORKSPACE/tools/runner/runner.py" job.json --results-dir results
           test -f results/summary.json
           grep -q '"ok": true' results/summary.json || (cat results/summary.json; exit 1)
+      - name: Monotone task region finite model (issue 482)
+        run: |
+          set -e
+          python3 -m unittest discover -s spikes/monotone-task-regions-482 -p 'test_*.py' -v
+          python3 spikes/monotone-task-regions-482/model.py
       - name: Job specs valid
         run: |
           set -e
