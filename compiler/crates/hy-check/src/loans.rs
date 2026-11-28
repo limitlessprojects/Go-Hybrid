@@ -7985,6 +7985,7 @@ impl<'a> Checker<'a> {
             }
         }
         let mut hits: Vec<(String, Span)> = Vec::new();
+        let mut let_hits: Vec<(String, Span)> = Vec::new();
         if let Expr::Field {
             base,
             name: method_name,
@@ -8082,6 +8083,12 @@ impl<'a> Checker<'a> {
                     });
                 if let Some(const_name) = recv_const {
                     hits.push((const_name, base.span()));
+                } else if let Expr::Ident { name, .. } = crate::model::unwrap_parens(base) {
+                    if !declared.contains(name.as_str())
+                        && self.lookup_binding(st, name).is_some_and(|b| b.is_let)
+                    {
+                        let_hits.push((name.clone(), base.span()));
+                    }
                 }
             }
         }
@@ -8256,6 +8263,9 @@ impl<'a> Checker<'a> {
         }
         for (const_name, span) in hits {
             self.emit_const_write_error(&const_name, span);
+        }
+        for (let_name, span) in let_hits {
+            self.emit_let_write_error(&let_name, span);
         }
     }
 
