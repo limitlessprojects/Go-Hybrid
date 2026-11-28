@@ -8982,13 +8982,25 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        let has_field = self.struct_field_kind(bk, name).is_some();
-        let sn_opt = self.struct_base_name(bk);
+        // Issue #4403: Go only auto-dereferences a field/method selector through
+        // a single pointer to a struct (`*S`), never through a pointer to a
+        // non-struct (`*int`, `*string`, `*[]T`, `*map[K]V`, `*bool`, `*chan T`)
+        // or a multi-level pointer (`**S`, `**int`).
+        let is_struct_like = match bk {
+            OpKind::Struct(_) => true,
+            OpKind::Pointer(inner) => matches!(inner.as_ref(), OpKind::Struct(_)),
+            _ => false,
+        };
+        let has_field = is_struct_like && self.struct_field_kind(bk, name).is_some();
+        let sn_opt = if is_struct_like {
+            self.struct_base_name(bk)
+        } else {
+            None
+        };
         let has_method = sn_opt
             .as_ref()
             .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn.clone(), name.to_string())));
 
-        let is_struct_like = matches!(bk, OpKind::Struct(_) | OpKind::Pointer(_));
         let struct_known = if is_struct_like {
             sn_opt.as_ref().is_some_and(|sn| self.ck.structs.contains_key(sn))
         } else {
