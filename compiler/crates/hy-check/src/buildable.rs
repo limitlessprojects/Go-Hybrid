@@ -4671,6 +4671,36 @@ impl<'a> Collector<'a> {
             }
         }
     }
+
+    fn check_hy_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        if matches!(member, "send_cap" | "recv_cap" | "channel") {
+            self.emit_e1002(
+                span,
+                format!("cannot call `hy.{member}`: `hy.{member}` is a capability type, not a function (HYB-E1002)"),
+                &format!("`hy.{member}` is a linear channel capability type, not a callable function"),
+            );
+            return;
+        }
+
+        if matches!(member, "pipe" | "new_pipe") {
+            if args.iter().any(|a| a.spread) {
+                self.emit_e1002(
+                    span,
+                    format!("cannot use `...` in call to non-variadic `hy.{member}` (HYB-E1002)"),
+                    &format!("`hy.{member}` does not accept variadic spread arguments"),
+                );
+                return;
+            }
+
+            if args.len() > 1 {
+                self.emit_e1002(
+                    span,
+                    format!("`hy.{member}` takes at most 1 argument `([cap])`, got {} (HYB-E1002)", args.len()),
+                    &format!("provide 0 arguments for unbuffered or 1 integer capacity argument to `hy.{member}`"),
+                );
+            }
+        }
+    }
     fn emit_e1002(&mut self, span: Span, msg: String, note: &str) {
         self.diags.push(
             Diagnostic::error("HYB-E1002", self.path.clone(), span, msg)
@@ -8413,6 +8443,9 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "sync" && self.lookup_kind(pkg).is_none() {
                         self.check_sync_package_call(name.as_str(), args, span);
+                    }
+                    if pkg == "hy" && self.lookup_kind(pkg).is_none() {
+                        self.check_hy_package_call(name.as_str(), args, span);
                     }
                     if pkg == "fmt" && self.lookup_kind(pkg).is_none() {
                         let method = name.as_str();
