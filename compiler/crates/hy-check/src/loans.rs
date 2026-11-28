@@ -287,6 +287,113 @@ impl<'a> Checker<'a> {
                         return;
                     }
                 }
+                // Issue #4537: arity and sendability validation for hy.send_cap / hy.recv_cap
+                if tname == "hy.send_cap" || tname.starts_with("hy.send_cap[") {
+                    if method == "close" {
+                        if !cr.args.is_empty() {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    "HYB-E1002",
+                                    self.path.clone(),
+                                    cr.span,
+                                    format!(
+                                        "`{}` takes 0 arguments but is called with {} — Go refuses `too many arguments in call to {}.{}` (HYB-E1002)",
+                                        cr.callee.render(),
+                                        cr.args.len(),
+                                        tname,
+                                        method
+                                    ),
+                                )
+                            );
+                            return;
+                        }
+                    } else if method == "send" {
+                        if cr.args.is_empty() {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    "HYB-E1002",
+                                    self.path.clone(),
+                                    cr.span,
+                                    format!(
+                                        "`{}` takes 1 argument but is called with 0 — Go refuses `not enough arguments in call to {}.{}` (HYB-E1002)",
+                                        cr.callee.render(),
+                                        tname,
+                                        method
+                                    ),
+                                )
+                            );
+                            return;
+                        } else if cr.args.len() > 1 {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    "HYB-E1002",
+                                    self.path.clone(),
+                                    cr.span,
+                                    format!(
+                                        "`{}` takes 1 argument but is called with {} — Go refuses `too many arguments in call to {}.{}` (HYB-E1002)",
+                                        cr.callee.render(),
+                                        cr.args.len(),
+                                        tname,
+                                        method
+                                    ),
+                                )
+                            );
+                            return;
+                        }
+
+                        // Validate payload sendability and element type match against T
+                        let payload_arg = &cr.args[0].value;
+                        let desc = format!("the send `{}`", cr.callee.render());
+                        let managed = false;
+                        let want_shape = if let Some(bracket_idx) = tname.find('[') {
+                            let inner_ty = &tname[bracket_idx + 1..tname.len().saturating_sub(1)];
+                            Some(self.named_shape(inner_ty))
+                        } else {
+                            self.lookup_binding(st, &root).and_then(|b| {
+                                if let Some(hy_syntax::TypeExpr::Named { name, .. }) = &b.ty {
+                                    if let Some(bracket_idx) = name.find('[') {
+                                        let inner_ty = &name[bracket_idx + 1..name.len().saturating_sub(1)];
+                                        return Some(self.named_shape(inner_ty));
+                                    }
+                                }
+                                None
+                            })
+                        };
+                        let target_shapes = want_shape.as_ref().map(|s| vec![s.clone()]);
+                        self.check_site(
+                            st,
+                            cr.span,
+                            "HYB-E3002",
+                            &[payload_arg],
+                            managed,
+                            &desc,
+                            false,
+                            None,
+                            target_shapes.as_deref(),
+                        );
+                    }
+                } else if tname == "hy.recv_cap" || tname.starts_with("hy.recv_cap[") {
+                    if method == "recv" || method == "drain" {
+                        if !cr.args.is_empty() {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    "HYB-E1002",
+                                    self.path.clone(),
+                                    cr.span,
+                                    format!(
+                                        "`{}` takes 0 arguments but is called with {} — Go refuses `too many arguments in call to {}.{}` (HYB-E1002)",
+                                        cr.callee.render(),
+                                        cr.args.len(),
+                                        tname,
+                                        method
+                                    ),
+                                )
+                            );
+                            return;
+                        }
+                    }
+                }
+
                 let receiver_moved = self
                     .lookup_binding(st, &root)
                     .map(|b| b.moved.is_some())

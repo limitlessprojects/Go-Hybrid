@@ -96,7 +96,7 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
         return Some(TypeShape::Unknown);
     }
     match base {
-        "hy.send_cap" | "hy.recv_cap" => Some(TypeShape::OwnHandle(base.into())),
+        "hy.send_cap" | "hy.recv_cap" => Some(TypeShape::OwnHandle(name.into())),
         "error" => Some(TypeShape::ForeignOpaque("error".into())),
         "serde_json.value" => Some(TypeShape::OwnHandle("serde_json.value".into())),
         "serde_json.view" => Some(TypeShape::BorrowHandle("serde_json.view".into())),
@@ -119,7 +119,7 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
 /// emitter supports ranging the value handle itself); other handles (e.g.
 /// `flate2.writer`) are NOT iterable and must stay rejected (issue #411).
 pub(crate) fn is_iterable_handle(name: &str) -> bool {
-    name == "serde_json.value" || name == "hy.recv_cap"
+    name == "serde_json.value" || name == "hy.recv_cap" || name.starts_with("hy.recv_cap[")
 }
 
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
@@ -346,7 +346,9 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     /// PushString. Package-level `Parse`/`NewObject`/`NewArray`/
     /// `ToStringPretty` are functions, NOT methods, and `Get`/`Remove` are
     /// not shipped at all.
-    const SERDE_JSON_VALUE: &[&str] = &["array", "int", "string", "set", "push_string"];
+        const HY_SEND_CAP: &[&str] = &["send", "close"];
+    const HY_RECV_CAP: &[&str] = &["recv", "drain"];
+const SERDE_JSON_VALUE: &[&str] = &["array", "int", "string", "set", "push_string"];
     /// `flate2.writer`: the A7 consume-mode fixture (deliberately unbound,
     /// see UNBOUND_RUST_CRATES — the surface is still pinned so the checker
     /// does not invent names).
@@ -695,7 +697,9 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         // at all (`len(v)` is the call form, not `v.len()`). The checker
         // cannot tell the two apart from the shape alone, so rejecting names
         // here would break legal element code — view stays fail-open.
-        "serde_json.value" => Some(SERDE_JSON_VALUE),
+        r if r == "hy.send_cap" || r.starts_with("hy.send_cap[") => Some(HY_SEND_CAP),
+        r if r == "hy.recv_cap" || r.starts_with("hy.recv_cap[") => Some(HY_RECV_CAP),
+"serde_json.value" => Some(SERDE_JSON_VALUE),
         "flate2.writer" => Some(FLATE2_WRITER),
         // NOTE: atomics are deliberately NOT gated here, and this is a
         // deliberate regression-free choice, not an oversight.
@@ -723,6 +727,22 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
 /// Result shape of a method call on a typed receiver.
 pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
     match (recv_type, method) {
+        (r, "recv") if r == "hy.recv_cap" || r.starts_with("hy.recv_cap[") => {
+            if let Some(bracket_idx) = r.find('[') {
+                let inner = &r[bracket_idx + 1..r.len().saturating_sub(1)];
+                match inner {
+                    "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64"
+                    | "u8" | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64"
+                    | "usize" | "isize" | "uintptr" | "float32" | "float64" | "f32" | "f64"
+                    | "bool" | "byte" | "rune" | "char" => TypeShape::Primitive,
+                    "string" => TypeShape::Str,
+                    _ => foreign_named_type(inner).unwrap_or(TypeShape::Unknown),
+                }
+            } else {
+                TypeShape::Unknown
+            }
+        }
+
         ("serde_json.value" | "serde_json.view", "array") => {
             // element views: iterating the result yields borrow handles
             TypeShape::BorrowHandle("serde_json.view".into())
