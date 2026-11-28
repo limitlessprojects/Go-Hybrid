@@ -110,10 +110,21 @@ def registry_codes(path: Path) -> dict[str, dict]:
 
 def fixture_verdict(path: Path) -> tuple[str | None, str | None]:
     """(registered verdict, pinned diagnostic code) — case-sensitive, like corpus_harness."""
+    verdicts, pinned = _fixture_markers(path)
+    return (verdicts[0] if len(set(verdicts)) == 1 else None, pinned[0] if pinned else None)
+
+
+def _fixture_markers(path: Path) -> tuple[list[str], list[str]]:
     text = path.read_text(encoding="utf-8")
-    verdict = VERDICT_RE.search(text)
-    pinned = DIAGNOSTIC_RE.search(text)
-    return (verdict.group(1) if verdict else None, pinned.group(1) if pinned else None)
+    return VERDICT_RE.findall(text), DIAGNOSTIC_RE.findall(text)
+
+
+def _has_valid_markers(doc: str) -> bool:
+    return (
+        doc.count(BEGIN) == 1
+        and doc.count(END) == 1
+        and doc.index(BEGIN) < doc.index(END)
+    )
 
 
 def render_table(table: dict) -> str:
@@ -187,21 +198,28 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
             if not fixture.is_file():
                 problems.append(f"{where}: fixture {path_rel} does not exist")
                 continue
-            if not str(path_rel).startswith(corpus_rel):
+            corpus_dir = (root / corpus_rel).resolve()
+            if Path(path_rel).is_absolute() or not fixture.resolve().is_relative_to(corpus_dir):
                 problems.append(f"{where}: fixture {path_rel} is outside {corpus_rel}")
-            verdict, pinned = fixture_verdict(fixture)
-            if verdict is None:
+            verdicts, pinned_codes = _fixture_markers(fixture)
+            if not verdicts:
                 problems.append(f"{where}: fixture {path_rel} carries no `// EXPECTED-VERDICT:` line")
-            elif verdict != EXPECT_DIRECTION[expect]:
+            elif len(set(verdicts)) > 1:
                 problems.append(
-                    f"{where}: fixture {path_rel} is registered {verdict}, but the row pins it as "
+                    f"{where}: fixture {path_rel} carries conflicting `// EXPECTED-VERDICT:` lines "
+                    f"({', '.join(verdicts)})"
+                )
+            elif verdicts[0] != EXPECT_DIRECTION[expect]:
+                problems.append(
+                    f"{where}: fixture {path_rel} is registered {verdicts[0]}, but the row pins it as "
                     f"`{expect}` — the fixture contradicts the row"
                 )
-            if pinned and pinned not in rules:
-                problems.append(
-                    f"{where}: fixture {path_rel} pins {pinned}, which the row does not claim "
-                    f"({', '.join(rules) or 'no rules'})"
-                )
+            for pinned in pinned_codes:
+                if pinned not in rules:
+                    problems.append(
+                        f"{where}: fixture {path_rel} pins {pinned}, which the row does not claim "
+                        f"({', '.join(rules) or 'no rules'})"
+                    )
 
         declared = {e.get("path") for e in fixtures}
         for cited in sorted(set(CORPUS_PATH_RE.findall(evidence_md))):
@@ -210,10 +228,19 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
                     f"{where}: the evidence cell cites {cited}, which is not declared in `fixtures`"
                 )
 
+        root_resolved = root.resolve()
         for target in LINK_RE.findall(evidence_md):
             if target.startswith(("http://", "https://", "#", "mailto:")):
                 continue
-            if not (root / target).exists():
+            rel_target = target.split("#", 1)[0]
+            if not rel_target:
+                continue
+            resolved_link = (root / rel_target).resolve()
+            if (
+                Path(rel_target).is_absolute()
+                or not resolved_link.is_relative_to(root_resolved)
+                or not resolved_link.exists()
+            ):
                 problems.append(f"{where}: evidence link `{target}` does not exist")
 
     for code, entry in sorted(codes.items()):
@@ -239,7 +266,7 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
         problems.append(f"doc: {doc_rel} does not exist")
     else:
         doc = doc_path.read_text(encoding="utf-8")
-        if BEGIN in doc and END in doc:
+        if _has_valid_markers(doc):
             current = doc[doc.index(BEGIN) : doc.index(END) + len(END)] + "\n"
             if current != rendered:
                 problems.append(
@@ -260,8 +287,13 @@ def write_doc(root: Path, table_path: Path, doc_override: str | None = None) -> 
     if not doc_path.is_file():
         raise Misuse(f"doc: {doc_path} does not exist")
     doc = doc_path.read_text(encoding="utf-8")
-    if BEGIN in doc and END in doc:
-        updated = doc[: doc.index(BEGIN)] + rendered + doc[doc.index(END) + len(END) + 1 :]
+    if _has_valid_markers(doc):
+        tail_start = doc.index(END) + len(END)
+        if doc[tail_start : tail_start + 1] == "\n":
+            tail_start += 1
+        updated = doc[: doc.index(BEGIN)] + rendered + doc[tail_start:]
+    elif BEGIN in doc or END in doc:
+        raise Misuse(f"doc: malformed generated-table markers in {doc_path}")
     else:
         # first adoption: replace the contiguous table block that follows the header row
         lines = doc.splitlines(keepends=True)
