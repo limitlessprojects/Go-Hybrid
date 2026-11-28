@@ -167,6 +167,42 @@ pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
     }
 }
 
+/// `true` for a package-level append-family call (`fmt.append`,
+/// `strconv.append_int`, ...): like the builtin `append(dst, ..)` it writes
+/// into the spare capacity of its first argument in place, so a bounded
+/// reslice of a `const` passed there overwrites the `const` (T22, HYB-E3006).
+pub(crate) fn package_appends_into_first_arg(pkg: &str, method: &str) -> bool {
+    matches!(
+        (pkg, method),
+        (
+            "fmt",
+            "append" | "appendf" | "appendln" | "Append" | "Appendf" | "Appendln"
+        ) | (
+            "strconv",
+            "append_bool"
+                | "append_float"
+                | "append_int"
+                | "append_uint"
+                | "append_quote"
+                | "append_quote_rune"
+                | "append_quote_rune_to_ascii"
+                | "append_quote_rune_to_graphic"
+                | "append_quote_to_ascii"
+                | "append_quote_to_graphic"
+                | "AppendBool"
+                | "AppendFloat"
+                | "AppendInt"
+                | "AppendUint"
+                | "AppendQuote"
+                | "AppendQuoteRune"
+                | "AppendQuoteRuneToASCII"
+                | "AppendQuoteRuneToGraphic"
+                | "AppendQuoteToASCII"
+                | "AppendQuoteToGraphic"
+        )
+    )
+}
+
 /// Result shape of a package-level call (for defines / loop variables).
 pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
     match (pkg, method) {
