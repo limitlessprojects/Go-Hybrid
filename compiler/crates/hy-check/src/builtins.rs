@@ -893,10 +893,47 @@ impl<'a> Checker<'a> {
             let e = unwrap_parens_and_move(val?); let (sh, (inner, is_addr)) = (self.shape_of_expr(&sa.st, e), match crate::model::as_addr_of(e) { Some(op) => (unwrap_parens_and_move(op), true), None => (e, false) });
             if let Some(r) = inner.root_ident() {
                 if r == "_" { return None; }
-                if let Some(entry) = sc.get(r) { let (cap, wp) = entry.as_ref()?; return if strict && is_addr { (*wp || self.expr_traverses_shared(&sa.st, inner)).then(|| (cap.clone(), true)) } else if strict { self.may_share_or_unk(&sh).then(|| (cap.clone(), matches!(sh, TypeShape::Pointer(_)))) } else { (is_addr || self.may_share_or_unk(&sh)).then(|| (cap.clone(), is_addr || *wp || matches!(sh, TypeShape::Pointer(_)))) }; }
+                if let Some(entry) = sc.get(r) {
+                    let (cap, wp) = entry.as_ref()?;
+                    return if strict && is_addr {
+                        if self.expr_traverses_shared(&sa.st, inner, *wp) {
+                            Some((cap.clone(), true))
+                        } else if self.may_share_or_unk(&self.shape_of_expr(&sa.st, inner)) {
+                            Some((cap.clone(), false))
+                        } else {
+                            None
+                        }
+                    } else if strict {
+                        let next_wp = if is_direct_root_expr(inner) {
+                            *wp && matches!(sh, TypeShape::Pointer(_))
+                        } else {
+                            matches!(sh, TypeShape::Pointer(_))
+                        };
+                        self.may_share_or_unk(&sh).then(|| (cap.clone(), next_wp))
+                    } else {
+                        (is_addr || self.may_share_or_unk(&sh)).then(|| (cap.clone(), is_addr || *wp || matches!(sh, TypeShape::Pointer(_))))
+                    };
+                }
                 return (is_addr || (!matches!(sh, TypeShape::Closure) && self.may_share_or_unk(&sh))).then(|| map_hit(sa.lookup_orig(self, r)).map(|o| (o, is_addr || matches!(sh, TypeShape::Pointer(_))))).flatten();
             }
             let mut os = Vec::new(); if is_addr { self.collect_addr_origins(sa, inner, &mut os); } else { self.collect_shared_origins(sa, e, &mut os); } Some((map_hit(os)?, is_addr || matches!(sh, TypeShape::Pointer(_))))
+        };
+        let slot_loan_hit = |val: &Expr, sc: &ScopeMap, sa: &StateAt| -> Option<Orig> {
+            let op = as_o8_slot_loan_operand(val)?;
+            if let Some(r) = peel_expr_root_ident(op) {
+                return match sc.get(r) {
+                    Some(Some((c, wp))) => self.expr_traverses_shared(&sa.st, op, *wp).then(|| c.clone()),
+                    Some(None) => None,
+                    None => map_hit(sa.lookup_orig(self, r)),
+                };
+            }
+            self.expr_traverses_shared(&sa.st, op, false)
+                .then(|| {
+                    let mut os = Vec::new();
+                    self.collect_shared_origins(sa, op, &mut os);
+                    map_hit(os)
+                })
+                .flatten()
         };
         let flat = crate::walk::flatten(body);
         for (stmt, idx) in &flat.stmts {
@@ -911,11 +948,34 @@ impl<'a> Checker<'a> {
             for cr in calls { if let Some(hit) = self.call_mutates_captured(&sa, cr.callee, cr.args, &scopes, &local_fns, dep, esc_span, &seed_origins, strict, &frames) { return Some(hit); } }
             match stmt {
                 Stmt::Local(l) => {
+                    if matches!(l.kind, LocalKind::Define | LocalKind::Let) && l.ty.is_none() && l.names.len() == l.values.len() {
+                        for (n, v) in l.names.iter().zip(l.values.iter()) {
+                            if n != "_" {
+                                if let Some(hit) = slot_loan_hit(v, scopes.last().unwrap(), &sa) {
+                                    return Some(hit);
+                                }
+                            }
+                        }
+                    }
                     let infos: Vec<_> = l.names.iter().enumerate().map(|(i, n)| (n, classify(l.values.get(i).or_else(|| l.values.first()), scopes.last().unwrap(), &sa))).collect();
                     for (i, n) in l.names.iter().enumerate() { if let Some(Expr::FnLit { params, results, body, .. }) = l.values.get(i).or_else(|| l.values.first()).map(unwrap_parens_and_move) { local_fns.insert(n.clone(), (params, results, body, scopes.clone(), sa.clone())); } else { local_fns.remove(n); } }
                     self.bind_local_stmt(&mut sa, l); for (n, info) in infos { scopes.last_mut().unwrap().insert(n.clone(), info); }
                 }
                 Stmt::Assign { targets, op, values, span } => {
+                    if matches!(op, hy_syntax::AssignOp::Assign)
+                        && targets.len() == values.len()
+                        && targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)))
+                    {
+                        for (t, v) in targets.iter().zip(values.iter()) {
+                            if let PlaceKind::Ident(n) = &t.kind {
+                                if n != "_" {
+                                    if let Some(hit) = slot_loan_hit(v, scopes.last().unwrap(), &sa) {
+                                        return Some(hit);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     for (i, t) in targets.iter().enumerate() {
                         let Some(root) = place_root(t) else { continue };
                         let Some(alias) = scopes.last().unwrap().get(root).cloned() else { if let Some(orig) = map_hit(sa.lookup_orig(self, root)) { return Some(orig); } continue; };
@@ -945,7 +1005,7 @@ impl<'a> Checker<'a> {
             let b = unwrap_parens_and_move(e);
             if let Some(r) = b.root_ident() {
                 return (r != "_").then(|| match sc.get(r) {
-                    Some(Some((c, wp))) if !strict || *wp || { if let Expr::Slice { base, .. } = b { if matches!(self.shape_of_expr(&sa.st, base), TypeShape::Array(_)) { return self.expr_traverses_shared(&sa.st, base).then(|| c.clone()); } } self.may_share_or_unk(&self.shape_of_expr(&sa.st, b)) || self.expr_traverses_shared(&sa.st, b) } => Some(c.clone()),
+                    Some(Some((c, wp))) if !strict || *wp || { if let Expr::Slice { base, .. } = b { if matches!(self.shape_of_expr(&sa.st, base), TypeShape::Array(_)) { return self.expr_traverses_shared(&sa.st, base, *wp).then(|| c.clone()); } } self.may_share_or_unk(&self.shape_of_expr(&sa.st, b)) || self.expr_traverses_shared(&sa.st, b, *wp) } => Some(c.clone()),
                     Some(_) => None, None => map_hit(sa.lookup_orig(self, r)),
                 }).flatten();
             }
@@ -964,7 +1024,23 @@ impl<'a> Checker<'a> {
         let arg_val = |a: &hy_syntax::CallArg, pty: &hy_syntax::TypeExpr| -> Option<(Orig, bool)> {
             let (psh, v) = (self.shape_of_type(pty), unwrap_parens_and_move(&a.value));
             match self.may_share_or_unk(&psh).then(|| crate::model::as_addr_of(v))? {
-                Some(op) => { let op = unwrap_parens_and_move(op); let c = if let Some(r) = op.root_ident() { if r == "_" { return None; } match sc.get(r) { Some(Some((c, wp))) => (*wp || self.may_share_or_unk(&self.shape_of_expr(&sa.st, op)) || self.expr_traverses_shared(&sa.st, op)).then(|| c.clone())?, Some(None) => return None, None => map_hit(sa.lookup_orig(self, r))? } } else { map_hit(self.recv_root_origs(sa, v))? }; Some((c, true)) }
+                Some(op) => {
+                    let op = unwrap_parens_and_move(op);
+                    let (c, ptr_shared) = if let Some(r) = op.root_ident() {
+                        if r == "_" { return None; }
+                        match sc.get(r) {
+                            Some(Some((c, wp))) => {
+                                let shared_shell = self.expr_traverses_shared(&sa.st, op, *wp);
+                                (shared_shell || self.may_share_or_unk(&self.shape_of_expr(&sa.st, op))).then(|| (c.clone(), !strict || shared_shell))?
+                            }
+                            Some(None) => return None,
+                            None => (map_hit(sa.lookup_orig(self, r))?, true),
+                        }
+                    } else {
+                        (map_hit(self.recv_root_origs(sa, v))?, true)
+                    };
+                    Some((c, ptr_shared))
+                }
                 None if matches!(psh, TypeShape::Closure) => Some((match v { Expr::FnLit { params, results, body, .. } => { let mut fsc = sc.clone(); for p in params { fsc.insert(p.name.clone(), None); } self.closure_writes_captured(&sa.st, params, results, body, Some((fsc, dep + 1, esc_span, seed_origins.to_vec(), strict, sa.clone(), frames.to_vec()))) } _ => esc_at(v) }?, false)),
                 None => Some((ref_of(v)?, matches!(psh, TypeShape::Pointer(_)) || matches!(self.shape_of_expr(&sa.st, v), TypeShape::Pointer(_)))),
             }
@@ -991,7 +1067,26 @@ impl<'a> Checker<'a> {
                 let b = unwrap_parens_and_move(base);
                 if let Some((d, ptr_r, vsh)) = self.resolve_method_decl(&sa.st, b, name) {
                     let tgt = crate::model::as_addr_of(b).unwrap_or(b);
-                    let recv = d.receiver.as_ref().map(|r| (r, b, if let Some(id) = tgt.root_ident() { match sc.get(id) { Some(Some((c, wp))) if if ptr_r { *wp || matches!(self.shape_of_expr(&sa.st, b), TypeShape::Pointer(_)) || self.expr_traverses_shared(&sa.st, tgt) } else { self.may_share_or_unk(&vsh) } => Some((c.clone(), ptr_r)), None if !strict && (ptr_r || self.may_share_or_unk(&vsh)) => map_hit(sa.lookup_orig(self, id)).map(|c| (c, ptr_r)), _ => None } } else if ptr_r || self.may_share_or_unk(&vsh) { map_hit(self.recv_root_origs(sa, b)).map(|c| (c, ptr_r)) } else { None }));
+                    let recv = d.receiver.as_ref().map(|r| (r, b, if let Some(id) = tgt.root_ident() {
+                        match sc.get(id) {
+                            Some(Some((c, wp))) => {
+                                if ptr_r {
+                                    let shared_shell = !strict
+                                        || self.expr_traverses_shared(&sa.st, tgt, *wp)
+                                        || (!is_direct_root_expr(b) && matches!(self.shape_of_expr(&sa.st, b), TypeShape::Pointer(_)));
+                                    (shared_shell || self.may_share_or_unk(&vsh)).then(|| (c.clone(), shared_shell))
+                                } else {
+                                    self.may_share_or_unk(&vsh).then(|| (c.clone(), false))
+                                }
+                            }
+                            None if !strict && (ptr_r || self.may_share_or_unk(&vsh)) => map_hit(sa.lookup_orig(self, id)).map(|c| (c, ptr_r)),
+                            _ => None,
+                        }
+                    } else if ptr_r || self.may_share_or_unk(&vsh) {
+                        map_hit(self.recv_root_origs(sa, b)).map(|c| (c, ptr_r))
+                    } else {
+                        None
+                    }));
                     return call_decl(d, recv);
                 }
                 esc_at(callee)
@@ -1076,8 +1171,40 @@ impl<'a> Checker<'a> {
             _ => {}
         }
     }
-    fn place_writes_shared(&self, st: &FnState, p: &Place, root_ptr: bool) -> bool { match &p.kind { PlaceKind::Ident(_) => root_ptr, PlaceKind::AddrOf { base } => self.place_writes_shared(st, base, root_ptr), PlaceKind::Field { base, .. } => matches!(self.place_shape(st, base), Some(TypeShape::Pointer(_) | TypeShape::Unknown) | None) || self.place_writes_shared(st, base, root_ptr), PlaceKind::Index { base, .. } => !matches!(self.place_shape(st, base), Some(TypeShape::Array(_))) || self.place_writes_shared(st, base, root_ptr) } }
-    fn expr_traverses_shared(&self, st: &FnState, expr: &Expr) -> bool { match unwrap_parens_and_move(expr) { Expr::Field { base, .. } => matches!(self.shape_of_expr(st, base), TypeShape::Pointer(_) | TypeShape::Unknown) || self.expr_traverses_shared(st, base), Expr::Index { base, .. } | Expr::Slice { base, .. } => !matches!(self.shape_of_expr(st, base), TypeShape::Array(_) | TypeShape::Str) || self.expr_traverses_shared(st, base), Expr::Try { operand, .. } => self.expr_traverses_shared(st, operand), _ => false } }
+    fn place_writes_shared(&self, st: &FnState, p: &Place, root_ptr: bool) -> bool {
+        match &p.kind {
+            PlaceKind::Ident(_) => root_ptr,
+            PlaceKind::AddrOf { base } => self.place_writes_shared(st, base, root_ptr),
+            PlaceKind::Field { base, .. } => {
+                (!is_direct_root_place(base)
+                    && matches!(self.place_shape(st, base), Some(TypeShape::Pointer(_) | TypeShape::Unknown) | None))
+                    || self.place_writes_shared(st, base, root_ptr)
+            }
+            PlaceKind::Index { base, .. } => {
+                !matches!(self.place_shape(st, base), Some(TypeShape::Array(_)))
+                    || self.place_writes_shared(st, base, root_ptr)
+            }
+        }
+    }
+    fn expr_traverses_shared(&self, st: &FnState, expr: &Expr, root_ptr: bool) -> bool {
+        match unwrap_parens_and_move(expr) {
+            Expr::Ident { .. } => root_ptr,
+            Expr::AddrOf { operand, .. } | Expr::Unary { op: UnOp::Addr, operand, .. } => {
+                self.expr_traverses_shared(st, operand, root_ptr)
+            }
+            Expr::Field { base, .. } => {
+                (!is_direct_root_expr(base)
+                    && matches!(self.shape_of_expr(st, base), TypeShape::Pointer(_) | TypeShape::Unknown))
+                    || self.expr_traverses_shared(st, base, root_ptr)
+            }
+            Expr::Index { base, .. } | Expr::Slice { base, .. } => {
+                !matches!(self.shape_of_expr(st, base), TypeShape::Array(_) | TypeShape::Str)
+                    || self.expr_traverses_shared(st, base, root_ptr)
+            }
+            Expr::Try { operand, .. } => self.expr_traverses_shared(st, operand, root_ptr),
+            _ => false,
+        }
+    }
     fn resolve_method_decl(&self, st: &FnState, base: &Expr, name: &str) -> Option<(&'a hy_syntax::FnDecl, bool, TypeShape)> {
         let vsh = peel_ptr(self.shape_of_expr(st, base)); let rb = match &vsh { TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(s).to_string()), _ => self.ty_of_expr(st, base).map(|t| self.resolve_type_alias(&t)).and_then(|t| Self::base_named_type(&t)) }?;
         let d = *self.method_decls.get(&(rb, name.to_string()))?; Some((d, d.receiver.as_ref()?.is_pointer || matches!(self.resolve_type_alias(&d.receiver.as_ref()?.ty), hy_syntax::TypeExpr::Pointer { .. }), vsh))
@@ -1252,6 +1379,42 @@ fn fn_span(ps: &[hy_syntax::Param], rs: &[hy_syntax::FnResult], b: &hy_syntax::B
 fn prepend_proj(h: Proj, tail: &[Proj]) -> Vec<Proj> { let mut v = Vec::with_capacity(tail.len() + 1); v.push(h); v.extend_from_slice(tail); v }
 fn place_steps(mut p: &Place) -> Option<Vec<Proj>> { let mut s = Vec::new(); loop { match &p.kind { PlaceKind::Ident(_) => { s.reverse(); return Some(s); } PlaceKind::Field { base, name } => { s.push(Proj::Field(name.clone())); p = base; } PlaceKind::Index { base, index } => { s.push(Proj::Index(const_idx(index))); p = base; } PlaceKind::AddrOf { base } => p = base } } }
 fn peel_ptr(mut sh: TypeShape) -> TypeShape { while let TypeShape::Pointer(i) = sh { sh = *i; } sh }
+fn as_o8_slot_loan_operand(expr: &Expr) -> Option<&Expr> {
+    let op = crate::model::as_addr_of(unwrap_parens_and_move(expr))?;
+    let inner = unwrap_parens_and_move(op);
+    matches!(inner, Expr::Index { .. } | Expr::Field { .. }).then_some(inner)
+}
+fn peel_expr_root_ident(mut cur: &Expr) -> Option<&str> {
+    while let Some(next) = match unwrap_parens_and_move(cur) {
+        Expr::Try { operand: o, .. }
+        | Expr::AddrOf { operand: o, .. }
+        | Expr::Unary { op: UnOp::Addr, operand: o, .. } => Some(o),
+        Expr::Field { base: b, .. }
+        | Expr::Index { base: b, .. }
+        | Expr::Slice { base: b, .. } => Some(b),
+        Expr::Ident { name, .. } => return (name != "_").then_some(name.as_str()),
+        _ => None,
+    } {
+        cur = next;
+    }
+    None
+}
+fn is_direct_root_place(p: &Place) -> bool {
+    match &p.kind {
+        PlaceKind::Ident(_) => true,
+        PlaceKind::AddrOf { base } => is_direct_root_place(base),
+        _ => false,
+    }
+}
+fn is_direct_root_expr(e: &Expr) -> bool {
+    match unwrap_parens_and_move(e) {
+        Expr::Ident { .. } => true,
+        Expr::AddrOf { operand, .. } | Expr::Unary { op: UnOp::Addr, operand, .. } => {
+            is_direct_root_expr(operand)
+        }
+        _ => false,
+    }
+}
 fn span_contains(outer: Span, inner: Span) -> bool { outer.start <= inner.start && inner.end <= outer.end }
 fn const_idx(e: &Expr) -> Option<String> { match unwrap_parens(e) { Expr::Lit { kind: LitKind::Int(s) | LitKind::Str(s) | LitKind::RawStr(s), .. } => Some(s.clone()), _ => None } }
 
