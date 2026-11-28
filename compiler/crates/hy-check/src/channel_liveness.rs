@@ -33,6 +33,9 @@ pub struct PipeInfo {
 pub struct ScopeState {
     pub pipes: Vec<PipeInfo>,
     pub moved_caps: HashSet<String>,
+    pub transferred_caps: HashSet<String>,
+    pub closure_moves: HashMap<String, Vec<String>>,
+    pub invoked_closures: HashSet<String>,
 }
 
 pub struct ChannelLivenessChecker {
@@ -72,6 +75,8 @@ impl ChannelLivenessChecker {
             self.check_terminal_invariants(&scope);
             if let Some(parent) = self.scope_stack.last_mut() {
                 parent.moved_caps.extend(scope.moved_caps);
+                parent.transferred_caps.extend(scope.transferred_caps);
+                parent.invoked_closures.extend(scope.invoked_closures);
             }
         }
     }
@@ -98,7 +103,9 @@ impl ChannelLivenessChecker {
     fn check_terminal_invariants(&mut self, scope: &ScopeState) {
         for pipe in &scope.pipes {
             // Check send capability terminal state
-            if !scope.moved_caps.contains(&pipe.tx) && pipe.tx_state != ChannelTypestate::Closed {
+            if !scope.transferred_caps.contains(&pipe.tx)
+                && pipe.tx_state != ChannelTypestate::Closed
+            {
                 self.diags.push(Diagnostic::error(
                     "HYB-E4004",
                     &self.file_path,
@@ -112,7 +119,9 @@ impl ChannelLivenessChecker {
 
             // Check receive capability terminal state
             // If rx was moved into a subtask, the subtask assumed lifecycle responsibility
-            if !scope.moved_caps.contains(&pipe.rx) && pipe.rx_state != ChannelTypestate::Drained {
+            if !scope.transferred_caps.contains(&pipe.rx)
+                && pipe.rx_state != ChannelTypestate::Drained
+            {
                 self.diags.push(Diagnostic::error(
                     "HYB-E4005",
                     &self.file_path,
@@ -145,8 +154,8 @@ impl ChannelLivenessChecker {
                         return;
                     }
                 }
-                for v in &decl.values {
-                    self.check_expr(v);
+                for (i, v) in decl.values.iter().enumerate() {
+                    self.check_bound_value(decl.names.get(i).map(String::as_str), v, false);
                 }
             }
             Stmt::Assign { targets, values, span, .. } => {
@@ -156,8 +165,12 @@ impl ChannelLivenessChecker {
                         return;
                     }
                 }
-                for v in values {
-                    self.check_expr(v);
+                for (i, v) in values.iter().enumerate() {
+                    let target = targets.get(i).and_then(|t| match &t.kind {
+                        PlaceKind::Ident(n) => Some(n.as_str()),
+                        _ => None,
+                    });
+                    self.check_bound_value(target, v, true);
                 }
             }
             Stmt::Expr { expr, .. } => {
@@ -397,11 +410,7 @@ impl ChannelLivenessChecker {
                 self.check_expr(operand);
             }
             Expr::FnLit { body, .. } => {
-                self.push_scope();
-                for s in &body.stmts {
-                    self.check_stmt(s);
-                }
-                self.pop_scope();
+                self.check_uncalled_fn_lit(body);
             }
             Expr::Call { callee, args, span } => {
                 if let Expr::Field { base, name, .. } = callee.as_ref() {
@@ -433,17 +442,28 @@ impl ChannelLivenessChecker {
                         }
                     }
                 }
+                if let Expr::FnLit { body, .. } = Self::unwrap_parens(callee) {
+                    for a in args { self.check_expr(&a.value); }
+                    self.push_scope();
+                    for s in &body.stmts { self.check_stmt(s); }
+                    self.pop_scope();
+                    return;
+                }
+                if let Expr::Ident { name, .. } = Self::unwrap_parens(callee) {
+                    if let Some(caps) = self.lookup_closure_moves(name) {
+                        if self.is_closure_invoked(name) {
+                            for cap in caps {
+                                self.diags.push(Diagnostic::error("HYB-E3001", &self.file_path, *span, format!("affine capability '{}' moved more than once", cap)));
+                            }
+                        } else if let Some(cur) = self.scope_stack.last_mut() {
+                            cur.invoked_closures.insert(name.clone());
+                        }
+                    }
+                }
                 self.check_expr(callee);
                 for a in args {
                     self.check_expr(&a.value);
                 }
-            }
-            Expr::FnLit { body, .. } => {
-                self.push_scope();
-                for s in &body.stmts {
-                    self.check_stmt(s);
-                }
-                self.pop_scope();
             }
             Expr::Receive { chan, span } => {
                 if let Some(cap) = self.get_cap_name(chan) {
@@ -555,7 +575,55 @@ impl ChannelLivenessChecker {
     fn mark_moved(&mut self, name: &str) {
         if let Some(scope) = self.scope_stack.last_mut() {
             scope.moved_caps.insert(name.to_string());
+            scope.transferred_caps.insert(name.to_string());
         }
+    }
+
+    fn unwrap_parens(mut expr: &Expr) -> &Expr {
+        while let Expr::Paren { inner, .. } = expr { expr = inner.as_ref(); }
+        expr
+    }
+
+    fn check_bound_value(&mut self, name: Option<&str>, val: &Expr, is_assign: bool) {
+        if let (true, Some(n)) = (is_assign, name.filter(|n| *n != "_")) {
+            for sc in self.scope_stack.iter_mut().rev() {
+                if sc.closure_moves.remove(n).is_some() { sc.invoked_closures.remove(n); break; }
+            }
+        }
+        if let Expr::FnLit { body, .. } = Self::unwrap_parens(val) {
+            let moved = self.check_uncalled_fn_lit(body);
+            if let (Some(n), false) = (name.filter(|n| *n != "_"), moved.is_empty()) {
+                if let Some(cur) = self.scope_stack.last_mut() { cur.closure_moves.insert(n.to_string(), moved); }
+            }
+        } else {
+            self.check_expr(val);
+        }
+    }
+
+    fn check_uncalled_fn_lit(&mut self, body: &Block) -> Vec<String> {
+        let saved: Vec<Vec<_>> = self.scope_stack.iter().map(|sc| sc.pipes.iter().map(|p| (p.tx_state, p.rx_state)).collect()).collect();
+        self.push_scope();
+        for s in &body.stmts { self.check_stmt(s); }
+        let mut outer_moved = Vec::new();
+        if let Some(scope) = self.scope_stack.pop() {
+            self.check_terminal_invariants(&scope);
+            let local: HashSet<&str> = scope.pipes.iter().flat_map(|p| [p.tx.as_str(), p.rx.as_str()]).collect();
+            outer_moved = scope.moved_caps.iter().filter(|c| !local.contains(c.as_str())).cloned().collect();
+            outer_moved.sort();
+            if let Some(parent) = self.scope_stack.last_mut() { parent.moved_caps.extend(scope.moved_caps); }
+        }
+        for (sc, states) in self.scope_stack.iter_mut().zip(saved) {
+            for (p, (tx_s, rx_s)) in sc.pipes.iter_mut().zip(states) { (p.tx_state, p.rx_state) = (tx_s, rx_s); }
+        }
+        outer_moved
+    }
+
+    fn lookup_closure_moves(&self, name: &str) -> Option<Vec<String>> {
+        self.scope_stack.iter().rev().find_map(|sc| sc.closure_moves.get(name).cloned())
+    }
+
+    fn is_closure_invoked(&self, name: &str) -> bool {
+        self.scope_stack.iter().rev().any(|sc| sc.invoked_closures.contains(name))
     }
 
     fn mark_tx_closed(&mut self, name: &str) {
