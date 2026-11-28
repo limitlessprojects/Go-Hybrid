@@ -558,6 +558,27 @@ impl FnState {
         }
     }
 
+
+    /// Every name currently bound as a live O8 slot loan, across scopes.
+    /// Used by passes that must reason about a loan outliving its frame
+    /// (#3228: a closure returned while the loan is live).
+    pub(crate) fn all_slot_loan_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for layer in &self.scopes {
+            for (name, b) in layer {
+                if b.slot_loan && !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+        }
+        for (name, b) in &self.env {
+            if b.slot_loan && !out.contains(name) {
+                out.push(name.clone());
+            }
+        }
+        out
+    }
+
     /// Innermost-first binding lookup (scopes, then the base env).
     pub(crate) fn env_lookup(&self, name: &str) -> Option<&Binding> {
         for layer in self.scopes.iter().rev() {
