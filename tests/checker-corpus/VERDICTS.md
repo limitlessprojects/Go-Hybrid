@@ -1111,4 +1111,12 @@ the move freeze reach the send path as well.
 | struct-chan-scalars-send-accept | ACCEPT | — | — | channel safe-by-type + immutable scalars; owned `move` over `chan packet`; no use after move |
 | struct-chan-shared-map-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct over the channel freezes that storage, so `m["after"] = 2` is a write through a live alias |
 
-With this registration the corpus is **139 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 92**.
+## Additive corpus registration — 2026-11-14: hy.pipe / capability emit path (#4464)
+
+One `ACCEPT` fixture added WITH the emitter lowering for `hy.pipe[T]` / `hy.new_pipe[T]` and `hy.send_cap[T]` / `hy.recv_cap[T]` (#4464): accepted SPSC capability programs now emit compilable, `-race`-clean Go with `type hy_send_cap[t any] chan<- t`, `type hy_recv_cap[t any] <-chan t`, and `func hy_pipe[t any](cap ...int)` in the generated prelude rather than emitting an unresolvable `import "hy"`.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| hy-pipe-capabilities-accept | ACCEPT | — | — | `hy.pipe` / `hy.new_pipe` + `hy.send_cap` / `hy.recv_cap` + `for v in rx` + `.recv()` / `.drain()` build and print `3 9` |
+
+With this registration the corpus is **140 programs — ACCEPT 46 · ACCEPT-MANAGED 2 · REJECT 92**.
