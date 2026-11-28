@@ -794,13 +794,16 @@ impl<'a> Checker<'a> {
                 self.check_expr_type_conversions(base);
                 self.check_expr_type_conversions(index);
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 self.check_expr_type_conversions(base);
                 if let Some(lo) = lo {
                     self.check_expr_type_conversions(lo);
                 }
                 if let Some(hi) = hi {
                     self.check_expr_type_conversions(hi);
+                }
+                if let Some(max) = max {
+                    self.check_expr_type_conversions(max);
                 }
             }
             Expr::Call { callee, args, span } => {
@@ -962,7 +965,7 @@ impl<'a> Checker<'a> {
                 Expr::FnLit { params, results, body, .. } => params.iter().any(|x| x.name == name) || results.iter().any(|r| r.name.as_deref() == Some(name)) || block_binds(body, name, p),
                 Expr::Binary { lhs, rhs, .. } | Expr::Index { base: lhs, index: rhs, .. } => expr_binds(lhs, name, p) || expr_binds(rhs, name, p),
                 Expr::Unary { operand: x, .. } | Expr::AddrOf { operand: x, .. } | Expr::Move { operand: x, .. } | Expr::Try { operand: x, .. } | Expr::Paren { inner: x, .. } | Expr::Field { base: x, .. } | Expr::Receive { chan: x, .. } => expr_binds(x, name, p),
-                Expr::Slice { base, lo, hi, .. } => expr_binds(base, name, p) || lo.as_deref().is_some_and(|x| expr_binds(x, name, p)) || hi.as_deref().is_some_and(|x| expr_binds(x, name, p)),
+                Expr::Slice { base, lo, hi, max, .. } => expr_binds(base, name, p) || lo.as_deref().is_some_and(|x| expr_binds(x, name, p)) || hi.as_deref().is_some_and(|x| expr_binds(x, name, p)) || max.as_deref().is_some_and(|x| expr_binds(x, name, p)),
                 Expr::Call { callee, args, .. } => expr_binds(callee, name, p) || args.iter().any(|a| expr_binds(&a.value, name, p)),
                 Expr::StructLit { fields, .. } => fields.iter().any(|f| expr_binds(&f.value, name, p)),
                 Expr::SliceLit { items, .. } => items.iter().any(|i| expr_binds(i, name, p)),

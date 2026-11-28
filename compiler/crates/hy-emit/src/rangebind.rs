@@ -82,10 +82,11 @@ pub(crate) fn expr_reads(e: &Expr, target: &str) -> bool {
         | Expr::Try { operand, .. } => expr_reads(operand, target),
         Expr::Receive { chan, .. } => expr_reads(chan, target),
         Expr::Index { base, index, .. } => expr_reads(base, target) || expr_reads(index, target),
-        Expr::Slice { base, lo, hi, .. } => {
+        Expr::Slice { base, lo, hi, max, .. } => {
             expr_reads(base, target)
                 || lo.as_ref().is_some_and(|x| expr_reads(x, target))
                 || hi.as_ref().is_some_and(|x| expr_reads(x, target))
+                || max.as_ref().is_some_and(|x| expr_reads(x, target))
         }
         Expr::Field { base, .. } => expr_reads(base, target),
         Expr::Call { callee, args, .. } => {

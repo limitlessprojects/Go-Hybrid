@@ -414,13 +414,16 @@ impl<'a> Checker<'a> {
                 self.elided_expr(base, None);
                 self.elided_expr(index, None);
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 self.elided_expr(base, None);
                 if let Some(l) = lo {
                     self.elided_expr(l, None);
                 }
                 if let Some(h) = hi {
                     self.elided_expr(h, None);
+                }
+                if let Some(max) = max {
+                    self.elided_expr(max, None);
                 }
             }
             Expr::Field { base, .. } => self.elided_expr(base, None),

@@ -635,13 +635,16 @@ fn walk_expr(ck: &mut TryWalker<'_, '_>, e: &Expr, ctx: Ctx<'_>) {
             walk_expr(ck, base, ctx);
             walk_expr(ck, index, ctx);
         }
-        Expr::Slice { base, lo, hi, .. } => {
+        Expr::Slice { base, lo, hi, max, .. } => {
             walk_expr(ck, base, ctx);
             if let Some(l) = lo {
                 walk_expr(ck, l, ctx);
             }
             if let Some(h) = hi {
                 walk_expr(ck, h, ctx);
+            }
+            if let Some(max) = max {
+                walk_expr(ck, max, ctx);
             }
         }
         Expr::StructLit { ty, fields, .. } => {

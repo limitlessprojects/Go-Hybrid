@@ -336,13 +336,16 @@ impl<'a> Checker<'a> {
                 self.kw_expr(base);
                 self.kw_expr(index);
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 self.kw_expr(base);
                 if let Some(l) = lo {
                     self.kw_expr(l);
                 }
                 if let Some(h) = hi {
                     self.kw_expr(h);
+                }
+                if let Some(max) = max {
+                    self.kw_expr(max);
                 }
             }
             Expr::Field { base, .. } => self.kw_expr(base),

@@ -648,7 +648,7 @@ fn generate_one(
         ));
     };
 
-    let go_src = hy_emit::emit_go_package(&ast, &pkg_name, binding_prefix)
+    let go_src = hy_emit::emit_go_package_with_plan(&ast, &pkg_name, binding_prefix, &result.clip_plan)
         .map_err(|e| format!("[emit] {}: {}", hy.display(), e.message))?;
     let hy_name = hy.file_name().and_then(|n| n.to_str()).unwrap_or("?");
     let header = format!(
@@ -983,7 +983,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
     // and fail closed unless a fresh parse+emit reproduces every hash.
     let mut proof_src: Option<String> = None;
     let go_src = if let Some(pn) = &pkg_name {
-        match hy_emit::emit_go_package(&ast, pn, &binding_prefix) {
+        match hy_emit::emit_go_package_with_plan(&ast, pn, &binding_prefix, &result.clip_plan) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("error [emit]: {}", e.message);
@@ -1002,7 +1002,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
             }
         }
     } else {
-        match hy_emit::emit_go(&ast) {
+        match hy_emit::emit_go_with_plan(&ast, &result.clip_plan) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("error [emit]: {}", e.message);

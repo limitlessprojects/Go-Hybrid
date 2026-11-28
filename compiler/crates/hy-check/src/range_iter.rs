@@ -693,13 +693,17 @@ impl<'a> Checker<'a> {
                 Self::range_bound_has_call_or_recv(base)
                     || Self::range_bound_has_call_or_recv(index)
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 Self::range_bound_has_call_or_recv(base)
                     || lo
                         .as_deref()
                         .map(Self::range_bound_has_call_or_recv)
                         .unwrap_or(false)
                     || hi
+                        .as_deref()
+                        .map(Self::range_bound_has_call_or_recv)
+                        .unwrap_or(false)
+                    || max
                         .as_deref()
                         .map(Self::range_bound_has_call_or_recv)
                         .unwrap_or(false)
@@ -742,12 +746,15 @@ impl<'a> Checker<'a> {
                 Self::range_bound_mentions_ident(base, target)
                     || Self::range_bound_mentions_ident(index, target)
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 Self::range_bound_mentions_ident(base, target)
                     || lo
                         .as_ref()
                         .is_some_and(|x| Self::range_bound_mentions_ident(x, target))
                     || hi
+                        .as_ref()
+                        .is_some_and(|x| Self::range_bound_mentions_ident(x, target))
+                    || max
                         .as_ref()
                         .is_some_and(|x| Self::range_bound_mentions_ident(x, target))
             }

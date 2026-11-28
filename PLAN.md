@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor #1927 / PR #1995 (rebased on upstream 2026-11-24): checker-planned capacity-clipped two-index slices and explicit full-slice maximum syntax, keeping strings and unknown bases on their original two-index path. Original reproducible trials remain recorded in the PR's isolated spike; rebase-specific Rust/Go workspace, corpus, and differential validation plus maintainer CI are still pending.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.

@@ -1,0 +1,1568 @@
+Benchmark attempt 2: complete raw text artifacts; file contents below are unedited.
+
+===== metadata.json =====
+{
+  "platform": "Linux-6.17.0-1020-oracle-aarch64-with-glibc2.39",
+  "machine": "aarch64",
+  "samples": 11,
+  "benchtime": "500ms",
+  "cpus": 1,
+  "threshold": 1.05,
+  "start_utc": "2026-10-27T03:20:31Z",
+  "protocol_sha256": "0856843ce58efafc3e1a6e89b3e982abede41006454006b0e4defd480348d466",
+  "compilers": {
+    "main": {
+      "path": "/tmp/e94889af-target/hyb-main",
+      "sha256": "0239f3f4a5452bbe1dee5737572b70f9b6bf4e6c896dbf0a4c69d130a4e9c5a3"
+    },
+    "patched": {
+      "path": "/tmp/e94889af-target/hyb-clip-final",
+      "sha256": "15eb114c8c5e901b6c398f5c1ce722558ec8e575310156bd21a0c3382af83f66"
+    }
+  }
+}
+
+===== cpuinfo.txt =====
+processor	: 0
+BogoMIPS	: 50.00
+Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp
+CPU implementer	: 0x41
+CPU architecture: 8
+CPU variant	: 0x3
+CPU part	: 0xd0c
+CPU revision	: 1
+
+processor	: 1
+BogoMIPS	: 50.00
+Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp
+CPU implementer	: 0x41
+CPU architecture: 8
+CPU variant	: 0x3
+CPU part	: 0xd0c
+CPU revision	: 1
+
+
+===== go-version.log =====
+$ go version
+go version go1.26.9 linux/arm64
+
+exit=0 elapsed=0.004739s
+
+===== rust-version.log =====
+$ rustc -vV
+rustc 1.99.0 (b940084d7 2026-09-28)
+binary: rustc
+commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4
+commit-date: 2026-09-28
+host: aarch64-unknown-linux-gnu
+release: 1.99.0
+LLVM version: 23.1.1
+
+exit=0 elapsed=0.010030s
+
+===== checkout.log =====
+$ git rev-parse HEAD
+abc2dbb52fd10ed5244a27c8151127094ae9f5d0
+
+exit=0 elapsed=0.002669s
+
+===== main-emit.log =====
+$ /tmp/e94889af-target/hyb-main build /home/ubuntu/microbounties/var/live/runs/20261027T020008088887Z/e94889af2803339efb447bd1/repo/spikes/cap-clipped-reslices/workload.hy --package capbench --out-dir /tmp/e94889af-clip-bench-attempt2/main
+package capbench ready at /tmp/e94889af-clip-bench-attempt2/main (bindings: none)
+
+exit=0 elapsed=0.036805s
+
+===== main-build.log =====
+$ go test -c -o /tmp/e94889af-clip-bench-attempt2/main/bench
+
+exit=0 elapsed=0.475665s
+
+===== main/capbench.go =====
+package capbench
+
+type store struct {
+	data [1024]int
+}
+
+func View(s []int, lo int, hi int) []int {
+	return s[lo:hi]
+}
+
+func Prefix(s []int, hi int) []int {
+	return s[:hi]
+}
+
+func Suffix(s []int, lo int) []int {
+	return s[lo:]
+}
+
+func Whole(s []int) []int {
+	return s[:]
+}
+
+func ArrayView(s *store, lo int, hi int) []int {
+	return s.data[lo:hi]
+}
+
+func PointerView(s *[1024]int, lo int, hi int) []int {
+	return s[lo:hi]
+}
+
+func Nested(s []int, lo int, hi int) []int {
+	return s[:hi][lo:]
+}
+
+===== main/slice_test.go =====
+package capbench
+
+import "testing"
+
+var headerSink []int
+var sumSink int
+var low = 7
+var high = 768
+
+func BenchmarkSlice(b *testing.B) {
+	s := make([]int, 1024)
+	for i := range s {
+		s[i] = i + 1
+	}
+	st := &store{}
+	copy(st.data[:], s)
+	p := &st.data
+	b.Run("TwoIndex", func(b *testing.B) {
+		var sum int
+		for i := 0; i < b.N; i++ {
+			v := View(s, low, high)
+			headerSink = v
+			sum += v[i&255]
+		}
+		sumSink = sum
+	})
+	b.Run("Prefix", func(b *testing.B) {
+		var sum int
+		for i := 0; i < b.N; i++ {
+			v := Prefix(s, high)
+			headerSink = v
+			sum += v[i&255]
+		}
+		sumSink = sum
+	})
+	b.Run("Suffix", func(b *testing.B) {
+		var sum int
+		for i := 0; i < b.N; i++ {
+			v := Suffix(s, low)
+			headerSink = v
+			sum += v[i&255]
+		}
+		sumSink = sum
+	})
+	b.Run("Whole", func(b *testing.B) {
+		var sum int
+		for i := 0; i < b.N; i++ {
+			v := Whole(s)
+			headerSink = v
+			sum += v[i&255]
+		}
+		sumSink = sum
+	})
+	b.Run("Array", func(b *testing.B) {
+		var sum int
+		for i := 0; i < b.N; i++ {
+			v := ArrayView(st, low, high)
+			headerSink = v
+			sum += v[i&255]
+		}
+		sumSink = sum
+	})
+	b.Run("Pointer", func(b *testing.B) {
+		var sum int
+		for i := 0; i < b.N; i++ {
+			v := PointerView(p, low, high)
+			headerSink = v
+			sum += v[i&255]
+		}
+		sumSink = sum
+	})
+	b.Run("Nested", func(b *testing.B) {
+		var sum int
+		for i := 0; i < b.N; i++ {
+			v := Nested(s, low, high)
+			headerSink = v
+			sum += v[i&255]
+		}
+		sumSink = sum
+	})
+}
+
+===== patched-emit.log =====
+$ /tmp/e94889af-target/hyb-clip-final build /home/ubuntu/microbounties/var/live/runs/20261027T020008088887Z/e94889af2803339efb447bd1/repo/spikes/cap-clipped-reslices/workload.hy --package capbench --out-dir /tmp/e94889af-clip-bench-attempt2/patched
+package capbench ready at /tmp/e94889af-clip-bench-attempt2/patched (bindings: none)
+
+exit=0 elapsed=0.032998s
+
+===== patched-build.log =====
+$ go test -c -o /tmp/e94889af-clip-bench-attempt2/patched/bench
+
+exit=0 elapsed=0.488949s
+
+===== patched/capbench.go =====
+package capbench
+
+// ---- Hybrid prelude: capacity clipping (auto-generated) ----
+func hy_clip_776f726b6c6f61642e6879[s ~[]e, e any](view s) s {
+	return view[:len(view):len(view)]
+}
+
+type store struct {
+	data [1024]int
+}
+
+func View(s []int, lo int, hi int) []int {
+	return hy_clip_776f726b6c6f61642e6879(s[lo:hi])
+}
+
+func Prefix(s []int, hi int) []int {
+	return hy_clip_776f726b6c6f61642e6879(s[:hi])
+}
+
+func Suffix(s []int, lo int) []int {
+	return hy_clip_776f726b6c6f61642e6879(s[lo:])
+}
+
+func Whole(s []int) []int {
+	return hy_clip_776f726b6c6f61642e6879(s[:])
+}
+
+func ArrayView(s *store, lo int, hi int) []int {
+	return hy_clip_776f726b6c6f61642e6879(s.data[lo:hi])
+}
+
+func PointerView(s *[1024]int, lo int, hi int) []int {
+	return hy_clip_776f726b6c6f61642e6879(s[lo:hi])
+}
+
+func Nested(s []int, lo int, hi int) []int {
+	return hy_clip_776f726b6c6f61642e6879(hy_clip_776f726b6c6f61642e6879(s[:hi])[lo:])
+}
+
+===== patched/slice_test.go =====
+package capbench
+
+import "testing"
+
+var headerSink []int
+var sumSink int
+var low = 7
+var high = 768
+
+func BenchmarkSlice(b *testing.B) {
+	s := make([]int, 1024)
+	for i := range s {
+		s[i] = i + 1
+	}
+	st := &store{}
+	copy(st.data[:], s)
+	p := &st.data
+	b.Run("TwoIndex", func(b *testing.B) {
+		var sum int
+		for i := 0; i < b.N; i++ {
+			v := View(s, low, high)
+			headerSink = v
+			sum += v[i&255]
+		}
+		sumSink = sum
+	})
+	b.Run("Prefix", func(b *testing.B) {
+		var sum int
+		for i := 0; i < b.N; i++ {
+			v := Prefix(s, high)
+			headerSink = v
+			sum += v[i&255]
+		}
+		sumSink = sum
+	})
+	b.Run("Suffix", func(b *testing.B) {
+		var sum int
+		for i := 0; i < b.N; i++ {
+			v := Suffix(s, low)
+			headerSink = v
+			sum += v[i&255]
+		}
+		sumSink = sum
+	})
+	b.Run("Whole", func(b *testing.B) {
+		var sum int
+		for i := 0; i < b.N; i++ {
+			v := Whole(s)
+			headerSink = v
+			sum += v[i&255]
+		}
+		sumSink = sum
+	})
+	b.Run("Array", func(b *testing.B) {
+		var sum int
+		for i := 0; i < b.N; i++ {
+			v := ArrayView(st, low, high)
+			headerSink = v
+			sum += v[i&255]
+		}
+		sumSink = sum
+	})
+	b.Run("Pointer", func(b *testing.B) {
+		var sum int
+		for i := 0; i < b.N; i++ {
+			v := PointerView(p, low, high)
+			headerSink = v
+			sum += v[i&255]
+		}
+		sumSink = sum
+	})
+	b.Run("Nested", func(b *testing.B) {
+		var sum int
+		for i := 0; i < b.N; i++ {
+			v := Nested(s, low, high)
+			headerSink = v
+			sum += v[i&255]
+		}
+		sumSink = sum
+	})
+}
+
+===== warmup-patched.log =====
+$ /tmp/e94889af-clip-bench-attempt2/patched/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	229122013	         2.570 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	323640403	         1.851 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	274146252	         2.191 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	380149066	         1.578 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	221816779	         2.702 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	222213537	         2.720 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	236033035	         2.535 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.841408s
+
+===== warmup-main.log =====
+$ /tmp/e94889af-clip-bench-attempt2/main/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	222111862	         2.700 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	322719057	         1.856 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	254638395	         2.361 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	380222974	         1.575 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	222456517	         2.712 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	222676590	         2.699 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	222860469	         2.695 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.894735s
+
+===== sample-01-main.log =====
+$ /tmp/e94889af-clip-bench-attempt2/main/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	221616900	         2.692 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	324622446	         1.853 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	254523722	         2.353 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	381855302	         1.589 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223022204	         2.689 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223180154	         2.689 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	223108550	         2.687 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.885884s
+
+===== sample-01-patched.log =====
+$ /tmp/e94889af-clip-bench-attempt2/patched/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	230804168	         2.559 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	324418629	         1.849 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	274575816	         2.185 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	381695362	         1.571 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223540058	         2.688 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223100587	         2.686 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	238219774	         2.567 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.841300s
+
+===== sample-02-patched.log =====
+$ /tmp/e94889af-clip-bench-attempt2/patched/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	234768210	         2.564 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	324563095	         1.848 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	274565863	         2.185 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	382346647	         1.570 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223358680	         2.686 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223547322	         2.691 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	222953949	         2.583 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.829336s
+
+===== sample-02-main.log =====
+$ /tmp/e94889af-clip-bench-attempt2/main/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	220006093	         2.705 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	318916594	         1.855 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	253901864	         2.411 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	379835247	         1.574 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223457205	         2.684 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223279087	         2.688 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	223405254	         2.688 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=6.416128s
+
+===== sample-03-main.log =====
+$ /tmp/e94889af-clip-bench-attempt2/main/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	223258382	         2.687 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	324748742	         1.847 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	255408955	         2.354 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	381020550	         1.572 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223104668	         2.689 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223358515	         2.688 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	223303915	         2.687 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.880480s
+
+===== sample-03-patched.log =====
+$ /tmp/e94889af-clip-bench-attempt2/patched/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	233582577	         2.641 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	324326809	         1.849 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	274384101	         2.186 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	381280690	         1.572 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223035334	         2.686 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223390149	         2.688 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	238175746	         2.700 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.893915s
+
+===== sample-04-patched.log =====
+$ /tmp/e94889af-clip-bench-attempt2/patched/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	233634385	         2.558 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	324463261	         1.849 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	274718029	         2.185 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	381788436	         1.571 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223235190	         2.686 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223402459	         2.685 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	230687210	         2.682 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.858024s
+
+===== sample-04-main.log =====
+$ /tmp/e94889af-clip-bench-attempt2/main/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	222945996	         2.690 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	324293012	         1.848 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	254990450	         2.353 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	381772303	         1.570 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223377241	         2.686 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223146188	         2.687 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	223328385	         2.686 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.878979s
+
+===== sample-05-main.log =====
+$ /tmp/e94889af-clip-bench-attempt2/main/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	223262137	         2.686 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	324427119	         1.847 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	255214923	         2.350 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	381891078	         1.571 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223425352	         2.685 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223332642	         2.684 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	223343283	         2.687 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.877441s
+
+===== sample-05-patched.log =====
+$ /tmp/e94889af-clip-bench-attempt2/patched/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	234383248	         2.561 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	324919046	         1.847 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	274313751	         2.185 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	381995336	         1.571 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223445356	         2.684 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223106626	         2.689 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	233530719	         2.657 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.858124s
+
+===== sample-06-patched.log =====
+$ /tmp/e94889af-clip-bench-attempt2/patched/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	230580436	         2.571 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	323238271	         1.856 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	273788874	         2.249 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	380453076	         1.574 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	222889182	         2.692 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223001878	         2.689 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	229334403	         2.606 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.855046s
+
+===== sample-06-main.log =====
+$ /tmp/e94889af-clip-bench-attempt2/main/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	221962188	         2.694 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	320944402	         1.863 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	255158574	         2.352 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	380679496	         1.586 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	221795722	         2.696 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	222181315	         2.697 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	222415318	         2.694 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.885895s
+
+===== sample-07-main.log =====
+$ /tmp/e94889af-clip-bench-attempt2/main/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	221784933	         2.696 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	323764398	         1.853 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	254196345	         2.354 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	381168106	         1.575 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	222895341	         2.696 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	222496048	         2.693 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	222227200	         2.694 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.881245s
+
+===== sample-07-patched.log =====
+$ /tmp/e94889af-clip-bench-attempt2/patched/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	232570872	         2.576 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	323172739	         1.857 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	272210413	         2.196 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	381554679	         1.578 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	220058703	         2.690 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	222806612	         2.688 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	224893068	         2.671 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.848728s
+
+===== sample-08-patched.log =====
+$ /tmp/e94889af-clip-bench-attempt2/patched/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	234228286	         2.560 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	324811328	         1.847 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	274553954	         2.185 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	381853458	         1.570 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223306377	         2.686 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223310034	         2.686 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	228459566	         2.678 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.856013s
+
+===== sample-08-main.log =====
+$ /tmp/e94889af-clip-bench-attempt2/main/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	223481876	         2.684 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	325080091	         1.846 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	255332438	         2.352 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	381735192	         1.571 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223616374	         2.687 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223249610	         2.688 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	223181416	         2.688 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.878982s
+
+===== sample-09-main.log =====
+$ /tmp/e94889af-clip-bench-attempt2/main/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	222777788	         2.690 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	324813438	         1.847 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	254875850	         2.351 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	382085925	         1.570 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223359945	         2.688 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223115587	         2.685 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	223448751	         2.687 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.878852s
+
+===== sample-09-patched.log =====
+$ /tmp/e94889af-clip-bench-attempt2/patched/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	234737570	         2.560 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	324895822	         1.845 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	274703690	         2.184 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	382267429	         1.570 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223192839	         2.684 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223422957	         2.688 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	231066631	         2.631 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.847763s
+
+===== sample-10-patched.log =====
+$ /tmp/e94889af-clip-bench-attempt2/patched/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	231783732	         2.563 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	324594769	         1.848 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	274596678	         2.275 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	380496796	         1.580 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	222258646	         2.698 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	222169929	         2.699 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	228242055	         2.588 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.861038s
+
+===== sample-10-main.log =====
+$ /tmp/e94889af-clip-bench-attempt2/main/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	222248043	         2.701 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	323819125	         1.856 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	254027079	         2.362 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	380588414	         1.577 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	219496176	         2.721 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	222547381	         2.697 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	222764821	         2.696 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.887760s
+
+===== sample-11-main.log =====
+$ /tmp/e94889af-clip-bench-attempt2/main/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	220874791	         2.702 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	323365652	         1.855 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	254350785	         2.358 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	380129798	         1.572 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223023297	         2.685 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	223356021	         2.728 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	220398306	         2.700 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.887337s
+
+===== sample-11-patched.log =====
+$ /tmp/e94889af-clip-bench-attempt2/patched/bench -test.run=^$ -test.bench=^BenchmarkSlice$ -test.cpu=1 -test.benchtime=500ms -test.count=1 -test.benchmem
+goos: linux
+goarch: arm64
+pkg: capbench
+BenchmarkSlice/TwoIndex         	233409276	         2.568 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Prefix           	323814024	         1.860 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Suffix           	273979306	         2.204 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Whole            	366974722	         1.584 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Array            	223165279	         2.691 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Pointer          	222802706	         2.694 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSlice/Nested           	234101511	         2.541 ns/op	       0 B/op	       0 allocs/op
+PASS
+
+exit=0 elapsed=5.829955s
+
+===== summary.json =====
+{
+  "Array": {
+    "main_median_ns": 2.688,
+    "patched_median_ns": 2.686,
+    "ratio": 0.9992559523809523,
+    "pass": true,
+    "main": [
+      {
+        "ns": 2.689,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.684,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.689,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.686,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.685,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.696,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.696,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.687,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.688,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.721,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.685,
+        "bytes": 0,
+        "allocs": 0
+      }
+    ],
+    "patched": [
+      {
+        "ns": 2.688,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.686,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.686,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.686,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.684,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.692,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.69,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.686,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.684,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.698,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.691,
+        "bytes": 0,
+        "allocs": 0
+      }
+    ]
+  },
+  "Nested": {
+    "main_median_ns": 2.688,
+    "patched_median_ns": 2.631,
+    "ratio": 0.9787946428571427,
+    "pass": true,
+    "main": [
+      {
+        "ns": 2.687,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.688,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.687,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.686,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.687,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.694,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.694,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.688,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.687,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.696,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.7,
+        "bytes": 0,
+        "allocs": 0
+      }
+    ],
+    "patched": [
+      {
+        "ns": 2.567,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.583,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.7,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.682,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.657,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.606,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.671,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.678,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.631,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.588,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.541,
+        "bytes": 0,
+        "allocs": 0
+      }
+    ]
+  },
+  "Pointer": {
+    "main_median_ns": 2.688,
+    "patched_median_ns": 2.688,
+    "ratio": 1.0,
+    "pass": true,
+    "main": [
+      {
+        "ns": 2.689,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.688,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.688,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.687,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.684,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.697,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.693,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.688,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.685,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.697,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.728,
+        "bytes": 0,
+        "allocs": 0
+      }
+    ],
+    "patched": [
+      {
+        "ns": 2.686,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.691,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.688,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.685,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.689,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.689,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.688,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.686,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.688,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.699,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.694,
+        "bytes": 0,
+        "allocs": 0
+      }
+    ]
+  },
+  "Prefix": {
+    "main_median_ns": 1.853,
+    "patched_median_ns": 1.849,
+    "ratio": 0.9978413383702105,
+    "pass": true,
+    "main": [
+      {
+        "ns": 1.853,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.855,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.847,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.848,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.847,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.863,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.853,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.846,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.847,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.856,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.855,
+        "bytes": 0,
+        "allocs": 0
+      }
+    ],
+    "patched": [
+      {
+        "ns": 1.849,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.848,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.849,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.849,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.847,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.856,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.857,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.847,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.845,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.848,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.86,
+        "bytes": 0,
+        "allocs": 0
+      }
+    ]
+  },
+  "Suffix": {
+    "main_median_ns": 2.353,
+    "patched_median_ns": 2.185,
+    "ratio": 0.928601784955376,
+    "pass": true,
+    "main": [
+      {
+        "ns": 2.353,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.411,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.354,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.353,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.35,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.352,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.354,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.352,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.351,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.362,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.358,
+        "bytes": 0,
+        "allocs": 0
+      }
+    ],
+    "patched": [
+      {
+        "ns": 2.185,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.185,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.186,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.185,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.185,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.249,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.196,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.185,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.184,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.275,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.204,
+        "bytes": 0,
+        "allocs": 0
+      }
+    ]
+  },
+  "TwoIndex": {
+    "main_median_ns": 2.692,
+    "patched_median_ns": 2.563,
+    "ratio": 0.9520802377414561,
+    "pass": true,
+    "main": [
+      {
+        "ns": 2.692,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.705,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.687,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.69,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.686,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.694,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.696,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.684,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.69,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.701,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.702,
+        "bytes": 0,
+        "allocs": 0
+      }
+    ],
+    "patched": [
+      {
+        "ns": 2.559,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.564,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.641,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.558,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.561,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.571,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.576,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.56,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.56,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.563,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 2.568,
+        "bytes": 0,
+        "allocs": 0
+      }
+    ]
+  },
+  "Whole": {
+    "main_median_ns": 1.572,
+    "patched_median_ns": 1.571,
+    "ratio": 0.9993638676844783,
+    "pass": true,
+    "main": [
+      {
+        "ns": 1.589,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.574,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.572,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.57,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.571,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.586,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.575,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.571,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.57,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.577,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.572,
+        "bytes": 0,
+        "allocs": 0
+      }
+    ],
+    "patched": [
+      {
+        "ns": 1.571,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.57,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.572,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.571,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.571,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.574,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.578,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.57,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.57,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.58,
+        "bytes": 0,
+        "allocs": 0
+      },
+      {
+        "ns": 1.584,
+        "bytes": 0,
+        "allocs": 0
+      }
+    ]
+  }
+}
+
+===== source-freeze.json =====
+{
+  "source_commit": "abc2dbb52fd10ed5244a27c8151127094ae9f5d0",
+  "base": "1f0ff978f4deff78c77bca96db0e3e46f32de71b",
+  "compiler": "/tmp/e94889af-target/hyb-clip-final",
+  "compiler_sha256": "15eb114c8c5e901b6c398f5c1ce722558ec8e575310156bd21a0c3382af83f66",
+  "source_diff_sha256": "a3752ed9000ad71680d46b90a1547593d3aaee73fe0678923ddd4ce7f2d99c99",
+  "at": "2026-10-27T03:17:36.464207+00:00"
+}

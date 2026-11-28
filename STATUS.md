@@ -1,5 +1,7 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor #1927 / PR #1995: rebased clip-plan / full-slice implementation against current upstream; review and full rebase-specific Rust tests pending. No acceptance or payout claimed.
+
 - Contributor (2026-11-07): runtime Cargo builds now resolve relative `CARGO_TARGET_DIR` from the caller, matching staticlib discovery. Four CLI regressions pass (two failed before); real Cargo smoke passes all four path modes and fresh reuse. Pinned macOS validation on `4cda40a`: workspace 2945/2945, corpus 135/135, differential 45/45 + 90/90 and guards pass. Hosted CI/review pending; see PLAN.md.
 - Contributor (2026-11-07): `hyb build` preserves unmarked/unreadable Go sidecars before compilation; marked outputs remain reusable, while legacy unmarked output requires explicit migration. Six CLI regressions, pinned macOS workspace 2947/2947, corpus 135/135 and differential 45/45 + 90/90 pass. Hosted CI/review pending; see PLAN.md.
 - Contributor (2026-11-06): triage board updates validate the configured issue or one trusted discovery result; 12 offline regressions pass. Baseline overwrote a marker-quoting issue. No live writes or compiler tests; CI/review pending. See PLAN.md.

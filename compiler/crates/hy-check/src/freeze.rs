@@ -751,10 +751,11 @@ impl<'a> Checker<'a> {
             hy_syntax::Expr::Index { base, index, .. } => {
                 Self::expr_mutates_var(base, var) || Self::expr_mutates_var(index, var)
             }
-            hy_syntax::Expr::Slice { base, lo, hi, .. } => {
+            hy_syntax::Expr::Slice { base, lo, hi, max, .. } => {
                 Self::expr_mutates_var(base, var)
                     || lo.as_ref().map_or(false, |e| Self::expr_mutates_var(e, var))
                     || hi.as_ref().map_or(false, |e| Self::expr_mutates_var(e, var))
+                    || max.as_ref().map_or(false, |e| Self::expr_mutates_var(e, var))
             }
             hy_syntax::Expr::Field { base, .. } => Self::expr_mutates_var(base, var),
             hy_syntax::Expr::Call { callee, args, .. } => {
@@ -824,7 +825,7 @@ impl<'a> Checker<'a> {
             Expr::Interp { parts, .. } => parts.iter().any(|p| matches!(p, hy_syntax::InterpPart::Expr(e) if self.expr_auto_addr_var(st, od, e, var, sc))),
             Expr::Binary { lhs: a, rhs: b, .. } | Expr::Index { base: a, index: b, .. } => self.expr_auto_addr_var(st, od, a, var, sc) || self.expr_auto_addr_var(st, od, b, var, sc),
             Expr::Unary { operand: e, .. } | Expr::AddrOf { operand: e, .. } | Expr::Move { operand: e, .. } | Expr::Try { operand: e, .. } | Expr::Receive { chan: e, .. } | Expr::Field { base: e, .. } | Expr::Paren { inner: e, .. } => self.expr_auto_addr_var(st, od, e, var, sc),
-            Expr::Slice { base, lo, hi, .. } => self.expr_auto_addr_var(st, od, base, var, sc) || lo.as_ref().is_some_and(|e| self.expr_auto_addr_var(st, od, e, var, sc)) || hi.as_ref().is_some_and(|e| self.expr_auto_addr_var(st, od, e, var, sc)),
+            Expr::Slice { base, lo, hi, max, .. } => self.expr_auto_addr_var(st, od, base, var, sc) || lo.as_ref().is_some_and(|e| self.expr_auto_addr_var(st, od, e, var, sc)) || hi.as_ref().is_some_and(|e| self.expr_auto_addr_var(st, od, e, var, sc)) || max.as_ref().is_some_and(|e| self.expr_auto_addr_var(st, od, e, var, sc)),
             Expr::Call { callee, args, .. } => self.call_auto_addr_var(st, od, callee, args, var, sc),
             Expr::StructLit { fields, .. } => fields.iter().any(|f| self.expr_auto_addr_var(st, od, &f.value, var, sc)),
             Expr::SliceLit { items, .. } => items.iter().any(|e| self.expr_auto_addr_var(st, od, e, var, sc)),

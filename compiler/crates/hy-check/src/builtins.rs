@@ -270,13 +270,16 @@ impl<'a> Checker<'a> {
                 self.check_expr_builtin_args(st, base);
                 self.check_expr_builtin_args(st, index);
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 self.check_expr_builtin_args(st, base);
                 if let Some(lo) = lo {
                     self.check_expr_builtin_args(st, lo);
                 }
                 if let Some(hi) = hi {
                     self.check_expr_builtin_args(st, hi);
+                }
+                if let Some(max) = max {
+                    self.check_expr_builtin_args(st, max);
                 }
             }
             Expr::Field { base, .. } => self.check_expr_builtin_args(st, base),
@@ -1499,10 +1502,11 @@ fn is_go_const_len_cap_operand(e: &Expr, fns: &HashMap<String, &'a hy_syntax::Fn
             Self::is_go_const_len_cap_operand(base, fns)
                 && Self::is_go_const_len_cap_operand(index, fns)
         }
-        Expr::Slice { base, lo, hi, .. } => {
+        Expr::Slice { base, lo, hi, max, .. } => {
             Self::is_go_const_len_cap_operand(base, fns)
                 && lo.as_ref().is_none_or(|x| Self::is_go_const_len_cap_operand(x, fns))
                 && hi.as_ref().is_none_or(|x| Self::is_go_const_len_cap_operand(x, fns))
+                && max.as_ref().is_none_or(|x| Self::is_go_const_len_cap_operand(x, fns))
         }
         Expr::StructLit { fields, .. } => fields
             .iter()
