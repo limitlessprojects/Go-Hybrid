@@ -128,6 +128,7 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
         ("serde_json", "parse" | "new_object" | "new_array")
         | ("flate2", "new_writer")
         | ("json" | "encoding/json", "new_decoder" | "new_encoder" | "NewDecoder" | "NewEncoder")
+        | ("adler32" | "hash/adler32", "new" | "New")
         | (
             "httptest" | "net/http/httptest",
             "new_server"
@@ -203,6 +204,10 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("json" | "encoding/json", "new_encoder" | "NewEncoder") => {
             TypeShape::ForeignOpaque("json.encoder".into())
         }
+        ("adler32" | "hash/adler32", "new" | "New") => {
+            TypeShape::ForeignOpaque("adler32.hash32".into())
+        }
+        ("adler32" | "hash/adler32", "checksum" | "Checksum") => TypeShape::Primitive,
         (
             "httptest" | "net/http/httptest",
             "new_server"
@@ -809,6 +814,8 @@ pub(crate) fn is_curated_import(path: &str) -> bool {
             | "regex"
             | "rust/flate2"
             | "flate2"
+            | "hash/adler32"
+            | "adler32"
     )
 }
 
@@ -878,6 +885,7 @@ pub(crate) fn is_curated_package_root(root: &str) -> bool {
             | "sha3"
             | "regex"
             | "flate2"
+            | "adler32"
     )
 }
 
@@ -913,6 +921,7 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
     let norm = normalize_go_ident_to_snake(member);
     let m = norm.as_str();
     match pkg {
+        "adler32" | "hash/adler32" => matches!(m, "new" | "checksum" | "size"),
         "fmt" => matches!(
             m,
             "print"
