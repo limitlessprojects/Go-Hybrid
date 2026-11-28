@@ -35,12 +35,26 @@ pub struct ScopeState {
     pub moved_caps: HashSet<String>,
 }
 
+fn stmt_exits_loop(stmt: &Stmt, in_sel: bool) -> bool {
+    match stmt {
+        Stmt::Return { .. } => true,
+        Stmt::Break { label, .. } => label.is_some() || !in_sel,
+        Stmt::Block { block: b, .. } | Stmt::Managed { body: b, .. } => b.stmts.iter().any(|s| stmt_exits_loop(s, in_sel)),
+        Stmt::If { then, otherwise: Some(eb), .. } => then.stmts.iter().any(|s| stmt_exits_loop(s, in_sel)) && stmt_exits_loop(eb, in_sel),
+        _ => false,
+    }
+}
+
 pub struct ChannelLivenessChecker {
     file_path: String,
     diags: Vec<Diagnostic>,
     scope_stack: Vec<ScopeState>,
     cap_to_pipe: HashMap<String, usize>,
     pipes_all: Vec<PipeInfo>,
+    fn_floors: Vec<usize>,
+    loop_floors: Vec<usize>,
+    select_floors: Vec<usize>,
+    emitted_terminal: HashSet<(u32, u32, &'static str, String)>,
 }
 
 impl ChannelLivenessChecker {
@@ -51,6 +65,27 @@ impl ChannelLivenessChecker {
             scope_stack: vec![ScopeState::default()],
             cap_to_pipe: HashMap::new(),
             pipes_all: Vec::new(),
+            fn_floors: Vec::new(),
+            loop_floors: Vec::new(),
+            select_floors: Vec::new(),
+            emitted_terminal: HashSet::new(),
+        }
+    }
+
+    fn break_floor(&self, label: &Option<String>) -> Option<usize> {
+        if label.is_none() { self.select_floors.last().or(self.loop_floors.last()).copied() } else { self.loop_floors.last().copied() }
+    }
+
+    fn stmt_exit_floor(&self, stmt: &Stmt) -> Option<usize> {
+        match stmt {
+            Stmt::Return { .. } => self.fn_floors.last().copied(),
+            Stmt::Continue { .. } => self.loop_floors.last().copied(),
+            Stmt::Break { label, .. } => self.break_floor(label),
+            Stmt::Block { block: b, .. } | Stmt::Managed { body: b, .. } => b.stmts.iter().find_map(|s| self.stmt_exit_floor(s)),
+            Stmt::If { then, otherwise: Some(eb), .. } => {
+                then.stmts.iter().find_map(|s| self.stmt_exit_floor(s)).zip(self.stmt_exit_floor(eb)).map(|(a, b)| a.max(b))
+            }
+            _ => None,
         }
     }
 
@@ -95,44 +130,50 @@ impl ChannelLivenessChecker {
         }
     }
 
-    fn check_terminal_invariants(&mut self, scope: &ScopeState) {
-        for pipe in &scope.pipes {
-            // Check send capability terminal state
-            if !scope.moved_caps.contains(&pipe.tx) && pipe.tx_state != ChannelTypestate::Closed {
-                self.diags.push(Diagnostic::error(
-                    "HYB-E4004",
-                    &self.file_path,
-                    pipe.def_span,
-                    format!(
-                        "linear send capability '{}' was not closed before scope exit",
-                        pipe.tx
-                    ),
-                ));
-            }
-
-            // Check receive capability terminal state
-            // If rx was moved into a subtask, the subtask assumed lifecycle responsibility
-            if !scope.moved_caps.contains(&pipe.rx) && pipe.rx_state != ChannelTypestate::Drained {
-                self.diags.push(Diagnostic::error(
-                    "HYB-E4005",
-                    &self.file_path,
-                    pipe.def_span,
-                    format!(
-                        "linear receive capability '{}' was not drained before scope exit",
-                        pipe.rx
-                    ),
-                ));
-            }
+    fn emit_term(&mut self, p: &PipeInfo, is_tx: bool) {
+        let (code, name, kind, act) = if is_tx {
+            ("HYB-E4004", &p.tx, "send capability", "closed")
+        } else {
+            ("HYB-E4005", &p.rx, "receive capability", "drained")
+        };
+        if self.emitted_terminal.insert((p.def_span.start.line, p.def_span.start.col, code, name.clone())) {
+            self.diags.push(Diagnostic::error(code, &self.file_path, p.def_span, format!("linear {kind} '{name}' was not {act} before scope exit")));
         }
+    }
+
+    fn check_pipe_term(&mut self, p: &PipeInfo, tx_m: bool, rx_m: bool) {
+        if !tx_m && p.tx_state != ChannelTypestate::Closed { self.emit_term(p, true); }
+        if !rx_m && p.rx_state != ChannelTypestate::Drained { self.emit_term(p, false); }
+    }
+
+    fn check_terminal_invariants(&mut self, scope: &ScopeState) {
+        for p in &scope.pipes {
+            let (tm, rm) = (scope.moved_caps.contains(&p.tx) || self.is_moved(&p.tx), scope.moved_caps.contains(&p.rx) || self.is_moved(&p.rx));
+            self.check_pipe_term(p, tm, rm);
+        }
+    }
+
+    fn check_terminal_range(&mut self, from_idx: usize) {
+        let pipes: Vec<PipeInfo> = self.scope_stack.get(from_idx..).map_or(Vec::new(), |s| s.iter().flat_map(|sc| sc.pipes.clone()).collect());
+        for p in pipes {
+            let (tm, rm) = (self.is_moved_in_range(&p.tx, from_idx), self.is_moved_in_range(&p.rx, from_idx));
+            self.check_pipe_term(&p, tm, rm);
+        }
+    }
+
+    fn is_moved_in_range(&self, name: &str, from_idx: usize) -> bool {
+        self.scope_stack.get(from_idx..).map_or(false, |s| s.iter().rev().any(|sc| sc.moved_caps.contains(name)))
     }
 
     fn check_fn(&mut self, f: &FnDecl) {
         self.push_scope();
+        self.fn_floors.push(self.scope_stack.len() - 1);
         if let Some(body) = &f.body {
             for stmt in &body.stmts {
                 self.check_stmt(stmt);
             }
         }
+        self.fn_floors.pop();
         self.pop_scope();
     }
 
@@ -186,41 +227,40 @@ impl ChannelLivenessChecker {
                     }
                     ForKind::Infinite => {}
                 }
-                self.push_scope();
-                for s in &body.stmts {
-                    self.check_stmt(s);
-                }
-                let has_unconditional_exit = matches!(
-                    body.stmts.last(),
-                    Some(Stmt::Break { .. } | Stmt::Return { .. })
-                );
-                if !has_unconditional_exit {
+                for _ in 0..if body.stmts.iter().any(|s| stmt_exits_loop(s, false)) { 1 } else { 2 } {
+                    self.push_scope();
+                    self.loop_floors.push(self.scope_stack.len() - 1);
                     for s in &body.stmts {
                         self.check_stmt(s);
+                        if self.stmt_exit_floor(s).is_some() { break; }
                     }
+                    self.loop_floors.pop();
+                    self.pop_scope();
                 }
-                self.pop_scope();
             }
-            Stmt::If {
-                init,
-                cond,
-                then,
-                otherwise,
-                ..
-            } => {
-                if let Some(i) = init {
-                    self.check_stmt(i);
-                }
+            Stmt::If { init, cond, then, otherwise, .. } => {
+                if let Some(i) = init { self.check_stmt(i); }
                 self.check_expr(cond);
+                let snap = self.scope_stack.clone();
                 self.push_scope();
-                for s in &then.stmts {
-                    self.check_stmt(s);
-                }
+                for s in &then.stmts { self.check_stmt(s); }
                 self.pop_scope();
-                if let Some(eb) = otherwise {
+                let tf = then.stmts.iter().find_map(|s| self.stmt_exit_floor(s));
+                if tf.is_some() { self.scope_stack = snap.clone(); }
+                let ef = otherwise.as_ref().and_then(|eb| {
+                    let se = self.scope_stack.clone();
                     self.push_scope();
                     self.check_stmt(eb);
                     self.pop_scope();
+                    let f = self.stmt_exit_floor(eb);
+                    if f.is_some() { self.scope_stack = se; }
+                    f
+                });
+                if let (Some(a), Some(b)) = (tf, ef) {
+                    for p in self.scope_stack[a.max(b)..].iter_mut().flat_map(|sc| &mut sc.pipes) {
+                        p.tx_state = ChannelTypestate::Closed;
+                        p.rx_state = ChannelTypestate::Drained;
+                    }
                 }
             }
             Stmt::Block { block, .. } => {
@@ -250,6 +290,13 @@ impl ChannelLivenessChecker {
                 for v in values {
                     self.check_expr(v);
                 }
+                if let Some(&floor) = self.fn_floors.last() { self.check_terminal_range(floor); }
+            }
+            Stmt::Break { label, .. } => {
+                if let Some(f) = self.break_floor(label) { self.check_terminal_range(f); }
+            }
+            Stmt::Continue { .. } => {
+                if let Some(&f) = self.loop_floors.last() { self.check_terminal_range(f); }
             }
             Stmt::Managed { body, .. } => {
                 self.push_scope();
@@ -306,13 +353,15 @@ impl ChannelLivenessChecker {
                         SelectArmKind::Default => {}
                     }
                     self.push_scope();
+                    self.select_floors.push(self.scope_stack.len() - 1);
                     for s in &arm.body.stmts {
                         self.check_stmt(s);
+                        if self.stmt_exit_floor(s).is_some() { break; }
                     }
+                    self.select_floors.pop();
                     self.pop_scope();
                 }
             }
-            _ => {}
         }
     }
 
@@ -395,13 +444,16 @@ impl ChannelLivenessChecker {
             }
             Expr::Try { operand, .. } => {
                 self.check_expr(operand);
+                if let Some(&floor) = self.fn_floors.last() { self.check_terminal_range(floor); }
             }
             Expr::FnLit { body, .. } => {
+                let (sl, ss) = (std::mem::take(&mut self.loop_floors), std::mem::take(&mut self.select_floors));
                 self.push_scope();
-                for s in &body.stmts {
-                    self.check_stmt(s);
-                }
+                self.fn_floors.push(self.scope_stack.len() - 1);
+                for s in &body.stmts { self.check_stmt(s); }
+                self.fn_floors.pop();
                 self.pop_scope();
+                (self.loop_floors, self.select_floors) = (sl, ss);
             }
             Expr::Call { callee, args, span } => {
                 if let Expr::Field { base, name, .. } = callee.as_ref() {
@@ -437,13 +489,6 @@ impl ChannelLivenessChecker {
                 for a in args {
                     self.check_expr(&a.value);
                 }
-            }
-            Expr::FnLit { body, .. } => {
-                self.push_scope();
-                for s in &body.stmts {
-                    self.check_stmt(s);
-                }
-                self.pop_scope();
             }
             Expr::Receive { chan, span } => {
                 if let Some(cap) = self.get_cap_name(chan) {
@@ -560,7 +605,7 @@ impl ChannelLivenessChecker {
 
     fn mark_tx_closed(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
-            for p in &mut scope.pipes {
+            for p in scope.pipes.iter_mut().rev() {
                 if p.tx == name {
                     p.tx_state = ChannelTypestate::Closed;
                     return;
@@ -571,7 +616,7 @@ impl ChannelLivenessChecker {
 
     fn mark_tx_active(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
-            for p in &mut scope.pipes {
+            for p in scope.pipes.iter_mut().rev() {
                 if p.tx == name && p.tx_state == ChannelTypestate::Fresh {
                     p.tx_state = ChannelTypestate::Active;
                     return;
@@ -582,7 +627,7 @@ impl ChannelLivenessChecker {
 
     fn mark_rx_drained(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
-            for p in &mut scope.pipes {
+            for p in scope.pipes.iter_mut().rev() {
                 if p.rx == name {
                     p.rx_state = ChannelTypestate::Drained;
                     return;
@@ -593,7 +638,7 @@ impl ChannelLivenessChecker {
 
     fn mark_rx_active(&mut self, name: &str) {
         for scope in self.scope_stack.iter_mut().rev() {
-            for p in &mut scope.pipes {
+            for p in scope.pipes.iter_mut().rev() {
                 if p.rx == name && p.rx_state == ChannelTypestate::Fresh {
                     p.rx_state = ChannelTypestate::Active;
                     return;
