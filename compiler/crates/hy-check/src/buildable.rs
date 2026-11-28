@@ -4225,6 +4225,7 @@ impl<'a> Collector<'a> {
                         return Some(Vec::new());
                     }
                     "recover" => return Some(vec![OpKind::Interface]),
+                    "real" | "imag" => return Some(vec![OpKind::Float]),
                     "min" | "max" => {
                         let res_kind = args
                             .iter()
