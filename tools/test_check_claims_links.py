@@ -59,6 +59,28 @@ class CheckClaimsLinksTest(unittest.TestCase):
         self.assertEqual([i["kind"] for i in report["issues"]], ["missing"])
         self.assertIn("15-good.hy", report["issues"][0]["target"])
 
+    def test_optional_outer_pipes_preserve_evidence(self):
+        (self.root / "SPEC-LANGUAGE.md").unlink()
+        for leading, trailing in ((True, False), (False, True), (False, False)):
+            with self.subTest(leading=leading, trailing=trailing):
+                lines = []
+                for line in CLAIMS.splitlines():
+                    if line.startswith("|"):
+                        if not leading:
+                            line = line.removeprefix("|").lstrip()
+                        if not trailing:
+                            line = line.removesuffix("|").rstrip()
+                    lines.append(line)
+                (self.root / "GUARANTEES.md").write_text("\n".join(lines), encoding="utf-8")
+                result = self.run_tool()
+                report = json.loads(result.stdout)
+                self.assertEqual(report["rows"], 2)
+                self.assertEqual(report["links"], 4)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(report["issues"], [
+                    {"row": 1, "kind": "missing", "target": "SPEC-LANGUAGE.md"},
+                ])
+
     def test_angle_delimited_path_with_spaces_is_checked(self):
         for target, fragment, title in (("evidence notes.md", "", ""),
                                         ("evidence (notes).md", "", ' "Evidence title"'),
