@@ -1,0 +1,16 @@
+# expect: accept
+# The witness crosses two helper boundaries and still arrives bound.
+fn classify(m: mesh, i: int, j: int, k: int) -> turn[m@m,(i,j,k)] {
+    o = observe(m, i, j, k)
+    return orientation(o)
+}
+
+fn forward(m: mesh, i: int, j: int, k: int) -> turn[m@m,(i,j,k)] {
+    t = call classify(m, i, j, k)
+    return t
+}
+
+fn hull(m: mesh) {
+    t = call forward(m, 4, 5, 6)
+    insert(m, 4, 5, 6, t)
+}

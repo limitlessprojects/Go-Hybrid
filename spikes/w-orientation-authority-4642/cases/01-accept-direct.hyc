@@ -1,0 +1,7 @@
+# expect: accept
+# The honest path: observe, classify, commit -- same mesh, same epoch, same order.
+fn hull(m: mesh) {
+    o = observe(m, 0, 1, 2)
+    t = orientation(o)
+    insert(m, 0, 1, 2, t)
+}

@@ -1,0 +1,8 @@
+# expect: reject HYB-E4643
+# A coordinate edit between observation and commit.
+fn hull(m: mesh) {
+    o = observe(m, 0, 1, 2)
+    t = orientation(o)
+    edit(m)
+    insert(m, 0, 1, 2, t)
+}

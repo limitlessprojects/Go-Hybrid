@@ -1,0 +1,13 @@
+# expect: reject HYB-E4647
+# The helper edits the mesh it was given before observing, so its '@m' promise
+# cannot hold at the caller: the caller's epoch never moved, the helper's did.
+fn classify(m: mesh) -> turn[m@m,(0,1,2)] {
+    edit(m)
+    o = observe(m, 0, 1, 2)
+    return orientation(o)
+}
+
+fn hull(m: mesh) {
+    t = call classify(m)
+    insert(m, 0, 1, 2, t)
+}

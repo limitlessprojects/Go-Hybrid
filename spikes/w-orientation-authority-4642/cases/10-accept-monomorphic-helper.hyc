@@ -1,0 +1,12 @@
+# expect: accept
+# The cheaper shape: a helper that fixes the triple. No dependent index needed,
+# but it can only ever serve that one triple.
+fn classify012(m: mesh) -> turn[m@m,(0,1,2)] {
+    o = observe(m, 0, 1, 2)
+    return orientation(o)
+}
+
+fn hull(m: mesh) {
+    t = call classify012(m)
+    insert(m, 0, 1, 2, t)
+}

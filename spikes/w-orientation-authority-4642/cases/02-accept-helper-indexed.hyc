@@ -1,0 +1,12 @@
+# expect: accept
+# Classify and commit live in two independently written helpers. The helper's
+# return type is indexed by its own parameters, so no caller bookkeeping.
+fn classify(m: mesh, i: int, j: int, k: int) -> turn[m@m,(i,j,k)] {
+    o = observe(m, i, j, k)
+    return orientation(o)
+}
+
+fn hull(m: mesh) {
+    t = call classify(m, 0, 1, 2)
+    insert(m, 0, 1, 2, t)
+}

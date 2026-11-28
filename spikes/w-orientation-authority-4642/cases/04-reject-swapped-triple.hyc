@@ -1,0 +1,11 @@
+# expect: reject HYB-E4644
+# A valid +1 for (0,1,2) is offered to a write at (0,2,1).
+fn classify(m: mesh) -> turn[m@m,(0,1,2)] {
+    o = observe(m, 0, 1, 2)
+    return orientation(o)
+}
+
+fn hull(m: mesh) {
+    t = call classify(m)
+    insert(m, 0, 2, 1, t)
+}
