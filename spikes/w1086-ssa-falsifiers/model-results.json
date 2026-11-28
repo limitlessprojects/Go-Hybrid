@@ -1,0 +1,30 @@
+{
+  "F1_fresh_control": {
+    "allocations": 2,
+    "consumptions": 2,
+    "ssa_valid": true,
+    "violations": []
+  },
+  "F1_loop_reconsume": {
+    "allocations": 1,
+    "consumptions": 1,
+    "ssa_valid": true,
+    "violations": [
+      "body: consume of consumed storage through map1"
+    ]
+  },
+  "F2_alias_write": {
+    "allocations": 1,
+    "consumptions": 1,
+    "ssa_valid": true,
+    "violations": [
+      "entry: write of consumed storage through peer0"
+    ]
+  },
+  "F2_clone_control": {
+    "allocations": 2,
+    "consumptions": 1,
+    "ssa_valid": true,
+    "violations": []
+  }
+}

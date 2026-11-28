@@ -72,6 +72,7 @@ jobs:
           python3 -m unittest discover -s tools -p test_package_version.py -v
           python3 -m unittest discover -s tools -p test_corpus_utf8.py -v
           python3 -m unittest discover -s tools -p test_check_claims_links.py -v
+          python3 -m unittest discover -s spikes/w1086-ssa-falsifiers -p 'test_*.py' -v
           # Fail closed if any tools/**/test_*.py is matched by no -p pattern
           # above: a suite outside this list would pass CI by never running.
           python3 tools/check_test_registration.py
@@ -165,12 +166,16 @@ jobs:
           cd compiler
           cargo test --workspace --quiet
 
+      - name: SSA map-version falsifier (#1086)
+        run: GO111MODULE=off go test -race -v ./spikes/w1086-ssa-falsifiers
+
       - name: Checker corpus verdict agreement (139/139 + tripwire)
         run: |
           set -e
           cd compiler && cargo build -p hyb --quiet
           cd ..
           python3 tools/corpus_harness.py --bin compiler/target/debug/hyb
+          python3 spikes/w1086-ssa-falsifiers/check_hybrid.py --bin compiler/target/debug/hyb
       - name: Row-13 sample module (existing go.mod integration)
         # The 10-minute story must stay TRUE: vendor-runtime, go generate,
         # ordinary go build/test, and generate --check catching drift.
