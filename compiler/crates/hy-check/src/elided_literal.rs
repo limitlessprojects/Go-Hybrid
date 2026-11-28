@@ -287,7 +287,9 @@ impl<'a> Checker<'a> {
         if is_non_struct_foreign_type(head) {
             return false;
         }
-        self.structs.contains_key(head) || head.contains('.')
+        self.structs.contains_key(head)
+            || self.pkg_names.get(head) == Some(&"struct")
+            || head.contains('.')
     }
 
     fn check_elided_struct_fields(&mut self, exp: Option<&TypeExpr>, fields: &[FieldInit]) {
@@ -300,10 +302,6 @@ impl<'a> Checker<'a> {
             r = self.resolve_type_alias(&to);
         }
         let TypeExpr::Named { name, .. } = &r else { return };
-        let head = name.split('[').next().unwrap_or(name.as_str());
-        let Some(declared) = self.structs.get(head).cloned() else {
-            return;
-        };
 
         let mut seen: HashMap<String, usize> = HashMap::new();
         for f in fields {
@@ -326,6 +324,55 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+
+        if name.starts_with("struct{") || name.starts_with("struct ") {
+            if let (Some(open), Some(close)) = (name.find('{'), name.rfind('}')) {
+                if close >= open {
+                    let body = &name[open + 1..close];
+                    let mut inline_fields: Vec<String> = Vec::new();
+                    for part in body.split(|c| c == ';' || c == '\n' || c == ',') {
+                        let trimmed = part.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        if let Some(tok) = trimmed
+                            .split(|c: char| c.is_whitespace() || c == ':')
+                            .find(|s| !s.is_empty())
+                        {
+                            inline_fields.push(tok.to_string());
+                        }
+                    }
+                    for f in fields {
+                        if !inline_fields.iter().any(|n| n == &f.name) {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    "HYB-E1002",
+                                    self.path.clone(),
+                                    f.span,
+                                    format!(
+                                        "unknown field `{}` in `{}` literal — Go refuses `unknown field {} in struct literal of type {}` (HYB-E1002)",
+                                        f.name, name, f.name, name
+                                    ),
+                                )
+                                .with_notes(vec![
+                                    "a struct literal may only name fields the struct declares".to_string(),
+                                ]),
+                            );
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        let head = name.split('[').next().unwrap_or(name.as_str());
+        let declared = if let Some(d) = self.structs.get(head).cloned() {
+            d
+        } else if self.pkg_names.get(head) == Some(&"struct") {
+            Vec::new()
+        } else {
+            return;
+        };
 
         for f in fields {
             if !declared.iter().any(|(n, _)| n == &f.name) {
