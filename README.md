@@ -13,7 +13,7 @@ and let the compiler prove your new files race-free — one file at a time.*
 [![status: MVP done](https://img.shields.io/badge/MVP-done%20%7C%20G3%20passed-brightgreen)](gates/G3.md)
 [![discuss](https://img.shields.io/badge/discuss-feedback%20%26%20Q%26A-8b5cf6)](https://github.com/limitlessprojects/Go-Hybrid/discussions/1)
 
-[Quick start](#quick-start) · [The guarantee](#what-exactly-does-this-compiler-guarantee-about-my-code) · [Design](#how-it-works) · [Evidence](#evidence-measured) · [Roadmap](PLAN.md) · [Feedback thread](https://github.com/limitlessprojects/Go-Hybrid/discussions/1)
+[Quick start](#quick-start) · [The guarantee](#what-exactly-does-this-compiler-guarantee-about-my-code) · [Design](#how-it-works) · [Evidence](GUARANTEES.md#evidence-inventory-what-backs-the--rows) · [Roadmap](PLAN.md) · [Feedback thread](https://github.com/limitlessprojects/Go-Hybrid/discussions/1)
 
 </div>
 
