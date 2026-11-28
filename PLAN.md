@@ -1,5 +1,10 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — guarantee fixture containment (2026-11-23, #4673)
+
+- On base `b48b1da1cc0702e5f98448ba0c4f64dfd49b13e8`, `check_guarantees.py` accepts an existing fixture in a same-prefix sibling directory or through `../` out of the configured corpus. Resolve both paths and compare directory ancestry instead of lexical prefixes.
+- Python 3.12.14 / Windows: 29 focused tests, two failures before and 29 passes after. Four added tests cover the two false-negative cases and nested/normalized valid paths. All 25 existing tests pass. Tooling only; full compiler, corpus and differential suites and upstream CI were not run. Hosted review and any award remain pending.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.

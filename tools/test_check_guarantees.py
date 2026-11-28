@@ -328,6 +328,37 @@ class Misuse(unittest.TestCase):
         self.assertEqual(MOD.main(["--root", str(root)]), 1)
 
 
+class FixtureContainment(unittest.TestCase):
+    def check_relocated_fixture(self, relative_path):
+        tmp, root = build()
+        self.addCleanup(tmp.cleanup)
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(fixture("REJECT A1c"), encoding="utf-8")
+        table_path = root / "guarantees.json"
+        data = json.loads(table_path.read_text(encoding="utf-8"))
+        data["rows"][0]["fixtures"][0]["path"] = relative_path
+        table_path.write_text(json.dumps(data), encoding="utf-8")
+        MOD.write_doc(root, table_path)
+        return problems_of(root)
+
+    def test_same_prefix_sibling_is_outside_corpus(self):
+        problems = self.check_relocated_fixture("tests/checker-corpus-archive/fake.hy")
+        self.assertIn("outside tests/checker-corpus", joined(problems))
+
+    def test_parent_traversal_is_outside_corpus(self):
+        problems = self.check_relocated_fixture("tests/checker-corpus/../unregistered/fake.hy")
+        self.assertIn("outside tests/checker-corpus", joined(problems))
+
+    def test_normalized_in_corpus_path_is_allowed(self):
+        problems = self.check_relocated_fixture("tests/checker-corpus/nested/../valid.hy")
+        self.assertEqual(problems, [])
+
+    def test_nested_fixture_is_allowed(self):
+        problems = self.check_relocated_fixture("tests/checker-corpus/nested/valid.hy")
+        self.assertEqual(problems, [])
+
+
 if __name__ == "__main__":
     unittest.main()
 
