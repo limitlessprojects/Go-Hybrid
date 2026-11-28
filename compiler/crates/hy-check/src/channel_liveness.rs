@@ -169,11 +169,29 @@ impl ChannelLivenessChecker {
                     self.check_task_arg(&arg.value, *span);
                 }
             }
-            Stmt::For { kind, body, .. } => {
+            Stmt::For {
+                kind, body, span, ..
+            } => {
                 match kind {
                     ForKind::Iterate { expr, .. } => {
                         if let Some(cap) = self.get_cap_name(expr) {
-                            self.mark_rx_drained(&cap);
+                            if self.is_tx(&cap) {
+                                self.diags.push(Diagnostic::error(
+                                    "HYB-E3001",
+                                    &self.file_path,
+                                    *span,
+                                    format!("cannot iterate over linear send capability '{}'", cap),
+                                ));
+                            } else if self.is_moved(&cap) {
+                                self.diags.push(Diagnostic::error(
+                                    "HYB-E3001",
+                                    &self.file_path,
+                                    *span,
+                                    format!("use of moved linear capability '{}'", cap),
+                                ));
+                            } else {
+                                self.mark_rx_drained(&cap);
+                            }
                         }
                         self.check_expr(expr);
                     }
@@ -262,13 +280,22 @@ impl ChannelLivenessChecker {
                 chan, value, span, ..
             } => {
                 if let Some(cap) = self.get_cap_name(chan) {
-                    if self.is_moved(&cap) {
+                    if self.is_rx(&cap) {
+                        self.diags.push(Diagnostic::error(
+                            "HYB-E3001",
+                            &self.file_path,
+                            *span,
+                            format!("cannot send on linear receive capability '{}'", cap),
+                        ));
+                    } else if self.is_moved(&cap) {
                         self.diags.push(Diagnostic::error(
                             "HYB-E3001",
                             &self.file_path,
                             *span,
                             format!("use of moved linear capability '{}'", cap),
                         ));
+                    } else {
+                        self.mark_tx_active(&cap);
                     }
                 }
                 self.check_expr(value);
@@ -278,7 +305,17 @@ impl ChannelLivenessChecker {
                     match &arm.kind {
                         SelectArmKind::Recv { chan, .. } => {
                             if let Some(cap) = self.get_cap_name(chan) {
-                                if self.is_moved(&cap) {
+                                if self.is_tx(&cap) {
+                                    self.diags.push(Diagnostic::error(
+                                        "HYB-E3001",
+                                        &self.file_path,
+                                        arm.body.span,
+                                        format!(
+                                            "cannot receive from linear send capability '{}'",
+                                            cap
+                                        ),
+                                    ));
+                                } else if self.is_moved(&cap) {
                                     self.diags.push(Diagnostic::error(
                                         "HYB-E3001",
                                         &self.file_path,
@@ -292,7 +329,17 @@ impl ChannelLivenessChecker {
                         }
                         SelectArmKind::Send { chan, value, .. } => {
                             if let Some(cap) = self.get_cap_name(chan) {
-                                if self.is_moved(&cap) {
+                                if self.is_rx(&cap) {
+                                    self.diags.push(Diagnostic::error(
+                                        "HYB-E3001",
+                                        &self.file_path,
+                                        arm.body.span,
+                                        format!(
+                                            "cannot send on linear receive capability '{}'",
+                                            cap
+                                        ),
+                                    ));
+                                } else if self.is_moved(&cap) {
                                     self.diags.push(Diagnostic::error(
                                         "HYB-E3001",
                                         &self.file_path,
@@ -418,16 +465,64 @@ impl ChannelLivenessChecker {
 
                         match name.as_str() {
                             "close" => {
-                                self.mark_tx_closed(&cap);
+                                if self.is_rx(&cap) {
+                                    self.diags.push(Diagnostic::error(
+                                        "HYB-E3001",
+                                        &self.file_path,
+                                        *span,
+                                        format!(
+                                            "cannot close linear receive capability '{}'; only send capabilities can be closed",
+                                            cap
+                                        ),
+                                    ));
+                                } else {
+                                    self.mark_tx_closed(&cap);
+                                }
                             }
                             "drain" => {
-                                self.mark_rx_drained(&cap);
+                                if self.is_tx(&cap) {
+                                    self.diags.push(Diagnostic::error(
+                                        "HYB-E3001",
+                                        &self.file_path,
+                                        *span,
+                                        format!(
+                                            "cannot drain linear send capability '{}'; only receive capabilities can be drained",
+                                            cap
+                                        ),
+                                    ));
+                                } else {
+                                    self.mark_rx_drained(&cap);
+                                }
                             }
                             "send" => {
-                                self.mark_tx_active(&cap);
+                                if self.is_rx(&cap) {
+                                    self.diags.push(Diagnostic::error(
+                                        "HYB-E3001",
+                                        &self.file_path,
+                                        *span,
+                                        format!(
+                                            "cannot call method 'send' on linear receive capability '{}'",
+                                            cap
+                                        ),
+                                    ));
+                                } else {
+                                    self.mark_tx_active(&cap);
+                                }
                             }
                             "recv" => {
-                                self.mark_rx_active(&cap);
+                                if self.is_tx(&cap) {
+                                    self.diags.push(Diagnostic::error(
+                                        "HYB-E3001",
+                                        &self.file_path,
+                                        *span,
+                                        format!(
+                                            "cannot call method 'recv' on linear send capability '{}'",
+                                            cap
+                                        ),
+                                    ));
+                                } else {
+                                    self.mark_rx_active(&cap);
+                                }
                             }
                             _ => {}
                         }
@@ -447,7 +542,14 @@ impl ChannelLivenessChecker {
             }
             Expr::Receive { chan, span } => {
                 if let Some(cap) = self.get_cap_name(chan) {
-                    if self.is_moved(&cap) {
+                    if self.is_tx(&cap) {
+                        self.diags.push(Diagnostic::error(
+                            "HYB-E3001",
+                            &self.file_path,
+                            *span,
+                            format!("cannot receive from linear send capability '{}'", cap),
+                        ));
+                    } else if self.is_moved(&cap) {
                         self.diags.push(Diagnostic::error(
                             "HYB-E3001",
                             &self.file_path,
@@ -541,6 +643,24 @@ impl ChannelLivenessChecker {
 
     fn is_cap(&self, name: &str) -> bool {
         self.cap_to_pipe.contains_key(name)
+    }
+
+    fn is_tx(&self, name: &str) -> bool {
+        if let Some(&idx) = self.cap_to_pipe.get(name) {
+            if let Some(pipe) = self.pipes_all.get(idx) {
+                return pipe.tx == name;
+            }
+        }
+        false
+    }
+
+    fn is_rx(&self, name: &str) -> bool {
+        if let Some(&idx) = self.cap_to_pipe.get(name) {
+            if let Some(pipe) = self.pipes_all.get(idx) {
+                return pipe.rx == name;
+            }
+        }
+        false
     }
 
     fn is_moved(&self, name: &str) -> bool {
