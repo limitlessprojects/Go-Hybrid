@@ -79,3 +79,54 @@ fn matching_and_unknown_element_kinds_stay_accepted() {
         assert!(error_codes(&r).is_empty(), "{name}: {:?}", r.diagnostics);
     }
 }
+
+// #1838: OpKind::Int/Float erase widths and signedness, but Go slice
+// conversions require identical elements, not merely convertible elements.
+#[test]
+fn slice_conversions_with_different_numeric_elements_reject_e1002() {
+    let mut accepted = Vec::new();
+    for (source, target) in [
+        ("int", "byte"),
+        ("int", "rune"),
+        ("int64", "int"),
+        ("uint8", "int8"),
+        ("float32", "float64"),
+        ("[]int64", "[]int"),
+        ("[2]int64", "[2]int"),
+        ("[010]int", "[10]int"),
+    ] {
+        let src = format!("fn main() {{\n    var s []{source}\n    _ = []{target}(s)\n}}\n");
+        let r = check(&src);
+        if r.verdict != Verdict::Reject || !error_codes(&r).contains(&"HYB-E1002".to_string()) {
+            accepted.push(format!("[]{target}([]{source}): {:?}", r.diagnostics));
+        }
+    }
+    assert!(accepted.is_empty(), "missing rejection: {accepted:#?}");
+}
+
+#[test]
+fn identical_numeric_slice_elements_and_aliases_stay_accepted() {
+    for (source, target) in [
+        ("int", "int"),
+        ("uint8", "byte"),
+        ("byte", "u8"),
+        ("int32", "rune"),
+        ("rune", "i32"),
+        ("int64", "i64"),
+        ("float32", "f32"),
+        ("[]int64", "[]i64"),
+        ("[2]int64", "[2]i64"),
+        ("[01]int", "[1]int"),
+        ("[010]int", "[8]int"),
+    ] {
+        let src = format!("fn main() {{\n    var s []{source}\n    _ = []{target}(s)\n}}\n");
+        let r = check(&src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Accept,
+            "[]{target}([]{source}): {:?}",
+            r.diagnostics
+        );
+        assert!(error_codes(&r).is_empty(), "{:?}", r.diagnostics);
+    }
+}

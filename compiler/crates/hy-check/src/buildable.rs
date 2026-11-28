@@ -51,6 +51,7 @@ use hy_syntax::{
 };
 use std::collections::{HashMap, HashSet};
 
+use crate::const_overflow::{parse_int_lit, ConstInt};
 use crate::model::{as_addr_of, unwrap_parens, Checker};
 
 /// Lightweight operand-kind classification for issue #425: distinguishes
@@ -437,7 +438,12 @@ fn elem_types_conflict(want: &str, got: &str) -> bool {
         return elem_types_conflict(w_inner, g_inner);
     }
     if let (Some((wl, we)), Some((gl, ge))) = (parse_sized_array(w), parse_sized_array(g)) {
-        return wl != gl || elem_types_conflict(we, ge);
+        // Go permits equivalent octal/decimal dimensions: [01]int == [1]int.
+        let lengths_differ = match (parse_int_lit(wl), parse_int_lit(gl)) {
+            (Some(ConstInt::Value(a)), Some(ConstInt::Value(b))) => a != b,
+            _ => wl != gl,
+        };
+        return lengths_differ || elem_types_conflict(we, ge);
     }
     false
 }
@@ -8129,7 +8135,13 @@ impl<'a> Collector<'a> {
                 // `go build` (`cannot convert ... to type ...`, Row 13 BUILDABLE).
                 if let OpKind::Slice(arg_elem) = &ak {
                     let target_elem = self.kind_of_ty(elem_ty, 0);
-                    if copy_element_kinds_conflict(&target_elem, arg_elem) {
+                    // #1838: kinds erase numeric width/signedness. Compare the
+                    // element spellings too, including nested slices/arrays,
+                    // while preserving Go/Hybrid aliases (byte/u8/uint8, etc.).
+                    let elem_type_conflict = self
+                        .slice_element_type_name(arg)
+                        .is_some_and(|source| elem_types_conflict(&elem_str, &source));
+                    if copy_element_kinds_conflict(&target_elem, arg_elem) || elem_type_conflict {
                         self.emit_e1002(
                             arg.span(),
                             format!(
