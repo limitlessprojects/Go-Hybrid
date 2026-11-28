@@ -194,3 +194,25 @@ fn single_value_calls_stay_accepted() {
         "fn one() int {\n    return 1\n}\n\nfn g(a int) {\n    fmt.println(\"{a}\")\n}\n\nfn main() {\n    g(one())\n}\n",
     );
 }
+
+#[test]
+fn multi_value_call_as_struct_literal_field_is_rejected() {
+    let src = "struct config {\n    timeout int\n    retries int\n}\n\nfn two() (int, int) {\n    return 1, 2\n}\n\nfn main() {\n    _ = config{\n        timeout: two(),\n        retries: 3,\n    }\n}\n";
+    let cs = codes(src);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E1002"),
+        "expected HYB-E1002 for multi-value call in struct literal field, got {cs:?}"
+    );
+}
+
+#[test]
+fn void_call_as_struct_literal_field_is_rejected() {
+    let src = "struct config {\n    timeout int\n}\n\nfn v() {}\n\nfn main() {\n    _ = config{\n        timeout: v(),\n    }\n}\n";
+    let cs = codes(src);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E1002"),
+        "expected HYB-E1002 for void call in struct literal field, got {cs:?}"
+    );
+}
+
+
