@@ -26,8 +26,17 @@ fn indirect_callee_const_mutation_rejected_e3006() {
         );
     }
 
+    // #2901: an indirect callee now checks its arguments like a direct call does, so a
+
+
+    // `*item` parameter takes `&it`. The old program passed a value and relied on exactly
+
+
+    // the fail-open that #2901 reports (the direct form `touch(it)` was already rejected).
+
+
     let ok = check(
-        "struct item { v int }\nstruct runner { f fn(p *item) }\nfn touch(p *item) { p.v = 2 }\nfn main() {\n    xs := []int{1, 2}\n    fs := []fn(a *item){touch}\n    it := item{ v: 1 }\n    r := runner{ f: touch }\n    fs[0](it)\n    r.f(it)\n    _ = xs\n}\n",
+        "struct item { v int }\nstruct runner { f fn(p *item) }\nfn touch(p *item) { p.v = 2 }\nfn main() {\n    xs := []int{1, 2}\n    fs := []fn(a *item){touch}\n    it := item{ v: 1 }\n    r := runner{ f: touch }\n    fs[0](&it)\n    r.f(&it)\n    _ = xs\n}\n",
     );
     assert_eq!(ok.verdict, Verdict::Accept, "unexpected diagnostics: {:?}", ok.diagnostics);
 }
