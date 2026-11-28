@@ -24,7 +24,7 @@ use crate::model::{
 use crate::shape::receiver_type_name;
 use crate::walk::{self, CallRef};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{AssignOp, Block, Expr, FnDecl, LocalDecl, LocalKind, Place, PlaceKind, Stmt};
+use hy_syntax::{AssignOp, Block, CallArg, Expr, FnDecl, LocalDecl, LocalKind, Place, PlaceKind, Stmt};
 use std::collections::{HashMap, HashSet};
 
 /// Read-only / non-map-mutating builtin call targets that can never insert or
@@ -192,24 +192,20 @@ impl<'a> Checker<'a> {
                         }
                         if pkg == "serde_json" && method == "set" {
                             if let Some(val_arg) = cr.args.get(2) {
-                                if let Some(val_root) = val_arg.value.root_ident() {
-                                    let active_handle = self
-                                        .lookup_binding(st, val_root)
-                                        .map(|b| b.shape.is_handle() && b.moved.is_none())
-                                        .unwrap_or(false);
-                                    if active_handle {
-                                        let rspan =
-                                            root_ident_span(&val_arg.value).unwrap_or(val_arg.span);
-                                        self.mark_move(
-                                            st,
-                                            val_root,
-                                            cr.span,
-                                            format!("the consuming call `{}`", cr.callee.render()),
-                                            MoveKind::Consumed,
-                                        );
-                                        stmt_consumes.push((rspan, cr.span));
-                                    }
-                                }
+                                let recv_root = cr
+                                    .args
+                                    .first()
+                                    .and_then(|a| a.value.root_ident())
+                                    .map(str::to_string);
+                                self.consume_json_set_value_arg(
+                                    st,
+                                    cr,
+                                    val_arg,
+                                    recv_root.as_deref(),
+                                    false,
+                                    idx,
+                                    stmt_consumes,
+                                );
                             }
                         }
                     }
@@ -321,33 +317,21 @@ impl<'a> Checker<'a> {
                         self.check_a2_conflict(st, cr, &root, idx);
                         // A7 / O13: `v.set(key, value_handle)` moves `value_handle`'s
                         // payload into `v` (`hy_json_set` frees the value slot and
-                        // zeroes its handle ID). Check A2 conflicts on `value_handle`
-                        // and mark it consumed.
+                        // zeroes its handle ID). Enforce non-owned transfer, A2 loan
+                        // conflict, and consume freeze across direct/projected/unrooted args.
                         if (tname == "serde_json.value" || tname == "serde_json.view")
                             && method == "set"
                         {
                             if let Some(val_arg) = cr.args.get(1) {
-                                if let Some(val_root) = val_arg.value.root_ident() {
-                                    let active_handle = self
-                                        .lookup_binding(st, val_root)
-                                        .map(|b| b.shape.is_handle() && b.moved.is_none())
-                                        .unwrap_or(false);
-                                    if active_handle {
-                                        if val_root != root {
-                                            self.check_a2_conflict(st, cr, val_root, idx);
-                                        }
-                                        let rspan =
-                                            root_ident_span(&val_arg.value).unwrap_or(val_arg.span);
-                                        self.mark_move(
-                                            st,
-                                            val_root,
-                                            cr.span,
-                                            format!("the consuming call `{}`", cr.callee.render()),
-                                            MoveKind::Consumed,
-                                        );
-                                        stmt_consumes.push((rspan, cr.span));
-                                    }
-                                }
+                                self.consume_json_set_value_arg(
+                                    st,
+                                    cr,
+                                    val_arg,
+                                    Some(root.as_str()),
+                                    true,
+                                    idx,
+                                    stmt_consumes,
+                                );
                             }
                         }
                     }
@@ -417,6 +401,335 @@ impl<'a> Checker<'a> {
                 self.check_a3_inline_or_unknown_call(st, cr, idx);
             }
         }
+    }
+
+    fn consume_json_set_value_arg(
+        &mut self,
+        st: &mut FnState,
+        cr: &CallRef,
+        val_arg: &CallArg,
+        recv_root: Option<&str>,
+        check_a2_on_ident_root: bool,
+        idx: usize,
+        stmt_consumes: &mut Vec<(Span, Span)>,
+    ) {
+        let arg_shape = self.shape_of_expr(st, &val_arg.value);
+        let unmanaged = !self.in_managed_at(cr.span);
+        if let Some(val_root) = val_arg.value.root_ident() {
+            let Some(b) = self.lookup_binding(st, val_root) else {
+                return;
+            };
+            let active_handle = (b.shape.is_handle() || arg_shape.is_handle()) && b.moved.is_none();
+            if !active_handle {
+                return;
+            }
+            if unmanaged {
+                self.check_non_owned_move(st, val_root, cr.span);
+            }
+            if check_a2_on_ident_root
+                && recv_root.is_none_or(|r| !a3_paths_conflict(st, r, val_root))
+            {
+                self.check_a2_conflict(st, cr, val_root, idx);
+            }
+            let rspan = root_ident_span(&val_arg.value).unwrap_or(val_arg.span);
+            self.mark_move(
+                st,
+                val_root,
+                cr.span,
+                format!("the consuming call `{}`", cr.callee.render()),
+                MoveKind::Consumed,
+            );
+            stmt_consumes.push((rspan, cr.span));
+            return;
+        }
+        if !arg_shape.is_handle() {
+            return;
+        }
+        let mut roots = Vec::new();
+        self.collect_json_set_consume_roots(st, &val_arg.value, &mut roots, 0);
+        for (root, rspan) in roots {
+            let active_handle = self
+                .lookup_binding(st, &root)
+                .map(|b| {
+                    (b.shape.is_handle() || self.shape_carries_handle(&b.shape))
+                        && b.moved.is_none()
+                })
+                .unwrap_or(false);
+            if !active_handle {
+                continue;
+            }
+            if unmanaged {
+                self.check_non_owned_move(st, &root, cr.span);
+            }
+            if recv_root.is_none_or(|r| !a3_paths_conflict(st, r, &root)) {
+                self.check_a2_conflict(st, cr, &root, idx);
+            }
+            self.mark_move(
+                st,
+                &root,
+                cr.span,
+                format!("the consuming call `{}`", cr.callee.render()),
+                MoveKind::Consumed,
+            );
+            stmt_consumes.push((rspan, cr.span));
+        }
+    }
+
+    fn collect_json_set_consume_roots(
+        &self,
+        st: &FnState,
+        expr: &Expr,
+        out: &mut Vec<(String, Span)>,
+        depth: usize,
+    ) {
+        if depth > 8 {
+            return;
+        }
+        match expr {
+            Expr::Ident { name, span } => {
+                if !out.iter().any(|(n, _)| n == name) {
+                    out.push((name.clone(), *span));
+                }
+            }
+            Expr::Paren { inner, .. }
+            | Expr::Move { operand: inner, .. }
+            | Expr::Try { operand: inner, .. }
+            | Expr::Unary { operand: inner, .. }
+            | Expr::AddrOf { operand: inner, .. }
+            | Expr::Field { base: inner, .. }
+            | Expr::Index { base: inner, .. }
+            | Expr::Slice { base: inner, .. } => {
+                self.collect_json_set_consume_roots(st, inner, out, depth + 1);
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.collect_json_set_consume_roots(st, &f.value, out, depth + 1);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for item in items {
+                    self.collect_json_set_consume_roots(st, item, out, depth + 1);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (_, val) in entries {
+                    self.collect_json_set_consume_roots(st, val, out, depth + 1);
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                for idx in self.callee_returned_param_indices(st, callee, depth) {
+                    if let Some(arg) = args.get(idx) {
+                        self.collect_json_set_consume_roots(st, &arg.value, out, depth + 1);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn callee_returned_param_indices(
+        &self,
+        st: &FnState,
+        callee: &Expr,
+        depth: usize,
+    ) -> Vec<usize> {
+        if depth > 8 {
+            return Vec::new();
+        }
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+            return Vec::new();
+        };
+        if self.lookup_binding(st, name).is_some() {
+            return Vec::new();
+        }
+        let fdecl = self
+            .fns
+            .get(name.as_str())
+            .or_else(|| self.fns.get(Self::base_named_type_str(name)));
+        let Some(fdecl) = fdecl else {
+            return Vec::new();
+        };
+        let Some(body) = &fdecl.body else {
+            return Vec::new();
+        };
+        let mut param_aliases: HashMap<String, HashSet<usize>> = HashMap::new();
+        for (i, p) in fdecl.params.iter().enumerate() {
+            param_aliases.insert(p.name.clone(), HashSet::from([i]));
+        }
+        let mut returned = HashSet::new();
+        self.collect_returned_param_indices_in_block(
+            body,
+            &mut param_aliases,
+            &mut returned,
+            depth,
+        );
+        let mut out: Vec<usize> = returned.into_iter().collect();
+        out.sort_unstable();
+        out
+    }
+
+    fn collect_returned_param_indices_in_block(
+        &self,
+        block: &Block,
+        aliases: &mut HashMap<String, HashSet<usize>>,
+        returned: &mut HashSet<usize>,
+        depth: usize,
+    ) {
+        for stmt in &block.stmts {
+            match stmt {
+                Stmt::Local(l) => {
+                    for (idx, name) in l.names.iter().enumerate() {
+                        if name == "_" {
+                            continue;
+                        }
+                        if let Some(val) = l.values.get(idx).or_else(|| l.values.first()) {
+                            let origins = self.expr_param_origins(val, aliases, depth);
+                            if origins.is_empty() {
+                                aliases.remove(name);
+                            } else {
+                                aliases.insert(name.clone(), origins);
+                            }
+                        } else {
+                            aliases.remove(name);
+                        }
+                    }
+                }
+                Stmt::Assign {
+                    targets, values, ..
+                } => {
+                    for (idx, target) in targets.iter().enumerate() {
+                        if let PlaceKind::Ident(name) = &target.kind {
+                            if name == "_" {
+                                continue;
+                            }
+                            if let Some(val) = values.get(idx).or_else(|| values.first()) {
+                                let origins = self.expr_param_origins(val, aliases, depth);
+                                if !origins.is_empty() {
+                                    aliases.entry(name.clone()).or_default().extend(origins);
+                                }
+                            }
+                        }
+                    }
+                }
+                Stmt::Return { values, .. } => {
+                    for val in values {
+                        returned.extend(self.expr_param_origins(val, aliases, depth));
+                    }
+                }
+                Stmt::If {
+                    init,
+                    then,
+                    otherwise,
+                    ..
+                } => {
+                    let mut sub = aliases.clone();
+                    if let Some(init_stmt) = init {
+                        let tmp = Block {
+                            stmts: vec![(**init_stmt).clone()],
+                            span: init_stmt.span(),
+                        };
+                        self.collect_returned_param_indices_in_block(
+                            &tmp, &mut sub, returned, depth,
+                        );
+                    }
+                    let mut then_aliases = sub.clone();
+                    self.collect_returned_param_indices_in_block(
+                        then,
+                        &mut then_aliases,
+                        returned,
+                        depth,
+                    );
+                    if let Some(other) = otherwise {
+                        let mut else_aliases = sub;
+                        let tmp = Block {
+                            stmts: vec![(**other).clone()],
+                            span: other.span(),
+                        };
+                        self.collect_returned_param_indices_in_block(
+                            &tmp,
+                            &mut else_aliases,
+                            returned,
+                            depth,
+                        );
+                    }
+                }
+                Stmt::For { body, .. } | Stmt::Block { block: body, .. } | Stmt::Managed { body, .. } => {
+                    let mut sub = aliases.clone();
+                    self.collect_returned_param_indices_in_block(body, &mut sub, returned, depth);
+                }
+                Stmt::Match { arms, .. } => {
+                    for arm in arms {
+                        let mut sub = aliases.clone();
+                        self.collect_returned_param_indices_in_block(
+                            &arm.body, &mut sub, returned, depth,
+                        );
+                    }
+                }
+                Stmt::Select { arms, .. } => {
+                    for arm in arms {
+                        let mut sub = aliases.clone();
+                        self.collect_returned_param_indices_in_block(
+                            &arm.body, &mut sub, returned, depth,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn expr_param_origins(
+        &self,
+        expr: &Expr,
+        aliases: &HashMap<String, HashSet<usize>>,
+        depth: usize,
+    ) -> HashSet<usize> {
+        let mut out = HashSet::new();
+        match expr {
+            Expr::Ident { name, .. } => {
+                if let Some(set) = aliases.get(name) {
+                    out.extend(set.iter().copied());
+                }
+            }
+            Expr::Paren { inner, .. }
+            | Expr::Move { operand: inner, .. }
+            | Expr::Try { operand: inner, .. }
+            | Expr::Unary { operand: inner, .. }
+            | Expr::AddrOf { operand: inner, .. }
+            | Expr::Field { base: inner, .. }
+            | Expr::Index { base: inner, .. }
+            | Expr::Slice { base: inner, .. } => {
+                out.extend(self.expr_param_origins(inner, aliases, depth));
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    out.extend(self.expr_param_origins(&f.value, aliases, depth));
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for item in items {
+                    out.extend(self.expr_param_origins(item, aliases, depth));
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (_, val) in entries {
+                    out.extend(self.expr_param_origins(val, aliases, depth));
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                for idx in self.callee_returned_param_indices(
+                    &FnState::default(),
+                    callee,
+                    depth + 1,
+                ) {
+                    if let Some(arg) = args.get(idx) {
+                        out.extend(self.expr_param_origins(&arg.value, aliases, depth));
+                    }
+                }
+            }
+            _ => {}
+        }
+        out
     }
 
     /// HYB-E3101 (A2): a mutating-mode call conflicts with any live
