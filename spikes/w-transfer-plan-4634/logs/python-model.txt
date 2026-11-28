@@ -1,0 +1,19 @@
+﻿meshes               : 8  [(0, 4), (0, 1, 4), (0, 2, 4), (0, 3, 4), (0, 1, 2, 4), (0, 1, 3, 4), (0, 2, 3, 4), (0, 1, 2, 3, 4)]
+mesh pairs           : 64
+mesh/data cases      : 1536   (issue claims 1536)
+worker layouts       : 4608   (issue claims 4608)
+cases executed       : 1536
+layouts executed     : 4608
+oracle A vs oracle B : 0 disagreements
+plan-vs-oracle       : 0 disagreements (assertions above)
+
+[N1] swapped rows: out=[Fraction(4, 1), Fraction(1, 1)] oracle=[Fraction(1, 1), Fraction(4, 1)] integral_before=5 integral_after=5 preserved=True rejected=True (row 0: weight*width 0 != overlap 1)
+[N2] (0, 1, 3) -> (0, 2, 3) rho=[4, 1]
+     copy by index    : [Fraction(4, 1), Fraction(1, 1)]  integral 6 -> 9  writes=[0, 1] disjoint=True  plan rejected=True (row 0: weight*width 2 != overlap 1)
+     overlap weighted : [Fraction(5, 2), Fraction(1, 1)]  integral 6 -> 6  plan rejected=False
+[N3] in-row perturbation: row measures [Fraction(2, 1), Fraction(1, 1)] (dst widths 2,1); out=[Fraction(7, 4), Fraction(1, 1)] integral 6 -> 9/2 rejected=True (row 0: weight*width 1/2 != overlap 1)
+     (the total happens to break too -- see N4: in 1D the margins are not independent)
+[N4] overlap graph is a forest for 64/64 mesh pairs -> row+column margins uniquely determine the weights
+[N5] overlapping worker claims: row 0 written twice
+
+SELF-CHECK PASSED
