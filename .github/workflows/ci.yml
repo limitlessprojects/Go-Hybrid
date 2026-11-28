@@ -23,7 +23,7 @@ jobs:
         run: |
           set -e
 
-          python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/test_corpus_harness.py tools/test_corpus_utf8.py tools/extract_offsets.py tools/test_extract_offsets.py tools/triage_bot.py tools/shepherd.py tools/check_guarantees.py tools/test_check_guarantees.py
+          python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/test_corpus_harness.py tools/test_corpus_utf8.py tools/extract_offsets.py tools/test_extract_offsets.py tools/triage_bot.py tools/shepherd.py tools/queue_snapshot.py tools/pr_triage_runner.py tools/test_pr_triage_runner.py tools/check_guarantees.py tools/test_check_guarantees.py
           # Fail closed on a committed merge-conflict marker: a marker in a
           # tracked file is invisible to the suites but can make the whole
           # workflow unparseable and take every run (and every PR) down.
@@ -40,6 +40,7 @@ jobs:
           python3 -m unittest discover -s tools -p test_shepherd_gate.py -v
           python3 -m unittest discover -s tools -p test_shepherd_verify_assert.py -v
           python3 -m unittest discover -s tools -p test_queue_sweeper.py -v
+          python3 -m unittest discover -s tools -p test_pr_triage_runner.py -v
           python3 -m unittest discover -s tools -p test_check_corpus_census.py -v
           python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz.py'
           python3 -m unittest discover -s tools/runner -p test_runner.py -v
