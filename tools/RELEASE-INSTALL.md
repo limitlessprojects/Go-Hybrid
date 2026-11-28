@@ -16,7 +16,9 @@
   reuses it unless you modify the bridge sources yourself (contributors
   only — rebuild with Rust 1.99.0, pinned).
 
-## Setup (two lines)
+## Setup
+
+### Linux / macOS
 
 ```bash
 export HYB_RUNTIME_DIR="$PWD/hybrid-<ver>/runtime"
@@ -28,10 +30,30 @@ hyb build program.hy -o app && ./app
 `HYB_RUNTIME_DIR` must point at this release's `runtime/` directory (it
 defaults to a source checkout only).
 
-Or use the one-command installer, which wires both lines for you:
+Or use the one-command installer (**Linux and macOS only**), which wires both lines for you:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/limitlessprojects/Go-Hybrid/main/install.sh | sh
+```
+
+### Windows (x64)
+
+The shell installer (`install.sh`) requires a POSIX environment and supports Linux and macOS. For Windows, extract the release archive and configure the environment variables:
+
+**PowerShell:**
+```powershell
+$env:HYB_RUNTIME_DIR = "$PWD\hybrid-<ver>\runtime"
+$env:Path = "$PWD\hybrid-<ver>;$env:Path"
+
+.\hyb.exe explain HYB-E0002
+```
+
+**Command Prompt:**
+```cmd
+set HYB_RUNTIME_DIR=%CD%\hybrid-<ver>\runtime
+set PATH=%CD%\hybrid-<ver>;%PATH%
+
+hyb.exe explain HYB-E0002
 ```
 
 ## Verify the claim, don't trust it
