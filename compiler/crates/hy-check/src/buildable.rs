@@ -89,7 +89,20 @@ pub(crate) enum OpKind {
     /// signature is known (`None` = unknown, e.g. a `fn`-typed value whose
     /// declaration is out of reach). The count is what closes the
     /// closure/method-value arity bypass (#577 C9).
-    Fn(Vec<OpKind>, Option<Vec<OpKind>>),
+    ///
+    /// #4751 — each signature element also carries the canonical numeric
+    /// spelling of a scalar kind (`Some("int64")`, `Some("float32")`, ...),
+    /// or `None` when the element is not a scalar, is unresolved, or has no
+    /// Go equivalent (`usize`/`isize`). Kinds alone collapse `int`/`int64`
+    /// to `Int`, so a function whose numeric parameter or result width
+    /// differs from the declared fn type passed `kinds_conflict` and died in
+    /// `go build`; the width rides the payload so every position that
+    /// compares fn types (var init, assignment, call argument, return,
+    /// struct literal, map value, fn literal) sees it through the one
+    /// `kinds_conflict` Fn arm. Aliases collapse to the canonical name
+    /// (`byte`/`u8` -> `uint8`, `rune`/`i32` -> `int32`), while `int` stays
+    /// distinct from `int64` — Go treats them as different types.
+    Fn(Vec<FnElem>, Option<Vec<FnElem>>),
     /// #2823 — `option[T]` carries its payload kind. `Unknown` here would be
     /// fail-open in every operand guard, so `op + 1`, `takes_int(op)` and
     /// `var s string = op.unwrap()` all passed and failed `go build`.
@@ -110,6 +123,23 @@ pub(crate) enum OpKind {
     /// value may legally target a foreign interface name (`io.reader`).
     Foreign(String),
     Void,
+}
+
+/// One element of a function signature in `OpKind::Fn` (#4751): the operand
+/// kind plus, for a scalar kind, its canonical numeric spelling. `None` =
+/// no width claim — the element is not a scalar, is unresolved, or names a
+/// type with no Go equivalent — and the width comparison fails open exactly
+/// like the kind comparison does for `Unknown`.
+type FnElem = (OpKind, Option<&'static str>);
+
+/// Render one `FnElem` for diagnostics: the canonical scalar spelling when
+/// the width is known (`int64`, `float32`), else the kind label. This is
+/// what makes a width-only mismatch readable — without it the var-init
+/// diagnostic would print the same `fn(int) int` on both sides.
+fn fn_elem_label((kind, scalar): &FnElem) -> String {
+    scalar
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| kind.label())
 }
 
 impl OpKind {
@@ -134,16 +164,16 @@ impl OpKind {
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
             OpKind::Fn(res, params) => {
                 let p_str = match params {
-                    Some(ps) => ps.iter().map(|p| p.label()).collect::<Vec<_>>().join(", "),
+                    Some(ps) => ps.iter().map(fn_elem_label).collect::<Vec<_>>().join(", "),
                     None => "...".to_string(),
                 };
                 match res.len() {
                     0 => format!("fn({})", p_str),
-                    1 => format!("fn({}) {}", p_str, res[0].label()),
+                    1 => format!("fn({}) {}", p_str, fn_elem_label(&res[0])),
                     _ => format!(
                         "fn({}) ({})",
                         p_str,
-                        res.iter().map(|r| r.label()).collect::<Vec<_>>().join(", ")
+                        res.iter().map(fn_elem_label).collect::<Vec<_>>().join(", ")
                     ),
                 }
             }
@@ -230,18 +260,31 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
             if r1.len() != r2.len() {
                 return true;
             }
-            for (w, g) in r1.iter().zip(r2.iter()) {
+            for ((w, w_scalar), (g, g_scalar)) in r1.iter().zip(r2.iter()) {
                 if w != &OpKind::Unknown && g != &OpKind::Unknown && w != g {
                     return true;
+                }
+                // #4751: same kind family, different scalar width — `int` vs
+                // `int64`, `float32` vs `float64`. Both widths must be known;
+                // an unknown side fails open exactly like `Unknown` kinds.
+                if let (Some(ws), Some(gs)) = (w_scalar, g_scalar) {
+                    if ws != gs {
+                        return true;
+                    }
                 }
             }
             if let (Some(ps1), Some(ps2)) = (p1, p2) {
                 if ps1.len() != ps2.len() {
                     return true;
                 }
-                for (w, g) in ps1.iter().zip(ps2.iter()) {
+                for ((w, w_scalar), (g, g_scalar)) in ps1.iter().zip(ps2.iter()) {
                     if w != &OpKind::Unknown && g != &OpKind::Unknown && w != g {
                         return true;
+                    }
+                    if let (Some(ws), Some(gs)) = (w_scalar, g_scalar) {
+                        if ws != gs {
+                            return true;
+                        }
                     }
                 }
             }
@@ -3690,6 +3733,121 @@ impl<'a> Collector<'a> {
         }
     }
 
+    // -- #4751: scalar widths for function-signature elements --------------
+
+    /// Canonical numeric spelling of a named type, following type aliases
+    /// (`type MyInt int64` carries `int64`'s width). Mirrors `kind_of_named`
+    /// without its struct short-circuit: a struct/enum name simply has no
+    /// canonical numeric name, so it yields `None` there.
+    fn fn_scalar_of_named(&self, name: &str, depth: usize) -> Option<&'static str> {
+        if depth > 8 {
+            return None;
+        }
+        let name = name.trim();
+        let base = Checker::base_named_type_str(name);
+        if let Some(target) = self.ck.type_aliases.get(base) {
+            return self.fn_scalar_of_ty(target, depth + 1);
+        }
+        canonical_numeric_name(name)
+    }
+
+    /// Canonical numeric spelling of a type expression's top-level scalar
+    /// (`int64`, `float32`, ...). Containers, fn types, structs and type
+    /// parameters yield `None` — only a bare scalar carries a width.
+    fn fn_scalar_of_ty(&self, ty: &TypeExpr, depth: usize) -> Option<&'static str> {
+        if depth > 8 {
+            return None;
+        }
+        match ty {
+            TypeExpr::Named { name, .. } => self.fn_scalar_of_named(name, depth),
+            _ => None,
+        }
+    }
+
+    /// Width of a parameter, mirroring `param_kind`'s empty-type branch: a
+    /// parameter declared without a type takes its kind (and width) from the
+    /// parameter name as a type name.
+    fn fn_scalar_of_param(&self, p: &Param, depth: usize) -> Option<&'static str> {
+        match &p.ty {
+            TypeExpr::Named { name, .. } if name.is_empty() => {
+                self.fn_scalar_of_named(&p.name, depth)
+            }
+            _ => self.fn_scalar_of_ty(&p.ty, depth),
+        }
+    }
+
+    /// Substitution-aware width, mirroring `param_kind_with_subst`.
+    fn fn_scalar_of_ty_with_subst(
+        &self,
+        ty: &TypeExpr,
+        subst: &HashMap<String, String>,
+        depth: usize,
+    ) -> Option<&'static str> {
+        if depth > 8 {
+            return None;
+        }
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                if let Some(arg) = subst.get(name.as_str()) {
+                    return canonical_numeric_name(arg);
+                }
+                self.fn_scalar_of_named(name, depth)
+            }
+            _ => None,
+        }
+    }
+
+    fn fn_scalar_of_param_with_subst(
+        &self,
+        p: &Param,
+        subst: &HashMap<String, String>,
+        depth: usize,
+    ) -> Option<&'static str> {
+        match &p.ty {
+            TypeExpr::Named { name, .. } if name.is_empty() => {
+                if let Some(concrete) = subst.get(&p.name) {
+                    return self.fn_scalar_of_named(concrete, depth);
+                }
+                self.fn_scalar_of_named(&p.name, depth)
+            }
+            _ => self.fn_scalar_of_ty_with_subst(&p.ty, subst, depth),
+        }
+    }
+
+    /// One `Fn` payload element from a type expression: its kind plus its
+    /// scalar width, if any.
+    fn fn_elem_of_ty(&self, ty: &TypeExpr, depth: usize) -> FnElem {
+        (self.kind_of_ty(ty, depth), self.fn_scalar_of_ty(ty, depth))
+    }
+
+    fn fn_elem_of_param(&self, p: &Param, depth: usize) -> FnElem {
+        (self.param_kind(p, depth), self.fn_scalar_of_param(p, depth))
+    }
+
+    fn fn_elem_of_ty_with_subst(
+        &self,
+        ty: &TypeExpr,
+        subst: &HashMap<String, String>,
+        depth: usize,
+    ) -> FnElem {
+        (
+            self.kind_of_ty_with_subst(ty, subst, depth),
+            self.fn_scalar_of_ty_with_subst(ty, subst, depth),
+        )
+    }
+
+    fn fn_elem_of_param_with_subst(
+        &self,
+        p: &Param,
+        subst: &HashMap<String, String>,
+        depth: usize,
+    ) -> FnElem {
+        (
+            self.param_kind_with_subst(p, subst, depth),
+            self.fn_scalar_of_param_with_subst(p, subst, depth),
+        )
+    }
+
     fn kind_of_ty(&self, ty: &TypeExpr, depth: usize) -> OpKind {
         if depth > 8 {
             return OpKind::Unknown;
@@ -3713,12 +3871,19 @@ impl<'a> Collector<'a> {
                 OpKind::Chan(Box::new(self.kind_of_ty(elem, depth + 1)))
             }
             TypeExpr::Option { elem, .. } => OpKind::Option(Box::new(self.kind_of_ty(elem, depth + 1))),
-            TypeExpr::Fn { params, results, .. } => OpKind::Fn(
+            TypeExpr::Fn {
+                params, results, ..
+            } => OpKind::Fn(
                 results
                     .iter()
-                    .map(|r| self.kind_of_ty(r, depth + 1))
+                    .map(|r| self.fn_elem_of_ty(r, depth + 1))
                     .collect(),
-                Some(params.iter().map(|p| self.param_kind(p, depth + 1)).collect()),
+                Some(
+                    params
+                        .iter()
+                        .map(|p| self.fn_elem_of_param(p, depth + 1))
+                        .collect(),
+                ),
             ),
         }
     }
@@ -3838,15 +4003,17 @@ impl<'a> Collector<'a> {
             TypeExpr::Option { elem, .. } => {
                 OpKind::Option(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
             }
-            TypeExpr::Fn { params, results, .. } => OpKind::Fn(
+            TypeExpr::Fn {
+                params, results, ..
+            } => OpKind::Fn(
                 results
                     .iter()
-                    .map(|r| self.kind_of_ty_with_subst(r, subst, depth + 1))
+                    .map(|r| self.fn_elem_of_ty_with_subst(r, subst, depth + 1))
                     .collect(),
                 Some(
                     params
                         .iter()
-                        .map(|p| self.param_kind_with_subst(p, subst, depth + 1))
+                        .map(|p| self.fn_elem_of_param_with_subst(p, subst, depth + 1))
                         .collect(),
                 ),
             ),
@@ -4003,9 +4170,14 @@ impl<'a> Collector<'a> {
                     return OpKind::Fn(
                         f.results
                             .iter()
-                            .map(|r| self.kind_of_ty(&r.ty, 0))
+                            .map(|r| self.fn_elem_of_ty(&r.ty, 0))
                             .collect(),
-                        Some(f.params.iter().map(|p| self.param_kind(p, 0)).collect()),
+                        Some(
+                            f.params
+                                .iter()
+                                .map(|p| self.fn_elem_of_param(p, 0))
+                                .collect(),
+                        ),
                     );
                 }
                 OpKind::Unknown
@@ -4124,9 +4296,14 @@ impl<'a> Collector<'a> {
                             return OpKind::Fn(
                                 m.results
                                     .iter()
-                                    .map(|r| self.kind_of_ty(&r.ty, 0))
+                                    .map(|r| self.fn_elem_of_ty(&r.ty, 0))
                                     .collect(),
-                                Some(m.params.iter().map(|p| self.param_kind(p, 0)).collect()),
+                                Some(
+                                    m.params
+                                        .iter()
+                                        .map(|p| self.fn_elem_of_param(p, 0))
+                                        .collect(),
+                                ),
                             );
                         }
                     }
@@ -4136,14 +4313,16 @@ impl<'a> Collector<'a> {
                 // function value takes `params + 1` arguments.
                 if let Some(m) = self.method_expr_decl(base, name) {
                     let mut params = Vec::with_capacity(m.params.len() + 1);
-                    params.push(bk);
+                    // #4751: the receiver has no declared scalar spelling —
+                    // it is a struct kind, so its width slot stays `None`.
+                    params.push((bk, None));
                     for p in &m.params {
-                        params.push(self.param_kind(p, 0));
+                        params.push(self.fn_elem_of_param(p, 0));
                     }
                     return OpKind::Fn(
                         m.results
                             .iter()
-                            .map(|r| self.kind_of_ty(&r.ty, 0))
+                            .map(|r| self.fn_elem_of_ty(&r.ty, 0))
                             .collect(),
                         Some(params),
                     );
@@ -4174,9 +4353,9 @@ impl<'a> Collector<'a> {
             } => OpKind::Fn(
                 results
                     .iter()
-                    .map(|r| self.kind_of_ty(&r.ty, 0))
+                    .map(|r| self.fn_elem_of_ty(&r.ty, 0))
                     .collect(),
-                Some(params.iter().map(|p| self.param_kind(p, 0)).collect()),
+                Some(params.iter().map(|p| self.fn_elem_of_param(p, 0)).collect()),
             ),
             Expr::Call { callee, args, .. } => match self.call_result_kinds(callee, args) {
                 Some(res) if res.is_empty() => OpKind::Void,
@@ -4205,7 +4384,9 @@ impl<'a> Collector<'a> {
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
                     if let OpKind::Fn(res, _) = k {
-                        return Some(res);
+                        // #4751: call results are kinds only — strip the
+                        // width slot back out of the `Fn` payload.
+                        return Some(res.iter().map(|(k, _)| k.clone()).collect());
                     }
                     return None;
                 }
@@ -4291,7 +4472,9 @@ impl<'a> Collector<'a> {
                     }
                 }
                 if let Some(OpKind::Fn(res, _)) = self.struct_field_kind(&bk, name) {
-                    return Some(res);
+                    // #4751: call results are kinds only — strip the width
+                    // slot back out of the `Fn` payload.
+                    return Some(res.iter().map(|(k, _)| k.clone()).collect());
                 }
                 None
             }
