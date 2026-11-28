@@ -573,6 +573,16 @@ impl<'a> Checker<'a> {
                 }
                 let recv = self.shape_of_expr(st, base);
                 if let Some(t) = receiver_type_name(&recv) {
+                    // `rx.recv()` on a stamped `hy.recv_cap[T]` yields T —
+                    // `method_result` is a free function and cannot run
+                    // `shape_of_type_arg_str`, so the cap result resolves
+                    // here. Without T the recv result was Unknown and a
+                    // downstream `tx.send(v)` mis-failed HYB-E3005 (O4.9).
+                    if name == "recv" {
+                        if let Some(elem) = cap_elem_arg(&t, "hy.recv_cap") {
+                            return self.shape_of_type_arg_str(elem, 0);
+                        }
+                    }
                     return foreign::method_result(&t, name);
                 }
                 let head = Self::base_named_type_str(name);
@@ -1544,7 +1554,7 @@ impl<'a> Checker<'a> {
     ) -> Vec<TypeShape> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
-            let unwrap_pipe = |call_e: &Expr| -> bool {
+            let unwrap_pipe = |call_e: &Expr| -> Option<Option<String>> {
                 if let Expr::Call { callee, .. } = call_e {
                     let mut base = callee.as_ref();
                     while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
@@ -1554,23 +1564,27 @@ impl<'a> Checker<'a> {
                         if let Expr::Ident { name: pkg_name, .. } = pkg.as_ref() {
                             let head = name.split('[').next().unwrap_or(name.as_str());
                             if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") {
-                                return true;
+                                return Some(cap_elem_arg(name, head).map(str::to_string));
                             }
                         }
                     }
                     if let Expr::Ident { name, .. } = base {
                         let head = name.split('[').next().unwrap_or(name.as_str());
                         if head == "pipe" || head == "new_pipe" {
-                            return true;
+                            return Some(cap_elem_arg(name, head).map(str::to_string));
                         }
                     }
                 }
-                false
+                None
             };
-            if unwrap_pipe(v) {
+            if let Some(elem) = unwrap_pipe(v) {
+                // The `[T]` written on `hy.pipe[T]` rides on the capability
+                // names so `rx.recv()` yields T's shape and `tx.send(v)`
+                // can check v against T (issue #4500 family).
+                let t = elem.map(|t| format!("[{}]", t)).unwrap_or_default();
                 return vec![
-                    TypeShape::OwnHandle("hy.send_cap".into()),
-                    TypeShape::OwnHandle("hy.recv_cap".into()),
+                    TypeShape::OwnHandle(format!("hy.send_cap{}", t)),
+                    TypeShape::OwnHandle(format!("hy.recv_cap{}", t)),
                 ];
             }
             if let Expr::Index { base, .. } = v {
@@ -1617,7 +1631,7 @@ impl<'a> Checker<'a> {
     ) -> Vec<Option<TypeExpr>> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
-            let unwrap_pipe = |call_e: &Expr| -> bool {
+            let unwrap_pipe = |call_e: &Expr| -> Option<Option<String>> {
                 if let Expr::Call { callee, .. } = call_e {
                     let mut base = callee.as_ref();
                     while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
@@ -1627,27 +1641,28 @@ impl<'a> Checker<'a> {
                         if let Expr::Ident { name: pkg_name, .. } = pkg.as_ref() {
                             let head = name.split('[').next().unwrap_or(name.as_str());
                             if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") {
-                                return true;
+                                return Some(cap_elem_arg(name, head).map(str::to_string));
                             }
                         }
                     }
                     if let Expr::Ident { name, .. } = base {
                         let head = name.split('[').next().unwrap_or(name.as_str());
                         if head == "pipe" || head == "new_pipe" {
-                            return true;
+                            return Some(cap_elem_arg(name, head).map(str::to_string));
                         }
                     }
                 }
-                false
+                None
             };
-            if unwrap_pipe(v) {
+            if let Some(elem) = unwrap_pipe(v) {
+                let t = elem.map(|t| format!("[{}]", t)).unwrap_or_default();
                 return vec![
                     Some(TypeExpr::Named {
-                        name: "hy.send_cap".into(),
+                        name: format!("hy.send_cap{}", t),
                         span: v.span(),
                     }),
                     Some(TypeExpr::Named {
-                        name: "hy.recv_cap".into(),
+                        name: format!("hy.recv_cap{}", t),
                         span: v.span(),
                     }),
                 ];
@@ -2194,6 +2209,17 @@ pub(crate) fn receiver_type_name(shape: &TypeShape) -> Option<String> {
         TypeShape::Pointer(inner) => receiver_type_name(inner),
         _ => None,
     }
+}
+
+/// The `[T]` argument baked into a stamped capability or folded generic
+/// name — `hy.send_cap[map[string]int]` → `Some("map[string]int")`,
+/// `pipe[int]` → `Some("int")` (the spelling `fold_type_args` writes).
+/// `None` when `s` does not start with `kind` or carries no `[T]` —
+/// `hy.send_cap` from a type-argument-less `hy.pipe()` stays bare.
+pub(crate) fn cap_elem_arg<'a>(s: &'a str, kind: &str) -> Option<&'a str> {
+    s.strip_prefix(kind)?
+        .strip_prefix('[')?
+        .strip_suffix(']')
 }
 
 #[cfg(test)]
