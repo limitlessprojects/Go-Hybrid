@@ -5050,15 +5050,23 @@ impl<'a> Collector<'a> {
                 let Expr::Call { callee, args, .. } = unwrap_parens(operand) else {
                     return None;
                 };
-                // `f()?` unwraps a trailing `error`. Only a local fn or a
-                // closure has a declared result list; a boundary or handle
-                // method (`doc.array("users")?`) is fail-open.
+                // `f()?` unwraps a trailing `error`. Only a local fn, a
+                // closure, or a declared struct method has a declared result
+                // list; a boundary or handle method (`doc.array("users")?`) is
+                // fail-open.
                 let results: &[FnResult] = match unwrap_parens(callee) {
                     Expr::Ident { name, .. } => match self.ck.fns.get(name.as_str()) {
                         Some(f) => &f.results,
                         None => return None,
                     },
                     Expr::FnLit { results, .. } => results,
+                    Expr::Field { base, name, .. } => {
+                        let bk = self.kind_of_expr(base);
+                        let head = Checker::base_named_type_str(name);
+                        let sname = self.struct_base_name(&bk)?;
+                        let m = self.ck.method_decls.get(&(sname, head.to_string()))?;
+                        &m.results
+                    }
                     _ => return None,
                 };
                 // A `?` on a non-error result is an accepted Hybrid no-op; do
