@@ -111,3 +111,51 @@ func TestHighMagnitudeMinNaNAndBucketClamp(t *testing.T) {
 		t.Fatalf("MaxInt64 bucket reconstruction drifted: p50=%d p99=%d", top.P50(), top.P99())
 	}
 }
+
+func TestValueAtRankCoverage(t *testing.T) {
+	// Reported tail cases: rounding to nearest integer can drop below the requested fraction.
+	h90 := New()
+	for i := 0; i < 5; i++ {
+		h90.Record(10)
+	}
+	h90.Record(1000)
+	if got := h90.P90(); got != 1000 {
+		t.Fatalf("P90(5x10, 1x1000) = %d, want 1000", got)
+	}
+
+	h99 := New()
+	for i := 0; i < 59; i++ {
+		h99.Record(10)
+	}
+	h99.Record(1000)
+	if got := h99.P99(); got != 1000 {
+		t.Fatalf("P99(59x10, 1x1000) = %d, want 1000", got)
+	}
+
+	// Exact and near-exact boundaries over 100 distinct samples (1..100).
+	h100 := New()
+	for i := int64(1); i <= 100; i++ {
+		h100.Record(i)
+	}
+	if got := h100.ValueAt(0.14); got != 14 {
+		t.Fatalf("ValueAt(0.14) = %d, want 14", got)
+	}
+	if got := h100.ValueAt(math.Nextafter(0.14, 1)); got != 15 {
+		t.Fatalf("ValueAt(Nextafter(0.14, 1)) = %d, want 15", got)
+	}
+	if got := h100.ValueAt(0.29); got != 29 {
+		t.Fatalf("ValueAt(0.29) = %d, want 29", got)
+	}
+	if got := h100.P50(); got != 50 {
+		t.Fatalf("P50(1..100) = %d, want 50", got)
+	}
+	if got := h100.P90(); got != 90 {
+		t.Fatalf("P90(1..100) = %d, want 90", got)
+	}
+	if got := h100.P99(); got != 99 {
+		t.Fatalf("P99(1..100) = %d, want 99", got)
+	}
+	if got := h100.ValueAt(math.Nextafter(0, 1)); got != 1 {
+		t.Fatalf("ValueAt(Nextafter(0, 1)) = %d, want 1", got)
+	}
+}
