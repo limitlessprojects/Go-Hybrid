@@ -776,6 +776,11 @@ struct Collector<'a> {
     /// signature (`None` = not a predeclared numeric spelling). Swapped
     /// together with `fn_results`.
     fn_result_scalars: Vec<Option<&'static str>>,
+    /// #4615-2: container element scalar of each result of the enclosing
+    /// signature (`[]int64` → Some("int64"), plain `int` → None). Used to
+    /// catch `[]int64 → []int32` mismatches in return statements that
+    /// `fn_result_scalars` cannot see (the outer container's scalar is None).
+    fn_result_container_elem_scalars: Vec<Option<&'static str>>,
     /// Lexical nesting depth within loops (`for` / `loop`).
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
@@ -822,6 +827,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             scalar_scopes: Vec::new(),
             container_elem_scopes: Vec::new(),
             fn_result_scalars: Vec::new(),
+            fn_result_container_elem_scalars: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
             managed_depth: 0,
@@ -2015,9 +2021,12 @@ impl<'a> Collector<'a> {
         }
         let result_scalars: Vec<Option<&'static str>> =
             f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+        let result_container_elem_scalars: Vec<Option<&'static str>> =
+            f.results.iter().map(|r| self.container_elem_scalar_of_ty(&r.ty)).collect();
         let result_type_names: Vec<String> = f.results.iter().map(|r| r.ty.render()).collect();
         let outer_rt = std::mem::replace(&mut self.fn_result_type_names, result_type_names);
         let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
+        let outer_ces = std::mem::replace(&mut self.fn_result_container_elem_scalars, result_container_elem_scalars);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -2043,6 +2052,7 @@ impl<'a> Collector<'a> {
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
         self.fn_result_scalars = outer_scalars;
+        self.fn_result_container_elem_scalars = outer_ces;
         self.fn_result_type_names = outer_rt;
         self.fn_type_params = outer_tp;
         self.pop_scope();
@@ -2143,10 +2153,15 @@ impl<'a> Collector<'a> {
                     (self.scalar_of_ty(t), self.typed_value_scalar(&l.values[0])),
                     (Some(w), Some(v)) if w != v
                 );
+                // #4615-2: `var s []int32 = get_int64s()`.
+                let want_ces = self.container_elem_scalar_of_ty(t);
+                let got_ces = self.container_elem_scalar_of_expr(&l.values[0]);
+                let container_elem_mismatch = self.container_elem_scalars_conflict(want_ces, got_ces);
                 // #2771: `var c [4]int = a` where `a` is a `[3]int`.
                 if kinds_conflict(&want, &vk)
                     || int_float_conflict
                     || scalar_mismatch
+                    || container_elem_mismatch
                     || self.sized_array_names_differ(
                         Some(t.render().as_str()),
                         self.typed_value_type_name(&l.values[0]).as_deref(),
@@ -2182,6 +2197,10 @@ impl<'a> Collector<'a> {
                         || self.sized_array_names_differ(
                             Some(t.render().as_str()),
                             self.typed_value_type_name(v).as_deref(),
+                        )
+                        || self.container_elem_scalars_conflict(
+                            self.container_elem_scalar_of_ty(t),
+                            self.container_elem_scalar_of_expr(v),
                         )
                     {
                         self.emit_e1002(
@@ -3264,10 +3283,13 @@ impl<'a> Collector<'a> {
                 );
                 let result_scalars: Vec<Option<&'static str>> =
                     results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+                let result_container_elem_scalars: Vec<Option<&'static str>> =
+                    results.iter().map(|r| self.container_elem_scalar_of_ty(&r.ty)).collect();
                 let result_type_names: Vec<String> =
                     results.iter().map(|r| r.ty.render()).collect();
                 let outer_rt = std::mem::replace(&mut self.fn_result_type_names, result_type_names);
                 let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
+                let outer_ces = std::mem::replace(&mut self.fn_result_container_elem_scalars, result_container_elem_scalars);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -3280,6 +3302,7 @@ impl<'a> Collector<'a> {
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
                 self.fn_result_scalars = outer_scalars;
+                self.fn_result_container_elem_scalars = outer_ces;
                 self.fn_result_type_names = outer_rt;
                 self.pop_scope();
             }
@@ -4840,11 +4863,20 @@ impl<'a> Collector<'a> {
                         Some(field_type_name),
                         got_type_name.as_deref(),
                     );
+                    // #4615-2: container element scalar mismatch in a struct
+                    // literal field (e.g. `{nums: get_int64s()}` where `nums`
+                    // is `[]int32`). `kinds_conflict` and `scalar_mismatch`
+                    // both fail open here.
+                    let want_field_ces = self.container_elem_scalar_of_ty(fty);
+                    let got_field_ces = self.container_elem_scalar_of_expr(&f.value);
+                    let container_elem_mismatch =
+                        self.container_elem_scalars_conflict(want_field_ces, got_field_ces);
                     let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
                         || kinds_conflict(&want, &got)
                         || scalar_mismatch
                         || container_or_alias_mismatch
-                        || array_mismatch;
+                        || array_mismatch
+                        || container_elem_mismatch;
                     let already_diagnosed_e3012 = self
                         .ck
                         .diags
@@ -5629,9 +5661,17 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
+            // #4615-2: container element scalar mismatch ([]int64 → []int32,
+            // map[K]int64 → map[K]int32).  `kinds_conflict` and
+            // `scalar_mismatch` both fail open because `Slice(Int)` ==
+            // `Slice(Int)` and the outer container itself has no scalar.
+            let want_ces = self.container_elem_scalar_of_ty(&p.ty);
+            let got_ces = self.container_elem_scalar_of_expr(&a.value);
+            let container_elem_mismatch = self.container_elem_scalars_conflict(want_ces, got_ces);
             if kinds_conflict(&want, &got)
                 || int_to_float_conflict
                 || scalar_mismatch
+                || container_elem_mismatch
                 || self.sized_array_names_differ(
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
@@ -5697,9 +5737,14 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
+            // #4615-2: container element scalar mismatch ([]int64 → []int32).
+            let want_ces = self.container_elem_scalar_of_ty(&p.ty);
+            let got_ces = self.container_elem_scalar_of_expr(&a.value);
+            let container_elem_mismatch = self.container_elem_scalars_conflict(want_ces, got_ces);
             if kinds_conflict(&want, &got)
                 || int_to_float_conflict
                 || scalar_mismatch
+                || container_elem_mismatch
                 || self.sized_array_names_differ(
                     Some(p.ty.render().as_str()),
                     self.typed_value_type_name(&a.value).as_deref(),
@@ -5783,6 +5828,7 @@ impl<'a> Collector<'a> {
                             if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
                                 let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
                                 self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
+                                self.report_container_elem_scalar_return_mismatch(&values[0], i, values[0].span());
                             }
                         }
                         return;
@@ -5795,6 +5841,7 @@ impl<'a> Collector<'a> {
                             if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
                                 let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
                                 self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
+                                self.report_container_elem_scalar_return_mismatch(&values[0], i, values[0].span());
                             }
                         }
                         return;
@@ -5847,6 +5894,7 @@ impl<'a> Collector<'a> {
                         let got_s = self.typed_value_scalar(v);
                         self.report_numeric_return_mismatch(got_s, &got, i, v.span());
                         self.report_array_return_mismatch(v, i, v.span());
+                        self.report_container_elem_scalar_return_mismatch(v, i, v.span());
                     }
                 }
                 return;
@@ -5880,6 +5928,7 @@ impl<'a> Collector<'a> {
                 let got_s = self.typed_value_scalar(v);
                 self.report_numeric_return_mismatch(got_s, &got, i, v.span());
                 self.report_array_return_mismatch(v, i, v.span());
+                self.report_container_elem_scalar_return_mismatch(v, i, v.span());
             }
         }
     }
@@ -5897,6 +5946,44 @@ impl<'a> Collector<'a> {
                 "return values must match the declared result types exactly; array lengths cannot differ",
             );
         }
+    }
+
+    /// #4615-2 — a container (`[]T`, `map[K]V`) returned into a result whose
+    /// element type differs only in scalar width (`[]int64` into `[]int32`).
+    /// `kinds_conflict` collapses `Slice(Int)` == `Slice(Int)` and misses
+    /// this; `fn_result_scalars` tracks the outer scalar (None for a slice),
+    /// so we keep a parallel `fn_result_container_elem_scalars` vec.
+    fn report_container_elem_scalar_return_mismatch(
+        &mut self,
+        val: &Expr,
+        idx: usize,
+        span: Span,
+    ) {
+        let got_ces = self.container_elem_scalar_of_expr(val);
+        let want_ces = self.fn_result_container_elem_scalars.get(idx).copied().flatten();
+        if self.scalar_names_conflict(want_ces, got_ces) {
+            let want_name = self.fn_result_type_names.get(idx).map(|s| s.as_str()).unwrap_or("[]T");
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot return a container value with element type `{}` from a function declaring `{}` — Go refuses `cannot use ... as {} value in return statement` (HYB-E1002)",
+                    got_ces.unwrap_or("?"),
+                    want_name,
+                    want_name
+                ),
+                "container element types must match exactly; write an explicit conversion loop when a conversion is intended",
+            );
+        }
+    }
+
+    /// #4615-2 — true when both the expected and actual container element
+    /// scalars are known and differ (e.g. `[]int64` arg to `[]int32` param).
+    fn container_elem_scalars_conflict(
+        &self,
+        want_ces: Option<&'static str>,
+        got_ces: Option<&'static str>,
+    ) -> bool {
+        self.scalar_names_conflict(want_ces, got_ces)
     }
 
     /// #1031 — a TYPED numeric value returned into a result of a different
