@@ -572,6 +572,14 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let recv = self.shape_of_expr(st, base);
+                if let TypeShape::OwnHandle(full) = &recv {
+                    if let Some((cap, elem_str)) = full.split_once('[') {
+                        if cap == "hy.recv_cap" && name == "recv" {
+                            let elem_str = elem_str.strip_suffix(']').unwrap_or(elem_str);
+                            return self.shape_of_type_arg_str(elem_str, 0);
+                        }
+                    }
+                }
                 if let Some(t) = receiver_type_name(&recv) {
                     return foreign::method_result(&t, name);
                 }
@@ -1544,33 +1552,61 @@ impl<'a> Checker<'a> {
     ) -> Vec<TypeShape> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
-            let unwrap_pipe = |call_e: &Expr| -> bool {
+            let unwrap_pipe = |call_e: &Expr| -> Option<String> {
                 if let Expr::Call { callee, .. } = call_e {
                     let mut base = callee.as_ref();
-                    while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
-                        base = inner.as_ref();
-                    }
+                    let mut type_arg: Option<String> = None;
+                    while match base {
+                        Expr::Index { base: inner, index, .. } => {
+                            if type_arg.is_none() {
+                                type_arg = Some(index.render());
+                            }
+                            base = inner.as_ref();
+                            true
+                        }
+                        Expr::Paren { inner, .. } => {
+                            base = inner.as_ref();
+                            true
+                        }
+                        _ => false,
+                    } {}
                     if let Expr::Field { base: pkg, name, .. } = base {
                         if let Expr::Ident { name: pkg_name, .. } = pkg.as_ref() {
                             let head = name.split('[').next().unwrap_or(name.as_str());
                             if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") {
-                                return true;
+                                if type_arg.is_none() && name.contains('[') {
+                                    type_arg = name.split_once('[').and_then(|(_, rest)| rest.rsplit_once(']')).map(|(s, _)| s.to_string());
+                                }
+                                return Some(type_arg.unwrap_or_default());
                             }
                         }
                     }
                     if let Expr::Ident { name, .. } = base {
                         let head = name.split('[').next().unwrap_or(name.as_str());
                         if head == "pipe" || head == "new_pipe" {
-                            return true;
+                            if type_arg.is_none() && name.contains('[') {
+                                type_arg = name.split_once('[').and_then(|(_, rest)| rest.rsplit_once(']')).map(|(s, _)| s.to_string());
+                            }
+                            return Some(type_arg.unwrap_or_default());
                         }
                     }
                 }
-                false
+                None
             };
-            if unwrap_pipe(v) {
+            if let Some(type_arg) = unwrap_pipe(v) {
+                let send_name = if type_arg.is_empty() {
+                    "hy.send_cap".to_string()
+                } else {
+                    format!("hy.send_cap[{}]", type_arg)
+                };
+                let recv_name = if type_arg.is_empty() {
+                    "hy.recv_cap".to_string()
+                } else {
+                    format!("hy.recv_cap[{}]", type_arg)
+                };
                 return vec![
-                    TypeShape::OwnHandle("hy.send_cap".into()),
-                    TypeShape::OwnHandle("hy.recv_cap".into()),
+                    TypeShape::OwnHandle(send_name),
+                    TypeShape::OwnHandle(recv_name),
                 ];
             }
             if let Expr::Index { base, .. } = v {
@@ -1617,37 +1653,65 @@ impl<'a> Checker<'a> {
     ) -> Vec<Option<TypeExpr>> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
-            let unwrap_pipe = |call_e: &Expr| -> bool {
+            let unwrap_pipe = |call_e: &Expr| -> Option<String> {
                 if let Expr::Call { callee, .. } = call_e {
                     let mut base = callee.as_ref();
-                    while let Expr::Index { base: inner, .. } | Expr::Paren { inner, .. } = base {
-                        base = inner.as_ref();
-                    }
+                    let mut type_arg: Option<String> = None;
+                    while match base {
+                        Expr::Index { base: inner, index, .. } => {
+                            if type_arg.is_none() {
+                                type_arg = Some(index.render());
+                            }
+                            base = inner.as_ref();
+                            true
+                        }
+                        Expr::Paren { inner, .. } => {
+                            base = inner.as_ref();
+                            true
+                        }
+                        _ => false,
+                    } {}
                     if let Expr::Field { base: pkg, name, .. } = base {
                         if let Expr::Ident { name: pkg_name, .. } = pkg.as_ref() {
                             let head = name.split('[').next().unwrap_or(name.as_str());
                             if pkg_name == "hy" && (head == "pipe" || head == "new_pipe") {
-                                return true;
+                                if type_arg.is_none() && name.contains('[') {
+                                    type_arg = name.split_once('[').and_then(|(_, rest)| rest.rsplit_once(']')).map(|(s, _)| s.to_string());
+                                }
+                                return Some(type_arg.unwrap_or_default());
                             }
                         }
                     }
                     if let Expr::Ident { name, .. } = base {
                         let head = name.split('[').next().unwrap_or(name.as_str());
                         if head == "pipe" || head == "new_pipe" {
-                            return true;
+                            if type_arg.is_none() && name.contains('[') {
+                                type_arg = name.split_once('[').and_then(|(_, rest)| rest.rsplit_once(']')).map(|(s, _)| s.to_string());
+                            }
+                            return Some(type_arg.unwrap_or_default());
                         }
                     }
                 }
-                false
+                None
             };
-            if unwrap_pipe(v) {
+            if let Some(type_arg) = unwrap_pipe(v) {
+                let send_name = if type_arg.is_empty() {
+                    "hy.send_cap".to_string()
+                } else {
+                    format!("hy.send_cap[{}]", type_arg)
+                };
+                let recv_name = if type_arg.is_empty() {
+                    "hy.recv_cap".to_string()
+                } else {
+                    format!("hy.recv_cap[{}]", type_arg)
+                };
                 return vec![
                     Some(TypeExpr::Named {
-                        name: "hy.send_cap".into(),
+                        name: send_name,
                         span: v.span(),
                     }),
                     Some(TypeExpr::Named {
-                        name: "hy.recv_cap".into(),
+                        name: recv_name,
                         span: v.span(),
                     }),
                 ];
@@ -2188,7 +2252,8 @@ impl<'a> Checker<'a> {
 pub(crate) fn receiver_type_name(shape: &TypeShape) -> Option<String> {
     match shape {
         TypeShape::OwnHandle(t) | TypeShape::BorrowHandle(t) | TypeShape::ForeignOpaque(t) => {
-            Some(t.clone())
+            let base = t.split('[').next().unwrap_or(t.as_str());
+            Some(base.to_string())
         }
         TypeShape::Atomic => Some("atomic.int".to_string()),
         TypeShape::Pointer(inner) => receiver_type_name(inner),
