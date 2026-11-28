@@ -1111,4 +1111,44 @@ the move freeze reach the send path as well.
 | struct-chan-scalars-send-accept | ACCEPT | — | — | channel safe-by-type + immutable scalars; owned `move` over `chan packet`; no use after move |
 | struct-chan-shared-map-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct over the channel freezes that storage, so `m["after"] = 2` is a write through a live alias |
 
-With this registration the corpus is **139 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 92**.
+### option-map-alias-at-spawn / option-fresh-payload-at-spawn-accept — REJECT + ACCEPT (corpus growth: the option payload)
+
+The `option[T]` wrapper is the cheapest place to launder an aliasing header: `o`
+looks like a value, while `some(shared)` embeds `shared`'s map header inside it.
+T21 makes `option[T]` sendable iff `T` is; O5.2's freeze is defined over the
+storage, not over the wrapper. Nothing in the corpus (or in `hy-check`'s unit
+tests) wrapped a map in `some(...)` before this registration.
+
+| case | verdict | rule | note |
+|------|---------|------|------|
+| option-map-alias-at-spawn | REJECT | A1b | `some(shared)` embeds the header; `task worker(move o, done)` freezes the payload's hash table, so `shared["main"]++` is a write through a live alias |
+| option-fresh-payload-at-spawn-accept | ACCEPT | — | identical shape, payload allocated inside the option expression; the edge is on the shared storage, not on the wrapper |
+
+### method-return-alias-freeze — REJECT (corpus growth: the receiver-method form of the call-return edge)
+
+Corpus 26/31 pin the alias edge for a free function (`alias := same(agg)`). The
+receiver-method form (`alias := h.map_ref()`, method declared `fn (h holder) ...`)
+was not pinned at corpus level; only the unit test
+`hy-check/tests/loop_backedge_shadow_and_range.rs::user_method_returning_map_records_may_share_with_receiver`
+asserted it. The checker does not inline the callee body — the return is treated as
+an alias of any reference-carrying argument (the receiver included), which is the
+fail-closed reading of O5.2.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| method-return-alias-freeze | REJECT | A1b | `HYB-E3003` | `alias := h.map_ref()` aliases `h.m`; after `task worker(move h, done)` the write `alias["main"]++` is use-after-move |
+
+### call-return-subslice-freeze / call-return-fresh-slice-accept — REJECT + ACCEPT (corpus growth: a call that hands back a slice view)
+
+Corpus 53 pins a *local* slice view (`s := a[:]`) and 26/31 pin a call handing
+back a **map**; the combination — a call handing back a slice **view over the
+caller's array** — was uncovered. The accept control keeps the call, the binding
+and the write and changes only the callee, which allocates its own slice, so the
+alias edge is attached to the argument rather than to the call itself.
+
+| case | verdict | rule | note |
+|------|---------|------|------|
+| call-return-subslice-freeze | REJECT | A1b | `view := tail(xs)` returns `xs[1:]`, a header over the caller's array; after `task worker(move xs, done)` the write `view[0] = 9` is use-after-move |
+| call-return-fresh-slice-accept | ACCEPT | — | `view := fresh(7)`: the callee allocates its own slice and the caller's `xs` is not an argument |
+
+With this registration the corpus is **144 programs — ACCEPT 47 · ACCEPT-MANAGED 2 · REJECT 95**.
