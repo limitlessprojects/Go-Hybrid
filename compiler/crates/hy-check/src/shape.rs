@@ -103,6 +103,9 @@ impl<'a> Checker<'a> {
         if base == "set" {
             return TypeShape::Struct(Some(name.to_string()));
         }
+        if self.enums.contains_key(base) || self.struct_type_params.contains_key(base) {
+            return TypeShape::Unknown;
+        }
         match name {
             "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
