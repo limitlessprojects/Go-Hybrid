@@ -1413,6 +1413,12 @@ impl<'a> Collector<'a> {
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
     fn scalar_of_type_name(&self, name: &str) -> Option<&'static str> {
+        match name.trim() {
+            "time.duration" => return Some("time.Duration"),
+            "time.month" => return Some("time.Month"),
+            "time.weekday" => return Some("time.Weekday"),
+            _ => {}
+        }
         if self.ck.structs.contains_key(name)
             || self.ck.enums.contains_key(name)
             || self.ck.type_aliases.contains_key(name)
@@ -3747,6 +3753,13 @@ impl<'a> Collector<'a> {
             "int" | "uint" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
             | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
+            // `time.Duration`/`Month`/`Weekday` are named INTEGER types: an
+            // untyped constant initialises them (`var d time.duration = 3`),
+            // they take arithmetic/comparison/conversion, and they keep their
+            // methods. The kind model cannot tell an untyped constant from a
+            // typed int, so they stay fail-open here; `scalar_of_type_name`
+            // carries the exact type for the typed-operand checks.
+            "time.duration" | "time.month" | "time.weekday" => OpKind::Unknown,
             // A curated foreign named type (`os.file`, `bufio.reader`,
             // `net.conn`, `serde_json.value`, ...) is resolved, not
             // unresolved: the same table #3521 uses at move boundaries. It
