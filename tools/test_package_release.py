@@ -219,6 +219,24 @@ class PackageReleaseIsolationTests(unittest.TestCase):
             "FRESH-LIB\n",
         )
 
+    def test_windows_bridge_failure_rejects_tarball(self):
+        fake = Path(self.env["HYB_TEST_FAKE_HYB"])
+        marker = 'log="${HYB_TEST_LOG:?}"'
+        reject_bridge = (
+            'case "$2" in */05-json-transform/program.hy) '
+            'echo "fixture: bridge cannot link" >&2; exit 42;; esac\n'
+        )
+        fake.write_text(fake.read_text().replace(marker, reject_bridge + marker))
+        result = subprocess.run(
+            ["sh", str(self.repo / "tools" / "package_release.sh"), VERSION],
+            env={**self.env, "HYB_PKG_OS": "windows"}, cwd=self.root,
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        self.assertIn("smoke PASS (windows/amd64)", result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fixture: bridge cannot link", result.stderr)
+        self.assertIn("BRIDGE SMOKE FAILED (windows/amd64", result.stderr)
+
     def test_cross_target_ships_triple_artifacts_not_the_native_tree(self):
         triple = "aarch64-unknown-linux-gnu"
         # PKG_ARCH stays amd64, so this is the cross *build* path only: the
