@@ -938,7 +938,7 @@ pub(crate) fn place_field_store_slot(place: &Place) -> Option<(String, Option<St
     }
 }
 
-fn lit_index_key(index: &Expr) -> Option<String> {
+pub(crate) fn lit_index_key(index: &Expr) -> Option<String> {
     if let Some(v) = crate::const_overflow::const_int_value(index) {
         return Some(v.to_string());
     }
@@ -970,4 +970,186 @@ fn place_is_index_free(p: &Place) -> bool {
 pub(crate) fn addr_of_index_base_path(value: &Expr) -> Option<String> {
     let (base, _) = peel_slot_loan_index(value)?;
     expr_path(base)
+}
+
+/// Collect all index read expressions `(base, index, span)` within this statement.
+/// Excludes assignment store targets (`base[index] = ...`), but includes index expressions
+/// evaluated inside index keys.
+pub(crate) fn own_index_reads<'e>(stmt: &'e Stmt, out: &mut Vec<(&'e Expr, &'e Expr, Span)>) {
+    match stmt {
+        Stmt::Local(l) => {
+            for v in &l.values {
+                expr_index_reads(v, out);
+            }
+        }
+        Stmt::Assign {
+            targets, values, ..
+        } => {
+            for t in targets {
+                place_index_reads(t, out);
+            }
+            for v in values {
+                expr_index_reads(v, out);
+            }
+        }
+        Stmt::Expr { expr, .. } => expr_index_reads(expr, out),
+        Stmt::Send { chan, value, .. } => {
+            expr_index_reads(chan, out);
+            expr_index_reads(value, out);
+        }
+        Stmt::If { cond, .. } => expr_index_reads(cond, out),
+        Stmt::For { kind, .. } => match kind {
+            ForKind::While { cond } => expr_index_reads(cond, out),
+            ForKind::Range { lo, hi, .. } => {
+                expr_index_reads(lo, out);
+                expr_index_reads(hi, out);
+            }
+            ForKind::Iterate { expr, .. } => expr_index_reads(expr, out),
+            ForKind::Infinite => {}
+        },
+        Stmt::Return { values, .. } => {
+            for v in values {
+                expr_index_reads(v, out);
+            }
+        }
+        Stmt::Task { callee, args, .. } => {
+            expr_index_reads(callee, out);
+            for a in args {
+                expr_index_reads(&a.value, out);
+            }
+        }
+        Stmt::Managed { .. } => {}
+        Stmt::Match { subject, arms, .. } => {
+            expr_index_reads(subject, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    expr_index_reads(g, out);
+                }
+            }
+        }
+        Stmt::Defer { call, .. } => expr_index_reads(call, out),
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Block { .. } => {}
+        Stmt::Select { arms, .. } => {
+            for arm in arms {
+                match &arm.kind {
+                    SelectArmKind::Send { chan, value, .. } => {
+                        expr_index_reads(chan, out);
+                        expr_index_reads(value, out);
+                    }
+                    SelectArmKind::Recv { chan, .. } => expr_index_reads(chan, out),
+                    SelectArmKind::Default => {}
+                }
+            }
+        }
+    }
+}
+
+fn place_index_reads<'e>(place: &'e Place, out: &mut Vec<(&'e Expr, &'e Expr, Span)>) {
+    match &place.kind {
+        PlaceKind::Ident(_) => {}
+        PlaceKind::Index { base, index } => {
+            expr_index_reads(index, out);
+            place_index_reads(base, out);
+        }
+        PlaceKind::Field { base, .. } => place_index_reads(base, out),
+        PlaceKind::AddrOf { base } => place_index_reads(base, out),
+    }
+}
+
+fn expr_index_reads<'e>(expr: &'e Expr, out: &mut Vec<(&'e Expr, &'e Expr, Span)>) {
+    match expr {
+        Expr::Index { base, index, span } => {
+            out.push((base.as_ref(), index.as_ref(), *span));
+            expr_index_reads(base, out);
+            expr_index_reads(index, out);
+        }
+        Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        }
+        | Expr::AddrOf { operand, .. } => {
+            match crate::model::unwrap_parens(operand) {
+                Expr::Index { index, .. } => {
+                    expr_index_reads(index, out);
+                }
+                _ => expr_index_reads(operand, out),
+            }
+        }
+        Expr::Unary { operand, .. } => expr_index_reads(operand, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_index_reads(lhs, out);
+            expr_index_reads(rhs, out);
+        }
+        Expr::Field { base, .. } => expr_index_reads(base, out),
+        Expr::Call { callee, args, .. } => {
+            expr_index_reads(callee, out);
+            for a in args {
+                expr_index_reads(&a.value, out);
+            }
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            expr_index_reads(base, out);
+            if let Some(lo) = lo {
+                expr_index_reads(lo, out);
+            }
+            if let Some(hi) = hi {
+                expr_index_reads(hi, out);
+            }
+        }
+        Expr::SliceLit { items, .. } => {
+            for i in items {
+                expr_index_reads(i, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                expr_index_reads(k, out);
+                expr_index_reads(v, out);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for f in fields {
+                expr_index_reads(&f.value, out);
+            }
+        }
+        Expr::Interp { parts, .. } => {
+            for p in parts {
+                if let InterpPart::Expr(e) = p {
+                    expr_index_reads(e, out);
+                }
+            }
+        }
+        Expr::Paren { inner, .. } => expr_index_reads(inner, out),
+        Expr::Move { operand, .. } => expr_index_reads(operand, out),
+        Expr::Try { operand, .. } => expr_index_reads(operand, out),
+        Expr::Receive { chan, .. } => expr_index_reads(chan, out),
+        Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => {}
+    }
+}
+
+/// Extract the container base path if and only if the expression does NOT contain an index.
+pub(crate) fn is_direct_container_path(expr: &Expr) -> Option<String> {
+    let mut cur = expr;
+    loop {
+        match cur {
+            Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => cur = inner,
+            Expr::Unary {
+                op: hy_syntax::UnOp::Addr,
+                operand,
+                ..
+            }
+            | Expr::AddrOf { operand, .. } => cur = operand,
+            _ => break,
+        }
+    }
+    match cur {
+        Expr::Ident { name, .. } => Some(name.clone()),
+        Expr::Field { base, name, .. } => {
+            let base_path = is_direct_container_path(base)?;
+            Some(format!("{}.{}", base_path, name))
+        }
+        _ => None,
+    }
 }
