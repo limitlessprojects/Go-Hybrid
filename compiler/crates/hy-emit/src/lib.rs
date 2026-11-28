@@ -369,6 +369,7 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "css" => "CSS",
         "dns" => "DNS",
         "eof" => "EOF",
+        "gnu" => "GNU",
         "guid" => "GUID",
         "html" => "HTML",
         "http" => "HTTP",
@@ -389,6 +390,7 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         // `time.UTC`, `log.l_utc` → `LUTC`); Go rejects `Utc` spellings.
         "utc" => "UTC",
         "ok" => "OK",
+        "pax" => "PAX",
         "qps" => "QPS",
         "ram" => "RAM",
         "rfc822" => "RFC822",
@@ -419,6 +421,7 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "uid" => "UID",
         "uri" => "URI",
         "url" => "URL",
+        "ustar" => "USTAR",
         "utf8" => "UTF8",
         "utf16" => "UTF16",
         "utf32" => "UTF32",
