@@ -1,6 +1,8 @@
 """Offline failure-propagation and scratch-isolation checks for the workload runner."""
 from pathlib import Path
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -176,6 +178,68 @@ output.chmod(0o755)
                 first.communicate()
                 raise
         self.assertEqual(first.returncode, 0, stdout + stderr)
+
+
+class RustTwinSharedTargetDirTests(unittest.TestCase):
+    """Issue #4894: with a shared CARGO_TARGET_DIR, the old runner built the
+    Rust twin via `cargo build` and then separately exec'd the crate-local
+    ./target/release/workloads path. That path is independent of
+    CARGO_TARGET_DIR, so it either 127'd (clean checkout) or re-ran whatever
+    binary was last left sitting there (stale checkout). The fix runs the
+    crate through `cargo run`, which always launches the binary cargo just
+    built, wherever CARGO_TARGET_DIR points it.
+
+    This pulls the live Rust-twin line out of run.sh (instead of
+    hardcoding the fixed command) so a regression back to the
+    build-then-exec pattern fails the test even if the surrounding script
+    changes shape.
+    """
+
+    def setUp(self):
+        if not shutil.which("cargo"):
+            self.skipTest("needs cargo")
+        script = (ROOT / "benchmarks/workloads/run.sh").read_text()
+        match = re.search(r'echo "== Rust twin =="\n(.+)\n', script)
+        self.assertIsNotNone(match, "could not find the Rust twin line in run.sh")
+        self.rust_twin_cmd = match.group(1)
+        self.assertNotIn(
+            "./target/release/workloads",
+            self.rust_twin_cmd,
+            "run.sh must launch the Rust twin through `cargo run`, not a "
+            "separate exec of a crate-relative target path (issue #4894)",
+        )
+
+        temporary = tempfile.TemporaryDirectory(prefix="hybrid-rust-twin-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.workloads = self.root / "benchmarks/workloads"
+        rust_dir = self.workloads / "rust"
+        shutil.copytree(ROOT / "benchmarks/workloads/rust/src", rust_dir / "src")
+        shutil.copy(ROOT / "benchmarks/workloads/rust/Cargo.toml", rust_dir / "Cargo.toml")
+        self.rust_dir = rust_dir
+        self.env = dict(os.environ, CARGO_TARGET_DIR=str(self.root / "shared-target"))
+
+    def run_rust_twin(self):
+        return subprocess.run(
+            ["bash", "-c", self.rust_twin_cmd], cwd=self.workloads, env=self.env,
+            capture_output=True, text=True, timeout=120,
+        )
+
+    def test_ignores_stale_binary_left_at_crate_relative_target_path(self):
+        stale = self.rust_dir / "target/release/workloads"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("#!/bin/sh\necho obsolete-benchmark\n")
+        stale.chmod(0o755)
+
+        result = self.run_rust_twin()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("obsolete-benchmark", result.stdout)
+        self.assertRegex(result.stdout, r"load p50=\d+ns")
+
+    def test_runs_with_a_clean_shared_target_dir(self):
+        result = self.run_rust_twin()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"load p50=\d+ns")
 
 
 if __name__ == "__main__":
