@@ -77,12 +77,12 @@
       "category": "resolve",
       "severity": "error",
       "title": "name is not available in this scope",
-      "summary": "The name is not declared, not imported, or not visible here. Some builtin names (e.g. `error`) require their package to be imported first.",
+      "summary": "The name is not declared, not imported, or not visible here. A package outside the M5 curated allowlist (e.g. `math`) cannot be resolved at all; `fmt`, `errors`, `strings` and the other allowlisted packages need no import line.",
       "fixits": [
         "import the package that declares it",
         "check the spelling (foreign names are normalized to snake_case at binding time)"
       ],
-      "example": "fn f() error { return nil }  // reject: HYB-E1001 until `errors` is imported",
+      "example": "fmt.println(math.sqrt(4.0))   // reject: HYB-E1001 — package `math` is outside the curated allowlist",
       "rule": "M"
     },
     {
@@ -206,7 +206,7 @@
         "bind the value first if it is a call result: `ch := make_call()` — then `<-ch`",
         "a statement STARTING with `<-expr` is a receive — check the operand's type"
       ],
-      "example": "x := 5; <-x   // reject: HYB-E2008 — x is an int, not a channel",
+      "example": "x := 5\n<-x   // reject: HYB-E2008 — x is an int, not a channel",
       "rule": "BUILDABLE"
     },
     {
@@ -222,7 +222,7 @@
         "for a number sequence use the integer-range form: `for i in 0..n`",
         "for a function or method call result that resolves to an iterable, bind it to a local first so the checker can classify it"
       ],
-      "example": "x := 5; for v in x { }   // reject: HYB-E2009 — x is an int, not an iterable",
+      "example": "x := 5\nfor v in x { }   // reject: HYB-E2009 — x is an int, not an iterable",
       "rule": "BUILDABLE"
     },
     {
@@ -251,7 +251,7 @@
         "add `error` as the last result of the enclosing function or closure and return it",
         "handle the error in place: `v, err := f()` then `if err != nil { ... }`"
       ],
-      "example": "fn count() int { n := parse(s)?; return n }   // reject: HYB-E2011 — `count` has no error result",
+      "example": "fn count(s string) int {\n    n := parse(s)?\n    return n\n}   // reject: HYB-E2011 — `count` has no error result",
       "rule": "E"
     },
     {
@@ -299,7 +299,7 @@
         "keep ownership here and send a copy",
         "have the receiver report results back over a channel"
       ],
-      "example": "results <- move agg; agg[\"total\"] = 1   // reject: HYB-E3003 — frozen alias",
+      "example": "results <- move agg\nagg[\"total\"] = 1   // reject: HYB-E3003 — frozen alias",
       "rule": "O5",
       "tier0_rule_id": "A1b"
     },
@@ -346,7 +346,7 @@
         "keep the `const` and write to a local copy inside the task",
         "if the state must be shared and updated, guard the access with `managed(\"why this is safe\", \"mutex\"|\"atomic\"|\"actor\") { ... }` — the explicit, auditable hatch (categories: mutex, atomic, actor, finalizer, interop, other)"
       ],
-      "example": "const cells = [0]; cells[0] = cells[0] + 1   // reject: HYB-E3006 — `cells` is deeply immutable (T22)",
+      "example": "const cells = [0]\ncells[0] = cells[0] + 1   // reject: HYB-E3006 — `cells` is deeply immutable (T22)",
       "rule": "T22",
       "tier0_rule_id": "IMMUT"
     },
@@ -361,7 +361,7 @@
         "send to a `chan T` binding (`ch := make(chan T, n)` or a `chan T` parameter)",
         "if the `<-expr` line was meant as a RECEIVE, put the channel expression first: `v := <-ch` — a statement starting with `<-` is a receive, and a `<-` on a new line never continues the previous statement"
       ],
-      "example": "noop() <- 1   // reject: HYB-E3007 — `noop()` is a void call, not a channel",
+      "example": "n := 5\nn <- 1   // reject: HYB-E3007 — `n` is an int, not a channel",
       "rule": "O4",
       "tier0_rule_id": "A1c"
     },
@@ -543,10 +543,10 @@
       "title": "this enum has no zero value",
       "summary": "An enum's zero value is its first variant only if that variant is payload-free; otherwise `var e E` is a compile error.",
       "fixits": [
-        "initialize explicitly: `e := some(3)`",
+        "initialize explicitly: `m := maybe.full(3)`",
         "reorder variants so the first is the payload-free default"
       ],
-      "example": "var e option[int]   // reject: HYB-E4002 — option[T] has no zero value",
+      "example": "enum maybe { full(int)  empty }\nvar m maybe   // reject: HYB-E4002 — `maybe` has no zero value: its first variant carries a payload",
       "rule": "N"
     },
     {
@@ -576,7 +576,7 @@
         "add the missing arm(s)",
         "add a final `_` arm if the remaining cases are truly impossible"
       ],
-      "example": "match s { shape::circle => ... }   // reject: HYB-E5001 — missing square/triangle",
+      "example": "match s {\n    circle(r): out = r\n}   // reject: HYB-E5001 — missing square/triangle",
       "rule": "T"
     },
     {
@@ -659,13 +659,13 @@
       "category": "overflow-bounds",
       "severity": "error",
       "title": "constant operand invalid for this type conversion",
-      "summary": "A `Type(const)` conversion whose literal-constant operand Go would refuse is rejected: `int8(300)` on a 64-bit target, `int(\"abc\")`, `string(2.5)`, `float32(1e40)`, `int(10^30)`, `string(true)`, `int8(nil)`, `[]int(3)`, a string constant to a non-byte/rune slice, integer constants of 2^512 or more to `string`, and similar forms fail `go build` on the emitted program (issue #228), so an accepted Hybrid program would emit unbuildable Go. Sub-64 integer overflow (`u8(300)`, SPEC X4) is deliberately accepted — the emitter folds the two's-complement result. Only the literal-constant operand case is in scope; a non-constant operand is a run-time conversion.",
+      "summary": "A `Type(const)` conversion whose literal-constant operand Go would refuse is rejected: `int8(3.5)`, `int(\"abc\")`, `string(2.5)`, `float32(1e40)`, `int(10^30)`, `string(true)`, `int8(nil)`, `[]int(3)`, a string constant to a non-byte/rune slice, integer constants of 2^512 or more to `string`, and similar forms fail `go build` on the emitted program (issue #228), so an accepted Hybrid program would emit unbuildable Go. Sub-64 integer overflow (`u8(300)`, SPEC X4) is deliberately accepted — the emitter folds the two's-complement result. Only the literal-constant operand case is in scope; a non-constant operand is a run-time conversion.",
       "fixits": [
         "use a constant that fits the target type (e.g. `int8(127)`, `uint8(255)`)",
         "convert between compatible kinds only (number <-> number, string <-> string, `string(65)`, `[]byte(\"abc\")`)",
         "if truncation or a run-time conversion is intended, bind the operand to a variable first (SPEC X4 runtime truncation)"
       ],
-      "example": "x := int8(300)   // reject: HYB-E6006 — constant 300 overflows int8 in Go; the emitted module would not build",
+      "example": "x := int8(3.5)   // reject: HYB-E6006 — constant 3.5 is not representable in int8; the emitted module would not build",
       "rule": "BUILDABLE"
     },
     {
