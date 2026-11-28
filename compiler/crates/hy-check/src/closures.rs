@@ -75,6 +75,14 @@ pub(crate) fn check_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, body:
     }
 }
 
+pub(crate) fn check_expr_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, expr: &Expr) {
+    let mut out = Vec::new();
+    collect_expr(expr, &mut out);
+    for (params, results, body, _) in out {
+        check_one_closure(ck, st, params, results, body);
+    }
+}
+
 struct NestedClosure<'a> {
     params: &'a [hy_syntax::Param],
     results: &'a [hy_syntax::FnResult],
