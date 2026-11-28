@@ -1,0 +1,19 @@
+[package]
+name = "w010-session-projection"
+version = "0.1.0"
+edition = "2021"
+description = "W-010 feasibility spike: session-type projection + exhaustive interleaving simulation"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "w010_session_projection"
+path = "src/lib.rs"
+
+[[bin]]
+name = "w010-demo"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 2
