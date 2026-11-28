@@ -165,8 +165,13 @@ def run_checker(bin_path, hy_path, report_managed=False):
                     f"{field}={count!r}, diagnostics={actual}"
                 )
     verdict = summary.get("verdict")
-    expected_exit = {"accept": 0, "reject": 1}.get(verdict)
-    if expected_exit is not None and proc.returncode != expected_exit:
+    if not isinstance(verdict, str) or verdict not in ("accept", "reject"):
+        raise RuntimeError(
+            f"checker JSON envelope invalid for {hy_path}: "
+            "summary.verdict must be 'accept' or 'reject'"
+        )
+    expected_exit = {"accept": 0, "reject": 1}[verdict]
+    if proc.returncode != expected_exit:
         raise RuntimeError(
             f"checker exit/verdict mismatch for {hy_path}: "
             f"exit {proc.returncode}, verdict {verdict}"
