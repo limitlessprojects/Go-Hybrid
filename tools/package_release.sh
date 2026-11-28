@@ -191,16 +191,20 @@ else
     exit 1
 fi
 
-# --- 5b. bridge smoke (cross linux/arm64 and native macOS assets) ---
+# --- 5b. bridge smoke (cross linux/arm64, native macOS and Windows) ---
 # Same tarball, same rustless PATH: a rust/serde_json-importing program
 # must build and RUN correctly. macOS must exercise Mach-O archive discovery
-# and the Darwin stack pool; a bridge-free hello cannot detect either failure.
-if { [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; } || [ "$PKG_OS" = "darwin" ]; then
+# and the Darwin stack pool. Windows must exercise the shipped COFF archive
+# and the Win64 bridge. The hello smoke does not link either bridge.
+if { [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; } \
+    || [ "$PKG_OS" = "darwin" ] || [ "$PKG_OS" = "windows" ]; then
+    BRIDGE_EXE="$SMOKE/json"
+    [ "$PKG_OS" != "windows" ] || BRIDGE_EXE="$BRIDGE_EXE.exe"
     echo "==> bridge smoke from the tarball (serde_json crossing on $PKG_OS/$ARCH)"
     if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" $CROSS_GO_ENV $QEMU_RUNNER \
             "$SMOKE/hybrid-${VER}/$HYB_OUT_NAME" build \
-            "$REPO_ROOT/examples/05-json-transform/program.hy" -o "$SMOKE/json" ) \
-        && $QEMU_RUNNER "$SMOKE/json" > "$SMOKE/json.txt" 2>&1 \
+            "$REPO_ROOT/examples/05-json-transform/program.hy" -o "$BRIDGE_EXE" ) \
+        && $QEMU_RUNNER "$BRIDGE_EXE" > "$SMOKE/json.txt" 2>&1 \
         && grep -q '"ada"' "$SMOKE/json.txt"; then
         echo "    bridge smoke PASS ($PKG_OS/$ARCH trampolines exercised): $(tr '\n' ' ' < "$SMOKE/json.txt" | tr -s ' ')"
     else
