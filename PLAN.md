@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor amendment (#2041): extend type-as-value diagnostics to curated imported type members while preserving conversion, qualifier, and shadowing semantics. Adapted to the current upstream checker. Regression tests are included; the updated Rust workspace/corpus/differential and maintainer-gated CI have not been run for this merge.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.
