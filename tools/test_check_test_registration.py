@@ -116,6 +116,27 @@ class PatternExtractionTests(unittest.TestCase):
         self.assertFalse(guard.is_registered_direct(
             "tests/test_live.py", "python3 -c 'print(1)' tests/test_live.py\n"))
 
+    def test_output_descriptor_redirection_preserves_registration(self):
+        for redirect in ("2>&1", "1>&2", ">&2", "2>& 1", "2>&-"):
+            with self.subTest(redirect=redirect):
+                self.assertEqual(guard.registered_patterns(
+                    "python3 -m unittest discover -s tools -p test_live.py "
+                    + redirect + "\n"), ["test_live.py"])
+                self.assertTrue(guard.is_registered_direct(
+                    "tests/test_live.py", "python3 tests/test_live.py "
+                    + redirect + "\n"))
+
+    def test_descriptor_redirection_does_not_hide_masking_operators(self):
+        for tail in ("2>&1 || true", "2>&1 | cat", "2>&1 &", "| cat 2>&1",
+                     "2>&1 && echo ok || true"):
+            with self.subTest(tail=tail):
+                self.assertEqual(guard.registered_patterns(
+                    "python3 -m unittest discover -s tools -p test_live.py "
+                    + tail + "\n"), [])
+                self.assertFalse(guard.is_registered_direct(
+                    "tests/test_live.py", "python3 tests/test_live.py "
+                    + tail + "\n"))
+
     def test_repeated_pattern_uses_the_last_value_like_unittest(self):
         self.assertEqual(guard.registered_patterns(
             "python3 -m unittest discover -s tools -p test_disabled.py -p test_live.py\n"),
@@ -495,6 +516,36 @@ class GuardMisuseTests(unittest.TestCase):
         self.assertEqual(
             self.run_main("python3 -m unittest discover -s tools -p test_x.py\n",
                           ["tools/test_x.py"]), 0)
+
+    def test_real_cli_accepts_registered_suites_with_stderr_merged(self):
+        with tempfile.TemporaryDirectory(prefix="hybrid-fd-registration-") as temporary:
+            root = Path(temporary)
+            (root / "tools").mkdir()
+            (root / "tests").mkdir()
+            for rel in ("tools/test_live.py", "tests/test_direct.py"):
+                (root / rel).write_text(
+                    "import unittest\nclass Live(unittest.TestCase):\n"
+                    "    def test_pass(self): pass\n"
+                    "if __name__ == '__main__': unittest.main()\n", encoding="utf-8")
+            workflow = root / "ci.yml"
+            workflow.write_text(
+                "name: fixture\njobs:\n  quick:\n    steps:\n      - run: |\n"
+                "          python3 -m unittest discover -s tools -p test_live.py 2>&1\n"
+                "          python3 tests/test_direct.py 2>&1\n", encoding="utf-8")
+            # Both real Python entry points run successfully with stderr merged.
+            for arguments in (["-m", "unittest", "discover", "-s", "tools", "-p", "test_live.py"],
+                              ["tests/test_direct.py"]):
+                suite = subprocess.run([sys.executable, *arguments], cwd=root,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                       text=True, timeout=15)
+                self.assertEqual(suite.returncode, 0, suite.stdout)
+                self.assertIn("Ran 1 test", suite.stdout)
+            checked = subprocess.run(
+                [sys.executable, str(Path(guard.__file__).resolve()),
+                 "--root", str(root), "--workflow", str(workflow)],
+                capture_output=True, text=True, timeout=15)
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            self.assertIn("test registration: OK", checked.stdout)
 
     def test_orphaned_suite_exits_one(self):
         self.assertEqual(
