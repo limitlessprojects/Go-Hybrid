@@ -112,6 +112,36 @@ class UpgradeTests(unittest.TestCase):
                 )
                 self.assertEqual((probe.returncode, probe.stdout), (0, "old\n"))
 
+    def test_launcher_write_failure_preserves_previous_installation(self):
+        self.package("old")
+        installed = self.install_release()
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        before = self.snapshot()
+        shim = self.root / "offline tools" / "mv"
+        shim.write_text(
+            '#!/bin/sh\n'
+            'for arg; do last=$arg; done\n'
+            'case "$last" in "$HYB_BIN_DIR/hyb") exit 73;; esac\n'
+            'exec /bin/mv "$@"\n'
+        )
+        shim.chmod(0o755)
+        self.package("new")
+        failed = self.install_release()
+        self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_launcher_directory_preserves_previous_payload(self):
+        self.package("old")
+        installed = self.install_release()
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        (self.bin_dir / "hyb").rename(self.bin_dir / "saved-launcher")
+        (self.bin_dir / "hyb").mkdir()
+        before = self.snapshot()
+        self.package("new")
+        failed = self.install_release()
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(self.snapshot(), before)
+
     def test_healthy_upgrade_replaces_previous_installation(self):
         for version in ("old", "new"):
             self.package(version)
