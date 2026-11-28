@@ -1,0 +1,13 @@
+# name: pos_branch_xor_key
+# expect: ADMIT
+# 例 7（正）：判别子来自保留的 key（不可变、逆函数同样收到 key），这是常量分支。
+# 两条臂形状不同（一条是 xor+rot，另一条是 addv+swap），逆向必须按臂对称重构。
+program pos_branch_xor_key
+
+if bit key, 4 == 1
+  xori x0, 0x5555aaaa5555aaaa
+  rotl x0, 11
+else
+  addv x0, x2
+  swap x2, x3
+end

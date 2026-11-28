@@ -1,0 +1,13 @@
+# name: pos_sbox_bytes
+# expect: ADMIT
+# 例 9（正）：「带逆向契约的受检函数」。S1 声明为仿射表 y = (x*0x1d mod 256) ^ 0x63；
+# 检查器独立验证它是双射（A 为奇数），并由表求逆得到逆表，而不是信任声明。
+# 这是唯一一个非算术原语，用来说明 "inverse contract" 通道可用。
+program pos_sbox_bytes
+
+sbox S1 affine 0x1d 0x63
+
+sboxb x0, S1
+rotl x3, 7
+sboxb x3, S1
+xor x0, x3

@@ -1,0 +1,12 @@
+# name: neg_disc_foreign
+# expect: R005_DISCRIMINATOR_FOREIGN
+# 例 5（负）：判别子来自非 owned 值（外部输入）。即使区域内的状态全部可逆，
+# 逆函数也读不到这个外部值 —— 除非把它记进日志，而那等于偷偷长出一个 log，
+# 是本 task 明确排除的做法。
+program neg_disc_foreign
+
+if foreign bit 3 == 1
+  add x0, 1
+else
+  sub x0, 1
+end

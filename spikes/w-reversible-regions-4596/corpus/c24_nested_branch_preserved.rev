@@ -1,0 +1,15 @@
+# name: c24_nested_branch_preserved
+# expect: ADMIT
+# 类别：带分支的结构（判别子 x5 在两条臂里都没被写，含嵌套）
+program c24_nested_branch_preserved
+
+if bit x5, 1 == 1
+  addv x0, x1
+  if bit x5, 6 == 0
+    rotl x0, 3
+  else
+    xor x0, x1
+  end
+else
+  subv x3, x4
+end

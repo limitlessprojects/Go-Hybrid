@@ -1,0 +1,8 @@
+# name: neg_assign_zero
+# expect: R001_ASSIGN_CONST
+# 例 1（负）：x = 0。issue 原文第一个必须被拒的写法。
+# 前一行 add x0,5 完全合法，用来证明拒绝是发生在语句级、不是整段放弃。
+program neg_assign_zero
+
+add x0, 5
+set x0, 0

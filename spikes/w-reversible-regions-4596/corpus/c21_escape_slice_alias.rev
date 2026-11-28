@@ -1,0 +1,6 @@
+# name: c21_escape_slice_alias
+# expect: R006_ALIAS_ESCAPE
+# 类别：别名逃逸（切片视图交给区域外）
+program c21_escape_slice_alias
+
+alias "records[8:16]"

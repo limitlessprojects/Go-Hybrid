@@ -1,0 +1,7 @@
+# name: neg_chansend
+# expect: R007_EFFECT_CHANSEND
+# 例 7（负）：channel send。发送是不可撤销的外部副作用：
+# 对端可能已经收下并据此行动，逆执行不能把它收回。
+program neg_chansend
+
+chansend x1

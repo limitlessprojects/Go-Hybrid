@@ -1,0 +1,6 @@
+# name: c16_rot_by_zero
+# expect: R010_NONINVERTIBLE_PRIM
+# 类别：退化原语（rot by 0；编译器生成时常因常量折叠出现）
+program c16_rot_by_zero
+
+rotl x0, 0

@@ -1,0 +1,6 @@
+# name: c22_channel_send
+# expect: R007_EFFECT_CHANSEND
+# 类别：外部副作用（channel send）
+program c22_channel_send
+
+chansend x3

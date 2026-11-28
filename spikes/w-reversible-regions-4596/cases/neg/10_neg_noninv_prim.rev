@@ -1,0 +1,9 @@
+# name: neg_noninv_prim
+# expect: R010_NONINVERTIBLE_PRIM
+# 例 10（负）：原语退化。x3 ^= x3 把寄存器清成 0，形式上是"合法原语"，
+# 但代数上退化成 x=0（与 R001 同类后果，成因不同，所以诊断码不同）。
+# 同一族还包括：rot by 0、非双射 perm、swap x,x、x -= x。
+program neg_noninv_prim
+
+add x3, 9
+xor x3, x3

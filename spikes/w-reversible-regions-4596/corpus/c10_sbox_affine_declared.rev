@@ -1,0 +1,9 @@
+# name: c10_sbox_affine_declared
+# expect: ADMIT
+# 类别：查表（已声明且双射的仿射表）
+program c10_sbox_affine_declared
+
+sbox SA affine 0x63 0x00
+
+sboxb x0, SA
+rotl x0, 5

@@ -1,0 +1,12 @@
+# name: pos_branch_addsub
+# expect: ADMIT
+# 例 5（正）：最简单的合法分支。判别子是 x7 的 bit0，两条臂都只写 x0 / x1，
+# 因此 x7 出口值与入口值相同，逆向时能重新判定同一条臂。
+# 逆向：if bit x7,0==0 { sub x0,K } else { add x1,3 }
+program pos_branch_addsub
+
+if bit x7, 0 == 0
+  add x0, 0x9e3779b97f4a7c15
+else
+  sub x1, 3
+end

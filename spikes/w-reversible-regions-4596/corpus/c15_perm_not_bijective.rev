@@ -1,0 +1,6 @@
+# name: c15_perm_not_bijective
+# expect: R010_NONINVERTIBLE_PRIM
+# 类别：可逆置换（写错成非双射：两个位置指向同一个源）
+program c15_perm_not_bijective
+
+perm 0 0 2 3 4 5 6 7

@@ -1,0 +1,10 @@
+# name: c08_condswap_separate_flag
+# expect: ADMIT
+# 类别：条件交换（标志与数据分离的正确写法）
+program c08_condswap_separate_flag
+
+if bit x7, 0 == 0
+  swap x0, x1
+else
+  add x2, 1
+end

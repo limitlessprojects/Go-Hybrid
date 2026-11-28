@@ -1,0 +1,6 @@
+# name: c06_clear_accumulator
+# expect: R001_ASSIGN_CONST
+# 类别：清零（累加器重置）
+program c06_clear_accumulator
+
+set x4, 0

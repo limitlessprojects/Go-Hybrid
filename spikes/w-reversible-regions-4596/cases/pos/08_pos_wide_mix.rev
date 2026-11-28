@@ -1,0 +1,15 @@
+# name: pos_wide_mix
+# expect: ADMIT
+# 例 8（正）：无分支，但覆盖 x0..x7 全部寄存器与全部原语族（add/sub/xor/addv/subv/rot/swap）。
+# 用途：把"寄存器越多越容易漏逆"这一类 bug 暴露出来；逆函数必须逐条反序。
+program pos_wide_mix
+
+add x0, 0x9e3779b97f4a7c15
+xor x1, x0
+rotl x2, 25
+sub x3, 3
+addv x4, x5
+xor x6, x7
+rotr x7, 40
+xori x5, 0xdeadbeefcafebabe
+swap x0, x6

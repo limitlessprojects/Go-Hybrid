@@ -1,0 +1,8 @@
+# name: c02_add_rot_xor_key
+# expect: ADMIT
+# 类别：算术混合 + 保留 key
+program c02_add_rot_xor_key
+
+xori x2, key
+rotl x2, 29
+add x3, 0x9e3779b97f4a7c15

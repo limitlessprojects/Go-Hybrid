@@ -1,0 +1,7 @@
+# name: neg_lossy_mask
+# expect: R002_LOSSY_MASK
+# 例 2（负）：x &= 0x7f。掩码把高位清零，原像不可恢复（8 个原像/结果）。
+# 诊断里会报出被清掉的位数（57 位）。
+program neg_lossy_mask
+
+mask x1, 0x7f

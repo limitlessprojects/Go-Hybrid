@@ -1,0 +1,6 @@
+# name: c05_mask_low_byte
+# expect: R002_LOSSY_MASK
+# 类别：掩码
+program c05_mask_low_byte
+
+mask x1, 0xff

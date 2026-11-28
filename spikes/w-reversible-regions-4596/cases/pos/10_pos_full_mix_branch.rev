@@ -1,0 +1,19 @@
+# name: pos_full_mix_branch
+# expect: ADMIT
+# 例 10（正）：组合压力测试 —— perm（写全部 8 个寄存器）+ S-box + 立即数 add + 分支。
+# 注意 perm 在 if 之前写 x5，这不违反规则：规则只禁止在分支臂内写判别子寄存器。
+# 逆向：先按臂对称撤销，再 sub，再 sboxInv，最后用逆置换 q = 1 3 2 0 6 7 4 5。
+program pos_full_mix_branch
+
+sbox S2 affine 0x8d 0x2f
+
+perm 3 0 2 1 6 7 4 5
+sboxb x0, S2
+add x4, 0x0123456789abcdef
+if bit x5, 2 == 0
+  xor x4, x6
+  sboxb x6, S2
+else
+  rotl x6, 19
+  sub x7, 5
+end

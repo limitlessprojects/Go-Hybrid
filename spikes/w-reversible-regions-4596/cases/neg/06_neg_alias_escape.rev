@@ -1,0 +1,9 @@
+# name: neg_alias_escape
+# expect: R006_ALIAS_ESCAPE
+# 例 6（负）：可变切片别名逃出区域。区域外还能观察到这块内存，
+# 于是"逆执行把状态还原"并不等于"外部看到的世界还原"。
+# fail closed：拒绝而不是记录。
+program neg_alias_escape
+
+add x0, 1
+alias "sharedBuf[:]"

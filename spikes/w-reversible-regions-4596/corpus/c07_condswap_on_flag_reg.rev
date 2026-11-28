@@ -1,0 +1,12 @@
+# name: c07_condswap_on_flag_reg
+# expect: R004_DISCRIMINATOR_CLOBBERED
+# 类别：条件交换（常量时间 CSWAP 惯例）
+# 判别子 x0.bit0，而 then 臂 swap 了 x0 本身 —— 出口状态无法区分"换过"与"没换"。
+# 这是真正的不可逆，不是保守规则的误伤。
+program c07_condswap_on_flag_reg
+
+if bit x0, 0 == 0
+  swap x0, x1
+else
+  add x2, 1
+end

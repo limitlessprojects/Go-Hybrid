@@ -1,0 +1,6 @@
+# name: c09_lookup_table
+# expect: R012_PRIM_NOT_IN_ALGEBRA
+# 类别：查表（未声明逆向契约的任意表）
+program c09_lookup_table
+
+lookup x0

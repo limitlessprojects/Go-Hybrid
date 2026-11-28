@@ -1,0 +1,12 @@
+# name: neg_disc_clobber
+# expect: R004_DISCRIMINATOR_CLOBBERED
+# 例 4（负）：分支判别子丢失。判别子是 x7.bit0，else 臂却写了 x7（kills bit0）。
+# 出口状态里 bit0 已经是别的值，逆函数无法重建"走了哪条臂" —— 这正是 issue 说的
+# "branches whose choices cannot be reconstructed from resulting state"。
+program neg_disc_clobber
+
+if bit x7, 0 == 0
+  add x0, 1
+else
+  xori x7, 0x10
+end
