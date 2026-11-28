@@ -1526,6 +1526,34 @@ impl<'a> Collector<'a> {
         None
     }
 
+    /// The `time` members that are `time.Duration`-typed values: the unit
+    /// constants (`time.second`) and, with `call`, the constructors
+    /// (`time.seconds(n)`) and `time.since`/`time.until`. `time.Duration` is a
+    /// distinct Go type, so `n * time.second` or `time.sleep(n)` with a typed
+    /// integer `n` cannot build. `nanoseconds`/`microseconds` are excluded
+    /// (they do not lower to Duration constructors, #3639).
+    fn time_duration_member(&self, e: &Expr, call: bool) -> bool {
+        let Expr::Field { base, name, .. } = unwrap_parens(e) else {
+            return false;
+        };
+        let Expr::Ident { name: pkg, .. } = unwrap_parens(base) else {
+            return false;
+        };
+        pkg == "time"
+            && !self.is_pkg_symbol_shadowed("time")
+            && if call {
+                matches!(
+                    name.as_str(),
+                    "milliseconds" | "seconds" | "minutes" | "hours" | "since" | "until"
+                )
+            } else {
+                matches!(
+                    name.as_str(),
+                    "nanosecond" | "microsecond" | "millisecond" | "second" | "minute" | "hour"
+                )
+            }
+    }
+
     /// #1031 — the exact numeric type of a value that is provably TYPED.
     /// Literals are untyped constants (assignable to any numeric type), so
     /// they are deliberately `None` here.
@@ -1555,12 +1583,20 @@ impl<'a> Collector<'a> {
                 operand,
                 ..
             } => self.typed_value_scalar(operand),
-            Expr::Call { callee, args, .. } => match self.call_result_scalars(callee, args) {
-                Some(rs) if rs.len() == 1 => rs[0],
-                _ => None,
-            },
+            Expr::Call { callee, args, .. } => {
+                if self.time_duration_member(callee, true) {
+                    return Some("time.Duration");
+                }
+                match self.call_result_scalars(callee, args) {
+                    Some(rs) if rs.len() == 1 => rs[0],
+                    _ => None,
+                }
+            }
             // #2858: struct field scalar resolution
             Expr::Field { base, name, .. } => {
+                if self.time_duration_member(e, false) {
+                    return Some("time.Duration");
+                }
                 let bk = self.kind_of_expr(base);
                 self.struct_field_scalar(&bk, name)
             }
@@ -8306,6 +8342,26 @@ impl<'a> Collector<'a> {
                                         name
                                     ),
                                     &format!("pass an integer or numeric expression to `time.{}`", name),
+                                );
+                            }
+                        }
+                    }
+                    // `time.Sleep`/`After`/`Tick` take a `time.Duration`: a typed
+                    // integer (`n int`, `int64`, ...) is a different Go type.
+                    if pkg == "time"
+                        && !self.is_pkg_symbol_shadowed("time")
+                        && matches!(name.as_str(), "sleep" | "after" | "tick")
+                        && args.len() == 1
+                    {
+                        if let Some(sc) = self.typed_value_scalar(&args[0].value) {
+                            if sc != "time.Duration" {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "cannot use a value of type `{}` as `time.Duration` in argument to `time.{}` — Go refuses mismatched argument types (HYB-E1002)",
+                                        sc, name
+                                    ),
+                                    &format!("wrap it: `time.sleep(time.milliseconds(n))` / `time.{}(time.seconds(n))`", name),
                                 );
                             }
                         }
