@@ -2468,10 +2468,14 @@ mod tests {
     }
 
     #[test]
-    fn fc_closure_without_boundary_stays_outside_perimeter() {
-        // corpus 10 shape unchanged: a capture used INSIDE a closure without
-        // any task/send statement is still the A5 perimeter (Q1, OQ1) — the
-        // closure pass owns boundary statements, nothing more
+    fn fc_closure_without_boundary_is_caught_by_a5_checksite() {
+        // Corpus 10 shape: a capture written INSIDE a closure without any
+        // task/send statement is not flagged by the closure pass (it owns
+        // boundary statements, nothing more) - but the shape is rejected by
+        // the A5 check-site (HYB-E3013, SPEC-LANGUAGE §8.5 C9). C9 is
+        // decidable from Hybrid source alone and does not require the file
+        // to import the foreign package first (issue #4493); this snippet
+        // deliberately has no `import "net/http"` line.
         let r = check(
             "fn main() {\n\
                hits := 0\n\
@@ -2481,13 +2485,15 @@ mod tests {
                }))\n\
              }",
         );
-        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
-        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3013"), "{:?}", r.diagnostics);
     }
 
     #[test]
-    fn closure_capture_is_outside_perimeter() {
-        // 10-shape: FnLit bodies are never analyzed (A5 scoped claim).
+    fn closure_capture_at_foreign_call_is_inside_a5_perimeter() {
+        // 10-shape: since the D5 promotion (§8.5 C9) a FnLit passed to a
+        // foreign call IS analyzed by the A5 check-site, whether or not the
+        // file imports the package (issue #4493).
         let r = check(
             "fn main() {\n\
                hits := 0\n\
@@ -2497,7 +2503,8 @@ mod tests {
                }))\n\
              }",
         );
-        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3013"), "{:?}", r.diagnostics);
     }
 
     #[test]
