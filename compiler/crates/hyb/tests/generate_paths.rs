@@ -464,3 +464,35 @@ fn marked_stale_output_can_be_refreshed() {
         stdout, stderr
     );
 }
+
+// `go build ./...` / `go generate ./...` never enter `testdata`, directories
+// starting with `_` or `.`, `vendor`, or nested modules. A recursive
+// `hyb generate .` must not either: fixtures there (a deliberately rejected
+// .hy, a .hy with no sibling .go) are not part of this package tree and used
+// to abort the whole run. An explicitly named directory is still honoured.
+#[test]
+fn recursive_walk_skips_dirs_go_dot_dot_dot_skips() {
+    let m = SampleModule::new("go-ignored-dirs");
+    let reject = "fn bad() {\n    x := \n}\n";
+    for dir in ["testdata", "_scratch", "nested_module"] {
+        fs::create_dir(m.root.join(dir)).unwrap();
+        fs::write(m.root.join(dir).join("fixture.hy"), reject).unwrap();
+    }
+    fs::write(
+        m.root.join("nested_module").join("go.mod"),
+        "module example.com/nested\n\ngo 1.26\n",
+    )
+    .unwrap();
+
+    let (code, out, err) = m.hyb(&["generate", "."]);
+    assert_eq!(code, 0, "{} {}", out, err);
+    assert!(out.contains("generate: 1 file(s) written, 1 total"), "{}", out);
+    assert!(m.root.join("calc.hy.go").exists());
+    let (code, out, err) = m.hyb(&["generate", "--check", "."]);
+    assert_eq!(code, 0, "{} {}", out, err);
+
+    // Naming the directory explicitly still checks it (and fails closed).
+    let (code, _out, err) = m.hyb(&["generate", "testdata"]);
+    assert_eq!(code, 1, "{}", err);
+    assert!(err.contains("failed the checker"), "{}", err);
+}
