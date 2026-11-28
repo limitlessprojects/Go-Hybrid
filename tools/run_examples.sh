@@ -170,7 +170,8 @@ run_example() {
         if [ "$ok" -eq 1 ]; then PASS="$PASS $name"; else FAIL=1; fi
         ;;
     *)
-        note "SKIP $name (not in the MVP-0 emittable set)"
+        note "FAIL $name (unsupported acceptance example; no runtime oracle)"
+        FAIL=1
         ;;
     esac
 }
