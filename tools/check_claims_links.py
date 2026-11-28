@@ -24,6 +24,7 @@ from pathlib import Path
 
 TABLE_HEADING = "## The claims table"
 ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|")
+BACKTICK_RUN_RE = re.compile(r"`+")
 LINK_RE = re.compile(r"\[([^\]]*)\]\((<[^<>\r\n]*>|[^)\s]+)(?:\s+\"[^\"]*\")?\)")
 INLINE_CORPUS_RE = re.compile(r"`(\d{2}-[a-z0-9][a-z0-9-]*(?:\.hy)?)`")
 CORPUS_NUM_RE = re.compile(r"\bcorpus\s+(\d{1,3})\b")
@@ -52,6 +53,52 @@ def table_rows(text):
         if len(cells) < 6:
             continue
         yield int(match.group(1)), "|".join(cells[5:-1]).strip()
+
+
+def code_span_ranges(text, position=0):
+    """Yield the offsets of inline code spans delimited by equal backtick runs."""
+    runs = list(BACKTICK_RUN_RE.finditer(text, position))
+    next_run = 0
+    while next_run < len(runs):
+        opening = runs[next_run]
+        next_run += 1
+        start = opening.start()
+        escape_start = start
+        while escape_start > 0 and text[escape_start - 1] == "\\":
+            escape_start -= 1
+        if (start - escape_start) % 2:
+            start += 1  # An escape removes the first backtick of the opener.
+        width = opening.end() - start
+        if not width:
+            continue
+        for index in range(next_run, len(runs)):
+            closing = runs[index]
+            if closing.end() - closing.start() == width:
+                yield start, closing.end()
+                next_run = index + 1
+                break
+
+
+def markdown_links(text):
+    """Find link matches whose opening bracket is outside inline code."""
+    spans = iter(code_span_ranges(text))
+    span = next(spans, None)
+    position = 0
+    while match := LINK_RE.search(text, position):
+        while span is not None and span[1] <= match.start():
+            span = next(spans, None)
+        if span is not None and span[0] <= match.start():
+            # A code example can consume a real link in the regex match.
+            # Resume at the end of the code span, not the end of the match.
+            position = span[1]
+        else:
+            yield match
+            position = match.end()
+            if span is not None and span[0] < position:
+                # The link consumed this opener. Scan fresh after the link so
+                # a backtick in its destination or title cannot hide later links.
+                spans = iter(code_span_ranges(text, position))
+                span = next(spans, None)
 
 
 def is_checkable(target):
@@ -96,7 +143,7 @@ def check(root):
     text = claims_file.read_text(encoding="utf-8", errors="replace")
     for row_number, evidence in table_rows(text):
         rows += 1
-        for index, match in enumerate(LINK_RE.finditer(evidence)):
+        for match in markdown_links(evidence):
             target = match.group(2)
             # Angle-delimited Markdown destinations may contain spaces or parentheses.
             if target.startswith("<") and target.endswith(">"):
