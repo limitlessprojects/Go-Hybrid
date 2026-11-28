@@ -36,6 +36,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "package_release.sh"
+RELEASE_INSTALL = ROOT / "tools" / "RELEASE-INSTALL.md"
 VERSION = "v9.9.9-test"
 PKG_OS = "linux"
 PKG_ARCH = "amd64"
@@ -266,6 +267,31 @@ class PackageReleaseIsolationTests(unittest.TestCase):
                     (directory / "cargo.exe").is_file() and os.access(directory / "cargo.exe", os.X_OK),
                     part,
                 )
+
+
+class ReleaseInstallDocTests(unittest.TestCase):
+    """package_release.sh ships tools/RELEASE-INSTALL.md verbatim as the
+    release's INSTALL.md (step 3 above). A Windows archive only contains
+    hyb.exe and PowerShell, so the doc must cover that setup path, not just
+    the POSIX export/curl|sh instructions install.sh wires up."""
+
+    def test_covers_windows_powershell_setup(self):
+        text = RELEASE_INSTALL.read_text()
+        self.assertIn("Windows", text)
+        self.assertIn("PowerShell", text)
+        self.assertIn("hyb.exe", text)
+        self.assertIn("$env:HYB_RUNTIME_DIR", text)
+        self.assertIn("$env:Path", text)
+
+    def test_labels_existing_setup_as_linux_and_macos(self):
+        text = RELEASE_INSTALL.read_text()
+        self.assertIn("Linux and macOS", text)
+
+    def test_windows_section_precedes_acceptance_checks(self):
+        text = RELEASE_INSTALL.read_text()
+        windows_at = text.index("Setup on Windows")
+        verify_at = text.index("Verify the claim")
+        self.assertLess(windows_at, verify_at)
 
 
 if __name__ == "__main__":
