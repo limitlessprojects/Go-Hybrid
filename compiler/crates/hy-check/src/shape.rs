@@ -93,7 +93,7 @@ impl<'a> Checker<'a> {
             return self.shape_of_type_depth(target, depth + 1);
         }
         if self.enums.contains_key(base) {
-            return TypeShape::Primitive;
+            return self.enum_shape(base, depth);
         }
         // #884: the T9 prelude's `set[T]` lowers to a struct wrapping a Go
         // map (`type set[t comparable] struct { m map[t]struct{} }`), so a
@@ -116,6 +116,31 @@ impl<'a> Checker<'a> {
                     TypeShape::Unknown
                 }
             }
+        }
+    }
+
+    /// An enum value holds its payload by value, so its shape is its payloads'
+    /// shape. The first payload that is not sendable by type decides (a
+    /// non-sendable payload makes the enum non-sendable); an unresolved payload
+    /// makes the enum Unknown (fail-closed, O4.9); otherwise every payload is a
+    /// value copy and the enum is Primitive. Recursion terminates through
+    /// MAX_TYPE_RESOLUTION_DEPTH, which yields Unknown.
+    fn enum_shape(&self, ename: &str, depth: usize) -> TypeShape {
+        let Some(payloads) = self.enum_payloads.get(ename) else {
+            return TypeShape::Primitive;
+        };
+        let mut unknown = false;
+        for p in payloads {
+            match self.shape_of_type_depth(p, depth + 1) {
+                TypeShape::Unknown => unknown = true,
+                s if !s.is_sendable_by_type() => return s,
+                _ => {}
+            }
+        }
+        if unknown {
+            TypeShape::Unknown
+        } else {
+            TypeShape::Primitive
         }
     }
 
@@ -307,6 +332,11 @@ impl<'a> Checker<'a> {
                 _ => TypeShape::Unknown,
             },
             Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, root).is_none() && self.enums.contains_key(root.as_str()) {
+                        return self.named_shape(root);
+                    }
+                }
                 let base_shape = self.shape_of_expr(st, base);
                 self.field_shape(&base_shape, name)
             }
@@ -478,6 +508,9 @@ impl<'a> Checker<'a> {
                         && !st.type_params.contains(root.as_str())
                         && !self.consts.contains_key(root.as_str())
                     {
+                        if self.enums.contains_key(root.as_str()) {
+                            return self.named_shape(root);
+                        }
                         let full = format!("{}.{}", root, head);
                         if let Some(f) = self.fns.get(full.as_str()) {
                             let subst = self.fn_call_shape_subst(st, f, name, None, args);
