@@ -675,6 +675,10 @@ pub struct Emitter {
     /// var → (shape-known dotted type, is_pointer): `var hits atomic.int64`
     /// / `hits *atomic.int64` — the MethodFunc receiver's address-of form.
     var_ty: BTreeMap<String, (String, bool)>,
+    /// var → its declared slice/array/map type (#element-kinds): an
+    /// indexed read `ss[0]` / `m[k]` or a range element binds through the
+    /// container's element type (set/map/chan/struct lowering).
+    var_container_ty: BTreeMap<String, TypeExpr>,
     /// Variables known to hold a pointer type in the current function frame.
     pointer_vars: BTreeSet<String>,
     /// Active O8 slot-loan variable → local alias names holding a pointer to that loan.
@@ -702,6 +706,7 @@ pub(crate) struct ScopeSnapshot {
     local_vars: BTreeSet<String>,
     bindings: BTreeMap<String, BindingKind>,
     var_ty: BTreeMap<String, (String, bool)>,
+    var_container_ty: BTreeMap<String, TypeExpr>,
     var_struct: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
     loan_aliases: BTreeMap<String, BTreeSet<String>>,
@@ -739,6 +744,7 @@ impl Emitter {
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
+            var_container_ty: BTreeMap::new(),
             pointer_vars: BTreeSet::new(),
             loan_aliases: BTreeMap::new(),
             local_vars: BTreeSet::new(),
@@ -761,6 +767,7 @@ impl Emitter {
             local_vars: self.local_vars.clone(),
             bindings: self.bindings.clone(),
             var_ty: self.var_ty.clone(),
+            var_container_ty: self.var_container_ty.clone(),
             var_struct: self.var_struct.clone(),
             pointer_vars: self.pointer_vars.clone(),
             loan_aliases: self.loan_aliases.clone(),
@@ -771,6 +778,7 @@ impl Emitter {
         self.local_vars = saved.local_vars;
         self.bindings = saved.bindings;
         self.var_ty = saved.var_ty;
+        self.var_container_ty = saved.var_container_ty;
         self.var_struct = saved.var_struct;
         self.pointer_vars = saved.pointer_vars;
         self.loan_aliases = saved.loan_aliases;
@@ -781,6 +789,7 @@ impl Emitter {
             self.local_vars.insert(name.to_string());
             self.bindings.remove(name);
             self.var_ty.remove(name);
+            self.var_container_ty.remove(name);
             self.var_struct.remove(name);
             self.pointer_vars.remove(name);
             self.loan_aliases.remove(name);
@@ -1458,6 +1467,7 @@ impl Emitter {
         self.var_struct.clear();
         self.closure_shapes.clear();
         self.var_ty.clear();
+        self.var_container_ty.clear();
         self.pointer_vars.clear();
         self.loan_aliases.clear();
         self.local_vars.clear();
@@ -1789,6 +1799,9 @@ impl Emitter {
     /// whose type is a user struct (`pool_stats`, value or pointer) lands
     /// in var_struct — `stats.mu.lock()` types through struct_fields.
     fn register_var_ty(&mut self, name: &str, ty: &TypeExpr) {
+        if self.container_elem_ty(ty).is_some() {
+            self.var_container_ty.insert(name.to_string(), ty.clone());
+        }
         let (base, ptr) = match self.resolve_type_alias(ty) {
             TypeExpr::Pointer { to, .. } => (base_ty_name(self.resolve_type_alias(to)), true),
             t => (base_ty_name(t), false),
@@ -1803,6 +1816,60 @@ impl Emitter {
         } else if self.struct_fields.contains_key(struct_base) {
             self.var_struct
                 .insert(name.to_string(), struct_base.to_string());
+        }
+    }
+
+    /// The element type of a slice/array (or pointer-to-array) type, or the
+    /// value type of a map type — what an index read `e[i]` produces.
+    pub(crate) fn container_elem_ty<'a>(&'a self, t: &'a TypeExpr) -> Option<&'a TypeExpr> {
+        let t = match self.resolve_type_alias(t) {
+            TypeExpr::Pointer { to, .. } => match self.resolve_type_alias(to) {
+                a @ TypeExpr::Array { .. } => a,
+                _ => return None,
+            },
+            other => other,
+        };
+        match t {
+            TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(elem),
+            TypeExpr::Map { value, .. } => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The statically known type of an expression, when it is reachable
+    /// through declared container types: a container-typed local, a typed
+    /// slice/map literal, a user-struct field, or an index read of any of
+    /// those (`ss[0]`, `m["a"]`, `grid[i][j]`, `bs[0].m`). `None` when
+    /// unknown — callers keep their previous fallback.
+    pub(crate) fn static_ty_of(&self, e: &Expr) -> Option<TypeExpr> {
+        match e {
+            Expr::Paren { inner, .. } => self.static_ty_of(inner),
+            Expr::Ident { name, .. } => self.var_container_ty.get(name).cloned(),
+            Expr::SliceLit {
+                elem: Some(elem),
+                span,
+                ..
+            } => Some(TypeExpr::Slice {
+                elem: elem.clone(),
+                span: *span,
+            }),
+            Expr::MapLit {
+                key, value, span, ..
+            } => Some(TypeExpr::Map {
+                key: key.clone(),
+                value: value.clone(),
+                span: *span,
+            }),
+            Expr::Field { base, name, .. } => self
+                .user_struct_name_of(base)
+                .and_then(|sn| self.n5_structs.get(sn))
+                .and_then(|fs| fs.iter().find(|f| &f.name == name))
+                .map(|f| f.ty.clone()),
+            Expr::Index { base, .. } => {
+                let bt = self.static_ty_of(base)?;
+                self.container_elem_ty(&bt).cloned()
+            }
+            _ => None,
         }
     }
 

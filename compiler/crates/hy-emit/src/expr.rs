@@ -729,6 +729,17 @@ impl Emitter {
                 self.resolve_to_struct_name(fty)
             }
             Expr::StructLit { ty: Some(t), .. } => super::base_ty_name(t).and_then(|n| self.resolve_to_struct_name(&n)),
+            // `bs[0].m` / `byname["k"].field`: an index read of a container
+            // whose declared element type is a user struct.
+            Expr::Index { .. } => self
+                .static_ty_of(e)
+                .and_then(|t| match self.resolve_type_alias(&t) {
+                    TypeExpr::Pointer { to, .. } => {
+                        super::base_ty_name(self.resolve_type_alias(to))
+                    }
+                    other => super::base_ty_name(other),
+                })
+                .and_then(|n| self.resolve_to_struct_name(&n)),
             Expr::Call { callee, args, .. } => {
                 let callee_head = match Self::unwrap_parens(callee) {
                     Expr::Index { base, .. } => Self::unwrap_parens(base),
