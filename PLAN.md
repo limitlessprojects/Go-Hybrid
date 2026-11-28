@@ -1,5 +1,10 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — queue snapshot output paths (2026-11-29, #4906)
+
+- Base `762d806`: resolve the output parent from an absolute path before creating it; keep the write destination unchanged, following the one-line fix proposed in #4906. Offline Windows/Python 3.12 regression: baseline raises two bare-filename subtest errors; patched five methods / ten empty-and-populated path subtests pass (bare, nested, absolute, spaces, and TRIAGE_STATE_DIR default). Registered in quick CI. No network or real credentials used by the tests. Compiler/corpus/differential suites and hosted CI were not run; review and any discretionary award remain pending.
+
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.

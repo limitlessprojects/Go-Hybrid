@@ -113,7 +113,7 @@ for p in rest_target:
         print(f"  #{p['number']}: {ex}", flush=True)
 print(f"mergeability fixed for {fixed}/{len(rest_target)}", flush=True)
 
-os.makedirs(os.path.dirname(OUT), exist_ok=True)
+os.makedirs(os.path.dirname(os.path.abspath(OUT)), exist_ok=True)
 with open(OUT, "w") as f: json.dump(prs, f, indent=1, default=str)
 
 def dist(items, key, title):
