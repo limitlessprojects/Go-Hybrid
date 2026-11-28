@@ -1,0 +1,12 @@
+[workspace]
+
+[package]
+name = "w1744-place-graph-mir"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+hy-diag = { path = "../../compiler/crates/hy-diag" }
+hy-syntax = { path = "../../compiler/crates/hy-syntax" }
+hy-check = { path = "../../compiler/crates/hy-check" }
