@@ -287,7 +287,9 @@ impl<'a> Checker<'a> {
         if is_non_struct_foreign_type(head) {
             return false;
         }
-        self.structs.contains_key(head) || head.contains('.')
+        self.structs.contains_key(head)
+            || self.struct_type_params.contains_key(head)
+            || head.contains('.')
     }
 
     fn check_elided_struct_fields(&mut self, exp: Option<&TypeExpr>, fields: &[FieldInit]) {
@@ -301,9 +303,6 @@ impl<'a> Checker<'a> {
         }
         let TypeExpr::Named { name, .. } = &r else { return };
         let head = name.split('[').next().unwrap_or(name.as_str());
-        let Some(declared) = self.structs.get(head).cloned() else {
-            return;
-        };
 
         let mut seen: HashMap<String, usize> = HashMap::new();
         for f in fields {
@@ -326,6 +325,14 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+
+        let declared = if let Some(d) = self.structs.get(head) {
+            d.clone()
+        } else if self.struct_type_params.contains_key(head) {
+            Vec::new()
+        } else {
+            return;
+        };
 
         for f in fields {
             if !declared.iter().any(|(n, _)| n == &f.name) {
