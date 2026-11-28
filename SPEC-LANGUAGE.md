@@ -327,6 +327,14 @@ distinct — `int`/`int64` and `uint`/`uintptr` never collapse, and the
 untouched. Untyped-bound defaulting and the constant-overflow checks are
 unchanged. (Issue #1165.)
 
+Integer range bounds are compared using their emitted Go integer type, so
+equivalent spellings (`u8`/`uint8`/`byte`, `i32`/`int32`/`rune`, and the other
+fixed-width SPEC/Go pairs) are compatible. Equal representable ranges do not
+make distinct Go types compatible: `int`/`int64` and `uint`/`uintptr` remain
+distinct. This clarifies LX13 for issue #1165; untyped-bound defaulting and
+constant-overflow checks are unchanged.
+
+
 **LX13a — the iterable is TYPE-checked (HYB-E2009/E3005).** LX13's iterable
 set is a closed contract: since issue #411, the checker rejects `for x in e`
 when `e` resolves to a concrete non-iterable shape (an int, bool, struct, a
