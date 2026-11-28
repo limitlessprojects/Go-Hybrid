@@ -111,6 +111,41 @@ fn modern_ignore_generator_does_not_conflict_with_package() {
 }
 
 #[test]
+fn source_constraints_select_the_implementation_at_go_build_time() {
+    let m = Module::new("source-tags");
+    m.write(
+        "calc.hy",
+        "//go:build !pro\n\npub fn add(a int, b int) int { return a + b }\n",
+    );
+    m.write(
+        "pro.hy",
+        "/*\n//go:build decoy\n*/\n// License\n//go:build pro\n\npub fn add(a int, b int) int { return b + a }\n",
+    );
+    assert_success(&m.hyb(&["generate", "."], ""));
+    for (flags, expected, excluded) in [
+        ("", "calc.hy.go", "pro.hy.go"),
+        ("-tags=pro", "pro.hy.go", "calc.hy.go"),
+    ] {
+        let selection = m.go_selection(flags);
+        let files = selection["GoFiles"].as_array().unwrap();
+        assert!(files.iter().any(|f| f.as_str() == Some(expected)));
+        assert!(!files.iter().any(|f| f.as_str() == Some(excluded)));
+        assert_success(&m.hyb(&["generate", "--check", "."], flags));
+        assert_success(&m.command("go", &["test", "./..."], flags));
+    }
+    m.write(
+        "pro.hy",
+        "//go:build enterprise\n\npub fn add(a int, b int) int { return b + a }\n",
+    );
+    assert!(!m
+        .hyb(&["generate", "--check", "pro.hy"], "")
+        .status
+        .success());
+    assert_success(&m.hyb(&["generate", "pro.hy"], ""));
+    assert_success(&m.hyb(&["generate", "--check", "pro.hy"], ""));
+}
+
+#[test]
 fn legacy_constraint_generator_does_not_conflict_with_package() {
     let m = Module::new("legacy");
     m.write(

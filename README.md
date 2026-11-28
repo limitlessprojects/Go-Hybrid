@@ -190,6 +190,11 @@ pitch is literal. CI staleness gate: `hyb generate --check .` fails when a
 `.hy` changed without regenerating, so untranspiled code can never silently
 skip the checker.
 
+For build variants, put a single Go build constraint such as `//go:build pro`
+near the top of the `.hy` file, before any code. `hyb generate` checks and
+emits each variant. The generated file carries the constraint so that
+`go build -tags=pro` selects the matching implementation.
+
 Directory discovery recurses through real subdirectories, skipping child directory
 symlinks (including links back to the project). A directory symlink explicitly
 passed as a root and symlinks to individual `.hy` files remain supported.
