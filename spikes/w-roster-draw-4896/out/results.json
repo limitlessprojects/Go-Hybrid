@@ -1,0 +1,770 @@
+{
+  "meta": {
+    "issue": "limitlessprojects/Go-Hybrid#4896",
+    "master_seed": 20261128,
+    "draws_per_config": 100000,
+    "python": "3.12.10",
+    "started": "2026-11-28T19:36:59+0800"
+  },
+  "H1": {
+    "rosters": 151,
+    "pairs": 284,
+    "histogram": {
+      "1": 43,
+      "2": 84,
+      "3": 23,
+      "4": 1
+    },
+    "oracle_seconds": 0.001842,
+    "product_agrees": true,
+    "sweep": [
+      {
+        "n": 0,
+        "oracle": 0,
+        "automaton": 0,
+        "pairs": 0,
+        "agree": true
+      },
+      {
+        "n": 1,
+        "oracle": 0,
+        "automaton": 0,
+        "pairs": 0,
+        "agree": true
+      },
+      {
+        "n": 2,
+        "oracle": 1,
+        "automaton": 1,
+        "pairs": 1,
+        "agree": true
+      },
+      {
+        "n": 3,
+        "oracle": 4,
+        "automaton": 4,
+        "pairs": 4,
+        "agree": true
+      },
+      {
+        "n": 4,
+        "oracle": 11,
+        "automaton": 11,
+        "pairs": 12,
+        "agree": true
+      },
+      {
+        "n": 5,
+        "oracle": 27,
+        "automaton": 27,
+        "pairs": 32,
+        "agree": true
+      },
+      {
+        "n": 6,
+        "oracle": 58,
+        "automaton": 58,
+        "pairs": 76,
+        "agree": true
+      },
+      {
+        "n": 7,
+        "oracle": 102,
+        "automaton": 102,
+        "pairs": 156,
+        "agree": true
+      },
+      {
+        "n": 8,
+        "oracle": 151,
+        "automaton": 151,
+        "pairs": 284,
+        "agree": true
+      },
+      {
+        "n": 9,
+        "oracle": 204,
+        "automaton": 204,
+        "pairs": 472,
+        "agree": true
+      }
+    ],
+    "sweep_agree": true,
+    "examples": {
+      "ABABABAB": [
+        0,
+        2,
+        4,
+        6
+      ],
+      "ABACACBA": [
+        0
+      ],
+      "ABABACAC": [
+        0,
+        2
+      ],
+      "ABACABAB": [
+        0,
+        4,
+        6
+      ]
+    },
+    "issue_claim": {
+      "rosters": 151,
+      "pairs": 284,
+      "histogram": {
+        "1": 43,
+        "2": 84,
+        "3": 23,
+        "4": 1
+      }
+    }
+  },
+  "H2": {
+    "impl1_pairs": {
+      "config": "H2/impl1/pairs",
+      "sampler": "pairs-uniform",
+      "draws": 100000,
+      "space_size": 284,
+      "seconds": 0.524,
+      "target_counts": {
+        "ABABABAB": 1531,
+        "ABACACBA": 335,
+        "ABABACAC": 678,
+        "ABACABAB": 1087
+      },
+      "chi2_uniform": 13007.98,
+      "df_uniform": 150,
+      "p_uniform": 0.0,
+      "chi2_multiplicity_model": 164.05,
+      "p_multiplicity_model": 0.2045807895330646,
+      "max_abs_dev_vs_uniform": 0.008687,
+      "worst_roster": "ABABABAB",
+      "rosters_outside_999_wilson": 69,
+      "expected_sd_count": 25.649,
+      "freq_ABABABAB": 0.01531,
+      "freq_ABACACBA": 0.00335,
+      "ratio_ABABABAB_over_ABACACBA": 4.5701,
+      "ratio_ci95": [
+        4.0619,
+        5.142
+      ],
+      "entropy_reveal_exact": 1.004797,
+      "entropy_reveal_empirical": 1.003804,
+      "repeat_agreement_exact": 0.53169
+    },
+    "impl1b_paths": {
+      "config": "H2/impl1b/pathcount",
+      "sampler": "pairs-uniform(path-count)",
+      "draws": 100000,
+      "space_size": 284,
+      "seconds": 7.279,
+      "target_counts": {
+        "ABABABAB": 1388,
+        "ABACACBA": 370,
+        "ABABACAC": 742,
+        "ABACABAB": 1079
+      },
+      "chi2_uniform": 12946.348,
+      "df_uniform": 150,
+      "p_uniform": 0.0,
+      "chi2_multiplicity_model": 135.608,
+      "p_multiplicity_model": 0.7939646860009292,
+      "max_abs_dev_vs_uniform": 0.007257,
+      "worst_roster": "ABABABAB",
+      "rosters_outside_999_wilson": 72,
+      "expected_sd_count": 25.649,
+      "freq_ABABABAB": 0.01388,
+      "freq_ABACACBA": 0.0037,
+      "ratio_ABABABAB_over_ABACACBA": 3.7514,
+      "ratio_ci95": [
+        3.346,
+        4.2058
+      ],
+      "entropy_reveal_exact": 1.004797,
+      "entropy_reveal_empirical": 1.00446,
+      "repeat_agreement_exact": 0.53169
+    },
+    "impl2_boundary": {
+      "config": "H2/impl2/roster-then-boundary",
+      "sampler": "roster-then-handoff",
+      "draws": 100000,
+      "space_size": 151,
+      "seconds": 9.9,
+      "target_counts": {
+        "ABABABAB": 659,
+        "ABACACBA": 657,
+        "ABABACAC": 624,
+        "ABACABAB": 688
+      },
+      "chi2_uniform": 158.258,
+      "df_uniform": 150,
+      "p_uniform": 0.30621408336647465,
+      "chi2_multiplicity_model": 16296.121,
+      "p_multiplicity_model": 0.0,
+      "max_abs_dev_vs_uniform": 0.000653,
+      "worst_roster": "CABABABA",
+      "rosters_outside_999_wilson": 0,
+      "expected_sd_count": 25.649,
+      "freq_ABABABAB": 0.00659,
+      "freq_ABACACBA": 0.00657,
+      "ratio_ABABABAB_over_ABACACBA": 1.003,
+      "ratio_ci95": [
+        0.9006,
+        1.1171
+      ],
+      "entropy_reveal_exact": 0.810955,
+      "entropy_reveal_empirical": 0.807587,
+      "repeat_agreement_exact": 0.615342
+    },
+    "impl2_run": {
+      "config": "H2/impl2/roster-then-run",
+      "sampler": "roster-then-handoff",
+      "draws": 100000,
+      "space_size": 151,
+      "seconds": 9.613,
+      "target_counts": {
+        "ABABABAB": 682,
+        "ABACACBA": 673,
+        "ABABACAC": 653,
+        "ABACABAB": 646
+      },
+      "chi2_uniform": 160.13,
+      "df_uniform": 150,
+      "p_uniform": 0.2707710856483048,
+      "chi2_multiplicity_model": 16767.461,
+      "p_multiplicity_model": 0.0,
+      "max_abs_dev_vs_uniform": 0.000703,
+      "worst_roster": "ABABACBA",
+      "rosters_outside_999_wilson": 0,
+      "expected_sd_count": 25.649,
+      "freq_ABABABAB": 0.00682,
+      "freq_ABACACBA": 0.00673,
+      "ratio_ABABABAB_over_ABACACBA": 1.0134,
+      "ratio_ci95": [
+        0.9113,
+        1.1268
+      ],
+      "entropy_reveal_exact": 0.810955,
+      "entropy_reveal_empirical": 0.805511,
+      "repeat_agreement_exact": 0.615342
+    },
+    "impl3_det": {
+      "config": "H2/impl3/determinized",
+      "sampler": "determinized",
+      "draws": 100000,
+      "space_size": 151,
+      "seconds": 6.202,
+      "target_counts": {
+        "ABABABAB": 671,
+        "ABACACBA": 648,
+        "ABABACAC": 655,
+        "ABACABAB": 678
+      },
+      "chi2_uniform": 119.97,
+      "df_uniform": 150,
+      "p_uniform": 0.9660763520295482,
+      "chi2_multiplicity_model": 15484.183,
+      "p_multiplicity_model": 0.0,
+      "max_abs_dev_vs_uniform": 0.000753,
+      "worst_roster": "BABCBCBA",
+      "rosters_outside_999_wilson": 0,
+      "expected_sd_count": 25.649,
+      "freq_ABABABAB": 0.00671,
+      "freq_ABACACBA": 0.00648,
+      "ratio_ABABABAB_over_ABACACBA": 1.0355,
+      "ratio_ci95": [
+        0.9299,
+        1.1531
+      ],
+      "entropy_reveal_exact": 0.0,
+      "entropy_reveal_empirical": 0.0,
+      "repeat_agreement_exact": 1.0
+    },
+    "posthoc_pooled_pair_ratio": {
+      "note": "post-hoc: impl1 + impl1b pooled, 200,000 draws total",
+      "counts": {
+        "ABABABAB": 2919,
+        "ABACACBA": 705
+      },
+      "ratio": 4.1404,
+      "ci95": [
+        3.8144,
+        4.4943
+      ],
+      "covers_4": true
+    }
+  },
+  "H3": {
+    "visible_count_plain": 151,
+    "visible_count_split": 151,
+    "path_count_plain": 284,
+    "path_count_split": 387,
+    "decode_identical": true,
+    "decoded_rosters": 151,
+    "per_roster_paths": {
+      "ABABABAB": [
+        4,
+        8
+      ],
+      "ABACACBA": [
+        1,
+        2
+      ],
+      "ABABACAC": [
+        2,
+        4
+      ],
+      "ABACABAB": [
+        3,
+        4
+      ]
+    },
+    "det_plain": {
+      "config": "H3/det-plain",
+      "sampler": "determinized",
+      "draws": 100000,
+      "space_size": 151,
+      "seconds": 8.056,
+      "target_counts": {
+        "ABABABAB": 647,
+        "ABACACBA": 637,
+        "ABABACAC": 630,
+        "ABACABAB": 667
+      },
+      "chi2_uniform": 145.1,
+      "df_uniform": 150,
+      "p_uniform": 0.5977234801584776,
+      "chi2_multiplicity_model": 15843.281,
+      "p_multiplicity_model": 0.0,
+      "max_abs_dev_vs_uniform": 0.000783,
+      "worst_roster": "ABABCBAB",
+      "rosters_outside_999_wilson": 0,
+      "expected_sd_count": 25.649,
+      "freq_ABABABAB": 0.00647,
+      "freq_ABACACBA": 0.00637,
+      "ratio_ABABABAB_over_ABACACBA": 1.0157,
+      "ratio_ci95": [
+        0.9108,
+        1.1327
+      ],
+      "entropy_reveal_exact": 0.0,
+      "entropy_reveal_empirical": 0.0,
+      "repeat_agreement_exact": 1.0
+    },
+    "det_split": {
+      "config": "H3/det-split",
+      "sampler": "determinized",
+      "draws": 100000,
+      "space_size": 151,
+      "seconds": 5.827,
+      "target_counts": {
+        "ABABABAB": 626,
+        "ABACACBA": 646,
+        "ABABACAC": 662,
+        "ABACABAB": 662
+      },
+      "chi2_uniform": 151.701,
+      "df_uniform": 150,
+      "p_uniform": 0.4457834530116933,
+      "chi2_multiplicity_model": 15772.956,
+      "p_multiplicity_model": 0.0,
+      "max_abs_dev_vs_uniform": 0.000757,
+      "worst_roster": "BCBACBAB",
+      "rosters_outside_999_wilson": 0,
+      "expected_sd_count": 25.649,
+      "freq_ABABABAB": 0.00626,
+      "freq_ABACACBA": 0.00646,
+      "ratio_ABABABAB_over_ABACACBA": 0.969,
+      "ratio_ci95": [
+        0.8685,
+        1.0813
+      ],
+      "entropy_reveal_exact": 0.0,
+      "entropy_reveal_empirical": 0.0,
+      "repeat_agreement_exact": 1.0
+    },
+    "det_ratio_ABABACAC": [
+      0.9517,
+      0.8536,
+      1.061
+    ],
+    "path_plain": {
+      "config": "H3/path-plain",
+      "sampler": "pairs-uniform(path-count)",
+      "draws": 100000,
+      "space_size": 284,
+      "seconds": 6.678,
+      "target_counts": {
+        "ABABABAB": 1421,
+        "ABACACBA": 344,
+        "ABABACAC": 712,
+        "ABACABAB": 1119
+      },
+      "chi2_uniform": 13138.668,
+      "df_uniform": 150,
+      "p_uniform": 0.0,
+      "chi2_multiplicity_model": 169.169,
+      "p_multiplicity_model": 0.1354632987745107,
+      "max_abs_dev_vs_uniform": 0.007587,
+      "worst_roster": "ABABABAB",
+      "rosters_outside_999_wilson": 72,
+      "expected_sd_count": 25.649,
+      "freq_ABABABAB": 0.01421,
+      "freq_ABACACBA": 0.00344,
+      "ratio_ABABABAB_over_ABACACBA": 4.1308,
+      "ratio_ci95": [
+        3.6731,
+        4.6456
+      ],
+      "entropy_reveal_exact": 1.004797,
+      "entropy_reveal_empirical": 1.005886,
+      "repeat_agreement_exact": 0.53169
+    },
+    "path_split": {
+      "config": "H3/path-split",
+      "sampler": "pairs-uniform(path-count)",
+      "draws": 100000,
+      "space_size": 387,
+      "seconds": 7.585,
+      "target_counts": {
+        "ABABABAB": 2033,
+        "ABACACBA": 529,
+        "ABABACAC": 1028,
+        "ABACABAB": 1014
+      },
+      "chi2_uniform": 25513.855,
+      "df_uniform": 150,
+      "p_uniform": 0.0,
+      "chi2_multiplicity_model": 8679.314,
+      "p_multiplicity_model": 0.0,
+      "max_abs_dev_vs_uniform": 0.013707,
+      "worst_roster": "ABABABAB",
+      "rosters_outside_999_wilson": 145,
+      "expected_sd_count": 25.649,
+      "freq_ABABABAB": 0.02033,
+      "freq_ABACACBA": 0.00529,
+      "ratio_ABABABAB_over_ABACACBA": 3.8431,
+      "ratio_ci95": [
+        3.4939,
+        4.2272
+      ],
+      "entropy_reveal_exact": 0.997463,
+      "entropy_reveal_empirical": 0.995589,
+      "repeat_agreement_exact": 0.541774
+    },
+    "path_ratio_ABABACAC": [
+      0.6926,
+      0.6297,
+      0.7618
+    ],
+    "reveal_conditional": {
+      "impl2_boundary_plain": {
+        "exact_law": {
+          "0": 0.3333333333333333,
+          "4": 0.3333333333333333,
+          "6": 0.3333333333333333
+        },
+        "observed": {
+          "0": 33453,
+          "4": 33541,
+          "6": 33006
+        },
+        "observed_total": 100000,
+        "chi2_vs_exact": 4.938,
+        "p_vs_exact": 0.08467880032284428,
+        "chi2_vs_other_policy_law": 4.938,
+        "p_vs_other_policy_law": 0.08467880032284428,
+        "seconds": 0.277
+      },
+      "impl2_boundary_split": {
+        "exact_law": {
+          "0": 0.3333333333333333,
+          "4": 0.3333333333333333,
+          "6": 0.3333333333333333
+        },
+        "observed": {
+          "0": 33217,
+          "4": 33331,
+          "6": 33452
+        },
+        "observed_total": 100000,
+        "chi2_vs_exact": 0.829,
+        "p_vs_exact": 0.6607960727288338,
+        "chi2_vs_other_policy_law": 0.829,
+        "p_vs_other_policy_law": 0.6607960727288338,
+        "seconds": 0.251
+      },
+      "impl2_run_plain": {
+        "exact_law": {
+          "0": 0.3333333333333333,
+          "4": 0.3333333333333333,
+          "6": 0.3333333333333333
+        },
+        "observed": {
+          "0": 33439,
+          "4": 33436,
+          "6": 33125
+        },
+        "observed_total": 100000,
+        "chi2_vs_exact": 1.953,
+        "p_vs_exact": 0.3765780308358878,
+        "chi2_vs_other_policy_law": 10972.603,
+        "p_vs_other_policy_law": 0.0,
+        "seconds": 0.282
+      },
+      "impl2_run_split": {
+        "exact_law": {
+          "0": 0.5,
+          "4": 0.25,
+          "6": 0.25
+        },
+        "observed": {
+          "0": 49924,
+          "4": 24800,
+          "6": 25276
+        },
+        "observed_total": 100000,
+        "chi2_vs_exact": 4.763,
+        "p_vs_exact": 0.09243218855622468,
+        "chi2_vs_other_policy_law": 12389.659,
+        "p_vs_other_policy_law": 0.0,
+        "seconds": 0.274
+      },
+      "impl3_canonical_split": {
+        "exact_law": {
+          "0": 1.0
+        },
+        "observed": null
+      }
+    }
+  },
+  "H4": {
+    "family": [
+      {
+        "n": 8,
+        "visible_words": 1189,
+        "bits": 11,
+        "seconds": 0.0229,
+        "distinct_sets": 1000,
+        "count_entries": 999,
+        "delta_entries": 2392,
+        "peak_members": 5,
+        "candidate_space": 65536,
+        "compact_seconds": 0.0112,
+        "compact_sets": 336,
+        "compact_count_entries": 335,
+        "compact_peak_members": 2,
+        "same_count": true
+      },
+      {
+        "n": 10,
+        "visible_words": 3252,
+        "bits": 12,
+        "seconds": 0.0832,
+        "distinct_sets": 2470,
+        "count_entries": 2469,
+        "delta_entries": 6388,
+        "peak_members": 6,
+        "candidate_space": 1048576,
+        "compact_seconds": 0.015,
+        "compact_sets": 441,
+        "compact_count_entries": 440,
+        "compact_peak_members": 2,
+        "same_count": true
+      },
+      {
+        "n": 12,
+        "visible_words": 6580,
+        "bits": 13,
+        "seconds": 0.2119,
+        "distinct_sets": 5367,
+        "count_entries": 5366,
+        "delta_entries": 14760,
+        "peak_members": 7,
+        "candidate_space": 16777216,
+        "compact_seconds": 0.0165,
+        "compact_sets": 537,
+        "compact_count_entries": 536,
+        "compact_peak_members": 2,
+        "same_count": true
+      },
+      {
+        "n": 16,
+        "visible_words": 18852,
+        "bits": 15,
+        "seconds": 1.2792,
+        "distinct_sets": 18970,
+        "count_entries": 18969,
+        "delta_entries": 57016,
+        "peak_members": 9,
+        "candidate_space": 4294967296,
+        "compact_seconds": 0.0291,
+        "compact_sets": 727,
+        "compact_count_entries": 726,
+        "compact_peak_members": 2,
+        "same_count": true
+      },
+      {
+        "n": 20,
+        "visible_words": 41236,
+        "bits": 16,
+        "seconds": 5.4914,
+        "distinct_sets": 51025,
+        "count_entries": 51024,
+        "delta_entries": 162568,
+        "peak_members": 11,
+        "candidate_space": 1099511627776,
+        "compact_seconds": 0.0661,
+        "compact_sets": 917,
+        "compact_count_entries": 916,
+        "compact_peak_members": 2,
+        "same_count": true
+      },
+      {
+        "n": 24,
+        "visible_words": 76804,
+        "bits": 17,
+        "seconds": 21.8823,
+        "distinct_sets": 114204,
+        "count_entries": 114203,
+        "delta_entries": 378648,
+        "peak_members": 13,
+        "candidate_space": 281474976710656,
+        "compact_seconds": 0.0925,
+        "compact_sets": 1107,
+        "compact_count_entries": 1106,
+        "compact_peak_members": 2,
+        "same_count": true
+      }
+    ],
+    "compact_family": [
+      {
+        "n": 8,
+        "visible_words": 1189,
+        "bits": 11,
+        "seconds": 0.0099,
+        "sets": 336,
+        "count_entries": 335,
+        "peak_members": 2,
+        "candidate_space": 65536
+      },
+      {
+        "n": 12,
+        "visible_words": 6580,
+        "bits": 13,
+        "seconds": 0.0207,
+        "sets": 537,
+        "count_entries": 536,
+        "peak_members": 2,
+        "candidate_space": 16777216
+      },
+      {
+        "n": 16,
+        "visible_words": 18852,
+        "bits": 15,
+        "seconds": 0.0273,
+        "sets": 727,
+        "count_entries": 726,
+        "peak_members": 2,
+        "candidate_space": 4294967296
+      },
+      {
+        "n": 20,
+        "visible_words": 41236,
+        "bits": 16,
+        "seconds": 0.0317,
+        "sets": 917,
+        "count_entries": 916,
+        "peak_members": 2,
+        "candidate_space": 1099511627776
+      },
+      {
+        "n": 24,
+        "visible_words": 76804,
+        "bits": 17,
+        "seconds": 0.0548,
+        "sets": 1107,
+        "count_entries": 1106,
+        "peak_members": 2,
+        "candidate_space": 281474976710656
+      },
+      {
+        "n": 32,
+        "visible_words": 199780,
+        "bits": 18,
+        "seconds": 0.0596,
+        "sets": 1487,
+        "count_entries": 1486,
+        "peak_members": 2,
+        "candidate_space": 18446744073709551616
+      },
+      {
+        "n": 48,
+        "visible_words": 739108,
+        "bits": 20,
+        "seconds": 0.084,
+        "sets": 2247,
+        "count_entries": 2246,
+        "peak_members": 2,
+        "candidate_space": 79228162514264337593543950336
+      },
+      {
+        "n": 64,
+        "visible_words": 1833444,
+        "bits": 21,
+        "seconds": 0.1227,
+        "sets": 3007,
+        "count_entries": 3006,
+        "peak_members": 2,
+        "candidate_space": 340282366920938463463374607431768211456
+      }
+    ],
+    "crosscheck": [
+      {
+        "n": 6,
+        "automaton": 240,
+        "oracle": 240,
+        "pairs": 282,
+        "agree": true
+      },
+      {
+        "n": 8,
+        "automaton": 1189,
+        "oracle": 1189,
+        "pairs": 1754,
+        "agree": true
+      },
+      {
+        "n": 10,
+        "automaton": 3252,
+        "oracle": 3252,
+        "pairs": 6842,
+        "agree": true
+      }
+    ],
+    "policy_b": {
+      "name": "B/12-shifts-4-volunteers",
+      "visible_words": 110220,
+      "pairs": 206713,
+      "histogram": {
+        "1": 38732,
+        "2": 49388,
+        "3": 19318,
+        "4": 2660,
+        "5": 121,
+        "6": 1
+      },
+      "seconds": 2.3694,
+      "compact_seconds": 0.1244,
+      "compact_visible_words": 110220,
+      "oracle_seconds": 2.8188,
+      "distinct_sets": 18593,
+      "count_entries": 18592,
+      "compact_sets": 1472,
+      "crosscheck_agree": true
+    },
+    "decode_microseconds_n32": 794.05
+  }
+}

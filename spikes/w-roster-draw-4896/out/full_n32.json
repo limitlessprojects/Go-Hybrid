@@ -1,0 +1,12 @@
+{
+  "n": 32,
+  "ok": true,
+  "visible_words": 199780,
+  "bits": 18,
+  "seconds": 32.806,
+  "distinct_sets": 401902,
+  "count_entries": 401901,
+  "delta_entries": 1400440,
+  "peak_members": 17,
+  "candidate_space": "18446744073709551616"
+}
