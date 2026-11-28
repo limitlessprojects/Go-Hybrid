@@ -871,15 +871,23 @@ impl<'a> Lexer<'a> {
     /// Flush buffered byte-valued escapes (`\xNN`, `\NNN`) into `cooked`.
     /// Valid UTF-8 sequences decode directly to their Unicode scalar values
     /// (preserving multi-byte UTF-8 sequences like `"\xc3\xa9"` -> `"é"` per
-    /// LX7/T3); any non-UTF-8 remainder bytes fall back byte-for-byte.
-    fn flush_str_bytes(pending_bytes: &mut Vec<u8>, cooked: &mut String) {
+    /// LX7/T3). A byte run that is not valid UTF-8 cannot be a string literal
+    /// (strings are always UTF-8, LX7/T3; invalid UTF-8 only arises from
+    /// byte-slice conversion), so it fails closed instead of being widened to
+    /// Latin-1 scalars (`"\xff"` would otherwise become the two bytes c3 bf).
+    fn flush_str_bytes(&mut self, pending_bytes: &mut Vec<u8>, cooked: &mut String, from: Pos) {
         if pending_bytes.is_empty() {
             return;
         }
         for chunk in pending_bytes.utf8_chunks() {
             cooked.push_str(chunk.valid());
-            for &b in chunk.invalid() {
-                cooked.push(char::from(b));
+            if !chunk.invalid().is_empty() {
+                self.escape_diag(
+                    from,
+                    true,
+                    "byte escapes in a string literal must form valid UTF-8 (LX7/T3: strings are always UTF-8); use `[]byte{…}` for arbitrary bytes",
+                );
+                break;
             }
         }
         pending_bytes.clear();
@@ -893,9 +901,10 @@ impl<'a> Lexer<'a> {
         let start = self.pos();
         let mut cooked = String::new();
         let mut pending_bytes: Vec<u8> = Vec::new();
+        let mut pending_from = start;
         loop {
             let Some(c) = self.at(0) else {
-                Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
+                self.flush_str_bytes(&mut pending_bytes, &mut cooked, pending_from);
                 self.frames.pop();
                 self.diag(PARSE_ERR_CODE, start, "unterminated string literal");
                 if cooked.is_empty() && emitted_any {
@@ -906,7 +915,7 @@ impl<'a> Lexer<'a> {
             };
             match c {
                 '"' => {
-                    Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
+                    self.flush_str_bytes(&mut pending_bytes, &mut cooked, pending_from);
                     self.bump();
                     self.frames.pop();
                     if cooked.is_empty() && emitted_any {
@@ -916,7 +925,7 @@ impl<'a> Lexer<'a> {
                     return Some(self.tok(start, Tok::StrChunk(cooked)));
                 }
                 '{' => {
-                    Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
+                    self.flush_str_bytes(&mut pending_bytes, &mut cooked, pending_from);
                     if self.at(1) == Some('{') {
                         self.bump();
                         self.bump();
@@ -936,7 +945,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 '}' => {
-                    Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
+                    self.flush_str_bytes(&mut pending_bytes, &mut cooked, pending_from);
                     // `}}` escapes a literal brace; a lone `}` is literal text
                     self.bump();
                     if self.at(0) == Some('}') {
@@ -945,15 +954,21 @@ impl<'a> Lexer<'a> {
                     cooked.push('}');
                 }
                 '\\' => {
+                    let esc_start = self.pos();
                     self.bump();
                     match self.escape_raw(true) {
-                        Some(StrEscape::Byte(b)) => pending_bytes.push(b),
+                        Some(StrEscape::Byte(b)) => {
+                            if pending_bytes.is_empty() {
+                                pending_from = esc_start;
+                            }
+                            pending_bytes.push(b);
+                        }
                         Some(StrEscape::Char(e)) => {
-                            Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
+                            self.flush_str_bytes(&mut pending_bytes, &mut cooked, pending_from);
                             cooked.push(e);
                         }
                         None => {
-                            Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
+                            self.flush_str_bytes(&mut pending_bytes, &mut cooked, pending_from);
                             // unknown escape: keep the char verbatim (diag recorded)
                             if let Some(c2) = self.bump() {
                                 cooked.push(c2);
@@ -962,7 +977,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 _ => {
-                    Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
+                    self.flush_str_bytes(&mut pending_bytes, &mut cooked, pending_from);
                     cooked.push(c);
                     self.bump();
                 }

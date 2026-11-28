@@ -72,11 +72,11 @@ fn octal_escape_unbounded_digits_do_not_panic_or_silently_drop() {
 
 #[test]
 fn octal_escape_leading_zero_and_above_255_fail_closed() {
-    let toks = lex("test.hy", r#"fn main() { s := "\0\000\012\377" }"#).expect("valid octals");
+    let toks = lex("test.hy", r#"fn main() { s := "\0\000\012\101" }"#).expect("valid octals");
     assert!(
         toks.iter()
-            .any(|t| t.tok == Tok::StrChunk("\0\0\n\u{ff}".into())),
-        "expected \\0, \\000, \\012, \\377 to decode cleanly, got: {toks:?}"
+            .any(|t| t.tok == Tok::StrChunk("\0\0\nA".into())),
+        "expected \\0, \\000, \\012, \\101 to decode cleanly, got: {toks:?}"
     );
 
     for src in [
@@ -246,4 +246,29 @@ fn utf8_byte_escapes_in_strings_preserve_utf8_bytes_issue_1199() {
         })
         .collect();
     assert_eq!(chars, vec!['é', 'é', 'é']);
+}
+
+#[test]
+fn non_utf8_byte_escapes_in_strings_fail_closed() {
+    // LX7/T3: string literals are always UTF-8. A byte-escape run that is not
+    // valid UTF-8 used to be widened to Latin-1 scalars ("\xff" -> c3 bf, "\377"
+    // likewise), silently changing len(s) and the bytes. It must be rejected.
+    for src in [
+        r#"fn main() { s := "\xff" }"#,
+        r#"fn main() { s := "\377" }"#,
+        r#"fn main() { s := "a\x80b" }"#,
+        r#"fn main() { s := "\xc3" }"#,
+        r#"fn main() { s := "\xe4\xb8" }"#,
+        r#"fn main() { s := "\xc3{x}" }"#,
+    ] {
+        let errs = lex_errs(src);
+        assert!(
+            errs.iter().any(|d| d.code == "HYB-E0002"
+                && d.tier0_rule.as_deref() == Some("LX7")
+                && d.message.contains("valid UTF-8")),
+            "expected HYB-E0002 [LX7] on `{src}`, got: {errs:?}"
+        );
+    }
+    // Valid UTF-8 byte runs and rune literals (code-point semantics) stay accepted.
+    lex("test.hy", r#"fn main() { s := "\xc3\xa9\x41" c := '\xff' }"#).expect("valid UTF-8 run + rune");
 }

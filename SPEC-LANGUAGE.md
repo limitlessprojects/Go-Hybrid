@@ -182,7 +182,9 @@ Malformed escape sequences — a non-hex digit in `\x`/`\u`/`\U`, the
 `\u{…}` rune form inside a string, a surrogate or a value above U+10FFFF —
 are `HYB-E0002` parse errors (rule `LX7`; the rune-literal forms carry
 `LX6`): the escape set is enforced fail-closed, never silently skipped
-with the remaining characters leaking into the value (corpus 61).
+with the remaining characters leaking into the value (corpus 61). A run of
+`\xNN`/`\NNN` byte escapes must decode as valid UTF-8 (`"\xc3\xa9"` is `é`);
+one that does not (`"\xff"`) is the same `HYB-E0002` error — use `[]byte{0xff}`.
 
 ```hy
 name := "Hybrid"
