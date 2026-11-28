@@ -566,6 +566,36 @@
       "tier0_rule_id": "N1"
     },
     {
+      "code": "HYB-E4004",
+      "name": "linear-send-unclosed",
+      "category": "ownership",
+      "severity": "error",
+      "title": "linear send capability was not closed before scope exit",
+      "summary": "Forward CFG dataflow analysis verifies all linear send capability handles (hy.send_cap[T]) reach terminal Closed state before exiting their nursery or lexical scope.",
+      "fixits": [
+        "explicitly close the send capability before scope exit: tx.close()",
+        "transfer ownership of the send capability to a subtask: spawn worker(tx)"
+      ],
+      "example": "nursery { tx, rx := hy.pipe[int](); // reject: HYB-E4004 — tx was not closed before scope exit }",
+      "rule": "LIVENESS",
+      "tier0_rule_id": "CH1"
+    },
+    {
+      "code": "HYB-E4005",
+      "name": "linear-recv-undrained",
+      "category": "ownership",
+      "severity": "error",
+      "title": "linear receive capability was not drained before scope exit",
+      "summary": "Forward CFG dataflow analysis verifies all linear receive capability handles (hy.recv_cap[T]) reach terminal Drained state before exiting their nursery or lexical scope, unless moved into a subtask.",
+      "fixits": [
+        "drain the receive capability completely before scope exit: for v := range rx { ... }",
+        "move the receive capability into a subtask that assumes lifecycle responsibility: spawn consumer(rx)"
+      ],
+      "example": "nursery { tx, rx := hy.pipe[int](); tx.close(); // reject: HYB-E4005 — rx was not drained before scope exit }",
+      "rule": "LIVENESS",
+      "tier0_rule_id": "CH2"
+    },
+    {
       "code": "HYB-E5001",
       "name": "match-not-exhaustive",
       "category": "match",

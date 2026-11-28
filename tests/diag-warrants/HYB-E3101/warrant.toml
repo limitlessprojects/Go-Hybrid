@@ -1,0 +1,9 @@
+[warrant]
+code = "HYB-E3101"
+tier0_rule = "A1"
+summary = "simultaneous mutable loans of the same memory slot"
+provenance = "Issue #4408 Warrant Synthesis"
+
+[expectations]
+reject_first_error = "HYB-E3101"
+near_miss_verdict = "ACCEPT"

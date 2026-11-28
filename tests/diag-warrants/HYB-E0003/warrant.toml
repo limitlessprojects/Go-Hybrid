@@ -1,0 +1,9 @@
+[warrant]
+code = "HYB-E0003"
+tier0_rule = "MANAGED"
+summary = "managed blocks need a reason and a category"
+provenance = "Issue #4408 Warrant Synthesis"
+
+[expectations]
+reject_first_error = "HYB-E0003"
+near_miss_verdict = "ACCEPT"

@@ -1,0 +1,9 @@
+[warrant]
+code = "HYB-E2002"
+tier0_rule = "T"
+summary = "cannot assign to immutable constant"
+provenance = "Issue #4408 Warrant Synthesis"
+
+[expectations]
+reject_first_error = "HYB-E2002"
+near_miss_verdict = "ACCEPT"
