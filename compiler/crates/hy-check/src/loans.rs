@@ -1572,7 +1572,7 @@ impl<'a> Checker<'a> {
             }
             let shape =
                 l.ty.as_ref()
-                    .map(|t| self.shape_of_type(t))
+                    .map(|t| self.shape_of_type_in_scope(t, &st.type_params))
                     .unwrap_or(TypeShape::Unknown);
             let ty = l.ty.clone();
             for name in &l.names {
@@ -1584,7 +1584,7 @@ impl<'a> Checker<'a> {
             // multi-value define from one expression
             // Issue #146: `n int, ok = <-ch` / shared ascription on a receive.
             if let Some(t) = &l.ty {
-                let want = self.shape_of_type(t);
+                let want = self.shape_of_type_in_scope(t, &st.type_params);
                 self.check_recv_elem_against_target(
                     st,
                     &l.values[0],
@@ -1620,7 +1620,9 @@ impl<'a> Checker<'a> {
                 .zip(tys)
                 .map(|((name, shape), ty)| {
                     let (shape, ty) = match (&l.ty, shape) {
-                        (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
+                        (Some(t), TypeShape::Unknown) => {
+                            (self.shape_of_type_in_scope(t, &st.type_params), Some(t.clone()))
+                        }
                         (_, s) => (s, ty.or_else(|| l.ty.clone())),
                     };
                     let reads_self = self.value_reads_storage_of(st, &l.values[0], name);
@@ -1774,7 +1776,7 @@ impl<'a> Checker<'a> {
                 // example is `var s []int = nil`.
                 if let Some(t) = &l.ty {
                     if Checker::is_nil_literal(value) {
-                        let shape = self.shape_of_type(t);
+                        let shape = self.shape_of_type_in_scope(t, &st.type_params);
                         if !matches!(shape, TypeShape::Unknown)
                             && !Checker::is_nilable_shape(&shape)
                         {
@@ -1806,7 +1808,7 @@ impl<'a> Checker<'a> {
                 // used to accept and then fail `go build`. Compare the
                 // ascription against the channel element when both resolve.
                 if let Some(t) = &l.ty {
-                    let want = self.shape_of_type(t);
+                    let want = self.shape_of_type_in_scope(t, &pre_st.type_params);
                     self.check_recv_elem_against_target(
                         &pre_st,
                         value,
@@ -1825,7 +1827,9 @@ impl<'a> Checker<'a> {
                 // emitted Go build (the emitter carries the declared type).
                 let inferred = self.shape_of_expr(&pre_st, value);
                 let (shape, ty) = match (&l.ty, inferred) {
-                    (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
+                    (Some(t), TypeShape::Unknown) => {
+                        (self.shape_of_type_in_scope(t, &pre_st.type_params), Some(t.clone()))
+                    }
                     (_, inferred) => (
                         inferred,
                         l.ty.clone()
@@ -5572,7 +5576,7 @@ impl<'a> Checker<'a> {
         for (p, pty) in &typed_params {
             let shape = pty
                 .as_ref()
-                .map(|t| self.shape_of_type(t))
+                .map(|t| self.shape_of_type_in_scope(t, &cst.type_params))
                 .unwrap_or(TypeShape::Unknown);
             self.define_binding(&mut cst, p, shape.clone(), pty.clone(), false, false, false);
             if self.shape_may_share(&shape)
@@ -5589,7 +5593,7 @@ impl<'a> Checker<'a> {
             }
             let shape = rty
                 .as_ref()
-                .map(|t| self.shape_of_type(t))
+                .map(|t| self.shape_of_type_in_scope(t, &cst.type_params))
                 .unwrap_or(TypeShape::Unknown);
             self.define_binding(&mut cst, nr, shape, rty.clone(), false, false, false);
             origins.remove(nr);
@@ -5686,7 +5690,7 @@ impl<'a> Checker<'a> {
                         let shape = l
                             .ty
                             .as_ref()
-                            .map(|t| self.shape_of_type(t))
+                            .map(|t| self.shape_of_type_in_scope(t, &cst.type_params))
                             .unwrap_or(TypeShape::Unknown);
                         for name in &l.names {
                             self.define_binding(
@@ -5749,9 +5753,10 @@ impl<'a> Checker<'a> {
                             .map(|v| {
                                 let inf = self.shape_of_expr(&cst, v);
                                 let (sh, ty) = match (&l.ty, inf) {
-                                    (Some(t), TypeShape::Unknown) => {
-                                        (self.shape_of_type(t), Some(t.clone()))
-                                    }
+                                    (Some(t), TypeShape::Unknown) => (
+                                        self.shape_of_type_in_scope(t, &cst.type_params),
+                                        Some(t.clone()),
+                                    ),
                                     (_, s) => (s, self.ty_of_expr(&cst, v).or_else(|| l.ty.clone())),
                                 };
                                 let mut os = HashSet::new();
@@ -5976,7 +5981,7 @@ impl<'a> Checker<'a> {
         };
         for ((nr, rty), mut os) in typed_results.iter().zip(init) {
             if nr == "_" { continue; }
-            let sh = rty.as_ref().map(|t| self.shape_of_type(t)).unwrap_or(TypeShape::Unknown);
+            let sh = rty.as_ref().map(|t| self.shape_of_type_in_scope(t, &cst.type_params)).unwrap_or(TypeShape::Unknown);
             if self.shape_may_share(&sh) || matches!(sh, TypeShape::Unknown | TypeShape::Array(_)) {
                 if os.is_empty() { os.insert(format!("ret:{idx}:{nr}")); }
                 rorig.insert(nr.clone(), os);
@@ -6033,7 +6038,7 @@ impl<'a> Checker<'a> {
             icst.scope_push();
             for (i, (p, pty)) in dps.iter().enumerate() {
                 iloc.insert(p.clone());
-                let sh = pty.as_ref().map(|t| self.shape_of_type(t)).unwrap_or(TypeShape::Unknown);
+                let sh = pty.as_ref().map(|t| self.shape_of_type_in_scope(t, &icst.type_params)).unwrap_or(TypeShape::Unknown);
                 self.define_binding(&mut icst, p, sh.clone(), pty.clone(), false, false, false);
                 let po = darg_os.get(i).cloned().unwrap_or_default();
                 if (self.shape_may_share(&sh) || matches!(sh, TypeShape::Unknown | TypeShape::Array(_))) && !po.is_empty() {
@@ -6043,7 +6048,7 @@ impl<'a> Checker<'a> {
             for (nr, rty) in &drs {
                 if nr != "_" {
                     iloc.insert(nr.clone());
-                    let sh = rty.as_ref().map(|t| self.shape_of_type(t)).unwrap_or(TypeShape::Unknown);
+                    let sh = rty.as_ref().map(|t| self.shape_of_type_in_scope(t, &icst.type_params)).unwrap_or(TypeShape::Unknown);
                     self.define_binding(&mut icst, nr, sh, rty.clone(), false, false, false);
                     iorig.remove(nr); ishd.insert(nr.clone());
                 }
@@ -6053,7 +6058,7 @@ impl<'a> Checker<'a> {
                     Stmt::Local(l) => {
                         let is_let = matches!(l.kind, LocalKind::Let);
                         let rhs: Vec<(TypeShape, Option<hy_syntax::TypeExpr>, HashSet<String>)> = if l.values.is_empty() {
-                            let sh = l.ty.as_ref().map(|t| self.shape_of_type(t)).unwrap_or(TypeShape::Unknown);
+                            let sh = l.ty.as_ref().map(|t| self.shape_of_type_in_scope(t, &icst.type_params)).unwrap_or(TypeShape::Unknown);
                             vec![(sh, l.ty.clone(), HashSet::new()); l.names.len()]
                         } else if l.values.len() == 1 && l.names.len() > 1 {
                             let base = eval_o(&icst, &l.values[0], &iorig, &ishd);
@@ -7744,13 +7749,13 @@ impl<'a> Checker<'a> {
         // closure_local_alias pin).
         st.scope_push();
         for p in params {
-            let shape = self.shape_of_type(&p.ty);
+            let shape = self.shape_of_type_in_scope(&p.ty, &st.type_params);
             self.define_binding(st, &p.name, shape, Some(p.ty.clone()), false, false, false);
         }
         for r in results {
             if let Some(name) = &r.name {
                 if name != "_" {
-                    let shape = self.shape_of_type(&r.ty);
+                    let shape = self.shape_of_type_in_scope(&r.ty, &st.type_params);
                     self.define_binding(st, name, shape, Some(r.ty.clone()), false, false, false);
                 }
             }

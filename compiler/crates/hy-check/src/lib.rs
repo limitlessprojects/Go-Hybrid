@@ -380,7 +380,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         for rtp in ck.receiver_type_params(&r.ty) {
             st.type_params.insert(rtp);
         }
-        let base_shape = ck.shape_of_type(&r.ty);
+        let base_shape = ck.shape_of_type_in_scope(&r.ty, &st.type_params);
         let (shape, ty) = if r.is_pointer {
             (
                 TypeShape::Pointer(Box::new(base_shape)),
@@ -410,7 +410,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         );
     }
     for p in &f.params {
-        let shape = ck.shape_of_type(&p.ty);
+        let shape = ck.shape_of_type_in_scope(&p.ty, &st.type_params);
         st.env.insert(
             p.name.clone(),
             Binding {
@@ -433,7 +433,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // plus named result bindings (`fn f() (out map[string]int)`), which are
     // function-scoped mutable local variables in Go and returned by bare `return`.
     for r in &f.results {
-        let shape = ck.shape_of_type(&r.ty);
+        let shape = ck.shape_of_type_in_scope(&r.ty, &st.type_params);
         if let Some(name) = &r.name {
             if name != "_" {
                 st.env.insert(
