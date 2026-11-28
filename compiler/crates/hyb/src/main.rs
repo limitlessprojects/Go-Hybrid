@@ -92,11 +92,12 @@ fn cmd_explain(args: &[String]) -> ExitCode {
 
 fn cmd_check(args: &[String]) -> ExitCode {
     const USAGE: &str =
-        "usage: hyb check [--json] [--report-managed] [--deny-managed] [--] <file.hy>";
+        "usage: hyb check [--json] [--report-managed] [--deny-managed] [--total-tier0] [--] <file.hy>";
     let mut file = None;
     let mut json = false;
     let mut report_managed = false;
     let mut deny_managed = false;
+    let mut total_tier0 = false;
     let mut end_of_options = false;
     // Validate the entire invocation before reading or checking any source.
     // Otherwise a second file or a mistyped option can silently go unchecked.
@@ -117,6 +118,12 @@ fn cmd_check(args: &[String]) -> ExitCode {
                 }
                 "--deny-managed" => {
                     deny_managed = true;
+                    continue;
+                }
+                "--total-tier0" => {
+                    // #4465 Total Tier-0 (M1): MaybeShare is the default for
+                    // unmodeled shapes — every accept must carry a witness.
+                    total_tier0 = true;
                     continue;
                 }
                 value if value.starts_with('-') => {
@@ -168,7 +175,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
     };
 
     // check
-    let result = hy_check::check_file(&ast);
+    let result = hy_check::check_file_with(&ast, total_tier0);
     let errors = result
         .diagnostics
         .iter()

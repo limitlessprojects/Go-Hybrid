@@ -78,6 +78,8 @@ use model::{Binding, Checker, FnState, TypeShape, MANAGED_CATEGORIES};
 /// The result of checking one file.
 #[derive(Debug, Default)]
 pub struct CheckResult {
+    /// Whether the run used the #4465 total mode (MaybeShare default).
+    pub total_tier0: bool,
     pub diagnostics: Vec<Diagnostic>,
     /// `accept` when no errors remain (warnings allowed), else `reject`.
     pub verdict: Verdict,
@@ -107,7 +109,17 @@ impl Verdict {
 /// into source order before returning: the corpus harness reads the FIRST
 /// error's `tier0_rule` as the join key against VERDICTS.md.
 pub fn check_file(file: &File) -> CheckResult {
+    check_file_with(file, false)
+}
+
+/// #4465 Total Tier-0 (M1, opt-in): same Tier-0 walk with the
+/// MaybeShare-default provenance predicate. `total_tier0=true` flips the
+/// fail-open default for UNMODELED shapes only — modeled shapes keep the
+/// legacy answers, so the acceptance delta is exactly the "X bypasses Y"
+/// backlog family.
+pub fn check_file_with(file: &File, total_tier0: bool) -> CheckResult {
     let mut ck = Checker::new(file);
+    ck.total_tier0 = total_tier0;
 
     build_tables(&mut ck);
     ck.check_struct_decls(); // A6: borrow-handle / pointer struct fields
@@ -167,6 +179,7 @@ pub fn check_file(file: &File) -> CheckResult {
         Verdict::Accept
     };
     CheckResult {
+        total_tier0,
         diagnostics: diags,
         verdict,
         managed: ManagedReport {

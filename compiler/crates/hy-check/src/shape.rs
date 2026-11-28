@@ -131,7 +131,39 @@ impl<'a> Checker<'a> {
     /// depth guard is conservative (deep/recursive struct types claim
     /// sharing) and cannot loop on Go's acyclic value types.
     pub(crate) fn shape_may_share(&self, shape: &TypeShape) -> bool {
+        // #4465 Total Tier-0 (M1, opt-in): under `--total-tier0` every
+        // provenance query goes through the MaybeShare-default predicate,
+        // so unmodeled shapes discharge through the witness rules instead
+        // of silently accepting.
+        if self.total_tier0 {
+            return self.shape_may_share_total(shape);
+        }
         self.shape_may_share_at(shape, 0)
+    }
+
+    /// #4465 Total Tier-0 (M1, opt-in `--total-tier0`): the provenance
+    /// predicate with MaybeShare(⊤) as the default for UNMODELED shapes.
+    ///
+    /// Legacy `shape_may_share` computes `false` ("no sharing") both for
+    /// genuinely value-copied shapes AND for shapes the model simply failed
+    /// to resolve — the fail-open default behind the "X bypasses Y"
+    /// soundness backlog (#1781, #1997, #775, #753, ...). This variant
+    /// returns `true` (MaybeShare: the witness rules must fire) when the
+    /// shape is (a) `Unknown`, or (b) a named-struct shape whose field
+    /// table is unreachable through `structs` — typically a type-alias
+    /// composite (`type m = map[string]int; m := m_box{}`) whose real shape
+    /// is only in `type_aliases`. Modeled value-copied shapes
+    /// (Primitive/Str/Atomic/Chan/Map/Slice/Pointer) keep the exact legacy
+    /// answers, so the only acceptance delta is on unmodeled shapes.
+    pub(crate) fn shape_may_share_total(&self, shape: &TypeShape) -> bool {
+        match shape {
+            TypeShape::Unknown => true,
+            TypeShape::Struct(Some(name)) => self
+                .struct_fields_for_sname(name)
+                .map(|fields| fields.iter().any(|(_, ty)| self.shape_may_share_at(&self.shape_of_type(ty), 1)))
+                .unwrap_or(true),
+            _ => self.shape_may_share_at(shape, 0),
+        }
     }
 
     fn shape_may_share_at(&self, shape: &TypeShape, depth: usize) -> bool {

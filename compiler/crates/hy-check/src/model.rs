@@ -685,6 +685,12 @@ impl FnState {
 
 pub(crate) struct Checker<'a> {
     pub file: &'a File,
+    /// #4465 Total Tier-0 (M1, opt-in `hyb check --total-tier0`): treat
+    /// unmodeled shapes (`TypeShape::Unknown`, named-struct shapes with no
+    /// resolvable field table) as MaybeShare instead of NoShare, so the
+    /// witness rules (HYB-E3003/E3004/E3005) fire instead of silently
+    /// accepting. Default false = legacy fail-open behavior.
+    pub total_tier0: bool,
     /// Source path, cloned onto every diagnostic.
     pub path: String,
     /// struct name -> (field name, field type) — file-level struct decls.
@@ -755,6 +761,7 @@ impl<'a> Checker<'a> {
         Checker {
             file,
             path: file.path.clone(),
+            total_tier0: false,
             structs: HashMap::new(),
             struct_type_params: HashMap::new(),
             enums: HashMap::new(),
