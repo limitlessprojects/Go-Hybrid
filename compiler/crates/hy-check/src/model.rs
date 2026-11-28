@@ -232,6 +232,9 @@ pub(crate) struct FnState {
     /// shadowed outer binding at `depth` as moved.
     pub shadow_links: HashMap<String, HashSet<(String, usize)>>,
     pub shadow_link_scopes: Vec<HashMap<String, HashSet<(String, usize)>>>,
+    /// Pairs of shadowed outer bindings `((name_a, depth_a), (name_b, depth_b))`
+    /// that were both shadowed inside a block after becoming storage peers.
+    pub shadowed_shares: HashSet<((String, usize), (String, usize))>,
     /// Block scopes, innermost last (issue #14): a define inside a nested
     /// block lands in the top layer and DIES at block exit, so an inner
     /// `m := 1` can no longer overwrite the outer `m`'s binding and launder
@@ -440,6 +443,74 @@ impl FnState {
                 }
             }
         }
+        // Issue #797: preserve sharing, non-owned origins, and freeze state across
+        // `shadow_links` and `shadowed_shares` when a block exits.
+        let new_scopes_len = self.scopes.len().saturating_sub(1);
+        let outer_depth_before_pop = |name: &str, scopes: &[HashMap<String, Binding>]| -> usize {
+            for (i, layer) in scopes.iter().enumerate().take(new_scopes_len).rev() {
+                if layer.contains_key(name) {
+                    return i + 1;
+                }
+            }
+            0
+        };
+        let mut surviving_shadow_pairs: Vec<((String, usize), (String, usize))> = Vec::new();
+        let mut shadow_depth_moves: Vec<((String, usize), MoveInfo)> = Vec::new();
+        let mut shadow_depth_origins: Vec<((String, usize), String)> = Vec::new();
+        for (holder, targets) in &self.shadow_links {
+            let mut group = self.share_group(holder);
+            group.insert(holder.clone());
+            let root = crate::freeze::resolve_alias(self, holder);
+            group.insert(root.clone());
+            for a in self.aliases.keys() {
+                if crate::freeze::resolve_alias(self, a) == root {
+                    group.insert(a.clone());
+                }
+            }
+            for m in &group {
+                if let Some(b) = self.env_lookup(m) {
+                    if let Some(mv) = &b.moved {
+                        for (t_name, t_depth) in targets {
+                            if *t_depth <= new_scopes_len {
+                                shadow_depth_moves.push(((t_name.clone(), *t_depth), mv.clone()));
+                            }
+                        }
+                    }
+                    if let Some(orig) = &b.non_owned_origin {
+                        let peer_orig = if orig.starts_with("a may-share peer of ") {
+                            orig.clone()
+                        } else {
+                            format!("a may-share peer of {}", orig)
+                        };
+                        for (t_name, t_depth) in targets {
+                            if *t_depth <= new_scopes_len {
+                                shadow_depth_origins
+                                    .push(((t_name.clone(), *t_depth), peer_orig.clone()));
+                            }
+                        }
+                    }
+                }
+                if let Some(oa) = to_outer_name(m, &self.aliases, &self.env, &self.scopes) {
+                    let oa_depth = outer_depth_before_pop(&oa, &self.scopes);
+                    for (t_name, t_depth) in targets {
+                        if *t_depth <= new_scopes_len
+                            && (oa.as_str(), oa_depth) != (t_name.as_str(), *t_depth)
+                        {
+                            surviving_shadow_pairs
+                                .push(((oa.clone(), oa_depth), (t_name.clone(), *t_depth)));
+                        }
+                    }
+                }
+            }
+        }
+        for ((a_name, a_depth), (b_name, b_depth)) in std::mem::take(&mut self.shadowed_shares) {
+            if a_depth <= new_scopes_len
+                && b_depth <= new_scopes_len
+                && (a_name.as_str(), a_depth) != (b_name.as_str(), b_depth)
+            {
+                surviving_shadow_pairs.push(((a_name, a_depth), (b_name, b_depth)));
+            }
+        }
         self.scopes.pop();
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
@@ -450,6 +521,101 @@ impl FnState {
                 self.may_share = outer_share;
                 for (a, b) in inner_outer_shares {
                     self.share_edge(&a, &b);
+                }
+            }
+            for ((t_name, t_depth), orig) in shadow_depth_origins {
+                if let Some(bt) = self.binding_at_depth_mut(&t_name, t_depth) {
+                    if bt.non_owned_origin.is_none() {
+                        bt.non_owned_origin = Some(orig);
+                    }
+                }
+            }
+            for ((t_name, t_depth), mv) in shadow_depth_moves {
+                if let Some(bt) = self.binding_at_depth_mut(&t_name, t_depth) {
+                    if bt.moved.is_none() {
+                        bt.moved = Some(mv);
+                    }
+                }
+            }
+            for ((a_name, a_depth), (b_name, b_depth)) in surviving_shadow_pairs {
+                let a_orig = self
+                    .binding_at_depth(&a_name, a_depth)
+                    .and_then(|b| b.non_owned_origin.clone());
+                let b_orig = self
+                    .binding_at_depth(&b_name, b_depth)
+                    .and_then(|b| b.non_owned_origin.clone());
+                if let Some(orig) = a_orig {
+                    let peer_orig = if orig.starts_with("a may-share peer of ") {
+                        orig
+                    } else {
+                        format!("a may-share peer of {}", orig)
+                    };
+                    if let Some(bb) = self.binding_at_depth_mut(&b_name, b_depth) {
+                        if bb.non_owned_origin.is_none() {
+                            bb.non_owned_origin = Some(peer_orig);
+                        }
+                    }
+                }
+                if let Some(orig) = b_orig {
+                    let peer_orig = if orig.starts_with("a may-share peer of ") {
+                        orig
+                    } else {
+                        format!("a may-share peer of {}", orig)
+                    };
+                    if let Some(ba) = self.binding_at_depth_mut(&a_name, a_depth) {
+                        if ba.non_owned_origin.is_none() {
+                            ba.non_owned_origin = Some(peer_orig);
+                        }
+                    }
+                }
+                let a_mv = self
+                    .binding_at_depth(&a_name, a_depth)
+                    .and_then(|b| b.moved.clone());
+                let b_mv = self
+                    .binding_at_depth(&b_name, b_depth)
+                    .and_then(|b| b.moved.clone());
+                if let Some(mv) = a_mv.or(b_mv) {
+                    if let Some(ba) = self.binding_at_depth_mut(&a_name, a_depth) {
+                        if ba.moved.is_none() {
+                            ba.moved = Some(mv.clone());
+                        }
+                    }
+                    if let Some(bb) = self.binding_at_depth_mut(&b_name, b_depth) {
+                        if bb.moved.is_none() {
+                            bb.moved = Some(mv);
+                        }
+                    }
+                }
+                let a_vis = self
+                    .scopes
+                    .iter()
+                    .skip(a_depth)
+                    .all(|s| !s.contains_key(&a_name));
+                let b_vis = self
+                    .scopes
+                    .iter()
+                    .skip(b_depth)
+                    .all(|s| !s.contains_key(&b_name));
+                match (a_vis, b_vis) {
+                    (true, true) => {
+                        self.share_edge(&a_name, &b_name);
+                    }
+                    (true, false) => {
+                        self.shadow_links
+                            .entry(a_name)
+                            .or_default()
+                            .insert((b_name, b_depth));
+                    }
+                    (false, true) => {
+                        self.shadow_links
+                            .entry(b_name)
+                            .or_default()
+                            .insert((a_name, a_depth));
+                    }
+                    (false, false) => {
+                        self.shadowed_shares
+                            .insert(((a_name, a_depth), (b_name, b_depth)));
+                    }
                 }
             }
             for (oa, orig) in inner_outer_origins {
@@ -545,6 +711,16 @@ impl FnState {
             Some(0)
         } else {
             None
+        }
+    }
+
+    /// Immutable lookup of a binding at an explicit scope depth (`0` for `env`,
+    /// `i + 1` for `scopes[i]`).
+    pub(crate) fn binding_at_depth(&self, name: &str, depth: usize) -> Option<&Binding> {
+        if depth == 0 {
+            self.env.get(name)
+        } else {
+            self.scopes.get(depth - 1).and_then(|s| s.get(name))
         }
     }
 
