@@ -3119,3 +3119,14 @@ fn utf8_byte_escapes_emit_exact_utf8_strings_issue_1199() {
         go
     );
 }
+
+#[test]
+fn error_fn_return_forwarding_multi_value_call_is_not_padded_issue_3541() {
+    // `return two()` where two() already yields (int, error) must stay a Go
+    // multi-value forward — it used to emit `return two(), nil`.
+    let src = "fn two() (int, error) {\n    return 1, nil\n}\n\nfn fwd(x int) (int, error) {\n    if x > 0 {\n        return two()\n    }\n    return 5\n}\n\nfn main() {\n    fmt.println(fwd(1))\n}\n";
+    let go = emit(src);
+    assert!(go.contains("\treturn two()\n"), "forward kept as written:\n{}", go);
+    assert!(!go.contains("two(), nil"), "no padding after a forward:\n{}", go);
+    assert!(go.contains("return 5, nil"), "short return still padded:\n{}", go);
+}
