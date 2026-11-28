@@ -219,6 +219,23 @@ class PackageReleaseIsolationTests(unittest.TestCase):
             "FRESH-LIB\n",
         )
 
+    def test_cross_linker_path_with_spaces_reaches_both_cargo_builds(self):
+        # HYB_CC can be a linker path with spaces (e.g. under "Program
+        # Files"). An unquoted $CROSS_ENV lets `env` split it on whitespace
+        # and misread part of the path as the command to run.
+        triple = "aarch64-unknown-linux-gnu"
+        linker = str(self.root / "tool chain" / "target gcc")
+        cargo = self.cargo_bin / "cargo"
+        source = cargo.read_text()
+        cargo.write_text(source.replace(
+            "#!/bin/sh\n",
+            '#!/bin/sh\nprintf "%s\\n" "$CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER" >> "$LINKER_LOG"\n',
+            1,
+        ))
+        log = self.root / "linker.log"
+        self.package(HYB_RUST_TARGET=triple, HYB_CC=linker, LINKER_LOG=str(log))
+        self.assertEqual(log.read_text().splitlines(), [linker, linker])
+
     def test_cross_target_ships_triple_artifacts_not_the_native_tree(self):
         triple = "aarch64-unknown-linux-gnu"
         # PKG_ARCH stays amd64, so this is the cross *build* path only: the
