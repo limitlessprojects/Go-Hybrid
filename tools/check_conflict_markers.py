@@ -77,7 +77,13 @@ def scan_file(path):
     hits = []
     open_start = None
     try:
-        with open(path, encoding="utf-8") as f:
+        # Decode leniently: the tokens this scanner looks for are ASCII, so one
+        # unrelated undecodable byte must not suppress a complete conflict block
+        # that sits elsewhere in the same read (issue #2124 — a strict decode
+        # raised UnicodeDecodeError and the `except` below turned the whole file
+        # into "no markers"). A file with an invalid byte alone is still not a
+        # finding, so this is not a UTF-8 validator.
+        with open(path, encoding="utf-8", errors="replace") as f:
             for n, line in enumerate(f, 1):
                 stripped = line.rstrip("\n")
                 if START_RE.match(stripped):
@@ -88,7 +94,7 @@ def scan_file(path):
         # An unterminated `<<<<<<<` is still a marker that must not ship.
         if open_start is not None:
             hits.append(open_start)
-    except (UnicodeDecodeError, OSError):
+    except OSError:
         return []
     return hits
 
@@ -104,7 +110,9 @@ def scan_workflow_file(path):
     """
     hits = []
     try:
-        with open(path, encoding="utf-8") as f:
+        # Same lenient decode as scan_file: a spilled column-zero command is
+        # ASCII, and an unrelated invalid byte must not hide it (issue #2124).
+        with open(path, encoding="utf-8", errors="replace") as f:
             for n, line in enumerate(f, 1):
                 stripped = line.rstrip("\n")
                 if not stripped.strip():
@@ -121,7 +129,7 @@ def scan_workflow_file(path):
                 if TOP_LEVEL_KEY_RE.match(stripped):
                     continue
                 hits.append((n, stripped))
-    except (UnicodeDecodeError, OSError):
+    except OSError:
         return []
     return hits
 
