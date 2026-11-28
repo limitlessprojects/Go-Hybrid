@@ -3119,3 +3119,19 @@ fn utf8_byte_escapes_emit_exact_utf8_strings_issue_1199() {
         go
     );
 }
+
+#[test]
+fn emit_escapes_bom_u_feff_in_string_lit_issue_4666() {
+    let src = "fn main() {\n    s := \"\\uFEFF\"\n    fmt.println(len(s))\n}\n";
+    let go = emit(src);
+    assert!(
+        go.contains("\"\\ufeff\""),
+        "U+FEFF must be escaped as \\ufeff in Go source to avoid invalid BOM compiler error, got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains('\u{feff}'),
+        "emitted Go source must not contain raw U+FEFF character:\n{}",
+        go
+    );
+}
