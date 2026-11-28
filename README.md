@@ -32,9 +32,9 @@ no runtime, no VM, no FFI in the output.
 // checkout.hy — a checked file, dropped into an existing Go module
 import "rust/regex"
 
-fn validate_email(raw string) (string, error) {
-    re := regex.must_compile(`^[\w.+-]+@[\w-]+\.[\w.]+$`)
-    if !re.is_match(raw) {
+pub fn validate_email(raw string) (string, error) {
+    ok := regex.is_match(`^[\w.+-]+@[\w-]+\.[\w.]+$`, raw)?
+    if !ok {
         return "", errors.new("invalid email")
     }
     return raw, nil
@@ -125,11 +125,11 @@ Prefer building from source? The pins are the contract (Go 1.26.9 / Rust 1.99.0)
 ```bash
 git clone https://github.com/limitlessprojects/Go-Hybrid.git && cd Go-Hybrid
 make examples     # all ten target programs, byte-exact vs expected.txt
-make test-quick   # workspace tests + checker corpus (109/109) + differential (36/36 + 73/73)
+make test-quick   # workspace tests + checker corpus (135/135) + differential (45/45 + 90/90)
 make bench        # G2 call-overhead bench on the LIVE bridge
 
 hyb build examples/01-hello/program.hy -o hello && ./hello
-hyb build --package mypkg --out-dir out --binding-prefix example.com/mypkg
+hyb build checkout.hy --package mypkg --out-dir out --binding-prefix example.com/mypkg
 ```
 
 The ten examples are the acceptance suite: worker pools with backpressure,
