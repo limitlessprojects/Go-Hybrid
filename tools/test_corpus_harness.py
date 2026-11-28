@@ -132,6 +132,31 @@ class CheckerEnvelopeCliTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=10,
             )
 
+    def run_payloads(self, payloads):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus"
+            corpus.mkdir()
+            responses = {}
+            for index, payload in enumerate(payloads, 1):
+                filename = f"{index:02}-example.hy"
+                (corpus / filename).write_text(
+                    "// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", encoding="utf-8"
+                )
+                responses[filename] = payload
+            checker = root / "hyb"
+            checker.write_text(
+                f"#!{sys.executable}\nimport json\nimport sys\nfrom pathlib import Path\n"
+                f"responses = {responses!r}\n"
+                "print(json.dumps(responses[Path(sys.argv[2]).name]))\n",
+                encoding="utf-8",
+            )
+            checker.chmod(0o700)
+            return subprocess.run(
+                [sys.executable, str(HARNESS), "--bin", str(checker), "--corpus", str(corpus)],
+                capture_output=True, text=True, timeout=10,
+            )
+
     def assert_invalid(self, payload, expected="ACCEPT", status=0):
         run = self.run_payload(payload, expected, status)
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
@@ -189,6 +214,23 @@ class CheckerEnvelopeCliTests(unittest.TestCase):
                                             "warnings": 0, "future": "kept"},
                                 "diagnostics": [], "version": 1, "future": {}})
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    def test_invalid_diagnostic_severity_is_case_error_and_notes_remain_valid(self):
+        run = self.run_payloads([
+            {"summary": {"verdict": "accept", "errors": 0, "warnings": 0},
+             "diagnostics": [{"severity": "fatal", "code": "HYB-E3001"}]},
+            {"summary": {"verdict": "accept", "errors": 0, "warnings": 0},
+             "diagnostics": [{"code": "HYB-E3001"}]},
+            {"summary": {"verdict": "accept", "errors": 0, "warnings": 0},
+             "diagnostics": [{"severity": "note", "code": "HYB-E3001"}]},
+        ])
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("harness-error", run.stdout)
+        self.assertIn("01-example.hy", run.stdout)
+        self.assertIn("02-example.hy", run.stdout)
+        self.assertIn("03-example.hy", run.stdout)
+        self.assertIn("verdict agreement: 1/3", run.stdout)
+        self.assertNotIn("Traceback", run.stderr)
 
 
 class ManagedReportCliTests(unittest.TestCase):
