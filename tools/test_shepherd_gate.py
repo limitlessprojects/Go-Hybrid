@@ -185,5 +185,59 @@ class CmdProbeTests(unittest.TestCase):
             Path(p).unlink(missing_ok=True)
 
 
+
+
+class ResolveLogOutcomeTests(unittest.TestCase):
+    """W7 session log outcome resolution under job_status (#4499)."""
+
+    def test_direct_cli_without_job_status_preserves_verdict_and_note(self):
+        v, n = sh.resolve_log_outcome("custom-verdict", "custom-note", None)
+        self.assertEqual(v, "custom-verdict")
+        self.assertEqual(n, "custom-note")
+
+    def test_success_job_status_preserves_verdict_and_note(self):
+        v, n = sh.resolve_log_outcome("ok", "board + labels refreshed", "success")
+        self.assertEqual(v, "ok")
+        self.assertEqual(n, "board + labels refreshed")
+
+    def test_success_job_status_defaults_none_verdict_to_ok(self):
+        v, n = sh.resolve_log_outcome(None, "rebase shepherd tick", "SUCCESS")
+        self.assertEqual(v, "ok")
+        self.assertEqual(n, "rebase shepherd tick")
+
+    def test_failure_job_status_overrides_verdict_and_rewrites_note(self):
+        v, n = sh.resolve_log_outcome("ok", "board + labels refreshed", "failure")
+        self.assertEqual(v, "failure")
+        self.assertEqual(n, "job failure before completion (intended: board + labels refreshed)")
+
+    def test_cancelled_job_status_overrides_verdict_and_rewrites_note(self):
+        v, n = sh.resolve_log_outcome("ok", "phase A/B pass complete", "cancelled")
+        self.assertEqual(v, "cancelled")
+        self.assertEqual(n, "job cancelled before completion (intended: phase A/B pass complete)")
+
+    def test_failure_without_note_rewrites_note_cleanly(self):
+        v, n = sh.resolve_log_outcome("ok", None, "failure")
+        self.assertEqual(v, "failure")
+        self.assertEqual(n, "job failure before completion")
+
+
+class WorkflowSessionLogInvocationTests(unittest.TestCase):
+    """Workflows with if: always() session-log steps must bind job.status (#4499)."""
+
+    def test_shepherd_workflows_bind_job_status_in_session_log_steps(self):
+        root = Path(__file__).resolve().parent.parent
+        workflows = [
+            ".github/workflows/shepherd-board.yml",
+            ".github/workflows/shepherd-dup.yml",
+            ".github/workflows/shepherd-rebase.yml",
+        ]
+        for rel in workflows:
+            wf = root / rel
+            self.assertTrue(wf.is_file(), f"workflow file not found: {rel}")
+            content = wf.read_text(encoding="utf-8")
+            self.assertIn("--job-status \"${{ job.status }}\"", content, f"{rel} missing job-status binding")
+            self.assertIn("--verdict \"ok\"", content, f"{rel} missing explicit verdict ok argument")
+
+
 if __name__ == "__main__":
     unittest.main()

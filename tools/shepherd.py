@@ -566,6 +566,20 @@ def cmd_comment(args):
 
 # ------------------------------------------------------------------ W7 log
 
+def resolve_log_outcome(verdict, note, job_status=None):
+    if not job_status:
+        return verdict, note
+    status = str(job_status).strip().lower()
+    if status == "success":
+        return verdict if verdict is not None else "ok", note
+    norm_verdict = status
+    if note:
+        norm_note = f"job {status} before completion (intended: {note})"
+    else:
+        norm_note = f"job {status} before completion"
+    return norm_verdict, norm_note
+
+
 def cmd_log(args):
     """Structured session log: one JSON line per bot action, appended to
     logs/SESSION.jsonl on the automation/session-log branch via the contents
@@ -576,9 +590,10 @@ def cmd_log(args):
     cfg = load_cfg()
     gh = tb.Gh(cfg["repo"], tb.load_token(args))
     branch, path = cfg["log_branch"], cfg["log_path"]
+    verdict, note = resolve_log_outcome(args.verdict, args.note, getattr(args, "job_status", None))
     rec = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-           "event": args.event, "pr": args.pr, "verdict": args.verdict,
-           "sha": args.sha, "note": args.note, "run": run_url()}
+           "event": args.event, "pr": args.pr, "verdict": verdict,
+           "sha": args.sha, "note": note, "run": run_url()}
     line = json.dumps(rec, ensure_ascii=False)
     try:
         st, ref = gh.req("GET", "/repos/%s/git/ref/heads/%s" % (gh.repo, branch))
@@ -696,6 +711,7 @@ def main():
     p.add_argument("--verdict", default=None)
     p.add_argument("--sha", default=None)
     p.add_argument("--note", default=None)
+    p.add_argument("--job-status", default=None)
     p.set_defaults(fn=cmd_log)
 
     args = ap.parse_args()
