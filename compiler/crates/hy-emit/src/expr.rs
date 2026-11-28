@@ -135,6 +135,16 @@ impl Emitter {
                 },
                 _ => {}
             }
+            if matches!(Self::unwrap_parens(e), Expr::Ident { name, .. } if name == "none") {
+                let is_opt = match &resolved {
+                    TypeExpr::Option { .. } => true,
+                    TypeExpr::Named { name, .. } => name == "option" || name.starts_with("option["),
+                    _ => false,
+                };
+                if is_opt {
+                    return Ok(format!("{}{{}}", self.type_text(exp)));
+                }
+            }
         }
         self.emit_expr(e, min_prec)
     }
