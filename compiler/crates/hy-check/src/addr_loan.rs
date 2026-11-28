@@ -329,12 +329,7 @@ impl<'a> Checker<'a> {
                 }
                 let mut carry_st = st.clone();
                 self.walk_for_loop_carried(&mut carry_st, kind, body, false);
-                if let ForKind::While { cond } = kind {
-                    self.check_expr_addr_of_loan_projections(&carry_st, cond, true);
-                }
-                if include_direct_ident {
-                    self.walk_for_loop_carried(&mut carry_st, kind, body, true);
-                }
+                self.walk_for_loop_carried(&mut carry_st, kind, body, true);
             }
             Stmt::Return { values, .. } => {
                 for v in values {
@@ -697,16 +692,41 @@ impl<'a> Checker<'a> {
 
     fn is_map_element_or_value_projection(&self, st: &FnState, e: &Expr) -> bool {
         match unwrap_parens_and_move(e) {
-            Expr::Index { base, .. } => match self.shape_of_expr(st, base) {
+            Expr::Index { base, .. } => match self.expr_borrow_shape(st, base) {
                 TypeShape::Map(..) => true,
                 TypeShape::Array(_) => self.is_map_element_or_value_projection(st, base),
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Map(..) => true,
+                    TypeShape::Array(_) => self.is_map_element_or_value_projection(st, base),
+                    _ => false,
+                },
                 _ => false,
             },
-            Expr::Field { base, .. } => match self.shape_of_expr(st, base) {
+            Expr::Field { base, .. } => match self.expr_borrow_shape(st, base) {
                 TypeShape::Struct(_) => self.is_map_element_or_value_projection(st, base),
                 _ => false,
             },
             _ => false,
+        }
+    }
+
+    fn expr_borrow_shape(&self, st: &FnState, e: &Expr) -> TypeShape {
+        match self.shape_of_expr(st, e) {
+            TypeShape::Unknown => match unwrap_parens_and_move(e) {
+                Expr::Index { base, .. } => match self.expr_borrow_shape(st, base) {
+                    TypeShape::Map(_, v) | TypeShape::Slice(v) | TypeShape::Array(v) => *v,
+                    TypeShape::Pointer(inner) => match *inner {
+                        TypeShape::Map(_, v) | TypeShape::Slice(v) | TypeShape::Array(v) => *v,
+                        _ => TypeShape::Unknown,
+                    },
+                    _ => TypeShape::Unknown,
+                },
+                Expr::Field { base, name, .. } => {
+                    self.field_shape(&self.expr_borrow_shape(st, base), name)
+                }
+                _ => TypeShape::Unknown,
+            },
+            s => s,
         }
     }
 
@@ -715,6 +735,11 @@ impl<'a> Checker<'a> {
             PlaceKind::Index { base, .. } => match self.shape_of_place(st, base) {
                 TypeShape::Map(..) => true,
                 TypeShape::Array(_) => self.place_is_map_element_or_value_projection(st, base),
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Map(..) => true,
+                    TypeShape::Array(_) => self.place_is_map_element_or_value_projection(st, base),
+                    _ => false,
+                },
                 _ => false,
             },
             PlaceKind::Field { base, .. } => match self.shape_of_place(st, base) {
@@ -812,7 +837,12 @@ impl<'a> Checker<'a> {
                 }
                 st.scope_pop();
             }
-            Stmt::For { kind, body, .. } => self.walk_for_loop_carried(st, kind, body, emit),
+            Stmt::For { kind, body, .. } => {
+                self.walk_for_loop_carried(st, kind, body, false);
+                if emit {
+                    self.walk_for_loop_carried(st, kind, body, true);
+                }
+            }
             Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => self.walk_loop_carried_block(st, body, emit),
             Stmt::Match { subject, arms, .. } => {
                 for arm in arms {
