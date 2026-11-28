@@ -2133,6 +2133,17 @@ fn update_post_defer_watch(
                 }
             }
         }
+        Stmt::Match { subject, arms, .. } => {
+            for arm in arms {
+                if let hy_syntax::MatchPattern::Path {
+                    binding: Some(target),
+                    ..
+                } = &arm.pattern
+                {
+                    handle_bind(target, Some(subject));
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -2145,9 +2156,12 @@ fn stmt_moves_watched_binding(
         let mut ops = Vec::new();
         crate::model::collect_move_operands(e, &mut ops);
         for (op, mspan) in ops {
-            let moved_name = match op {
+            let unwrapped_op = crate::model::unwrap_parens(op);
+            let moved_name = match unwrapped_op {
                 Expr::Ident { name, .. } => Some(name.as_str()),
-                Expr::Field { .. } => op.root_ident(),
+                Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
+                    unwrapped_op.root_ident()
+                }
                 _ => None,
             };
             if let Some(n) = moved_name {
@@ -2197,7 +2211,7 @@ fn stmt_moves_watched_binding(
                 }
             );
             if *is_move {
-                if let Some(name) = value.root_ident() {
+                if let Some(name) = crate::model::unwrap_parens(value).root_ident() {
                     if watch.contains(name) {
                         return Some(crate::model::MoveInfo {
                             span: *span,
@@ -2258,7 +2272,7 @@ fn stmt_moves_watched_binding(
                             }
                         );
                         if *is_move {
-                            if let Some(name) = value.root_ident() {
+                            if let Some(name) = crate::model::unwrap_parens(value).root_ident() {
                                 if watch.contains(name) {
                                     return Some(crate::model::MoveInfo {
                                         span: chan.span().to(value.span()),
