@@ -124,6 +124,26 @@ fn root_ident_span(expr: &Expr) -> Option<Span> {
 }
 
 impl<'a> Checker<'a> {
+    /// #4407: an associated function call `Type.fn(...)` is bound in `ck.fns`
+    /// under the qualified name `"Type.fn"` (lib.rs `build_tables`) and
+    /// resolved from there by `shape.rs`. The loan rules must resolve it the
+    /// same way, or every interprocedural obligation at that call site
+    /// (const writes, parameter stores, A3 slot conflicts, O2 loans) is
+    /// silently skipped and an unsound program passes `hyb check`.
+    fn assoc_fn_name(&self, st: &FnState, callee: &Expr) -> Option<String> {
+        let Expr::Field { base, name, .. } = callee else {
+            return None;
+        };
+        let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) else {
+            return None;
+        };
+        if self.lookup_binding(st, root).is_some() || self.known_package(root) {
+            return None;
+        }
+        let full = format!("{}.{}", root, name);
+        self.fns.contains_key(full.as_str()).then_some(full)
+    }
+
     fn resolve_call(&self, st: &FnState, cr: &CallRef) -> Resolved {
         match cr.callee {
             Expr::Field { base, name, .. } => {
@@ -134,6 +154,9 @@ impl<'a> Checker<'a> {
                             method: name.clone(),
                         };
                     }
+                }
+                if let Some(full) = self.assoc_fn_name(st, cr.callee) {
+                    return Resolved::Fn { name: full };
                 }
                 if let Some(root) = base.root_ident() {
                     let recv = self.shape_of_expr(st, base);
@@ -3127,6 +3150,11 @@ impl<'a> Checker<'a> {
     }
 
     fn is_opaque_interproc_call(&self, st: &FnState, callee: &Expr) -> bool {
+        // #4407: an associated `Type.fn(...)` is a resolved user function —
+        // not an opaque callee, so it must not be treated as unknown.
+        if self.assoc_fn_name(st, callee).is_some() {
+            return false;
+        }
         match crate::model::unwrap_parens(callee) {
             Expr::Ident { name, .. } => self.lookup_binding(st, name).is_some(),
             Expr::Field { base, name, .. } => {
@@ -3324,6 +3352,49 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Bind a resolved top-level `fn` declaration's parameters to this call
+    /// site's arguments and yield its body for interprocedural analysis.
+    /// Shared by the plain-ident and associated (`Type.fn`) callee forms
+    /// (#4407) so both get identical slot/body handling.
+    fn slots_and_body_for_decl<'c>(
+        &self,
+        st: &FnState,
+        cr: &'c CallRef<'c>,
+        decl: &'a FnDecl,
+    ) -> Option<(
+        Vec<(
+            String,
+            TypeShape,
+            Option<hy_syntax::TypeExpr>,
+            CalleeSlotSource<'c>,
+        )>,
+        std::borrow::Cow<'a, Block>,
+    )> {
+        let body = decl.body.as_ref()?;
+        let mut slots = Vec::new();
+        let mut bound: HashSet<String> = decl.params.iter().map(|p| p.name.clone()).collect();
+        bound.extend(decl.results.iter().filter_map(|r| r.name.clone()));
+        for (i, p) in decl.params.iter().enumerate() {
+            let arg_opt = cr.args.get(i).or_else(|| {
+                if cr.args.len() == 1 && decl.params.len() > 1 {
+                    cr.args.first()
+                } else {
+                    None
+                }
+            });
+            if let Some(arg) = arg_opt {
+                slots.push((
+                    p.name.clone(),
+                    self.shape_of_type(&p.ty),
+                    Some(p.ty.clone()),
+                    CalleeSlotSource::Arg(&arg.value),
+                ));
+            }
+        }
+        self.append_outer_binding_slots(st, &mut bound, false, &mut slots);
+        Some((slots, std::borrow::Cow::Borrowed(body)))
+    }
+
     fn resolve_callee_slots_and_body<'c>(
         &self,
         st: &FnState,
@@ -3337,6 +3408,12 @@ impl<'a> Checker<'a> {
         )>,
         std::borrow::Cow<'a, Block>,
     )> {
+        // #4407: `Type.fn(...)` is a top-level function bound as `"Type.fn"` —
+        // resolve its slots/body exactly like the `Expr::Ident` arm below.
+        if let Some(full) = self.assoc_fn_name(st, cr.callee) {
+            let decl = *self.fns.get(full.as_str())?;
+            return self.slots_and_body_for_decl(st, cr, decl);
+        }
         match crate::model::unwrap_parens(cr.callee) {
             Expr::Ident { name, .. } => {
                 if name == "copy"
@@ -3371,30 +3448,7 @@ impl<'a> Checker<'a> {
                     return Some((slots, std::borrow::Cow::Owned(body.clone())));
                 }
                 let decl = *self.fns.get(name.as_str())?;
-                let body = decl.body.as_ref()?;
-                let mut slots = Vec::new();
-                let mut bound: HashSet<String> =
-                    decl.params.iter().map(|p| p.name.clone()).collect();
-                bound.extend(decl.results.iter().filter_map(|r| r.name.clone()));
-                for (i, p) in decl.params.iter().enumerate() {
-                    let arg_opt = cr.args.get(i).or_else(|| {
-                        if cr.args.len() == 1 && decl.params.len() > 1 {
-                            cr.args.first()
-                        } else {
-                            None
-                        }
-                    });
-                    if let Some(arg) = arg_opt {
-                        slots.push((
-                            p.name.clone(),
-                            self.shape_of_type(&p.ty),
-                            Some(p.ty.clone()),
-                            CalleeSlotSource::Arg(&arg.value),
-                        ));
-                    }
-                }
-                self.append_outer_binding_slots(st, &mut bound, false, &mut slots);
-                Some((slots, std::borrow::Cow::Borrowed(body)))
+                self.slots_and_body_for_decl(st, cr, decl)
             }
             Expr::Field {
                 base,
@@ -7973,6 +8027,33 @@ impl<'a> Checker<'a> {
     /// reject the call site with `HYB-E3006` (`cannot write to const`).
     /// Read-only helpers (`len(shared_map)`, `count(shared_map)`) do not
     /// mutate the parameter and remain accepted.
+    /// `(param is a pointer, param is mutated)` for argument slot `i` of a
+    /// resolved user-function declaration. Shared by the plain-ident and
+    /// associated (`Type.fn`, #4407) callee arms.
+    fn param_effect_for_decl(&self, decl: &FnDecl, i: usize, argc: usize) -> (bool, bool) {
+        if argc == 1 && decl.params.len() > 1 {
+            let is_ptr = decl.params.iter().any(|p| {
+                matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                    || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
+            });
+            let mutates = decl.params.iter().any(|p| {
+                let ps = self.shape_of_type(&p.ty);
+                (self.shape_may_share(&ps)
+                    || matches!(ps, TypeShape::Unknown | TypeShape::Pointer(_)))
+                    && self.fn_mutates_const_param(decl, &p.name, 0)
+            });
+            return (is_ptr, mutates);
+        }
+        match decl.params.get(i) {
+            Some(p) => {
+                let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                    || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
+                (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
+            }
+            None => (false, true),
+        }
+    }
+
     pub(crate) fn check_call_const_writes(&mut self, st: &FnState, cr: &CallRef, declared: &HashSet<String>) {
         let callee = crate::model::unwrap_parens(cr.callee);
         if let Expr::Ident { name, .. } = callee {
@@ -8110,7 +8191,16 @@ impl<'a> Checker<'a> {
                 }
             };
 
+            // #4407: `Type.fn(...)` resolves to the top-level `fn` bound as
+            // `"Type.fn"`, so it gets the same argument-effect decision the
+            // plain-ident arm below makes.
+            let assoc_decl = self
+                .assoc_fn_name(st, callee)
+                .and_then(|n| self.fns.get(n.as_str()).copied());
             let (param_is_ptr, mutates) = match callee {
+                Expr::Field { .. } if assoc_decl.is_some() => {
+                    self.param_effect_for_decl(assoc_decl.unwrap(), i, cr.args.len())
+                }
                 Expr::Ident { name, .. } => {
                     if declared.contains(name) {
                         (false, true)

@@ -1112,3 +1112,23 @@ the move freeze reach the send path as well.
 | struct-chan-shared-map-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct over the channel freezes that storage, so `m["after"] = 2` is a write through a live alias |
 
 With this registration the corpus is **139 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 92**.
+
+### associated-fn-const-write-reject / associated-fn-param-store-reject — REJECT + REJECT (fixes #4407)
+
+The two interprocedural obligations that an associated function call used to
+launder. `Type.name(...)` is bound in `ck.fns` under the qualified name
+`"Type.name"` and resolved by `shape.rs`, but `loans.rs` only resolved
+`Expr::Ident` callees — an associated call parses as `Expr::Field`, so it fell
+through to the method/unknown paths and every obligation at that call site was
+skipped.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| associated-fn-const-write-reject | REJECT | IMMUT (T22) | `HYB-E3006` | `ns.mutate(shared)` stores into a file-level `const` map through the callee's parameter; the plain-fn spelling has always been rejected (27-const-write-reject) |
+| associated-fn-param-store-reject | REJECT | A1b | `HYB-E3003` | `holder.insert(b, local_m)` stores `local_m` into `b`; `move b` to a task freezes that storage, so `local_m["k"] = 4` is a write through a live alias of a moved value |
+
+The minimal runtime-visible shape is smaller than either fixture: a 15-line
+program whose associated callee stores a parameter alias was accepted with
+`0 diagnostics` and produced `WARNING: DATA RACE` under `go run -race`.
+
+With this registration the corpus is **141 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 94**.
