@@ -4785,7 +4785,14 @@ impl<'a> Collector<'a> {
 
         // U14 + value type: unknown names, then assignability.
         for f in fields {
-            match declared.iter().find(|(n, _)| n == &f.name) {
+            // #4758 — a blank field is declared for layout, never settable by
+            // name: `point{_: 1}` is `unknown field _ in struct literal`.
+            let matched = if f.name == "_" {
+                None
+            } else {
+                declared.iter().find(|(n, _)| n == &f.name)
+            };
+            match matched {
                 None => self.emit_e1002(
                     f.span,
                     format!(
@@ -8952,6 +8959,25 @@ impl<'a> Collector<'a> {
     }
 
     fn check_field_selector(&mut self, base: &Expr, name: &str, span: Span) {
+        // #4758 — `_` never names a field or method. A blank field (`_ int`)
+        // or a method declared `fn (self t) _()` is legal Go *declaration*
+        // syntax (layout / an unreferenceable method), but every lookup of it
+        // is `v._ undefined` at `go build`. Reject before the type-qualifier
+        // early-return below so `point._` (not a real method expression) is
+        // covered too.
+        if name == "_" {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`{}` has no field or method `_` — Go refuses `{}.{} undefined`; the blank identifier never names a member (HYB-E1002)",
+                    base.render(),
+                    base.render(),
+                    name
+                ),
+                "a blank field (`_ int`) is declared for layout only and a method named `_` is unreferenceable; select a named field or method instead",
+            );
+            return;
+        }
         if let Expr::Ident { name: ident_name, .. } = unwrap_parens(base) {
             if self.is_imported_pkg_root(ident_name)
                 || self.ck.enums.contains_key(ident_name.as_str())
@@ -8967,6 +8993,20 @@ impl<'a> Collector<'a> {
     }
 
     fn check_field_selector_kind(&mut self, base_render: &str, name: &str, bk: &OpKind, span: Span) {
+        // #4758 — assignment targets (`v._ = 2`) reach the lookup through
+        // `PlaceKind::Field`, not `check_field_selector`, so guard here as
+        // well. `_` is never a member on any Go type.
+        if name == "_" {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`{}` has no field or method `_` — Go refuses `{}.{} undefined`; the blank identifier never names a member (HYB-E1002)",
+                    base_render, base_render, name
+                ),
+                "a blank field (`_ int`) is declared for layout only and a method named `_` is unreferenceable; select a named field or method instead",
+            );
+            return;
+        }
         if !is_fully_resolved(bk) || matches!(bk, OpKind::Interface) {
             return;
         }
