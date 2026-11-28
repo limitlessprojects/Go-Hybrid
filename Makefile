@@ -59,10 +59,12 @@ check:
 	@$(PY) tools/check_test_registration.py && echo "test registration OK"
 	@bash tools/check-versions.sh --no-toolchain && echo "versions OK"
 	@$(PY) tools/check_conflict_markers.py && echo "conflict markers OK"
-	@cd /tmp && rm -rf gh-selftest && mkdir gh-selftest && cd gh-selftest && \
+	@selftest_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/gh-selftest.XXXXXXXX") && \
+	trap 'rm -rf -- "$$selftest_dir"' 0 && \
+	(cd "$$selftest_dir" && \
 	printf '%s\n' '{"job":"selftest","tier":"sandbox","sha":"HEAD","repo":"none","gpu":false,"setup":[],"commands":[{"name":"echo","run":"echo selftest-ok","timeout":30}],"expected_results":[]}' > job.json && \
-	$(PY) $(CURDIR)/tools/runner/runner.py job.json --results-dir results >/dev/null && \
-	test -f results/summary.json && grep -q '"ok": true' results/summary.json && echo "runner selftest OK"
+	$(PY) "$(CURDIR)/tools/runner/runner.py" job.json --results-dir results >/dev/null && \
+	test -f results/summary.json && grep -q '"ok": true' results/summary.json && echo "runner selftest OK")
 	@$(PY) -c "import glob,json;[json.load(open(p)) for p in glob.glob('jobs/*/job.json')];print('job specs OK')"
 	@! git grep -qE 'ghp_[A-Za-z0-9]{20,}|KGAT_[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}' HEAD 2>/dev/null || (echo "SECRET LEAK"; exit 1)
 	@cd compiler && CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) CARGO_BUILD_JOBS=2 $(CARGO) check --workspace --quiet && echo "cargo check OK"
