@@ -8201,7 +8201,17 @@ impl<'a> Checker<'a> {
                         } else if matches!(self.shape_of_expr(st, callee), TypeShape::Closure) {
                             indirect_callee_effect(callee)
                         } else {
-                            (false, false)
+                            // Foreign-handle method call: no user method
+                            // declaration exists, but the boundary tables
+                            // model in-place writes through the arguments
+                            // (a reader's `read` fills its buffer
+                            // argument). A const root there is a write
+                            // (HYB-E3006), exactly like the package-level
+                            // mutated-arg table in the `is_pkg` arm above.
+                            let mutates = receiver_type_name(&self.shape_of_expr(st, base))
+                                .and_then(|t| foreign::method_mutated_arg(&t, method_name))
+                                == Some(i);
+                            (false, mutates)
                         }
                     }
                 }
