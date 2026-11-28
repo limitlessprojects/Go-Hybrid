@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — stage release archives until smoke passes (2026-11-26)
+
+At base `af9d9854`, a failing release smoke left an archive and matching checksum at the upload paths. A failed rebuild also replaced the previous verified pair. Stage the archive, checksum and smoke extraction in a per-run directory and move the two files to the release paths after all applicable smoke tests pass. Three offline regressions fail before the change. All seven packaging tests pass after it.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.
