@@ -145,12 +145,34 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn resolve_const_type_alias(&self, ty: &hy_syntax::TypeExpr, st: Option<&FnState>) -> hy_syntax::TypeExpr {
+        let mut cur = ty.clone();
+        for _ in 0..8 {
+            let hy_syntax::TypeExpr::Named { ref name, .. } = cur else {
+                break;
+            };
+            if st.is_some_and(|s| s.type_params.contains(name.as_str()))
+                || self.structs.contains_key(name.as_str())
+                || self.struct_type_params.contains_key(name.as_str())
+                || self.enums.contains_key(name.as_str())
+            {
+                break;
+            }
+            if let Some(next) = self.type_aliases.get(name.as_str()) {
+                cur = next.clone();
+            } else {
+                break;
+            }
+        }
+        cur
+    }
+
     fn is_const_conversion_target(&self, name: &str, st: Option<&FnState>) -> bool {
         if st.is_some_and(|s| s.type_params.contains(name)) {
             return false;
         }
         if let Some(ty) = self.type_aliases.get(name) {
-            let resolved = self.resolve_type_alias(ty);
+            let resolved = self.resolve_const_type_alias(ty, st);
             if let hy_syntax::TypeExpr::Named { name: target, .. } = resolved {
                 return !st.is_some_and(|s| s.type_params.contains(target.as_str()))
                     && !self.structs.contains_key(target.as_str())
@@ -174,7 +196,7 @@ impl<'a> Checker<'a> {
             return false;
         }
         if let Some(ty) = self.type_aliases.get(name) {
-            let resolved = self.resolve_type_alias(ty);
+            let resolved = self.resolve_const_type_alias(ty, st);
             return matches!(
                 resolved,
                 hy_syntax::TypeExpr::Named { name: target, .. }
@@ -267,7 +289,7 @@ impl<'a> Checker<'a> {
                 return false;
             }
         }
-        let resolved = self.resolve_type_alias(ty);
+        let resolved = self.resolve_const_type_alias(ty, st);
         if matches!(resolved, hy_syntax::TypeExpr::Option { .. }) {
             return false;
         }
