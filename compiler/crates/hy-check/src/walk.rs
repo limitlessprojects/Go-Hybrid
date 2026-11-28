@@ -285,6 +285,10 @@ pub(crate) struct Use {
     /// true when the use is the direct operand of an address-of `&x`
     /// (T24: `&` on a map-slot loan binding is HYB-E3104).
     pub via_addr: bool,
+    /// True when this use dereferences the binding: `x.f`, `x[i]`, `x[a:b]`
+    /// (including as an assignment target — a map/slice write loads the
+    /// pointer). A bare `x` or `x == nil` comparison never derefs.
+    pub via_deref: bool,
 }
 
 /// Collect the uses of THIS statement only (child statements are separate
@@ -335,6 +339,7 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
                         is_write: false,
                         via_move: false,
                         via_addr: false,
+                        via_deref: false,
                     });
                 }
             } else {
@@ -396,17 +401,46 @@ fn place_uses(place: &Place, out: &mut Vec<Use>) {
             is_write: true,
             via_move: false,
             via_addr: false,
+            via_deref: false,
         }),
+        // A write through `x[i]` / `x.f` reads the pointer `x` (map/slice
+        // indexing and field stores load the base), so the root counts as a
+        // deref use even though it is a write.
         PlaceKind::Index { base, index } => {
-            place_uses(base, out);
+            place_uses_ctx(base, out, true);
             expr_uses(index, out);
         }
-        PlaceKind::Field { base, .. } => place_uses(base, out),
-        PlaceKind::AddrOf { base } => place_uses(base, out),
+        PlaceKind::Field { base, .. } => place_uses_ctx(base, out, true),
+        PlaceKind::AddrOf { base } => place_uses_ctx(base, out, false),
+    }
+}
+
+fn place_uses_ctx(place: &Place, out: &mut Vec<Use>, deref_ctx: bool) {
+    match &place.kind {
+        PlaceKind::Ident(n) => out.push(Use {
+            name: n.clone(),
+            span: place.span,
+            is_write: true,
+            via_move: false,
+            via_addr: false,
+            via_deref: deref_ctx,
+        }),
+        PlaceKind::Index { base, index } => {
+            place_uses_ctx(base, out, true);
+            expr_uses(index, out);
+        }
+        PlaceKind::Field { base, .. } => place_uses_ctx(base, out, true),
+        PlaceKind::AddrOf { base } => place_uses_ctx(base, out, false),
     }
 }
 
 pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
+    expr_uses_ctx(expr, out, false);
+}
+
+/// Walk `expr`, collecting uses. `deref_ctx` marks the root of a
+/// field/index/slice access chain, whose base binding is dereferenced.
+fn expr_uses_ctx(expr: &Expr, out: &mut Vec<Use>, deref_ctx: bool) {
     match expr {
         Expr::Ident { name, span } => out.push(Use {
             name: name.clone(),
@@ -414,6 +448,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
             is_write: false,
             via_move: false,
             via_addr: false,
+            via_deref: deref_ctx,
         }),
         Expr::Lit { .. } => {}
         Expr::Interp { parts, .. } => {
@@ -439,6 +474,8 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                 is_write: false,
                 via_move: false,
                 via_addr: true,
+                via_deref: false,
+
             }),
             _ => expr_uses(operand, out),
         },
@@ -450,6 +487,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                 is_write: false,
                 via_move: true,
                 via_addr: false,
+                via_deref: false,
             }),
             Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
                 if let Some(root) = crate::model::unwrap_parens(operand).root_ident() {
@@ -459,6 +497,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                         is_write: false,
                         via_move: true,
                         via_addr: false,
+                        via_deref: false,
                     });
                 } else {
                     expr_uses(operand, out);
@@ -469,11 +508,11 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
         Expr::Try { operand, .. } => expr_uses(operand, out),
         Expr::Receive { chan, .. } => expr_uses(chan, out),
         Expr::Index { base, index, .. } => {
-            expr_uses(base, out);
+            expr_uses_ctx(base, out, true);
             expr_uses(index, out);
         }
         Expr::Slice { base, lo, hi, .. } => {
-            expr_uses(base, out);
+            expr_uses_ctx(base, out, true);
             if let Some(lo) = lo {
                 expr_uses(lo, out);
             }
@@ -481,7 +520,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                 expr_uses(hi, out);
             }
         }
-        Expr::Field { base, .. } => expr_uses(base, out),
+        Expr::Field { base, .. } => expr_uses_ctx(base, out, true),
         Expr::Call { callee, args, .. } => {
             expr_uses(callee, out);
             for a in args {

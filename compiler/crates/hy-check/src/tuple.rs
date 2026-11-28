@@ -860,6 +860,7 @@ impl<'a> Checker<'a> {
                     moved: None,
                     non_owned_origin: None,
                     slot_loan: false,
+                unassigned: false,
                 },
             );
         }
@@ -878,6 +879,7 @@ impl<'a> Checker<'a> {
                             moved: None,
                             non_owned_origin: None,
                             slot_loan: false,
+                unassigned: false,
                         },
                     );
                 }

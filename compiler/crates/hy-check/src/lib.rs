@@ -406,6 +406,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     r.name
                 )),
                 slot_loan: false,
+                unassigned: false,
             },
         );
     }
@@ -425,6 +426,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     p.name
                 )),
                 slot_loan: false,
+                unassigned: false,
             },
         );
     }
@@ -447,6 +449,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         moved: None,
                         non_owned_origin: None,
                         slot_loan: false,
+                unassigned: false,
                     },
                 );
                 st.named_results.push(name.clone());

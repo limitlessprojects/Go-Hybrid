@@ -403,11 +403,20 @@ impl<'a> Checker<'a> {
                         // A3 #111 form 4: a local closure whose body mutates a
                         // captured binding — event attributed to this call site.
                         self.check_a3_closure_call(st, cr, idx, &name);
-                    } else if !A3_PURE_FNS.contains(&name.as_str()) && name != "delete" {
-                        // Unresolved callee (e.g. a `fn(...)` parameter or local
-                        // function variable): fail-closed on any map argument
-                        // that conflicts with a live slot loan.
-                        self.check_a3_unknown_call_args(st, cr, idx);
+                        // E5e: the same call may also deref a captured
+                        // still-nil zero-value pointer.
+                        self.check_e3199_closure_call(st, cr, &name);
+                    } else {
+                        if !A3_PURE_FNS.contains(&name.as_str()) && name != "delete" {
+                            // Unresolved callee (e.g. a `fn(...)` parameter or local
+                            // function variable): fail-closed on any map argument
+                            // that conflicts with a live slot loan.
+                            self.check_a3_unknown_call_args(st, cr, idx);
+                        }
+                        // E5e (HYB-E3199 via closures): call to a local
+                        // closure that captured a still-unassigned zero-value
+                        // pointer at its define site — the call derefs nil.
+                        self.check_e3199_closure_call(st, cr, &name);
                     }
                 }
             }
@@ -740,6 +749,59 @@ impl<'a> Checker<'a> {
             }
         }
     }
+
+    /// HYB-E3199 via closures (E5e): the callee is a local closure literal that
+    /// captured a still-unassigned zero-value pointer at its define site. The
+    /// deref runs inside the closure body when THIS call executes; if the
+    /// captured binding is still unfilled here, the call dereferences nil.
+    /// The body walk itself sees the end-of-fn env (fill already applied), so
+    /// this call-site check is the only soundness net for call-before-fill.
+    fn check_e3199_closure_call(&mut self, st: &FnState, cr: &CallRef, name: &str) {
+        let resolved = crate::freeze::resolve_alias(st, name);
+        let Some(nil_caps) = st
+            .closure_nil_derefs
+            .get(name)
+            .or_else(|| st.closure_nil_derefs.get(&resolved))
+        else {
+            return;
+        };
+        if nil_caps.is_empty() {
+            return;
+        }
+        // Flow-sensitive at the call site: a capture the enclosing function
+        // has already filled (or that this scope does not see) is fine —
+        // Go accepts fill-before-call order.
+        let still_nil: Vec<String> = nil_caps
+            .iter()
+            .filter(|c| st.env_lookup(c).map(|b| b.unassigned).unwrap_or(false))
+            .cloned()
+            .collect();
+        for c in still_nil {
+            let shape = st
+                .env_lookup(&c)
+                .map(|b| b.shape.render())
+                .unwrap_or_default();
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E3199",
+                    self.path.clone(),
+                    cr.span,
+                    format!(
+                        "call to `{name}` dereferences captured pointer `{c}`, which is still an unassigned zero-value `{shape}` here — the deref inside the closure body is nil",
+                    ),
+                )
+                .with_notes(vec![
+                    format!(
+                        "`{c}` was captured by `{name}` while still unassigned; assign `{c}` BEFORE calling `{name}` (fill-before-call) to make the deref safe",
+                        c = c,
+                        name = name,
+                    ),
+                    "zero-value declarations (`var p *T`) are not initialized to a valid value — only comparison against nil is legal before the first assignment (HYB-E3199)".to_string(),
+                ]),
+            );
+        }
+    }
+
 
     /// A3 check for user-defined method calls (`e.bump()`), closure-field calls,
     /// and unknown method receivers while a map-slot loan is live.
@@ -1126,6 +1188,7 @@ impl<'a> Checker<'a> {
                 results,
                 body,
                 ..
+
             } => {
                 st.closure_defs.insert(
                     name.to_string(),
@@ -1155,6 +1218,25 @@ impl<'a> Checker<'a> {
                 let mut cap_bound = bound;
                 let mut caps = Vec::new();
                 collect_capture_idents_block(body, &mut cap_bound, &mut caps);
+                // E5e (HYB-E3199 via closures): snapshot captured names that
+                // are still unassigned zero-value pointers at DEFINE time.
+                // The closure body is checked against the end-of-fn env, where
+                // the enclosing function may already have filled the binding —
+                // so a call that dereferences it BEFORE the fill would slip
+                // through. Recorded here (flow-sensitive define point) and
+                // consumed at the closure CALL site, where the call-order env
+                // decides whether the deref hits a still-nil pointer.
+                let nil_caps: Vec<String> = caps
+                    .iter()
+                    .filter(|c| st.env_lookup(c).map(|b| b.unassigned).unwrap_or(false))
+                    .cloned()
+                    .collect();
+                if !nil_caps.is_empty() {
+                    st.closure_nil_derefs
+                        .entry(name.to_string())
+                        .or_default()
+                        .extend(nil_caps);
+                }
                 if let Some(&closure_last) = st.last_use.get(name) {
                     for loan in &mut st.loans {
                         if let LoanTarget::MapSlot { binding, .. } = &loan.target {
@@ -1162,6 +1244,7 @@ impl<'a> Checker<'a> {
                                 loan.last = loan.last.max(closure_last);
                             }
                         }
+
                     }
                 }
             }
@@ -1189,6 +1272,19 @@ impl<'a> Checker<'a> {
                             .entry(name.to_string())
                             .or_default()
                             .extend(roots);
+                    }
+                }
+                let inherited_nil = st
+                    .closure_nil_derefs
+                    .get(src)
+                    .or_else(|| st.closure_nil_derefs.get(&resolved))
+                    .cloned();
+                if let Some(nilset) = inherited_nil {
+                    if !nilset.is_empty() {
+                        st.closure_nil_derefs
+                            .entry(name.to_string())
+                            .or_default()
+                            .extend(nilset);
                     }
                 }
             }
@@ -1574,9 +1670,18 @@ impl<'a> Checker<'a> {
                 l.ty.as_ref()
                     .map(|t| self.shape_of_type(t))
                     .unwrap_or(TypeShape::Unknown);
+            // HYB-E3199: a zero-value pointer declaration is nil until an
+            // assignment fills it in. Track it so a use before the first
+            // assignment is rejected (deref of nil panics).
+            let unassigned = matches!(shape, TypeShape::Pointer(_));
             let ty = l.ty.clone();
             for name in &l.names {
                 self.define_binding(st, name, shape.clone(), ty.clone(), immutable, managed, is_let);
+                if unassigned {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.unassigned = true;
+                    }
+                }
             }
             return;
         }
@@ -1876,6 +1981,15 @@ impl<'a> Checker<'a> {
                     },
                     _ => false,
                 };
+                // HYB-E3199: `let q = p` copies a zero-value (nil) pointer —
+                // the copy is just as unassigned as its source, so a use of
+                // `q` before `p`'s first assignment is the same nil deref.
+                let rhs_unassigned = match unwrap_parens(value) {
+                    Expr::Ident { name: src, .. } => {
+                        self.lookup_binding(&pre_st, src).is_some_and(|b| b.unassigned)
+                    }
+                    _ => false,
+                };
                 if move_operand_ident(value).is_some()
                     || matches!(unwrap_parens(value), Expr::Move { .. })
                 {
@@ -1960,6 +2074,11 @@ impl<'a> Checker<'a> {
                 if rhs_slot_loan {
                     if let Some(b) = st.env_lookup_mut(name) {
                         b.slot_loan = true;
+                    }
+                }
+                if rhs_unassigned {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.unassigned = true;
                     }
                 }
                 if let Some(origin) = &moved_non_owned {
@@ -3524,6 +3643,7 @@ impl<'a> Checker<'a> {
                     moved: None,
                     non_owned_origin: None,
                     slot_loan: false,
+                unassigned: false,
                 },
             );
             aliases.insert((*name).to_string(), HashSet::from([idx]));
@@ -3679,6 +3799,7 @@ impl<'a> Checker<'a> {
                                 moved: None,
                                 non_owned_origin: None,
                                 slot_loan: false,
+                unassigned: false,
                             },
                         );
                         aliases.remove(name);
@@ -3720,6 +3841,7 @@ impl<'a> Checker<'a> {
                                 moved: None,
                                 non_owned_origin: None,
                                 slot_loan: false,
+                unassigned: false,
                             },
                         );
                         cst.closure_defs.remove(name);
@@ -3748,6 +3870,7 @@ impl<'a> Checker<'a> {
                                 moved: None,
                                 non_owned_origin: None,
                                 slot_loan: false,
+                unassigned: false,
                             },
                         );
                         if carries && !raw.is_empty() {
@@ -3944,6 +4067,7 @@ impl<'a> Checker<'a> {
                                         moved: None,
                                         non_owned_origin: None,
                                         slot_loan: false,
+                unassigned: false,
                                     },
                                 );
                                 if carries && !raw.is_empty() {
@@ -4011,6 +4135,7 @@ impl<'a> Checker<'a> {
                                 moved: None,
                                 non_owned_origin: None,
                                 slot_loan: false,
+                unassigned: false,
                             },
                         );
                         if subj_origins.is_empty() {
@@ -6363,6 +6488,7 @@ impl<'a> Checker<'a> {
                 moved: prev_moved,
                 non_owned_origin,
                 slot_loan: prev_slot_loan,
+                unassigned: false,
             },
         );
     }
@@ -6852,6 +6978,9 @@ impl<'a> Checker<'a> {
                     }
 
                     if let Some(b) = st.env_lookup_mut(name) {
+                        // HYB-E3199: a plain assignment fills the binding —
+                        // it is no longer a zero-value unassigned pointer.
+                        b.unassigned = false;
                         if !matches!(info.shape, TypeShape::Unknown) || b.ty.is_none() {
                             b.shape = info.shape;
                         }
@@ -9570,6 +9699,7 @@ impl<'a> Checker<'a> {
             moved: None,
             non_owned_origin,
             slot_loan: false,
+                unassigned: false,
         }
     }
 }

@@ -269,6 +269,7 @@ fn check_one_closure(
                 managed_taint: false,
                 moved: None,
                 slot_loan: false,
+                unassigned: false,
                 non_owned_origin: Some(format!(
                     "closure parameter `{}` (the caller retains the argument across calls)",
                     p.name
@@ -291,6 +292,7 @@ fn check_one_closure(
                         moved: None,
                         non_owned_origin: None,
                         slot_loan: false,
+                unassigned: false,
                     },
                 );
                 cst.named_results.push(name.clone());
@@ -1807,6 +1809,7 @@ fn check_deferred_uses(ck: &mut Checker<'_>, st: &FnState, body: &Block) {
                             moved: Some(mv),
                             non_owned_origin: None,
                             slot_loan: false,
+                unassigned: false,
                         },
                     );
                     ck.check_uses(&tmp_st, std::slice::from_ref(&u));
