@@ -1,0 +1,10 @@
+[package]
+name = "hy-distinguish"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Finite recognizers used by `hyb distinguish` (#4807). The extractor starts
+# from hy-syntax AST nodes; it never guesses at source text it could not parse.
+[dependencies]
+hy-syntax = { path = "../hy-syntax" }

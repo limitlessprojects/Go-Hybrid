@@ -20,6 +20,7 @@ hy-syntax = { path = "../hy-syntax" }
 hy-check = { path = "../hy-check" }
 hy-diag = { path = "../hy-diag" }
 hy-emit = { path = "../hy-emit" }
+hy-distinguish = { path = "../hy-distinguish" }
 
 # Reuse the existing test dependency to read Go's file-selection JSON.
 serde_json = "1"
