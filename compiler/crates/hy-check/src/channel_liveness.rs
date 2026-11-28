@@ -269,6 +269,15 @@ impl ChannelLivenessChecker {
                             *span,
                             format!("use of moved linear capability '{}'", cap),
                         ));
+                    } else if self.is_tx_closed(&cap) {
+                        self.diags.push(Diagnostic::error(
+                            "HYB-E4004",
+                            &self.file_path,
+                            *span,
+                            format!("send on already-closed linear capability '{}'", cap),
+                        ));
+                    } else {
+                        self.mark_tx_active(&cap);
                     }
                 }
                 self.check_expr(value);
@@ -317,7 +326,11 @@ impl ChannelLivenessChecker {
     }
 
     fn check_task_arg(&mut self, arg: &Expr, _call_span: Span) {
-        match arg {
+        let mut unwrapped = arg;
+        while let Expr::Paren { inner, .. } = unwrapped {
+            unwrapped = inner.as_ref();
+        }
+        match unwrapped {
             Expr::Move { operand, span } => {
                 if let Some(cap) = self.get_cap_name(operand) {
                     if self.is_moved(&cap) {
@@ -372,7 +385,7 @@ impl ChannelLivenessChecker {
                 }
             }
             _ => {
-                self.check_expr(arg);
+                self.check_expr(unwrapped);
             }
         }
     }
@@ -418,13 +431,31 @@ impl ChannelLivenessChecker {
 
                         match name.as_str() {
                             "close" => {
-                                self.mark_tx_closed(&cap);
+                                if self.is_tx_closed(&cap) {
+                                    self.diags.push(Diagnostic::error(
+                                        "HYB-E4004",
+                                        &self.file_path,
+                                        *span,
+                                        format!("linear send capability '{}' closed more than once", cap),
+                                    ));
+                                } else {
+                                    self.mark_tx_closed(&cap);
+                                }
                             }
                             "drain" => {
                                 self.mark_rx_drained(&cap);
                             }
                             "send" => {
-                                self.mark_tx_active(&cap);
+                                if self.is_tx_closed(&cap) {
+                                    self.diags.push(Diagnostic::error(
+                                        "HYB-E4004",
+                                        &self.file_path,
+                                        *span,
+                                        format!("send on already-closed linear capability '{}'", cap),
+                                    ));
+                                } else {
+                                    self.mark_tx_active(&cap);
+                                }
                             }
                             "recv" => {
                                 self.mark_rx_active(&cap);
@@ -556,6 +587,17 @@ impl ChannelLivenessChecker {
         if let Some(scope) = self.scope_stack.last_mut() {
             scope.moved_caps.insert(name.to_string());
         }
+    }
+
+    fn is_tx_closed(&self, name: &str) -> bool {
+        for scope in self.scope_stack.iter().rev() {
+            for p in &scope.pipes {
+                if p.tx == name {
+                    return p.tx_state == ChannelTypestate::Closed;
+                }
+            }
+        }
+        false
     }
 
     fn mark_tx_closed(&mut self, name: &str) {
