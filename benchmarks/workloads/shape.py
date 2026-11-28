@@ -45,7 +45,7 @@ import (
 	"hybrid.program/hybench"
 )
 
-var alphabet = []int{@ALPHABET_GO@}
+var alphabet = []byte{@ALPHABET_GO@}
 
 func buildCorpus() []string {
 	tpl := []string{
@@ -97,7 +97,7 @@ func allocWorkload() {
 			for j := 0; j < @ALLOC_BATCH@; j++ {
 				item := []byte{}
 				for k := 0; k < @ALLOC_ITEM@; k++ {
-					item = append(item, byte(alphabet[(j+k)%len(alphabet)]))
+					item = append(item, alphabet[(j+k)%len(alphabet)])
 				}
 				_ = item
 			}
