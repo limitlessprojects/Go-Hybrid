@@ -1663,6 +1663,7 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
                 | "raw_message"
                 | "delim"
                 | "number"
+                | "token"
                 | "marshaler"
                 | "unmarshaler"
                 | "syntax_error"
