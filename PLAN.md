@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — differential stdout terminators (2026-11-27)
+
+On base `82037c3`, an ACCEPT fixture expecting `idle` printed `69 64 6c 65 0d` and the differential loop reported full agreement. The runner now compares the program's stdout bytes with the UTF-8 expectation and its two allowed line endings. The same fixture fails as expected. Controls with no terminator, LF and CRLF pass. On Linux amd64 with the pinned toolchains, 92 differential harness tests and 3,293 Rust workspace tests pass. The checker agrees on 139/139 corpus fixtures and the differential run passes 47/47 accept and 92/92 reject cases.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.

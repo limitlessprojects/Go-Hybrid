@@ -1,7 +1,7 @@
 """The differential's registered stdout assertions must affect its verdict.
 
-Mock only the build/run processes: exercise the real corpus parsing and
-main loop without requiring Go, Rust, or executable script fixtures.
+Use a Python child to write exact stdout bytes through a real pipe. Only
+compilation is simulated, so these tests do not require Go or Rust.
 """
 import contextlib
 import importlib.util
@@ -32,13 +32,21 @@ class RegisteredOutputTests(unittest.TestCase):
             )
             compiler = root / "hyb"
             compiler.touch()
-            build = subprocess.CompletedProcess([], 0, "", "")
-            run = subprocess.CompletedProcess([], 0, stdout, "")
+            run_child = subprocess.run
+
+            def run_fixture(command, **kwargs):
+                if command[1:2] == ["build"]:
+                    (Path(kwargs["cwd"]) / "a.out").touch()
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                writer = "import sys; sys.stdout.buffer.write(bytes.fromhex(sys.argv[1]))"
+                return run_child(
+                    [sys.executable, "-c", writer, stdout.encode("utf-8").hex()], **kwargs
+                )
+
             output = io.StringIO()
             with patch.object(sys, "argv", [
                 str(HARNESS), "--bin", str(compiler), "--corpus", str(corpus)
-            ]), patch.object(MODULE.subprocess, "run", side_effect=[build, run]), \
-                    patch.object(MODULE.os.path, "exists", return_value=True), \
+            ]), patch.object(MODULE.subprocess, "run", side_effect=run_fixture), \
                     contextlib.redirect_stdout(output):
                 code = MODULE.main()
             return code, output.getvalue()
@@ -68,6 +76,12 @@ class RegisteredOutputTests(unittest.TestCase):
             with self.subTest(stdout=stdout):
                 code, output = self.run_corpus(stdout)
                 self.assertEqual(code, 0, output)
+
+    def test_lone_carriage_return_is_not_a_terminal_newline(self):
+        code, output = self.run_corpus("idle\r")
+        self.assertEqual(code, 1, output)
+        self.assertIn("stdout mismatch", output)
+        self.assertNotIn("FULL AGREEMENT", output)
 
     def test_fixture_without_output_marker_keeps_execution_contract(self):
         code, output = self.run_corpus("arbitrary stdout\n", marker="")
