@@ -570,6 +570,22 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     ];
     const JSON_ENCODER: &[&str] = &["encode", "set_escape_html", "set_indent"];
     const JSON_RAW_MESSAGE: &[&str] = &["marshal_json", "unmarshal_json"];
+    const JSON_MARSHALER: &[&str] = &["marshal_json"];
+    const JSON_UNMARSHALER: &[&str] = &["unmarshal_json"];
+    const HTTP_COOKIE_JAR: &[&str] = &["cookies", "set_cookies"];
+    const HTTP_CLOSE_NOTIFIER: &[&str] = &["close_notify"];
+    const HTTP_DIR: &[&str] = &["open"];
+    const HTTP_MAX_BYTES_ERROR: &[&str] = &["error"];
+    const HTTP_PROTOCOL_ERROR: &[&str] = &["error", "is"];
+    const HTTP_PROTOCOLS: &[&str] = &[
+        "http1",
+        "http2",
+        "set_http1",
+        "set_http2",
+        "set_unencrypted_http2",
+        "string",
+        "unencrypted_http2",
+    ];
     const HTTPTEST_SERVER: &[&str] = &[
         "client",
         "close",
@@ -674,6 +690,20 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "json.decoder" | "json.Decoder" => Some(JSON_DECODER),
         "json.encoder" | "json.Encoder" => Some(JSON_ENCODER),
         "json.raw_message" | "json.rawmessage" | "json.RawMessage" => Some(JSON_RAW_MESSAGE),
+        "json.marshaler" | "json.Marshaler" => Some(JSON_MARSHALER),
+        "json.unmarshaler" | "json.Unmarshaler" => Some(JSON_UNMARSHALER),
+        "http.cookie_jar" | "http.cookiejar" | "http.CookieJar" => Some(HTTP_COOKIE_JAR),
+        "http.close_notifier" | "http.closenotifier" | "http.CloseNotifier" => {
+            Some(HTTP_CLOSE_NOTIFIER)
+        }
+        "http.dir" | "http.Dir" => Some(HTTP_DIR),
+        "http.max_bytes_error" | "http.maxbyteserror" | "http.MaxBytesError" => {
+            Some(HTTP_MAX_BYTES_ERROR)
+        }
+        "http.protocol_error" | "http.protocolerror" | "http.ProtocolError" => {
+            Some(HTTP_PROTOCOL_ERROR)
+        }
+        "http.protocols" | "http.Protocols" => Some(HTTP_PROTOCOLS),
         "httptest.server" | "httptest.Server" => Some(HTTPTEST_SERVER),
         "httptest.response_recorder"
         | "httptest.responserecorder"
@@ -749,6 +779,36 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("net.error" | "net.Error", "error") => TypeShape::Str,
         ("net.error" | "net.Error", "temporary" | "timeout") => TypeShape::Primitive,
         ("strings.reader" | "strings.Reader", "len" | "size") => TypeShape::Primitive,
+        ("json.marshaler" | "json.Marshaler", "marshal_json")
+        | (
+            "json.raw_message" | "json.rawmessage" | "json.RawMessage",
+            "marshal_json",
+        ) => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        ("http.cookie_jar" | "http.cookiejar" | "http.CookieJar", "cookies") => {
+            TypeShape::Slice(Box::new(TypeShape::ForeignOpaque("http.cookie".into())))
+        }
+        (
+            "http.close_notifier" | "http.closenotifier" | "http.CloseNotifier",
+            "close_notify",
+        ) => TypeShape::Chan(Box::new(TypeShape::Primitive)),
+        ("http.dir" | "http.Dir", "open") => TypeShape::ForeignOpaque("http.file".into()),
+        (
+            "http.max_bytes_error" | "http.maxbyteserror" | "http.MaxBytesError",
+            "error",
+        )
+        | (
+            "http.protocol_error" | "http.protocolerror" | "http.ProtocolError",
+            "error",
+        )
+        | ("http.protocols" | "http.Protocols", "string") => TypeShape::Str,
+        (
+            "http.protocol_error" | "http.protocolerror" | "http.ProtocolError",
+            "is",
+        )
+        | (
+            "http.protocols" | "http.Protocols",
+            "http1" | "http2" | "unencrypted_http2",
+        ) => TypeShape::Primitive,
         ("sync.mutex" | "sync.Mutex", "try_lock")
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
