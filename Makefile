@@ -15,7 +15,7 @@ HYB_BIN := $(CARGO_TARGET_DIR)/debug/hyb
 
 .PHONY: help env check test-quick ci corpus workspace examples differential bench spike0-kaggle spike0-kaggle-status spike0-kaggle-fetch \
         spike0-actions-4 spike0-actions-20 spike-1 spike-2 spike-3 kaggle-job kaggle-status kaggle-fetch kaggle-wait \
-        actions-dispatch actions-watch census guarantees clean
+        actions-dispatch actions-watch census guarantees registry clean
 
 help:
 	@echo "make env              — verify pinned toolchains (source tools/env.sh)"
@@ -26,6 +26,7 @@ help:
 	@echo "make corpus           — Tier-0 corpus verdicts (139/139)"
 	@echo "make census           — every stated corpus count matches the corpus"
 	@echo "make guarantees       — GUARANTEES.md claims table matches the rules and corpus"
+	@echo "make registry         — every HYB-Exxxx the compiler can print is in the registry"
 	@echo "make differential     — the differential corpus loop (accept + reject)"
 	@echo "make bench            — G2 call-overhead bench on the live bridge (hyb bench-overhead)"
 	@echo "make spike0-kaggle    — submit Spike 0 part A to the Kaggle worker"
@@ -40,10 +41,11 @@ env:
 check:
 	@$(MAKE) -n examples >/dev/null 2>&1 || { echo "MAKE SYNTAX BROKEN (recipes must be TAB-indented)"; exit 1; }
 	@echo "make-syntax OK"
-	@$(PY) -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/differential_loop.py tools/check_guarantees.py tools/test_check_guarantees.py && echo "py-syntax OK"
+	@$(PY) -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/differential_loop.py tools/check_guarantees.py tools/test_check_guarantees.py tools/check_diagnostic_registry.py tools/test_check_diagnostic_registry.py && echo "py-syntax OK"
 
 	@$(PY) -m unittest discover -s tools -p test_differential_loop.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_guarantees.py -v
+	@$(PY) -m unittest discover -s tools -p test_check_diagnostic_registry.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_versions.py -v
 	@$(PY) -m unittest discover -s tools -p test_workload_run.py -v
 	@$(PY) -m unittest discover -s tools -p test_runner_env_report.py -v
@@ -56,6 +58,7 @@ check:
 	@$(PY) tools/check_corpus_census.py && echo "corpus census OK"
 	@$(PY) tools/check_claims_links.py && echo "claims links OK"
 	@$(PY) tools/check_guarantees.py && echo "guarantees OK"
+	@$(PY) tools/check_diagnostic_registry.py && echo "registry OK"
 	@$(PY) tools/check_test_registration.py && echo "test registration OK"
 	@bash tools/check-versions.sh --no-toolchain && echo "versions OK"
 	@$(PY) tools/check_conflict_markers.py && echo "conflict markers OK"
@@ -88,6 +91,13 @@ corpus:
 
 census:
 	@$(PY) tools/check_corpus_census.py
+
+# The diagnostic registry is append-only and is what `hyb explain` serves; this
+# fails when a `.rs` under any crate's src/ can print a code the registry does
+# not carry (or so much as names one in a comment), naming the `file:line` sites
+# (#4460 — HYB-E4004/E4005 shipped with `hyb explain` answering "unknown").
+registry:
+	@$(PY) tools/check_diagnostic_registry.py
 
 # GUARANTEES.md claims table is rendered from guarantees.json; this fails when a
 # row names a rule the registry no longer has, when a fixture EXPECTED-VERDICT

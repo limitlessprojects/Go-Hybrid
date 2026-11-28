@@ -159,6 +159,14 @@ jobs:
           bash tools/check-versions.sh
       - name: Check Corpus Census (every stated count matches the corpus)
         run: make census
+      - name: Diagnostic registry (every printable HYB-Exxxx is registered)
+        # A code the compiler can print but the registry lacks dead-ends the
+        # user's next move: `hyb explain` answers "unknown diagnostic code"
+        # (#4460 — HYB-E4004/E4005 shipped that way).
+        run: |
+          set -e
+          python3 tools/check_diagnostic_registry.py
+          python3 -m unittest discover -s tools -p test_check_diagnostic_registry.py -v
       - name: Compiler tests (hy-diag + hy-syntax + hy-check + hy-emit)
         run: |
           set -e
