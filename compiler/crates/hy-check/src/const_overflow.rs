@@ -48,7 +48,7 @@ impl<'a> Checker<'a> {
             self.check_default_float_overflow(name, value, st);
             return;
         }
-        if let Some(is_f32) = is_float_type(ty_name) {
+        if let Some(is_f32) = is_float_or_complex_type(ty_name) {
             if let Some(f) = self.const_float_fold(value, st) {
                 let overflows = if is_f32 {
                     (f as f32).is_infinite()
@@ -217,7 +217,7 @@ impl<'a> Checker<'a> {
             self.check_default_float_overflow(target, value, st);
             return;
         }
-        if let Some(is_f32) = is_float_type(ty_name) {
+        if let Some(is_f32) = is_float_or_complex_type(ty_name) {
             if let Some(f) = self.const_float_fold(value, st) {
                 let overflows = if is_f32 {
                     (f as f32).is_infinite()
@@ -577,8 +577,22 @@ impl<'a> Checker<'a> {
                     BinOp::Sub => Some(l - r),
                     BinOp::Mul => Some(l * r),
                     BinOp::Div => (r != 0.0).then_some(l / r),
+                    BinOp::Shl if r >= 0.0 && r.fract() == 0.0 => {
+                        Some(if l == 0.0 { 0.0 } else { l * 2.0_f64.powi(r.min(2000.0) as i32) })
+                    }
                     _ => None,
                 }
+            }
+            Expr::Call { callee, args, .. }
+                if depth == 0
+                    && args.len() == 2
+                    && !args[0].spread
+                    && !args[1].spread
+                    && matches!(unwrap_parens(callee), Expr::Ident { name, span } if name == "complex" && !self.is_shadowed_ident_at(name, span.start)) =>
+            {
+                let r = self.const_float_fold_at(&args[0].value, st, depth + 1)?;
+                let i = self.const_float_fold_at(&args[1].value, st, depth + 1)?;
+                Some(r.abs().max(i.abs()))
             }
             other => const_float_fold_with(other, &self.const_values, depth, st),
         }
@@ -1453,6 +1467,7 @@ fn conv_const(e: &Expr) -> Option<ConvConst> {
                 },
             }),
             ConvConst::Float(f) => Some(ConvConst::Float(-f)),
+            ConvConst::Char(c) => Some(ConvConst::Int(-(c as i128))),
             ConvConst::Huge { f, lt_512 } => Some(ConvConst::Huge { f: -f, lt_512 }),
             other => Some(other),
         },
@@ -1548,6 +1563,14 @@ fn is_float_type(ty_name: &str) -> Option<bool> {
         "float64" | "f64" => Some(false),
         _ => None,
     }
+}
+
+fn is_float_or_complex_type(ty_name: &str) -> Option<bool> {
+    is_float_type(ty_name).or_else(|| match ty_name {
+        "complex64" | "c64" => Some(true),
+        "complex128" | "c128" => Some(false),
+        _ => None,
+    })
 }
 
 fn span_hint(span: Span) -> String {
@@ -1946,6 +1969,9 @@ pub(crate) fn const_float_fold_with(
                     } else {
                         Some(l / r)
                     }
+                }
+                BinOp::Shl if r >= 0.0 && r.fract() == 0.0 => {
+                    Some(if l == 0.0 { 0.0 } else { l * 2.0_f64.powi(r.min(2000.0) as i32) })
                 }
                 _ => None,
             }
