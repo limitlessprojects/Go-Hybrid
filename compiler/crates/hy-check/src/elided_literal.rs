@@ -27,13 +27,54 @@ use hy_syntax::{
     TypeExpr,
 };
 
-/// Curated foreign named types that are Go interfaces, function types, or
-/// scalar aliases rather than structs (`go build` refuses `T{...}` with
-/// `invalid composite literal type ...`).
-fn is_non_struct_foreign_type(name: &str) -> bool {
+/// Whether this curated foreign type rules out the elided literal.
+/// Slice- and map-backed types allow `{}`, but not struct-style fields.
+fn is_non_struct_foreign_type(name: &str, is_empty: bool) -> bool {
+    if matches!(
+        name,
+        "net.ip"
+            | "net.ip_mask"
+            | "net.hardware_addr"
+            | "net.buffers"
+            | "json.raw_message"
+            | "sort.int_slice"
+            | "sort.float64_slice"
+            | "sort.string_slice"
+            | "http.header"
+            | "url.values"
+    ) {
+        return !is_empty;
+    }
+
     matches!(
         name,
-        "io.reader"
+        "json.number"
+            | "json.delim"
+            | "json.token"
+            | "json.marshaler"
+            | "json.unmarshaler"
+            | "time.month"
+            | "time.weekday"
+            | "net.error"
+            | "net.flags"
+            | "net.invalid_addr_error"
+            | "net.unknown_network_error"
+            | "url.escape_error"
+            | "url.invalid_host_error"
+            | "hex.invalid_byte_error"
+            | "sync.locker"
+            | "http.handler_func"
+            | "http.dir"
+            | "http.conn_state"
+            | "http.same_site"
+            | "http.cookie_jar"
+            | "http.file"
+            | "http.file_system"
+            | "http.close_notifier"
+            | "http.pusher"
+            | "filepath.walk_func"
+            | "bufio.split_func"
+            | "io.reader"
             | "io.writer"
             | "io.closer"
             | "io.read_closer"
@@ -284,7 +325,7 @@ impl<'a> Checker<'a> {
             return true;
         }
         let head = name.split('[').next().unwrap_or(name.as_str());
-        if is_non_struct_foreign_type(head) {
+        if is_non_struct_foreign_type(head, is_empty) {
             return false;
         }
         self.structs.contains_key(head) || head.contains('.')
