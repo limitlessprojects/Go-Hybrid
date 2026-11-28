@@ -307,6 +307,9 @@ pub(crate) struct FnState {
     /// Active `defer <call>` sites seen prior to the current program point, paired
     /// with eager per-argument borrow flags evaluated at the `defer` statement.
     pub deferred_calls: Vec<(hy_syntax::Expr, Vec<bool>)>,
+    /// Pointer alias name -> root map-slot loan binding name (populated by
+    /// `extend_map_slot_loan_to_alias`).
+    pub slot_loan_aliases: HashMap<String, String>,
 }
 
 impl FnState {
