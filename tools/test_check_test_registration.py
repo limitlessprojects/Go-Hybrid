@@ -116,6 +116,19 @@ class PatternExtractionTests(unittest.TestCase):
         self.assertFalse(guard.is_registered_direct(
             "tests/test_live.py", "python3 -c 'print(1)' tests/test_live.py\n"))
 
+    def test_statically_disabled_recognizes_literal_false_only(self):
+        def fields_for(condition):
+            return guard.yaml_fields(["if: " + condition])
+
+        for condition in ("false", "FALSE", "${{ false }}", "${{FALSE}}",
+                          "'false'", '"false" # comment', "false  # skip for now"):
+            with self.subTest(condition=condition):
+                self.assertTrue(guard.statically_disabled(fields_for(condition)))
+        for condition in ("true", "${{ github.event_name == 'push' }}", "${{ !cancelled() }}"):
+            with self.subTest(condition=condition):
+                self.assertFalse(guard.statically_disabled(fields_for(condition)))
+        self.assertFalse(guard.statically_disabled(guard.yaml_fields(["run: echo hi"])))
+
     def test_repeated_pattern_uses_the_last_value_like_unittest(self):
         self.assertEqual(guard.registered_patterns(
             "python3 -m unittest discover -s tools -p test_disabled.py -p test_live.py\n"),
@@ -282,6 +295,82 @@ class RegistrationTests(unittest.TestCase):
             self.assertEqual(shell.returncode, 0, shell.stderr)
         self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
                          ["tools/test_disabled.py", "tests/test_disabled.py"])
+
+    # --- statically-disabled jobs/steps (issue #4913) ---
+
+    def test_disabled_step_condition_does_not_register_its_invocation(self):
+        workflow = (
+            "jobs:\n"
+            "  guarded:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - name: Disabled suite\n"
+            "        if: false\n"
+            "        run: python3 -m unittest discover -s tools -p test_disabled.py\n"
+            "  live:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: python3 tests/test_live.py\n")
+        root, text = self.build(workflow, ["tools/test_disabled.py", "tests/test_live.py"])
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/test_disabled.py"])
+
+    def test_disabled_job_condition_does_not_register_its_invocation(self):
+        workflow = (
+            "jobs:\n"
+            "  guarded:\n"
+            "    if: false\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: python3 -m unittest discover -s tools -p test_disabled.py\n"
+            "  live:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: python3 tests/test_live.py\n")
+        root, text = self.build(workflow, ["tools/test_disabled.py", "tests/test_live.py"])
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/test_disabled.py"])
+
+    def test_disabled_condition_variants_are_all_recognized(self):
+        for condition in ("false", "FALSE", "${{ false }}", "${{FALSE}}",
+                          "'false'", '"false" # comment', "false  # skip for now"):
+            with self.subTest(condition=condition):
+                workflow = (
+                    "jobs:\n"
+                    "  guarded:\n"
+                    "    runs-on: ubuntu-latest\n"
+                    "    steps:\n"
+                    "      - if: " + condition + "\n"
+                    "        run: python3 -m unittest discover -s tools -p test_disabled.py\n")
+                root, text = self.build(workflow, ["tools/test_disabled.py"])
+                self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                                 ["tools/test_disabled.py"])
+
+    def test_dynamic_condition_is_left_to_fail_open_as_before(self):
+        workflow = (
+            "jobs:\n"
+            "  guarded:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - if: ${{ github.event_name == 'push' }}\n"
+            "        run: python3 -m unittest discover -s tools -p test_dynamic.py\n")
+        root, text = self.build(workflow, ["tools/test_dynamic.py"])
+        self.assertEqual(guard.unregistered(root, text), [])
+
+    def test_disabled_job_does_not_shadow_another_enabled_invocation(self):
+        workflow = (
+            "jobs:\n"
+            "  guarded:\n"
+            "    if: false\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: python3 -m unittest discover -s tools -p test_shared.py\n"
+            "  live:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: python3 -m unittest discover -s tools -p test_shared.py\n")
+        root, text = self.build(workflow, ["tools/test_shared.py"])
+        self.assertEqual(guard.unregistered(root, text), [])
 
     def test_or_list_and_pipeline_masked_failures_are_rejected(self):
         fixtures = Path(__file__).resolve().parents[1] / "tests" / "fixtures"

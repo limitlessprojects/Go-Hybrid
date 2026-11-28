@@ -24,8 +24,11 @@ Block mappings and literal run blocks are supported; unknown cwd expressions
 and unsupported mapping forms cannot establish root execution. Raw command
 snippets retain their repository-root convention. Comments, echoed text,
 step names, interpreter flags, chained later commands, and paths passed as
-arguments to other scripts register nothing. This is not a general
-shell/YAML interpreter.
+arguments to other scripts register nothing. A job or step with a literal
+`if: false` (or `if: ${{ false }}`) condition never runs, so an invocation
+inside one registers nothing either; a dynamic condition is left alone,
+since this guard does not evaluate Actions expressions. This is not a
+general shell/YAML interpreter.
 
 Usage: python3 tools/check_test_registration.py [--workflow PATH] [--root DIR]
 Exit:  0 = every test file is registered; 1 = unregistered file(s); 2 = guard misuse.
@@ -109,6 +112,18 @@ def default_root_cwd(fields, inherited):
     return inherited if cwd is None else root_working_directory(cwd[0])
 
 
+def statically_disabled(fields):
+    """Recognize a literal false job/step condition, not arbitrary expressions."""
+    condition = fields.get("if")
+    if condition is None:
+        return False
+    value = condition[0].strip()
+    quoted = re.fullmatch(r'''(['"])(.*?)\1(?:\s+#.*)?''', value)
+    scalar = quoted[2] if quoted else re.split(r"\s+#", value, 1)[0]
+    return re.fullmatch(r"(?:false|\$\{\{ *false *\}\})", scalar.strip(),
+                        re.IGNORECASE) is not None
+
+
 def workflow_run_lines(workflow_text):
     """Yield shell lines only from steps whose effective cwd is root.
 
@@ -128,7 +143,7 @@ def workflow_run_lines(workflow_text):
     workflow_root = default_root_cwd(workflow, True)
     for job in jobs.values():
         fields = block_fields(job)
-        if fields is None:
+        if fields is None or statically_disabled(fields):
             continue
         job_root = default_root_cwd(fields, workflow_root)
         steps = fields.get("steps")
@@ -152,7 +167,7 @@ def workflow_run_lines(workflow_text):
             cwd = step.get("working-directory")
             is_root = job_root if cwd is None else root_working_directory(cwd[0])
             run = step.get("run")
-            if not is_root or run is None or "<<" in step:
+            if not is_root or run is None or "<<" in step or statically_disabled(step):
                 continue
             value, commands = run
             scalar = re.split(r"\s+#", value.strip(), 1)[0]
