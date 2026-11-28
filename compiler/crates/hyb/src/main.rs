@@ -1133,7 +1133,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
             .output();
         match build {
             Ok(out) if out.status.success() => {
-                println!("built {} (go {})", out_path, PINNED_GO);
+                println!("built {} (go {})", out_path, installed_go_version());
                 ExitCode::SUCCESS
             }
             Ok(out) => {
@@ -1149,7 +1149,11 @@ fn cmd_build(args: &[String]) -> ExitCode {
     } else {
         match build_with_bridge(go_bin, &out_path, &go_src, &bindings, race) {
             Ok(()) => {
-                println!("built {} (go {}, bridge: hyrt)", out_path, PINNED_GO);
+                println!(
+                    "built {} (go {}, bridge: hyrt)",
+                    out_path,
+                    installed_go_version()
+                );
                 ExitCode::SUCCESS
             }
             Err(BuildError::Tool(msg)) => {
@@ -1756,6 +1760,24 @@ fn newest_mtime(dir: &std::path::Path) -> Option<std::time::SystemTime> {
         }
     }
     newest
+}
+
+/// The Go release that actually ran the build (`go1.27.4` from
+/// `go version go1.27.4 darwin/arm64`). The success banner reports this, not
+/// PINNED_GO: under HYB_ALLOW_TOOLCHAIN_DRIFT=1 the two can differ and the
+/// banner is the build's only provenance line.
+fn installed_go_version() -> String {
+    Command::new(go_bin())
+        .arg("version")
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .nth(2)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Compare installed toolchains against the pins. Returns the E9001
