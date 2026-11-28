@@ -1,4 +1,5 @@
 # STATUS (for the human — 15 lines max)
+- Contributor (2026-11-22): foreign package arity guards count forwarded tuple results across eight package bands; pinned workspace 3298/3298, corpus 139/139 and differential 47/47 + 92/92 pass. Six positive Hybrid builds pass; three additional checker controls hit the existing >2-result emitter limit. Hosted CI/review/reward pending.
 
 - Contributor (2026-11-07): runtime Cargo builds now resolve relative `CARGO_TARGET_DIR` from the caller, matching staticlib discovery. Four CLI regressions pass (two failed before); real Cargo smoke passes all four path modes and fresh reuse. Pinned macOS validation on `4cda40a`: workspace 2945/2945, corpus 135/135, differential 45/45 + 90/90 and guards pass. Hosted CI/review pending; see PLAN.md.
 - Contributor (2026-11-07): `hyb build` preserves unmarked/unreadable Go sidecars before compilation; marked outputs remain reusable, while legacy unmarked output requires explicit migration. Six CLI regressions, pinned macOS workspace 2947/2947, corpus 135/135 and differential 45/45 + 90/90 pass. Hosted CI/review pending; see PLAN.md.

@@ -2032,6 +2032,12 @@ concurrency flags for the A5 lint, API contract extraction) is per-package
 work; promising "any Go package" and delivering broken bindings would be
 the dishonest version. The list grows by Decision Log entries.
 
+Fixed-arity curated package calls count a sole multi-result argument by
+its expanded results, matching Go's call rule. This applies to the existing
+`path`, `filepath`, `url`, `strconv`, `sort`, `sync`, `hex` and `io` arity
+guards (`HYB-E1002`, BUILDABLE). Unknown result counts retain the existing
+fallback; variadic members and argument-type checking are unchanged.
+
 **M6 — Rust crate imports and pinning.** `import "rust/serde_json"`
 resolves the crate through the module manifest (`hybrid.mod`), which pins
 **exact versions** (`serde_json = "1.0.140"` — no ranges; reproducibility

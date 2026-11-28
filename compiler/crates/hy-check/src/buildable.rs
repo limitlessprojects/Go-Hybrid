@@ -4375,6 +4375,7 @@ impl<'a> Collector<'a> {
 
 
     fn check_filepath_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        let got = self.effective_call_arg_count(args);
         if matches!(
             member,
             "separator"
@@ -4407,11 +4408,11 @@ impl<'a> Collector<'a> {
                     format!("cannot use `...` in call to non-variadic `filepath.{member}` (HYB-E1002)"),
                     &format!("`filepath.{member}` does not accept variadic spread arguments"),
                 );
-            } else if args.len() != expected {
+            } else if got != expected {
                 let noun = if expected == 1 { "argument" } else { "arguments" };
                 self.emit_e1002(
                     span,
-                    format!("`filepath.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    format!("`filepath.{member}` takes {expected} {noun}, got {} (HYB-E1002)", got),
                     &format!("provide exactly {expected} {noun} to `filepath.{member}`"),
                 );
             }
@@ -4419,6 +4420,7 @@ impl<'a> Collector<'a> {
     }
 
     fn check_path_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        let got = self.effective_call_arg_count(args);
         if member == "err_bad_pattern" {
             self.emit_e1002(
                 span,
@@ -4441,17 +4443,18 @@ impl<'a> Collector<'a> {
                     format!("cannot use `...` in call to non-variadic `path.{member}` (HYB-E1002)"),
                     &format!("`path.{member}` does not accept variadic spread arguments"),
                 );
-            } else if args.len() != expected {
+            } else if got != expected {
                 let noun = if expected == 1 { "argument" } else { "arguments" };
                 self.emit_e1002(
                     span,
-                    format!("`path.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    format!("`path.{member}` takes {expected} {noun}, got {} (HYB-E1002)", got),
                     &format!("provide exactly {expected} {noun} to `path.{member}`"),
                 );
             }
         }
     }
     fn check_url_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        let got = self.effective_call_arg_count(args);
         if matches!(
             member,
             "url" | "values" | "userinfo" | "error" | "escape_error" | "invalid_host_error"
@@ -4478,11 +4481,11 @@ impl<'a> Collector<'a> {
                     format!("cannot use `...` in call to non-variadic `url.{member}` (HYB-E1002)"),
                     &format!("`url.{member}` does not accept variadic spread arguments"),
                 );
-            } else if args.len() != expected {
+            } else if got != expected {
                 let noun = if expected == 1 { "argument" } else { "arguments" };
                 self.emit_e1002(
                     span,
-                    format!("`url.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    format!("`url.{member}` takes {expected} {noun}, got {} (HYB-E1002)", got),
                     &format!("provide exactly {expected} {noun} to `url.{member}`"),
                 );
             }
@@ -4507,6 +4510,7 @@ impl<'a> Collector<'a> {
     // fail-closed, HYB-E1002). Never over-reject: only members the table
     // blesses are listed, and every accepted call matches its Go signature.
     fn check_strconv_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        let got = self.effective_call_arg_count(args);
         // Package-level values and types are not callable.
         if matches!(member, "int_size" | "err_range" | "err_syntax" | "num_error") {
             self.emit_e1002(
@@ -4556,7 +4560,7 @@ impl<'a> Collector<'a> {
                     format!("cannot use `...` in call to non-variadic `strconv.{member}` (HYB-E1002)"),
                     &format!("`strconv.{member}` does not accept variadic spread arguments"),
                 );
-            } else if args.len() != expected {
+            } else if got != expected {
                 let go_name = {
                     // mirror hy-emit's to_go_name without a cross-crate dep
                     // (hy-check must not depend on hy-emit).
@@ -4578,7 +4582,7 @@ impl<'a> Collector<'a> {
                     format!(
                         "`strconv.{member}` takes exactly {expected} argument{}, got {} (HYB-E1002)",
                         if expected == 1 { "" } else { "s" },
-                        args.len()
+                        got
                     ),
                     &format!(
                         "match the arity of the Go function this lowers to (`strconv.{go_name}`)"
@@ -4589,6 +4593,7 @@ impl<'a> Collector<'a> {
     }
 
     fn check_sort_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        let got = self.effective_call_arg_count(args);
         if matches!(member, "interface" | "int_slice" | "float64_slice" | "string_slice") {
             self.emit_e1002(
                 span,
@@ -4613,11 +4618,11 @@ impl<'a> Collector<'a> {
                     format!("cannot use `...` in call to non-variadic `sort.{member}` (HYB-E1002)"),
                     &format!("`sort.{member}` does not accept variadic spread arguments"),
                 );
-            } else if args.len() != expected {
+            } else if got != expected {
                 let noun = if expected == 1 { "argument" } else { "arguments" };
                 self.emit_e1002(
                     span,
-                    format!("`sort.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    format!("`sort.{member}` takes {expected} {noun}, got {} (HYB-E1002)", got),
                     &format!("provide exactly {expected} {noun} to `sort.{member}`"),
                 );
             }
@@ -4625,6 +4630,7 @@ impl<'a> Collector<'a> {
     }
 
     fn check_sync_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
+        let got = self.effective_call_arg_count(args);
         if matches!(
             member,
             "mutex"
@@ -4661,11 +4667,11 @@ impl<'a> Collector<'a> {
         };
 
         if let Some(expected) = expected_arity {
-            if args.len() != expected {
+            if got != expected {
                 let noun = if expected == 1 { "argument" } else { "arguments" };
                 self.emit_e1002(
                     span,
-                    format!("`sync.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    format!("`sync.{member}` takes {expected} {noun}, got {} (HYB-E1002)", got),
                     &format!("provide exactly {expected} {noun} to `sync.{member}`"),
                 );
             }
@@ -5118,6 +5124,12 @@ impl<'a> Collector<'a> {
             }
             None => {}
         }
+    }
+
+    /// Go expands a sole multi-result call into the complete argument list.
+    /// Package arity guards must use that count for both rejection and reporting.
+    fn effective_call_arg_count(&self, args: &[CallArg]) -> usize {
+        self.multi_value_arg_count(args).unwrap_or(args.len())
     }
 
     /// #682 U7 — a multi-value call as the whole argument list is legal Go when
@@ -8326,6 +8338,7 @@ impl<'a> Collector<'a> {
                         );
                     }
                     if pkg == "hex" && self.lookup_kind(pkg).is_none() {
+                        let got = self.effective_call_arg_count(args);
                         // Full encoding/hex call surface — every member the
                         // member table in foreign.rs blesses, with the arity
                         // of the Go name it lowers to (`to_go_name`: snake
@@ -8351,7 +8364,7 @@ impl<'a> Collector<'a> {
                             _ => None,
                         };
                         if let Some(n) = expected {
-                            if args.len() != n {
+                            if got != n {
                                 let go_name = {
                                     // mirror hy-emit's to_go_name without a
                                     // cross-crate dep (hy-check must not
@@ -8376,7 +8389,7 @@ impl<'a> Collector<'a> {
                                         name,
                                         n,
                                         if n == 1 { "" } else { "s" },
-                                        args.len()
+                                        got
                                     ),
                                     &format!(
                                         "match the arity of the Go function this lowers to (`hex.{}`)",
@@ -9929,6 +9942,7 @@ impl<'a> Collector<'a> {
     }
 
     fn check_io_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        let got = self.effective_call_arg_count(args);
         match name {
             "eof"
             | "err_unexpected_eof"
@@ -9959,97 +9973,97 @@ impl<'a> Collector<'a> {
                 if !args.is_empty() {
                     self.emit_e1002(
                         span,
-                        format!("`io.pipe` takes 0 arguments `()`, got {} (HYB-E1002)", args.len()),
+                        format!("`io.pipe` takes 0 arguments `()`, got {} (HYB-E1002)", got),
                         "write `io.pipe()`",
                     );
                 }
             }
             "read_all" => {
-                if args.len() != 1 {
+                if got != 1 {
                     self.emit_e1002(
                         span,
-                        format!("`io.read_all` takes exactly 1 argument `(r)`, got {} (HYB-E1002)", args.len()),
+                        format!("`io.read_all` takes exactly 1 argument `(r)`, got {} (HYB-E1002)", got),
                         "write `io.read_all(r)`",
                     );
                 }
             }
             "copy" => {
-                if args.len() != 2 {
+                if got != 2 {
                     self.emit_e1002(
                         span,
-                        format!("`io.copy` takes exactly 2 arguments `(dst, src)`, got {} (HYB-E1002)", args.len()),
+                        format!("`io.copy` takes exactly 2 arguments `(dst, src)`, got {} (HYB-E1002)", got),
                         "write `io.copy(dst, src)`",
                     );
                 }
             }
             "read_full" => {
-                if args.len() != 2 {
+                if got != 2 {
                     self.emit_e1002(
                         span,
-                        format!("`io.read_full` takes exactly 2 arguments `(r, buf)`, got {} (HYB-E1002)", args.len()),
+                        format!("`io.read_full` takes exactly 2 arguments `(r, buf)`, got {} (HYB-E1002)", got),
                         "write `io.read_full(r, buf)`",
                     );
                 }
             }
             "write_string" => {
-                if args.len() != 2 {
+                if got != 2 {
                     self.emit_e1002(
                         span,
-                        format!("`io.write_string` takes exactly 2 arguments `(w, s)`, got {} (HYB-E1002)", args.len()),
+                        format!("`io.write_string` takes exactly 2 arguments `(w, s)`, got {} (HYB-E1002)", got),
                         "write `io.write_string(w, s)`",
                     );
                 }
             }
             "limit_reader" => {
-                if args.len() != 2 {
+                if got != 2 {
                     self.emit_e1002(
                         span,
-                        format!("`io.limit_reader` takes exactly 2 arguments `(r, n)`, got {} (HYB-E1002)", args.len()),
+                        format!("`io.limit_reader` takes exactly 2 arguments `(r, n)`, got {} (HYB-E1002)", got),
                         "write `io.limit_reader(r, n)`",
                     );
                 }
             }
             "tee_reader" => {
-                if args.len() != 2 {
+                if got != 2 {
                     self.emit_e1002(
                         span,
-                        format!("`io.tee_reader` takes exactly 2 arguments `(r, w)`, got {} (HYB-E1002)", args.len()),
+                        format!("`io.tee_reader` takes exactly 2 arguments `(r, w)`, got {} (HYB-E1002)", got),
                         "write `io.tee_reader(r, w)`",
                     );
                 }
             }
             "copy_n" => {
-                if args.len() != 3 {
+                if got != 3 {
                     self.emit_e1002(
                         span,
-                        format!("`io.copy_n` takes exactly 3 arguments `(dst, src, n)`, got {} (HYB-E1002)", args.len()),
+                        format!("`io.copy_n` takes exactly 3 arguments `(dst, src, n)`, got {} (HYB-E1002)", got),
                         "write `io.copy_n(dst, src, n)`",
                     );
                 }
             }
             "copy_buffer" => {
-                if args.len() != 3 {
+                if got != 3 {
                     self.emit_e1002(
                         span,
-                        format!("`io.copy_buffer` takes exactly 3 arguments `(dst, src, buf)`, got {} (HYB-E1002)", args.len()),
+                        format!("`io.copy_buffer` takes exactly 3 arguments `(dst, src, buf)`, got {} (HYB-E1002)", got),
                         "write `io.copy_buffer(dst, src, buf)`",
                     );
                 }
             }
             "read_at_least" => {
-                if args.len() != 3 {
+                if got != 3 {
                     self.emit_e1002(
                         span,
-                        format!("`io.read_at_least` takes exactly 3 arguments `(r, buf, min)`, got {} (HYB-E1002)", args.len()),
+                        format!("`io.read_at_least` takes exactly 3 arguments `(r, buf, min)`, got {} (HYB-E1002)", got),
                         "write `io.read_at_least(r, buf, min)`",
                     );
                 }
             }
             "new_section_reader" => {
-                if args.len() != 3 {
+                if got != 3 {
                     self.emit_e1002(
                         span,
-                        format!("`io.new_section_reader` takes exactly 3 arguments `(r, off, n)`, got {} (HYB-E1002)", args.len()),
+                        format!("`io.new_section_reader` takes exactly 3 arguments `(r, off, n)`, got {} (HYB-E1002)", got),
                         "write `io.new_section_reader(r, off, n)`",
                     );
                 }
