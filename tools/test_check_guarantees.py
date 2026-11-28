@@ -243,6 +243,15 @@ class Coverage(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.assertIn("empty reason", joined(problems_of(root)))
 
+    def test_unclaimed_with_non_string_reason_fails(self):
+        for invalid_reason in (None, False, True, 0, 1.5, [], {}, ["typing"]):
+            with self.subTest(reason=invalid_reason):
+                tmp, root = build(unclaimed={"HYB-E3002": invalid_reason, "HYB-E8001": "lint"})
+                self.addCleanup(tmp.cleanup)
+                text = joined(problems_of(root))
+                self.assertIn("invalid `unclaimed` reason", text)
+                self.assertIn("expected a non-empty string", text)
+
     def test_unclaimed_naming_a_gone_rule_fails(self):
         tmp, root = build(
             unclaimed={"HYB-E3002": "typing", "HYB-E8001": "lint", "HYB-E9999": "removed rule"}
