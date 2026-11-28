@@ -1,0 +1,27 @@
+name: fuzz-source-windows
+
+on:
+  pull_request:
+    paths:
+      - "tools/fuzz/**"
+      - ".github/workflows/fuzz-source-windows.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tools/fuzz/**"
+      - ".github/workflows/fuzz-source-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Fuzz process and exact-source regression tests
+        run: python -m unittest discover -s tools/fuzz -p test_hyfuzz.py -k FuzzProcessTests -v
