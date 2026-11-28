@@ -150,3 +150,134 @@ fn f() error {{
 "
     ));
 }
+
+const METHOD_VOID_AND_MULTI: &str = r#"struct worker {
+    id int
+}
+
+fn (w worker) run() error {
+    return nil
+}
+
+fn (w worker) multi() (int, int, error) {
+    return 1, 2, nil
+}
+
+fn (w worker) one() (int, error) {
+    return 1, nil
+}
+"#;
+
+#[test]
+fn rejects_void_method_try_in_single_value_positions() {
+    assert_reject(&format!(
+        "{METHOD_VOID_AND_MULTI}
+fn f() error {{
+    w := worker{{id: 1}}
+    x := w.run()?
+    _ = x
+    return nil
+}}
+"
+    ));
+    assert_reject(&format!(
+        "{METHOD_VOID_AND_MULTI}
+fn f() error {{
+    w := worker{{id: 1}}
+    s := []int{{1, 2, 3}}
+    x := s[w.run()?]
+    _ = x
+    return nil
+}}
+"
+    ));
+    assert_reject(&format!(
+        "{METHOD_VOID_AND_MULTI}
+fn f() error {{
+    w := worker{{id: 1}}
+    s := []int{{1, 2, 3}}
+    sub := s[w.run()?:2]
+    _ = sub
+    return nil
+}}
+"
+    ));
+    assert_reject(&format!(
+        "{METHOD_VOID_AND_MULTI}
+fn take(v int) {{ print(v) }}
+
+fn f() error {{
+    w := worker{{id: 1}}
+    take(w.run()?)
+    return nil
+}}
+"
+    ));
+}
+
+#[test]
+fn rejects_multi_value_method_try_in_single_value_positions() {
+    assert_reject(&format!(
+        "{METHOD_VOID_AND_MULTI}
+fn f() error {{
+    w := worker{{id: 1}}
+    s := []int{{1, 2, 3}}
+    x := s[w.multi()?]
+    _ = x
+    return nil
+}}
+"
+    ));
+    assert_reject(&format!(
+        "{METHOD_VOID_AND_MULTI}
+fn f() error {{
+    w := worker{{id: 1}}
+    _ = w.multi()? + 1
+    return nil
+}}
+"
+    ));
+    assert_reject(&format!(
+        "{METHOD_VOID_AND_MULTI}
+fn take(v int) {{ print(v) }}
+
+fn f() error {{
+    w := worker{{id: 1}}
+    take(w.multi()?)
+    return nil
+}}
+"
+    ));
+}
+
+#[test]
+fn accepts_single_value_method_try_in_valid_position() {
+    assert_accept(&format!(
+        "{METHOD_VOID_AND_MULTI}
+fn f() error {{
+    w := worker{{id: 1}}
+    s := []int{{1, 2, 3}}
+    x := w.one()?
+    y := w.one()? + 1
+    z := s[w.one()?]
+    _ = x + y + z
+    return nil
+}}
+"
+    ));
+}
+
+#[test]
+fn accepts_void_and_multi_method_try_in_non_single_value_positions() {
+    assert_accept(&format!(
+        "{METHOD_VOID_AND_MULTI}
+fn f() error {{
+    w := worker{{id: 1}}
+    w.run()?
+    a, b := w.multi()?
+    _ = a + b
+    return nil
+}}
+"
+    ));
+}
