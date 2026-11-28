@@ -14,7 +14,10 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-/home/z/go-hybrid-target}"
 HYB="${HYB_BIN:-$TARGET_DIR/debug/hyb}"
-WORK="$(mktemp -d)"
+if ! WORK="$(mktemp -d "${TMPDIR:-/tmp}/hybrid-examples.XXXXXXXXXX")"; then
+    printf '%s\n' 'run_examples: cannot create an example work directory' >&2
+    exit 1
+fi
 trap 'rm -rf "$WORK"' EXIT
 
 FAIL=0
