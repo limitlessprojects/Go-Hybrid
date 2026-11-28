@@ -902,8 +902,14 @@ fn cmd_build(args: &[String]) -> ExitCode {
     // The walking skeleton's reproducibility guard (DX study: ~30 lines).
     // HYB_ALLOW_TOOLCHAIN_DRIFT=1 is the documented escape hatch for
     // experimentation; CI and the Makefile never set it.
+    //
+    // Only the GO pin is enforced here: go compiles every build. The rust pin
+    // governs the ONE step that uses Rust — rebuilding the hyrt staticlib — so
+    // it is enforced in ensure_staticlib's cargo branch instead (#4517: a
+    // bridge-free build died on an unrelated rustc, contradicting both the
+    // comment there and RELEASE-INSTALL.md's "No Rust toolchain needed").
     if std::env::var("HYB_ALLOW_TOOLCHAIN_DRIFT").ok().as_deref() != Some("1") {
-        if let Some(diag) = check_toolchain_pins(&file) {
+        if let Some(diag) = check_go_pin(&file) {
             println!("{}", diag.render_head());
             for f in &diag.fixits {
                 println!("  = help: {}", f.description);
@@ -1304,6 +1310,23 @@ fn ensure_staticlib(rt: &std::path::Path) -> Result<std::path::PathBuf, BuildErr
             // No fresh arch-matching lib — rebuild native (the dev flow; the
             // release tarball never lands here because packaging touches the
             // shipped lib's mtime past every source's).
+            //
+            // THIS is the only step that uses the Rust toolchain, so this is
+            // where the rust pin is enforced (#4517). `hyb build` no longer
+            // checks rustc up front: a bridge-free build must not die on an
+            // unrelated rustc, and a build that *is* rebuilding the staticlib
+            // must not silently link a lib a different rustc produced.
+            if std::env::var("HYB_ALLOW_TOOLCHAIN_DRIFT").ok().as_deref() != Some("1") {
+                if let Some(found) = rust_pin_drift() {
+                    return Err(BuildError::Tool(format!(
+                        "HYB-E9001 toolchain mismatch: found rustc {}, pinned {} — the hyrt \
+                         staticlib has to be rebuilt with Rust, which is the only step the rust \
+                         pin governs. Install {} (rustup install {}) or set \
+                         HYB_ALLOW_TOOLCHAIN_DRIFT=1 to build with this toolchain anyway",
+                        found, PINNED_RUST, PINNED_RUST, PINNED_RUST
+                    )));
+                }
+            }
             let mut cargo = Command::new(cargo_bin());
             cargo
                 .args(["build", "--release", "-j2"])
@@ -1758,9 +1781,49 @@ fn newest_mtime(dir: &std::path::Path) -> Option<std::time::SystemTime> {
     newest
 }
 
-/// Compare installed toolchains against the pins. Returns the E9001
-/// diagnostic on the FIRST mismatch (go first — it gates codegen).
+/// The rustc version inside `rustc --version` output
+/// (`rustc 1.99.0 (b940084d7 2026-09-28)` -> `1.99.0`).
+fn rustc_version_of(version_output: &str) -> String {
+    version_output.split_whitespace().nth(1).unwrap_or("").to_string()
+}
+
+/// The rustc on PATH, when it exists, prints a version, and that version is
+/// NOT the pin. `None` in the other three states (absent, silent, exactly the
+/// pin) — i.e. whenever this build cannot be blamed on the rust pin.
+fn rust_pin_drift() -> Option<String> {
+    let out = Command::new("rustc").arg("--version").output().ok()?;
+    let found = rustc_version_of(String::from_utf8_lossy(&out.stdout).trim());
+    if found.is_empty() || found == PINNED_RUST {
+        None
+    } else {
+        Some(found)
+    }
+}
+
+/// Compare installed toolchains against BOTH pins. Returns the E9001
+/// diagnostic on the FIRST mismatch (go first — it gates codegen). Callers are
+/// the commands that really do use Rust (bench-overhead measures the live
+/// bridge); `hyb build` uses [`check_go_pin`] and lets the staticlib step own
+/// the rust pin.
 fn check_toolchain_pins(file: &str) -> Option<Diagnostic> {
+    if let Some(diag) = check_go_pin(file) {
+        return Some(diag);
+    }
+    if let Some(found) = rust_pin_drift() {
+        return Some(Diagnostic::error(
+            "HYB-E9001",
+            file,
+            Span::point(Pos::new(1, 1)),
+            format!("toolchain mismatch: found rustc {}, pinned {}", found, PINNED_RUST),
+        ));
+    }
+    None
+}
+
+/// Compare the installed GO toolchain against the pin. Returns the E9001
+/// diagnostic when go is absent or is not the pin — go compiles every build,
+/// so this is enforced on every path.
+fn check_go_pin(file: &str) -> Option<Diagnostic> {
     let span = Span::point(Pos::new(1, 1));
 
     let go_out = Command::new(go_bin())
@@ -1790,32 +1853,12 @@ fn check_toolchain_pins(file: &str) -> Option<Diagnostic> {
         }
     }
 
-    let rust_out = Command::new("rustc")
-        .arg("--version")
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-    if let Some(v) = rust_out {
-        // Empty/unparseable output is treated as ABSENT: the rust pin
-        // governs the toolchain WHEN IT IS USED (bridge builds via
-        // ensure_staticlib); a bridge-free build — the arm64 release smoke,
-        // where rustc is legitimately not on PATH at all — must not die on
-        // a rustc that exists but prints nothing. Absent (ENOENT) already
-        // skips; this closes the same hole for the found-but-silent case.
-        // Found during the arm64 release-matrix smoke (row 11/16).
-        let found = v.split_whitespace().nth(1).unwrap_or("").to_string();
-        if !found.is_empty() && found != PINNED_RUST {
-            return Some(Diagnostic::error(
-                "HYB-E9001",
-                file,
-                span,
-                format!(
-                    "toolchain mismatch: found rustc {}, pinned {}",
-                    found, PINNED_RUST
-                ),
-            ));
-        }
-    }
+    // The rust pin is NOT checked here: it governs the toolchain WHEN IT IS
+    // USED (the hyrt staticlib rebuild in ensure_staticlib). A bridge-free
+    // build — the arm64 release smoke, where rustc is legitimately not on PATH
+    // at all — must not die on an unrelated rustc (#4517). `rust_pin_drift`
+    // also treats empty/unparseable output as absent, closing the
+    // found-but-silent hole the release-matrix smoke hit (row 11/16).
     None
 }
 
@@ -2194,6 +2237,22 @@ mod staticlib_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `rustc --version` output -> version. Anything unparseable is empty,
+    /// which `rust_pin_drift` reads as "cannot be blamed on the pin".
+    #[test]
+    fn rustc_version_of_parses_the_version_field() {
+        assert_eq!(
+            rustc_version_of("rustc 1.99.0 (b940084d7 2026-09-28)"),
+            "1.99.0"
+        );
+        assert_eq!(rustc_version_of("rustc 1.98.0-nightly (abc 2026-09-01)"), "1.98.0-nightly");
+        // Silent / junk output is ABSENT, not a mismatch (#4517 keeps the
+        // release-matrix arm64 lesson: found-but-silent must not fail a build).
+        assert_eq!(rustc_version_of(""), "");
+        assert_eq!(rustc_version_of("not a version line"), "a");
+        assert_eq!(rustc_version_of("rustc"), "");
+    }
 
     /// lib_arch_matches must accept a matching-arch ELF and reject a
     /// foreign-arch one, garbage, and short files (row 16: the bridge smoke
