@@ -672,6 +672,8 @@ pub struct Emitter {
     /// var → user-struct name (value or pointer): `stats := pool_stats{}` /
     /// `worker(..., stats *pool_stats)`.
     var_struct: BTreeMap<String, String>,
+    /// var → full instantiated generic struct name (`box[set[int]]`).
+    var_struct_full: BTreeMap<String, String>,
     /// var → (shape-known dotted type, is_pointer): `var hits atomic.int64`
     /// / `hits *atomic.int64` — the MethodFunc receiver's address-of form.
     var_ty: BTreeMap<String, (String, bool)>,
@@ -703,6 +705,7 @@ pub(crate) struct ScopeSnapshot {
     bindings: BTreeMap<String, BindingKind>,
     var_ty: BTreeMap<String, (String, bool)>,
     var_struct: BTreeMap<String, String>,
+    var_struct_full: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
     loan_aliases: BTreeMap<String, BTreeSet<String>>,
 }
@@ -738,6 +741,7 @@ impl Emitter {
             closure_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
+            var_struct_full: BTreeMap::new(),
             var_ty: BTreeMap::new(),
             pointer_vars: BTreeSet::new(),
             loan_aliases: BTreeMap::new(),
@@ -762,6 +766,7 @@ impl Emitter {
             bindings: self.bindings.clone(),
             var_ty: self.var_ty.clone(),
             var_struct: self.var_struct.clone(),
+            var_struct_full: self.var_struct_full.clone(),
             pointer_vars: self.pointer_vars.clone(),
             loan_aliases: self.loan_aliases.clone(),
         }
@@ -772,6 +777,7 @@ impl Emitter {
         self.bindings = saved.bindings;
         self.var_ty = saved.var_ty;
         self.var_struct = saved.var_struct;
+        self.var_struct_full = saved.var_struct_full;
         self.pointer_vars = saved.pointer_vars;
         self.loan_aliases = saved.loan_aliases;
     }
@@ -782,6 +788,7 @@ impl Emitter {
             self.bindings.remove(name);
             self.var_ty.remove(name);
             self.var_struct.remove(name);
+            self.var_struct_full.remove(name);
             self.pointer_vars.remove(name);
             self.loan_aliases.remove(name);
             for aliases in self.loan_aliases.values_mut() {
@@ -1456,6 +1463,7 @@ impl Emitter {
     fn emit_fn(&mut self, f: &FnDecl) -> Result<(), EmitError> {
         self.bindings.clear();
         self.var_struct.clear();
+        self.var_struct_full.clear();
         self.closure_shapes.clear();
         self.var_ty.clear();
         self.pointer_vars.clear();
@@ -1803,6 +1811,9 @@ impl Emitter {
         } else if self.struct_fields.contains_key(struct_base) {
             self.var_struct
                 .insert(name.to_string(), struct_base.to_string());
+            if base.contains('[') {
+                self.var_struct_full.insert(name.to_string(), base);
+            }
         }
     }
 

@@ -1304,12 +1304,40 @@ impl Emitter {
                 self.register_var_ty(&names[0], t);
             } else if let Some(sn) = self.user_struct_name_of(&values[0]).map(str::to_string) {
                 self.var_struct.insert(names[0].clone(), sn);
+                if let Some(full) = self.full_struct_type_of(&values[0]) {
+                    self.var_struct_full.insert(names[0].clone(), full);
+                }
             }
         }
         for (name, is_ptr) in names.iter().zip(ptr_flags) {
             if name != "_" && is_ptr {
                 self.pointer_vars.insert(name.clone());
             }
+        }
+    }
+
+    fn full_struct_type_of(&self, e: &Expr) -> Option<String> {
+        let e = Self::peel_parens(e);
+        match e {
+            Expr::Try { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => self.full_struct_type_of(operand),
+            Expr::Ident { name, .. } => self.var_struct_full.get(name).cloned(),
+            Expr::StructLit { ty: Some(t), .. } => {
+                super::base_ty_name(self.resolve_type_alias(t)).filter(|s| s.contains('['))
+            }
+            Expr::Field { base, name, .. } => {
+                let full = self.full_struct_type_of(base)?;
+                let fields = self.struct_lit_field_decls(&full)?;
+                let f = fields.iter().find(|f| &f.name == name)?;
+                super::base_ty_name(self.resolve_type_alias(&f.ty)).filter(|s| s.contains('['))
+            }
+            _ => None,
         }
     }
 
@@ -1320,6 +1348,15 @@ impl Emitter {
             return self.bindings.get(name).copied().unwrap_or(BindingKind::Plain);
         }
         if let Expr::Field { base, name, .. } = e {
+            if let Some(full) = self.full_struct_type_of(base) {
+                if let Some(kind) = self
+                    .struct_lit_field_decls(&full)
+                    .and_then(|fs| fs.into_iter().find(|f| &f.name == name))
+                    .and_then(|f| self.binding_kind_of_ty(&f.ty))
+                {
+                    return kind;
+                }
+            }
             return self
                 .user_struct_name_of(base)
                 .and_then(|sn| self.n5_structs.get(sn))
