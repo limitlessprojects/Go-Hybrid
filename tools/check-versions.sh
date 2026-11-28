@@ -47,12 +47,19 @@ has_version() {
 echo "pins: $PINNED_GO / rust $PINNED_RUST (tools/env.sh)"
 
 # --- 2. Cross-reference every version-bearing artifact ----------------------
-has_version README.md "Go " "$GO_VER" \
-    && pass "README.md names Go $GO_VER" \
-    || fail "README.md does not name Go $GO_VER"
-has_version README.md "Rust " "$PINNED_RUST" \
-    && pass "README.md names Rust $PINNED_RUST" \
-    || fail "README.md does not name Rust $PINNED_RUST"
+# Check the source-build instructions, where users get the toolchain pins.
+# The Docker section can still mention the right version when those instructions drift.
+quick_start="$(awk '
+    /^## Quick start[[:blank:]]*$/ { inside = 1; next }
+    inside && /^##?[[:blank:]]/ { exit }
+    inside { print }
+' README.md)"
+has_version <(printf '%s\n' "$quick_start") "Go " "$GO_VER" \
+    && pass "README.md names Go $GO_VER in Quick start" \
+    || fail "README.md does not name Go $GO_VER in Quick start"
+has_version <(printf '%s\n' "$quick_start") "Rust " "$PINNED_RUST" \
+    && pass "README.md names Rust $PINNED_RUST in Quick start" \
+    || fail "README.md does not name Rust $PINNED_RUST in Quick start"
 
 grep -qF "\"$PINNED_GO\"" compiler/crates/hyb/src/main.rs \
     && pass "hyb default pin matches ($PINNED_GO)" \

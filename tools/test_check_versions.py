@@ -67,6 +67,20 @@ class CheckVersionsTests(unittest.TestCase):
         self.edit("README.md", "Rust 1.99.0", "Rust 1.99.01")
         self.assertDrift("README.md does not name Rust 1.99.0")
 
+    def test_other_readme_sections_do_not_mask_stale_quickstart_pins(self):
+        path = self.root / "README.md"
+        original = path.read_text(encoding="utf-8")
+        for old, stale in (("Go 1.26.9", "Go 1.26.8"),
+                           ("Rust 1.99.0", "Rust 1.98.0")):
+            with self.subTest(pin=old):
+                path.write_text(
+                    original.replace("(Go 1.26.9 / Rust 1.99.0):",
+                                     "(Go 1.26.9 / Rust 1.99.0):".replace(old, stale), 1)
+                    + f"\n## Another toolchain example\n\n{old}\n",
+                    encoding="utf-8",
+                )
+                self.assertDrift("README.md does not name " + old)
+
     def test_readme_dots_are_literal(self):
         self.edit("README.md", "Go 1.26.9", "Go 1x26x9")
         self.assertDrift("README.md does not name Go 1.26.9")
