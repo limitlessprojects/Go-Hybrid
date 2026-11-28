@@ -215,6 +215,9 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("httptest" | "net/http/httptest", "new_recorder" | "NewRecorder") => {
             TypeShape::ForeignOpaque("httptest.response_recorder".into())
         }
+        ("log", "new" | "default" | "New" | "Default") => {
+            TypeShape::ForeignOpaque("log.logger".into())
+        }
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -417,6 +420,25 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     ];
     const TIME_TICKER: &[&str] = &["stop", "reset"];
     const TIME_TIMER: &[&str] = &["stop", "reset"];
+    /// `log.Logger` — Go 1.26.9 `*log.Logger` curated 16-method surface (#4304).
+    const LOG_LOGGER: &[&str] = &[
+        "fatal",
+        "fatalf",
+        "fatalln",
+        "flags",
+        "output",
+        "panic",
+        "panicf",
+        "panicln",
+        "prefix",
+        "print",
+        "printf",
+        "println",
+        "set_flags",
+        "set_output",
+        "set_prefix",
+        "writer",
+    ];
     /// `bufio.Reader` — Go standard library buffered reader methods.
     const BUFIO_READER: &[&str] = &[
         "buffered",
@@ -688,6 +710,7 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         "net.udp_addr" | "net.udpaddr" | "net.UDPAddr" => Some(NET_UDP_ADDR),
         "net.unix_addr" | "net.unixaddr" | "net.UnixAddr" => Some(NET_UNIX_ADDR),
         "net.ip_addr" | "net.ipaddr" | "net.IPAddr" => Some(NET_IP_ADDR),
+        "log.logger" | "log.Logger" => Some(LOG_LOGGER),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
@@ -753,6 +776,10 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
             TypeShape::Primitive
         }
+        ("log.logger" | "log.Logger", "flags") => TypeShape::Primitive,
+        ("log.logger" | "log.Logger", "prefix") => TypeShape::Str,
+        ("log.logger" | "log.Logger", "writer") => TypeShape::ForeignOpaque("io.writer".into()),
+        ("log.logger" | "log.Logger", "output") => TypeShape::ForeignOpaque("error".into()),
         // scalar atomics only ("atomic.int" is receiver_type_name's key for
         // TypeShape::Atomic): load/swap/add yield the scalar. A non-scalar
         // atomic's `load()` / `swap()` returns a pointer / `any` — Unknown,
