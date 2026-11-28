@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor PR #1663 refresh (2026-11-10, PABixn): rebased the launcher-symlink fix onto main `7cf2983`, preserving the new transactional payload promotion. Five focused assertions fail on that main: a payload-link exec loop, overwrites of unrelated and dangling symlink targets, and both directory-path variants. The refreshed fix replaces the launcher entry without following links and rejects directories before payload changes. All 34 offline installer tests, `sh -n install.sh`, and `git diff --check` pass on macOS. Compiler/runtime suites and hosted CI were not run; maintainer review and any bounty decision remain pending.
+
 ## Contributor validation — triage board target (2026-11-06)
 
 - Base `973453c5`: an offline `cmd_board` reproduction overwrote an unrelated issue that quoted the board marker and ranked first in search. Posting now validates the configured `board_issue` (940 for this repository), or requires one trusted exact-title/marker candidate from a complete search. Missing, closed, invalid and ambiguous targets fail before a write. Twelve offline tests pass; baseline produced 15 failed subtest assertions and three passing controls. No live GitHub writes or compiler tests were run; hosted CI, review and any bounty award remain pending.
