@@ -7991,97 +7991,100 @@ impl<'a> Checker<'a> {
             ..
         } = callee
         {
-            let recv_base = match self.shape_of_expr(st, base) {
-                TypeShape::Struct(Some(s)) => Some(s),
-                TypeShape::Pointer(inner) => match *inner {
-                    TypeShape::Struct(Some(s)) => Some(s),
+            let recv_shape = self.shape_of_expr(st, base);
+            let recv_base = match &recv_shape {
+                TypeShape::Struct(Some(s)) => Some(s.clone()),
+                TypeShape::Pointer(inner) => match &**inner {
+                    TypeShape::Struct(Some(s)) => Some(s.clone()),
                     _ => None,
                 },
                 _ => None,
             };
-            if let Some(rname) = recv_base {
-                let rbase = Self::base_named_type_str(&rname).to_string();
-                if let Some(decl) = self
-                    .method_decls
+            let matched_decl = recv_base.as_ref().and_then(|rname| {
+                let rbase = Self::base_named_type_str(rname).to_string();
+                self.method_decls
                     .get(&(rbase, method_name.clone()))
                     .copied()
-                {
-                    if let Some(r) = &decl.receiver {
-                        let ptr_recv =
-                            r.is_pointer || matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. });
-                        let recv_const = if ptr_recv {
-                            self.const_arg_root(st, base, declared).or_else(|| {
-                                let base_inner = crate::model::unwrap_parens(base);
-                                let mut roots: Vec<String> = Vec::new();
-                                if let Some(root) = base_inner.root_ident() {
-                                    roots.push(root.to_string());
-                                } else {
-                                    collect_ref_roots(base_inner, &mut roots);
-                                    self.collect_callee_const_return_roots(st, base_inner, &mut roots, 0);
-                                }
-                                roots
-                                    .into_iter()
-                                    .filter(|root| !declared.contains(root.as_str()))
-                                    .find_map(|root| {
-                                        let place = Place {
-                                            kind: PlaceKind::Ident(root),
-                                            span: base.span(),
-                                        };
-                                        self.const_write_root(st, &place)
-                                    })
-                            })
-                        } else {
-                            self.const_arg_root(st, base, declared)
-                        };
-                        if let Some(const_name) = recv_const {
-                            if self.fn_mutates_const_param(decl, &r.name, 0) {
-                                hits.push((const_name, base.span()));
+            });
+            if let Some(decl) = matched_decl {
+                if let Some(r) = &decl.receiver {
+                    let ptr_recv =
+                        r.is_pointer || matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. });
+                    let recv_const = if ptr_recv {
+                        self.const_arg_root(st, base, declared).or_else(|| {
+                            let base_inner = crate::model::unwrap_parens(base);
+                            let mut roots: Vec<String> = Vec::new();
+                            if let Some(root) = base_inner.root_ident() {
+                                roots.push(root.to_string());
+                            } else {
+                                collect_ref_roots(base_inner, &mut roots);
+                                self.collect_callee_const_return_roots(st, base_inner, &mut roots, 0);
                             }
+                            roots
+                                .into_iter()
+                                .filter(|root| !declared.contains(root.as_str()))
+                                .find_map(|root| {
+                                    let place = Place {
+                                        kind: PlaceKind::Ident(root),
+                                        span: base.span(),
+                                    };
+                                    self.const_write_root(st, &place)
+                                })
+                        })
+                    } else {
+                        self.const_arg_root(st, base, declared)
+                    };
+                    if let Some(const_name) = recv_const {
+                        if self.fn_mutates_const_param(decl, &r.name, 0) {
+                            hits.push((const_name, base.span()));
                         }
                     }
                 }
-            } else if method_name == "pop"
-                && cr.args.is_empty()
-                && (matches!(
-                    self.shape_of_expr(st, base),
-                    TypeShape::Slice(_) | TypeShape::Unknown
-                ) || matches!(
-                    self.shape_of_expr(st, base),
-                    TypeShape::Pointer(ref inner)
-                        if matches!(**inner, TypeShape::Slice(_) | TypeShape::Unknown)
-                ))
-            {
-                let recv_const = base
-                    .root_ident()
-                    .filter(|root| !declared.contains(*root))
-                    .and_then(|root| {
-                        self.const_write_root(
-                            st,
-                            &Place {
-                                kind: PlaceKind::Ident(root.to_string()),
-                                span: base.span(),
-                            },
-                        )
-                    })
-                    .or_else(|| self.const_arg_root(st, base, declared))
-                    .or_else(|| {
-                        let base_inner = crate::model::unwrap_parens(base);
-                        let mut roots: Vec<String> = Vec::new();
-                        collect_ref_roots(base_inner, &mut roots);
-                        self.collect_callee_const_return_roots(st, base_inner, &mut roots, 0);
-                        roots
-                            .into_iter()
-                            .filter(|root| !declared.contains(root.as_str()))
-                            .find_map(|root| {
-                                let place = Place {
-                                    kind: PlaceKind::Ident(root),
+            } else {
+                let is_slice_pop = method_name == "pop"
+                    && cr.args.is_empty()
+                    && (matches!(recv_shape, TypeShape::Slice(_) | TypeShape::Unknown)
+                        || matches!(
+                            recv_shape,
+                            TypeShape::Pointer(ref inner)
+                                if matches!(**inner, TypeShape::Slice(_) | TypeShape::Unknown)
+                        ));
+                let is_set_mutator = matches!(method_name.as_str(), "insert" | "remove")
+                    && cr.args.len() == 1
+                    && self.is_prelude_set_shape(&recv_shape);
+                if is_slice_pop || is_set_mutator {
+                    let recv_const = base
+                        .root_ident()
+                        .filter(|root| !declared.contains(*root))
+                        .and_then(|root| {
+                            self.const_write_root(
+                                st,
+                                &Place {
+                                    kind: PlaceKind::Ident(root.to_string()),
                                     span: base.span(),
-                                };
-                                self.const_write_root(st, &place)
-                            })
-                    });
-                if let Some(const_name) = recv_const {
-                    hits.push((const_name, base.span()));
+                                },
+                            )
+                        })
+                        .or_else(|| self.const_arg_root(st, base, declared))
+                        .or_else(|| {
+                            let base_inner = crate::model::unwrap_parens(base);
+                            let mut roots: Vec<String> = Vec::new();
+                            collect_ref_roots(base_inner, &mut roots);
+                            self.collect_callee_const_return_roots(st, base_inner, &mut roots, 0);
+                            roots
+                                .into_iter()
+                                .filter(|root| !declared.contains(root.as_str()))
+                                .find_map(|root| {
+                                    let place = Place {
+                                        kind: PlaceKind::Ident(root),
+                                        span: base.span(),
+                                    };
+                                    self.const_write_root(st, &place)
+                                })
+                        });
+                    if let Some(const_name) = recv_const {
+                        hits.push((const_name, base.span()));
+                    }
                 }
             }
         }
@@ -10384,6 +10387,58 @@ fn main() {
         assert!(
             check_codes(src_const_alias).iter().any(|c| c == "HYB-E3006"),
             "expected HYB-E3006 when mutating slice alias y := xs followed by [0] on next line"
+        );
+    }
+
+    #[test]
+    fn const_set_insert_and_remove_reject_hyb_e3006_while_reads_pass() {
+        let mutating_cases = [
+            (
+                "file-level const set.insert",
+                "const s = set[int]{}\n\nfn main() {\n    _ = s.insert(1)\n}\n",
+            ),
+            (
+                "file-level const set.remove",
+                "const s = set[int]{}\n\nfn main() {\n    s.remove(1)\n}\n",
+            ),
+            (
+                "file-level const set ambient race",
+                "const s = set[int]{}\nfn worker(done chan bool) {\n    for i in 0..10 {\n        _ = s.contains(i)\n    }\n    done <- true\n}\nfn main() {\n    done := make(chan bool, 1)\n    task worker(done)\n    for i in 0..10 {\n        _ = s.insert(i)\n    }\n    <-done\n}\n",
+            ),
+            (
+                "struct field const set.insert",
+                "struct bag {\n    seen set[int]\n}\n\nconst b = bag{seen: set[int]{}}\n\nfn main() {\n    _ = b.seen.insert(1)\n}\n",
+            ),
+            (
+                "local alias to const set.insert",
+                "const s = set[int]{}\n\nfn main() {\n    a := s\n    _ = a.insert(1)\n}\n",
+            ),
+            (
+                "closure capture const set.insert",
+                "const s = set[int]{}\n\nfn main() {\n    f := fn() {\n        _ = s.insert(1)\n    }\n    f()\n}\n",
+            ),
+            (
+                "local const set.insert",
+                "fn main() {\n    const s = set[int]{}\n    _ = s.insert(1)\n}\n",
+            ),
+        ];
+        for (label, src) in mutating_cases {
+            let r = check(src);
+            assert!(
+                r.diagnostics.iter().any(|d| d.code == "HYB-E3006"),
+                "expected HYB-E3006 for {label}, got {:?}",
+                r.diagnostics
+            );
+        }
+
+        let readonly = check(
+            "const s = set[int]{}\n\nfn main() {\n    _ = s.contains(1)\n    _ = s.len()\n}\n",
+        );
+        assert_eq!(
+            readonly.verdict,
+            Verdict::Accept,
+            "expected read-only const set queries to pass, got {:?}",
+            readonly.diagnostics
         );
     }
 }
