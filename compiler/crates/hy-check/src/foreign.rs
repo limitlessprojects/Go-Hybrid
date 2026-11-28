@@ -151,10 +151,45 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     }
 }
 
+pub(crate) fn is_package_append_fn(pkg: &str, method: &str) -> bool {
+    matches!(
+        (pkg, method),
+        (
+            "fmt",
+            "append" | "appendf" | "appendln" | "Append" | "Appendf" | "Appendln"
+        ) | (
+            "strconv",
+            "append_bool"
+                | "append_float"
+                | "append_int"
+                | "append_uint"
+                | "append_quote"
+                | "append_quote_rune"
+                | "append_quote_rune_to_ascii"
+                | "append_quote_rune_to_graphic"
+                | "append_quote_to_ascii"
+                | "append_quote_to_graphic"
+                | "AppendBool"
+                | "AppendFloat"
+                | "AppendInt"
+                | "AppendUint"
+                | "AppendQuote"
+                | "AppendQuoteRune"
+                | "AppendQuoteRuneToASCII"
+                | "AppendQuoteRuneToGraphic"
+                | "AppendQuoteToASCII"
+                | "AppendQuoteToGraphic"
+        )
+    )
+}
+
 /// The argument index a package-level call mutates IN PLACE (T22: passing a
 /// `const` root there is a write, `HYB-E3006`). `None` = the descriptor stubs
 /// record no in-place write for this API.
 pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
+    if is_package_append_fn(pkg, method) {
+        return Some(0);
+    }
     match (pkg, method) {
         (
             "sort",
