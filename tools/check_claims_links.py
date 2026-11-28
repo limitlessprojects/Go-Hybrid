@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 TABLE_HEADING = "## The claims table"
-ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|")
+ROW_RE = re.compile(r"^\|?\s*(\d+)\s*\|")
 LINK_RE = re.compile(r"\[([^\]]*)\]\((<[^<>\r\n]*>|[^)\s]+)(?:\s+\"[^\"]*\")?\)")
 INLINE_CORPUS_RE = re.compile(r"`(\d{2}-[a-z0-9][a-z0-9-]*(?:\.hy)?)`")
 CORPUS_NUM_RE = re.compile(r"\bcorpus\s+(\d{1,3})\b")
@@ -47,11 +47,11 @@ def table_rows(text):
         match = ROW_RE.match(stripped)
         if not match:
             continue
-        cells = stripped.split("|")
-        # | # | surface | checker | claim | evidence |
-        if len(cells) < 6:
+        # After the row number come surface, checker, claim and evidence.
+        cells = stripped[match.end():].split("|", 3)
+        if len(cells) != 4:
             continue
-        yield int(match.group(1)), "|".join(cells[5:-1]).strip()
+        yield int(match.group(1)), cells[-1].removesuffix("|").strip()
 
 
 def is_checkable(target):
