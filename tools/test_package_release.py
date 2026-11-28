@@ -219,6 +219,39 @@ class PackageReleaseIsolationTests(unittest.TestCase):
             "FRESH-LIB\n",
         )
 
+    def test_cross_linker_path_with_spaces_reaches_both_cargo_builds(self):
+        triple = "aarch64-unknown-linux-gnu"
+        linker = str(self.root / "tool chain" / "target gcc")
+        cargo = self.cargo_bin / "cargo"
+        source = cargo.read_text()
+        cargo.write_text(source.replace(
+            "#!/bin/sh\n",
+            '#!/bin/sh\nprintf "%s\\n" "$CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER" >> "$LINKER_LOG"\n',
+            1,
+        ))
+        log = self.root / "linker.log"
+        self.package(HYB_RUST_TARGET=triple, HYB_CC=linker, LINKER_LOG=str(log))
+        self.assertEqual(log.read_text().splitlines(), [linker, linker])
+
+    def test_arm64_smoke_preserves_cross_linker_executable(self):
+        compiler = self.root / "tool chain" / "target gcc"
+        compiler.parent.mkdir()
+        compiler.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CC_LOG"\n')
+        compiler.chmod(0o755)
+        qemu = self.gobin / "qemu-test"
+        qemu.write_text(
+            '#!/bin/sh\ncase "$1" in */json) echo \'"ada"\';; *) exec "$@";; esac\n'
+        )
+        qemu.chmod(0o755)
+        hyb = Path(self.env["HYB_TEST_FAKE_HYB"])
+        hyb.write_text(hyb.read_text().replace('out=""', '"$CC" smoke-probe || exit\nout=""'))
+        log = self.root / "cc.log"
+        self.package(
+            HYB_RUST_TARGET="aarch64-unknown-linux-gnu", HYB_PKG_ARCH="arm64",
+            HYB_QEMU=str(qemu), HYB_CC=str(compiler), CC_LOG=str(log),
+        )
+        self.assertEqual(log.read_text().splitlines(), ["smoke-probe", "smoke-probe"])
+
     def test_cross_target_ships_triple_artifacts_not_the_native_tree(self):
         triple = "aarch64-unknown-linux-gnu"
         # PKG_ARCH stays amd64, so this is the cross *build* path only: the

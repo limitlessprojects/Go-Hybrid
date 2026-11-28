@@ -84,7 +84,7 @@ command -v go >/dev/null || { echo "go not on PATH" >&2; exit 1; }
 echo "==> building hyrt staticlib (crate-local)"
 ( cd "$REPO_ROOT/runtime/rust/hyrt" && \
   if [ -n "$RUST_TARGET" ]; then \
-      env CARGO_BUILD_JOBS=2 $CROSS_ENV cargo build --release --target "$RUST_TARGET" --quiet; \
+      env CARGO_BUILD_JOBS=2 "$CROSS_ENV" cargo build --release --target "$RUST_TARGET" --quiet; \
   else \
       CARGO_BUILD_JOBS=2 cargo build --release --quiet; fi )
 
@@ -93,7 +93,7 @@ echo "==> building hyrt staticlib (crate-local)"
 echo "==> building hyb (release)"
 ( cd "$REPO_ROOT/compiler" && \
   if [ -n "$RUST_TARGET" ]; then \
-      env CARGO_BUILD_JOBS=2 $CROSS_ENV cargo build --release -p hyb --target "$RUST_TARGET" --quiet; \
+      env CARGO_BUILD_JOBS=2 "$CROSS_ENV" cargo build --release -p hyb --target "$RUST_TARGET" --quiet; \
   else \
       cargo build --release -p hyb --quiet; fi )
 HYB_BIN="$REPO_ROOT/compiler/target/release/hyb"
@@ -166,9 +166,19 @@ IFS="$OLDIFS"
 #       call_arm64.s (GOARCH=arm64 selects it), and the run drives real
 #       trampoline crossings (fast + pooled-deep paths) under qemu.
 #       A linux/arm64 asset whose bridge smoke fails must not ship.
-CROSS_GO_ENV=""
+CROSS_GO=0
 if [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; then
-    CROSS_GO_ENV="GOARCH=arm64 CGO_ENABLED=1 CC=$CROSS_CC"
+    CROSS_GO=1
+    if [ -n "$CROSS_CC" ]; then
+        # Go parses CC as a command line. Pass a single helper name and
+        # let the helper execute the configured linker as an exact path.
+        cat > "$SMOKE/hyb-cross-cc" <<'CC_WRAPPER'
+#!/bin/sh
+exec "$HYB_SMOKE_CROSS_CC" "$@"
+CC_WRAPPER
+        chmod +x "$SMOKE/hyb-cross-cc"
+        RUSTLESS_PATH="$SMOKE:$RUSTLESS_PATH"
+    fi
     QEMU_RUNNER="${QEMU_RUNNER:-qemu-aarch64}"
     # qemu-user-static (the fleet's package) ships *-static names only
     first="${QEMU_RUNNER%% *}"
@@ -179,9 +189,18 @@ if [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; then
         fi
     fi
 fi
-if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" $CROSS_GO_ENV $QEMU_RUNNER \
-        "$SMOKE/hybrid-${VER}/$HYB_OUT_NAME" build \
-        "$REPO_ROOT/examples/01-hello/program.hy" -o "$SMOKE/hello" ) \
+smoke_build() (
+    cd "$SMOKE"
+    export PATH="$RUSTLESS_PATH"
+    if [ "$CROSS_GO" -eq 1 ]; then
+        export GOARCH=arm64 CGO_ENABLED=1 CC=""
+        if [ -n "$CROSS_CC" ]; then
+            export CC=hyb-cross-cc HYB_SMOKE_CROSS_CC="$CROSS_CC"
+        fi
+    fi
+    $QEMU_RUNNER "$SMOKE/hybrid-${VER}/$HYB_OUT_NAME" build "$@"
+)
+if smoke_build "$REPO_ROOT/examples/01-hello/program.hy" -o "$SMOKE/hello" \
     && $QEMU_RUNNER "$SMOKE/hello" > "$SMOKE/out.txt" 2>&1 \
     && grep -q 'hello, Hybrid!' "$SMOKE/out.txt"; then
     echo "    smoke PASS ($PKG_OS/$ARCH${QEMU_RUNNER:+ under $QEMU_RUNNER}): $(head -1 "$SMOKE/out.txt")"
@@ -197,9 +216,7 @@ fi
 # and the Darwin stack pool; a bridge-free hello cannot detect either failure.
 if { [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; } || [ "$PKG_OS" = "darwin" ]; then
     echo "==> bridge smoke from the tarball (serde_json crossing on $PKG_OS/$ARCH)"
-    if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" $CROSS_GO_ENV $QEMU_RUNNER \
-            "$SMOKE/hybrid-${VER}/$HYB_OUT_NAME" build \
-            "$REPO_ROOT/examples/05-json-transform/program.hy" -o "$SMOKE/json" ) \
+    if smoke_build "$REPO_ROOT/examples/05-json-transform/program.hy" -o "$SMOKE/json" \
         && $QEMU_RUNNER "$SMOKE/json" > "$SMOKE/json.txt" 2>&1 \
         && grep -q '"ada"' "$SMOKE/json.txt"; then
         echo "    bridge smoke PASS ($PKG_OS/$ARCH trampolines exercised): $(tr '\n' ' ' < "$SMOKE/json.txt" | tr -s ' ')"
