@@ -605,6 +605,69 @@ impl Emitter {
         Ok((format_str, args))
     }
 
+    /// Arguments of a printf-family call whose FORMAT argument (index
+    /// `fidx`) is an interpolated string, with the interpolation spliced
+    /// into the call instead of pre-rendered by `fmt.Sprintf`.
+    ///
+    /// Pre-rendering is wrong twice over: the rendered VALUES become part of
+    /// the format, so a `%` inside one (`"50%"`, `"/a%20b"`) is re-read as a
+    /// verb, and the outer call then formats that text a second time.
+    ///
+    /// * No explicit arguments after the format: the interp's `%v` slots
+    ///   and values are spliced in order (literal `%` stays literal, the
+    ///   Batch E behaviour).
+    /// * Explicit arguments follow: the author's verbs are kept and both
+    ///   sides get explicit argument indexes, interp values first, so
+    ///   arguments are still evaluated in source order:
+    ///   `fmt.printf("{name}: %d\n", n)` → `fmt.Printf("%[1]v: %[2]d\n", name, n)`.
+    ///
+    /// Returns `None` (caller keeps the generic emission) when the format
+    /// is not an interp with at least one `{expr}`, when a spread or named
+    /// argument is involved, or when the author's verbs cannot be mapped
+    /// one-to-one onto the explicit arguments (explicit `%[n]` indexes, a
+    /// verb split by an `{expr}`, or a verb/argument count mismatch).
+    fn emit_format_call_args(
+        &mut self,
+        args: &[CallArg],
+        fidx: usize,
+    ) -> Result<Option<Vec<String>>, EmitError> {
+        let Some(fmt_arg) = args.get(fidx) else {
+            return Ok(None);
+        };
+        if fmt_arg.spread || fmt_arg.name.is_some() {
+            return Ok(None);
+        }
+        let Expr::Interp { parts, .. } = Self::unwrap_parens(&fmt_arg.value) else {
+            return Ok(None);
+        };
+        if !parts.iter().any(|p| matches!(p, InterpPart::Expr(_))) {
+            return Ok(None);
+        }
+        let trailing = &args[fidx + 1..];
+        if trailing.iter().any(|a| a.spread || a.name.is_some()) {
+            return Ok(None);
+        }
+        let format = if trailing.is_empty() {
+            None
+        } else {
+            match indexed_format(parts, trailing.len()) {
+                Some(f) => Some(f),
+                None => return Ok(None),
+            }
+        };
+        let mut call_args = Vec::new();
+        for a in &args[..fidx] {
+            call_args.push(self.emit_call_arg(a)?);
+        }
+        let (plain_format, interp_args) = self.interp_parts(parts)?;
+        call_args.push(go_quote(format.as_deref().unwrap_or(&plain_format)));
+        call_args.extend(interp_args);
+        for a in trailing {
+            call_args.push(self.emit_call_arg(a)?);
+        }
+        Ok(Some(call_args))
+    }
+
     /// A struct literal's keyed fields plus, for a user struct, the N5
     /// allocation of every map-carrying field the literal leaves at its
     /// zero value (`bag{}` → `bag{counts: map[string]int{}}`, issue #645).
@@ -1081,6 +1144,16 @@ impl Emitter {
             if let Expr::Ident { name: root, .. } = Self::unwrap_parens_and_addr(base) {
                 if let Some(BindingKind::Foreign) = self.bindings.get(root) {
                     let b = self.emit_expr(base, ATOM)?;
+                    if let Some(fidx) = format_method_param_index(name) {
+                        if let Some(call_args) = self.emit_format_call_args(args, fidx)? {
+                            return Ok(format!(
+                                "{}.{}({})",
+                                b,
+                                to_go_name(name),
+                                call_args.join(", ")
+                            ));
+                        }
+                    }
                     let mut parts = Vec::new();
                     for a in args {
                         parts.push(self.emit_call_arg(a)?);
@@ -1604,16 +1677,12 @@ impl Emitter {
         // `fmt.fprintf(w, "{a}+{b}={a+b}\n")` must splice the interp's
         // arguments into the call — `fmt.Fprintf(w, "%v+%v=%v\n", a, b, a+b)`.
         // (Wrapping the whole interp in Sprintf would print the %v's as
-        // literals — Fprintf's format param consumes them.)
-        if (pkg == "fmt" && (name == "fprintf" || name == "printf")) && !args.is_empty() {
-            if let Expr::Interp { parts, .. } = &args[args.len() - 1].value {
-                let (fmt_str, interp_args) = self.interp_parts(parts)?;
-                let mut call_args = Vec::new();
-                for a in &args[..args.len() - 1] {
-                    call_args.push(self.emit_call_arg(a)?);
-                }
-                call_args.push(go_quote(&fmt_str));
-                call_args.extend(interp_args);
+        // literals — Fprintf's format param consumes them, and a `%` inside
+        // an interpolated VALUE would be re-read as a verb.) Only the
+        // argument in the FORMAT position is spliced: an interp passed as a
+        // value (`fmt.printf("[%s]\n", "{a}")`) stays an ordinary string.
+        if let Some(fidx) = format_param_index(pkg, name) {
+            if let Some(call_args) = self.emit_format_call_args(args, fidx)? {
                 return Ok(format!(
                     "{}.{}({})",
                     pkg,
@@ -1634,6 +1703,119 @@ impl Emitter {
             parts.join(", ")
         ))
     }
+}
+
+/// Format-parameter position of the printf-family calls on the curated
+/// surface (`fmt`, `log`); `None` for every other call.
+fn format_param_index(pkg: &str, name: &str) -> Option<usize> {
+    match (pkg, name) {
+        ("fmt", "printf" | "sprintf" | "errorf") => Some(0),
+        ("fmt", "fprintf" | "appendf") => Some(1),
+        ("log", "printf" | "fatalf" | "panicf") => Some(0),
+        _ => None,
+    }
+}
+
+/// The same, for a method call on a foreign (Go) value: `log.Logger`'s
+/// `printf` / `fatalf` / `panicf` take the format first.
+fn format_method_param_index(name: &str) -> Option<usize> {
+    match name {
+        "printf" | "fatalf" | "panicf" => Some(0),
+        _ => None,
+    }
+}
+
+/// Go format text for an interpolated format string followed by
+/// `n_explicit` explicit arguments, using explicit argument indexes so the
+/// interp values (passed first, `%[1]v`…) and the author's own verbs
+/// (re-numbered after them) never shift each other. `None` when the
+/// author's verbs cannot be mapped one-to-one onto the explicit arguments.
+fn indexed_format(parts: &[InterpPart], n_explicit: usize) -> Option<String> {
+    let n_interp = parts
+        .iter()
+        .filter(|p| matches!(p, InterpPart::Expr(_)))
+        .count();
+    let mut out = String::new();
+    let mut next_interp = 0usize;
+    let mut used = 0usize;
+    for p in parts {
+        match p {
+            InterpPart::Expr(_) => {
+                next_interp += 1;
+                out.push_str(&format!("%[{}]v", next_interp));
+            }
+            InterpPart::Lit(l) => {
+                let cs: Vec<char> = l.chars().collect();
+                let mut i = 0;
+                while i < cs.len() {
+                    if cs[i] != '%' {
+                        out.push(cs[i]);
+                        i += 1;
+                        continue;
+                    }
+                    if cs.get(i + 1) == Some(&'%') {
+                        out.push_str("%%");
+                        i += 2;
+                        continue;
+                    }
+                    // %[flags][width][.precision]verb, each `*` consuming
+                    // one explicit argument; the verb consumes one more.
+                    let mut spec = String::from("%");
+                    i += 1;
+                    while i < cs.len() && matches!(cs[i], '+' | '-' | '#' | ' ' | '0') {
+                        spec.push(cs[i]);
+                        i += 1;
+                    }
+                    let mut take_arg = |spec: &mut String| -> Option<()> {
+                        if used >= n_explicit {
+                            return None;
+                        }
+                        used += 1;
+                        spec.push_str(&format!("[{}]", n_interp + used));
+                        Some(())
+                    };
+                    if cs.get(i) == Some(&'*') {
+                        take_arg(&mut spec)?;
+                        spec.push('*');
+                        i += 1;
+                    } else {
+                        while i < cs.len() && cs[i].is_ascii_digit() {
+                            spec.push(cs[i]);
+                            i += 1;
+                        }
+                    }
+                    if cs.get(i) == Some(&'.') {
+                        spec.push('.');
+                        i += 1;
+                        if cs.get(i) == Some(&'*') {
+                            take_arg(&mut spec)?;
+                            spec.push('*');
+                            i += 1;
+                        } else {
+                            while i < cs.len() && cs[i].is_ascii_digit() {
+                                spec.push(cs[i]);
+                                i += 1;
+                            }
+                        }
+                    }
+                    // An author-written `%[n]` index, or a verb cut off by
+                    // the end of this literal (`"%{x}"`), cannot be mapped.
+                    let verb = *cs.get(i)?;
+                    if verb == '[' {
+                        return None;
+                    }
+                    take_arg(&mut spec)?;
+                    spec.push(verb);
+                    out.push_str(&spec);
+                    i += 1;
+                }
+            }
+        }
+    }
+    if used != n_explicit {
+        return None;
+    }
+    Some(out)
 }
 
 /// `new[string, int]` → ("new", Some("[string, int]")).
