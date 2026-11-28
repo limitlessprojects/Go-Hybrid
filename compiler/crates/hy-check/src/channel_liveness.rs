@@ -70,8 +70,22 @@ impl ChannelLivenessChecker {
     fn pop_scope(&mut self) {
         if let Some(scope) = self.scope_stack.pop() {
             self.check_terminal_invariants(&scope);
-            if let Some(parent) = self.scope_stack.last_mut() {
-                parent.moved_caps.extend(scope.moved_caps);
+            self.propagate_outer_moves(&scope.moved_caps);
+        }
+    }
+
+    fn propagate_outer_moves(&mut self, moved: &HashSet<String>) {
+        if moved.is_empty() {
+            return;
+        }
+        for scope in self.scope_stack.iter_mut().rev() {
+            for p in &mut scope.pipes {
+                if moved.contains(&p.tx) {
+                    scope.moved_caps.insert(p.tx.clone());
+                }
+                if moved.contains(&p.rx) {
+                    scope.moved_caps.insert(p.rx.clone());
+                }
             }
         }
     }
@@ -97,8 +111,9 @@ impl ChannelLivenessChecker {
 
     fn check_terminal_invariants(&mut self, scope: &ScopeState) {
         for pipe in &scope.pipes {
-            // Check send capability terminal state
-            if !scope.moved_caps.contains(&pipe.tx) && pipe.tx_state != ChannelTypestate::Closed {
+            // Check send capability terminal state across all paths
+            if pipe.tx_state != ChannelTypestate::Closed && pipe.tx_state != ChannelTypestate::Moved
+            {
                 self.diags.push(Diagnostic::error(
                     "HYB-E4004",
                     &self.file_path,
@@ -110,9 +125,11 @@ impl ChannelLivenessChecker {
                 ));
             }
 
-            // Check receive capability terminal state
-            // If rx was moved into a subtask, the subtask assumed lifecycle responsibility
-            if !scope.moved_caps.contains(&pipe.rx) && pipe.rx_state != ChannelTypestate::Drained {
+            // Check receive capability terminal state across all paths
+            // If rx was moved into a subtask on every path, the subtask assumed lifecycle responsibility
+            if pipe.rx_state != ChannelTypestate::Drained
+                && pipe.rx_state != ChannelTypestate::Moved
+            {
                 self.diags.push(Diagnostic::error(
                     "HYB-E4005",
                     &self.file_path,
@@ -212,16 +229,24 @@ impl ChannelLivenessChecker {
                     self.check_stmt(i);
                 }
                 self.check_expr(cond);
+                let base_scopes = self.scope_stack.clone();
+
                 self.push_scope();
                 for s in &then.stmts {
                     self.check_stmt(s);
                 }
                 self.pop_scope();
+                let then_states = self.scope_stack.clone();
+
+                self.scope_stack = base_scopes.clone();
                 if let Some(eb) = otherwise {
                     self.push_scope();
                     self.check_stmt(eb);
                     self.pop_scope();
                 }
+                let else_states = self.scope_stack.clone();
+
+                self.merge_branch_scopes(base_scopes, vec![then_states, else_states]);
             }
             Stmt::Block { block, .. } => {
                 self.push_scope();
@@ -274,7 +299,13 @@ impl ChannelLivenessChecker {
                 self.check_expr(value);
             }
             Stmt::Select { arms, .. } => {
+                if arms.is_empty() {
+                    return;
+                }
+                let base_scopes = self.scope_stack.clone();
+                let mut arm_states = Vec::with_capacity(arms.len());
                 for arm in arms {
+                    self.scope_stack = base_scopes.clone();
                     match &arm.kind {
                         SelectArmKind::Recv { chan, .. } => {
                             if let Some(cap) = self.get_cap_name(chan) {
@@ -310,7 +341,9 @@ impl ChannelLivenessChecker {
                         self.check_stmt(s);
                     }
                     self.pop_scope();
+                    arm_states.push(self.scope_stack.clone());
                 }
+                self.merge_branch_scopes(base_scopes, arm_states);
             }
             _ => {}
         }
@@ -556,6 +589,54 @@ impl ChannelLivenessChecker {
         if let Some(scope) = self.scope_stack.last_mut() {
             scope.moved_caps.insert(name.to_string());
         }
+        for scope in self.scope_stack.iter_mut().rev() {
+            for p in &mut scope.pipes {
+                if p.tx == name {
+                    p.tx_state = ChannelTypestate::Moved;
+                    return;
+                }
+                if p.rx == name {
+                    p.rx_state = ChannelTypestate::Moved;
+                    return;
+                }
+            }
+        }
+    }
+
+    fn merge_branch_scopes(
+        &mut self,
+        mut base: Vec<ScopeState>,
+        branch_states: Vec<Vec<ScopeState>>,
+    ) {
+        if branch_states.is_empty() {
+            self.scope_stack = base;
+            return;
+        }
+        for i in 0..base.len() {
+            let mut union_moved = base[i].moved_caps.clone();
+            for bs in &branch_states {
+                if let Some(s) = bs.get(i) {
+                    union_moved.extend(s.moved_caps.iter().cloned());
+                }
+            }
+            base[i].moved_caps = union_moved;
+
+            for j in 0..base[i].pipes.len() {
+                if let Some(first) = branch_states[0].get(i).and_then(|s| s.pipes.get(j)) {
+                    let mut tx_acc = first.tx_state;
+                    let mut rx_acc = first.rx_state;
+                    for bs in &branch_states[1..] {
+                        if let Some(p) = bs.get(i).and_then(|s| s.pipes.get(j)) {
+                            tx_acc = join_tx(tx_acc, p.tx_state);
+                            rx_acc = join_rx(rx_acc, p.rx_state);
+                        }
+                    }
+                    base[i].pipes[j].tx_state = tx_acc;
+                    base[i].pipes[j].rx_state = rx_acc;
+                }
+            }
+        }
+        self.scope_stack = base;
     }
 
     fn mark_tx_closed(&mut self, name: &str) {
@@ -600,5 +681,27 @@ impl ChannelLivenessChecker {
                 }
             }
         }
+    }
+}
+
+fn join_tx(a: ChannelTypestate, b: ChannelTypestate) -> ChannelTypestate {
+    use ChannelTypestate::*;
+    match (a, b) {
+        (Closed, Closed) => Closed,
+        (Moved, Moved) => Moved,
+        (Closed, Moved) | (Moved, Closed) => Closed,
+        (Fresh, Fresh) => Fresh,
+        _ => Active,
+    }
+}
+
+fn join_rx(a: ChannelTypestate, b: ChannelTypestate) -> ChannelTypestate {
+    use ChannelTypestate::*;
+    match (a, b) {
+        (Drained, Drained) => Drained,
+        (Moved, Moved) => Moved,
+        (Drained, Moved) | (Moved, Drained) => Drained,
+        (Fresh, Fresh) => Fresh,
+        _ => Active,
     }
 }
