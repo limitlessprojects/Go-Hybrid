@@ -80,6 +80,252 @@ impl fmt::Display for Span {
     }
 }
 
+/// A zero-based, half-open UTF-8 byte interval `[start, end)` in a checked source snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ByteSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// 1-based display coordinates derived from a checked UTF-8 byte offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplayPos {
+    pub line: u32,
+    pub scalar_col: u32,
+    pub utf16_col: u32,
+    pub utf8_col: u32,
+}
+
+/// Start and end display coordinates for a source span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplaySpan {
+    pub start: DisplayPos,
+    pub end: DisplayPos,
+}
+
+/// Failure when resolving a previously emitted diagnostic against current source state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpError {
+    /// Source content digest or document version changed since the diagnostic was produced.
+    StaleSnapshot,
+    /// Span coordinates do not resolve cleanly to valid UTF-8 boundaries in the snapshot.
+    InvalidSpan,
+}
+
+/// Verified half-open UTF-8 byte interval plus multi-encoding display coordinates for jump targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedJump {
+    pub byte_span: ByteSpan,
+    pub display: DisplaySpan,
+}
+
+/// Compute lowercase FIPS 180-4 SHA-256 hex digest of a source snapshot using stdlib only.
+pub fn snapshot_sha256(src: &str) -> String {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+
+    let bytes = src.as_bytes();
+    let bit_len = (bytes.len() as u64).wrapping_mul(8);
+    let mut padded = Vec::with_capacity(bytes.len() + 72);
+    padded.extend_from_slice(bytes);
+    padded.push(0x80);
+    while (padded.len() % 64) != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_be_bytes());
+
+    for block in padded.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            let j = i * 4;
+            w[i] = u32::from_be_bytes([block[j], block[j + 1], block[j + 2], block[j + 3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        for (slot, delta) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
+            *slot = slot.wrapping_add(delta);
+        }
+    }
+
+    let mut hex = String::with_capacity(64);
+    for word in h {
+        use fmt::Write;
+        let _ = write!(hex, "{word:08x}");
+    }
+    hex
+}
+
+/// Convert a 1-based `(line, scalar_col)` lexer position into a zero-based UTF-8 byte offset.
+/// Matches `hy_syntax::Lexer::bump` line/column accounting (1-based line split on `\n`,
+/// 1-based column incremented per Unicode scalar), including end-of-line and EOF positions.
+pub fn pos_to_byte_offset(src: &str, pos: Pos) -> Option<usize> {
+    if pos.line == 0 || pos.col == 0 {
+        return None;
+    }
+    let mut line: u32 = 1;
+    let mut col: u32 = 1;
+    for (byte_idx, ch) in src.char_indices() {
+        if line == pos.line && col == pos.col {
+            return Some(byte_idx);
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    if line == pos.line && col == pos.col {
+        Some(src.len())
+    } else {
+        None
+    }
+}
+
+/// Convert a scalar `Span` into a zero-based half-open UTF-8 [`ByteSpan`].
+pub fn span_to_byte_span(src: &str, span: Span) -> Option<ByteSpan> {
+    let start = pos_to_byte_offset(src, span.start)?;
+    let end = pos_to_byte_offset(src, span.end)?;
+    if start <= end {
+        Some(ByteSpan { start, end })
+    } else {
+        None
+    }
+}
+
+/// Derive 1-based scalar, UTF-16, and UTF-8 column coordinates from a zero-based UTF-8 byte offset.
+pub fn byte_offset_to_display_pos(src: &str, byte_offset: usize) -> Option<DisplayPos> {
+    if byte_offset > src.len() || !src.is_char_boundary(byte_offset) {
+        return None;
+    }
+    let mut line: u32 = 1;
+    let mut scalar_col: u32 = 1;
+    let mut utf16_col: u32 = 1;
+    let mut utf8_col: u32 = 1;
+    for ch in src[..byte_offset].chars() {
+        if ch == '\n' {
+            line += 1;
+            scalar_col = 1;
+            utf16_col = 1;
+            utf8_col = 1;
+        } else {
+            scalar_col += 1;
+            utf16_col += ch.len_utf16() as u32;
+            utf8_col += ch.len_utf8() as u32;
+        }
+    }
+    Some(DisplayPos {
+        line,
+        scalar_col,
+        utf16_col,
+        utf8_col,
+    })
+}
+
+/// Derive start/end display coordinates from a [`ByteSpan`].
+pub fn byte_span_to_display_span(src: &str, byte_span: ByteSpan) -> Option<DisplaySpan> {
+    if byte_span.start > byte_span.end {
+        return None;
+    }
+    let start = byte_offset_to_display_pos(src, byte_span.start)?;
+    let end = byte_offset_to_display_pos(src, byte_span.end)?;
+    Some(DisplaySpan { start, end })
+}
+
+/// Attach the checked snapshot SHA-256 digest and half-open UTF-8 [`ByteSpan`] to every diagnostic.
+pub fn stamp_diagnostics_for_source(src: &str, diags: &mut [Diagnostic]) {
+    if diags.is_empty() {
+        return;
+    }
+    let digest = snapshot_sha256(src);
+    for diag in diags {
+        diag.snapshot_sha256 = Some(digest.clone());
+        diag.byte_span = span_to_byte_span(src, diag.span);
+    }
+}
+
+/// Verify snapshot identity and resolve a diagnostic to exact UTF-8 byte offsets and display columns.
+/// Returns [`JumpError::StaleSnapshot`] if the document version or source digest has changed.
+pub fn resolve_diagnostic_jump(
+    diag: &Diagnostic,
+    current_src: &str,
+    expected_doc_version: Option<u64>,
+    current_doc_version: Option<u64>,
+) -> Result<ResolvedJump, JumpError> {
+    if expected_doc_version != current_doc_version {
+        return Err(JumpError::StaleSnapshot);
+    }
+    if let Some(expected_digest) = diag.snapshot_sha256.as_deref() {
+        if expected_digest != snapshot_sha256(current_src) {
+            return Err(JumpError::StaleSnapshot);
+        }
+    }
+
+    let derived = span_to_byte_span(current_src, diag.span);
+    let byte_span = match (diag.byte_span, derived) {
+        (Some(stamped), Some(from_span)) => {
+            if stamped != from_span {
+                return Err(JumpError::InvalidSpan);
+            }
+            stamped
+        }
+        (Some(stamped), None) => {
+            if stamped.start > stamped.end
+                || stamped.end > current_src.len()
+                || !current_src.is_char_boundary(stamped.start)
+                || !current_src.is_char_boundary(stamped.end)
+            {
+                return Err(JumpError::InvalidSpan);
+            }
+            stamped
+        }
+        (None, Some(from_span)) => from_span,
+        (None, None) => return Err(JumpError::InvalidSpan),
+    };
+
+    let display = byte_span_to_display_span(current_src, byte_span).ok_or(JumpError::InvalidSpan)?;
+    Ok(ResolvedJump { byte_span, display })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -136,6 +382,12 @@ pub struct Diagnostic {
     /// `EXPECTED-VERDICT` lines (tests/checker-corpus/VERDICTS.md rule key).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier0_rule: Option<String>,
+    /// Zero-based half-open UTF-8 byte interval `[start, end)` in the checked snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub byte_span: Option<ByteSpan>,
+    /// SHA-256 digest of the source snapshot against which `span` and `byte_span` were checked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_sha256: Option<String>,
 }
 
 /// Trim surrounding whitespace, brackets, quotes, angle brackets, parentheses,
@@ -187,6 +439,8 @@ impl Diagnostic {
                 })
                 .unwrap_or_default(),
             tier0_rule: entry.and_then(|e| e.tier0_rule_id.clone()),
+            byte_span: None,
+            snapshot_sha256: None,
         }
     }
 
@@ -258,6 +512,9 @@ pub struct CheckSummary {
     /// spawn/send sites in the file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub managed: Option<ManagedReport>,
+    /// SHA-256 digest of the checked `.hy` source file for consumer staleness checks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_sha256: Option<String>,
 }
 
 /// The `--report-managed` audit data (normative tooling requirement, O6.3).

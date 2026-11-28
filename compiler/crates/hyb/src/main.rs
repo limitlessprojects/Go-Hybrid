@@ -146,9 +146,11 @@ fn cmd_check(args: &[String]) -> ExitCode {
     };
 
     // parse
+    let snapshot_sha256 = hy_diag::snapshot_sha256(&src);
     let ast = match hy_syntax::parse_file(&file, &src) {
         Ok(ast) => ast,
-        Err(diags) => {
+        Err(mut diags) => {
+            hy_diag::stamp_diagnostics_for_source(&src, &mut diags);
             if json {
                 let summary = hy_diag::CheckSummary {
                     file: file.clone(),
@@ -156,6 +158,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
                     errors: diags.len(),
                     warnings: 0,
                     managed: None,
+                    snapshot_sha256: Some(snapshot_sha256.clone()),
                 };
                 println!("{}", hy_diag::check_output_json(&diags, &summary));
             } else {
@@ -168,7 +171,8 @@ fn cmd_check(args: &[String]) -> ExitCode {
     };
 
     // check
-    let result = hy_check::check_file(&ast);
+    let mut result = hy_check::check_file(&ast);
+    hy_diag::stamp_diagnostics_for_source(&src, &mut result.diagnostics);
     let errors = result
         .diagnostics
         .iter()
@@ -189,6 +193,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
         } else {
             None
         },
+        snapshot_sha256: Some(snapshot_sha256),
     };
 
     if json {
@@ -920,15 +925,18 @@ fn cmd_build(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let snapshot_sha256 = hy_diag::snapshot_sha256(&src);
     let ast = match hy_syntax::parse_file(&file, &src) {
         Ok(ast) => ast,
-        Err(diags) => {
+        Err(mut diags) => {
+            hy_diag::stamp_diagnostics_for_source(&src, &mut diags);
             let summary = hy_diag::CheckSummary {
                 file: file.clone(),
                 verdict: "reject".into(),
                 errors: diags.len(),
                 warnings: 0,
                 managed: None,
+                snapshot_sha256: Some(snapshot_sha256),
             };
             println!("{}", hy_diag::check_output_json(&diags, &summary));
             for d in &diags {
@@ -939,7 +947,8 @@ fn cmd_build(args: &[String]) -> ExitCode {
     };
 
     // --- 3. Tier-0 check (verdict gates the build) ---
-    let result = hy_check::check_file(&ast);
+    let mut result = hy_check::check_file(&ast);
+    hy_diag::stamp_diagnostics_for_source(&src, &mut result.diagnostics);
     let errors = result
         .diagnostics
         .iter()
@@ -956,6 +965,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
                 .filter(|d| d.severity == hy_diag::Severity::Warning)
                 .count(),
             managed: None,
+            snapshot_sha256: Some(snapshot_sha256),
         };
         println!(
             "{}",
