@@ -258,6 +258,37 @@ pub struct CheckSummary {
     /// spawn/send sites in the file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub managed: Option<ManagedReport>,
+    /// `--report-alloc` data (#4492): compositional heap-allocation summaries
+    /// and static site counts for checked vs managed regions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alloc: Option<AllocAuditReport>,
+}
+
+/// The `--report-alloc` audit payload (#4492): static allocation site counts
+/// plus per-function compositional heap-allocation bounds.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AllocAuditReport {
+    pub program_checked_bound: String,
+    pub program_total_bound: String,
+    pub total_sites: usize,
+    pub checked_sites: usize,
+    pub managed_sites: usize,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub by_kind: BTreeMap<String, usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub functions: Vec<FnAllocAudit>,
+}
+
+/// Per-function allocation summary serialized in `--report-alloc --json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FnAllocAudit {
+    pub name: String,
+    pub checked_bound: String,
+    pub total_bound: String,
+    pub checked_sites: usize,
+    pub managed_sites: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_budget: Option<String>,
 }
 
 /// The `--report-managed` audit data (normative tooling requirement, O6.3).
