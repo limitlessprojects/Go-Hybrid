@@ -2537,6 +2537,92 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn collect_map_key_index_exprs<'b>(
+        &self,
+        st: &FnState,
+        place: &'b Place,
+        out: &mut Vec<&'b Expr>,
+    ) {
+        match &place.kind {
+            PlaceKind::Index { base, index } => {
+                self.collect_map_key_index_exprs(st, base, out);
+                let is_map_base = match self.place_shape(st, base) {
+                    Some(TypeShape::Map(_, _)) | Some(TypeShape::Unknown) | None => true,
+                    Some(TypeShape::Pointer(inner)) => {
+                        matches!(*inner, TypeShape::Map(_, _) | TypeShape::Unknown)
+                    }
+                    Some(_) => false,
+                };
+                if is_map_base {
+                    out.push(index);
+                }
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                self.collect_map_key_index_exprs(st, base, out);
+            }
+            PlaceKind::Ident(_) => {}
+        }
+    }
+
+    pub(crate) fn record_map_key_stores(
+        &self,
+        st: &mut FnState,
+        pre_st: &FnState,
+        target: &Place,
+        overwritten: &[String],
+        idx: usize,
+    ) {
+        let root = target.root();
+        if root.is_empty() || root == "_" || !self.binding_may_share(st, root) {
+            return;
+        }
+        let mut map_keys = Vec::new();
+        self.collect_map_key_index_exprs(pre_st, target, &mut map_keys);
+        for key_expr in map_keys {
+            self.record_place_store_from_snapshot(st, pre_st, root, key_expr, overwritten);
+            self.record_move_const_and_a3_loans(st, root, key_expr, idx);
+        }
+    }
+
+    fn record_param_store_map_keys(
+        &self,
+        t: &Place,
+        cst: &FnState,
+        aliases: &mut HashMap<String, HashSet<usize>>,
+        param_names: &HashSet<String>,
+        out: &mut HashSet<(usize, usize)>,
+    ) {
+        let mut map_keys = Vec::new();
+        self.collect_map_key_index_exprs(cst, t, &mut map_keys);
+        if map_keys.is_empty() {
+            return;
+        }
+        let t_root = t.root();
+        for key_expr in map_keys {
+            let k_shape = self.shape_of_expr(cst, key_expr);
+            let key_carries =
+                self.shape_may_share(&k_shape) || matches!(k_shape, TypeShape::Unknown);
+            let key_slots = self.expr_slot_origins(cst, key_expr, aliases);
+            if key_carries && !key_slots.is_empty() {
+                if let Some(dst_slots) = aliases.get(t_root).cloned() {
+                    for d in &dst_slots {
+                        for s in &key_slots {
+                            if d != s {
+                                out.insert((*d, *s));
+                            }
+                        }
+                    }
+                }
+                if !t_root.is_empty() && !param_names.contains(t_root) {
+                    aliases
+                        .entry(t_root.to_string())
+                        .or_default()
+                        .extend(key_slots);
+                }
+            }
+        }
+    }
+
     pub(crate) fn record_place_store_from_snapshot(
         &self,
         st: &mut FnState,
@@ -3816,6 +3902,13 @@ impl<'a> Checker<'a> {
                                             .extend(src_slots);
                                     }
                                 }
+                                self.record_param_store_map_keys(
+                                    t,
+                                    cst,
+                                    aliases,
+                                    param_names,
+                                    out,
+                                );
                             }
                             _ => {}
                         }
@@ -3858,6 +3951,13 @@ impl<'a> Checker<'a> {
                                             .extend(src_slots);
                                     }
                                 }
+                                self.record_param_store_map_keys(
+                                    t,
+                                    cst,
+                                    aliases,
+                                    param_names,
+                                    out,
+                                );
                             }
                             _ => {}
                         }
@@ -4457,6 +4557,36 @@ impl<'a> Checker<'a> {
                                             st.aliases.entry(root.to_string()).or_insert(src);
                                             break;
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for t in targets {
+            if matches!(t.kind, PlaceKind::Ident(_)) {
+                continue;
+            }
+            let root = t.root();
+            if root.is_empty() || root == "_" {
+                continue;
+            }
+            let mut map_keys = Vec::new();
+            self.collect_map_key_index_exprs(st, t, &mut map_keys);
+            for key_expr in map_keys {
+                if self.expr_carries_borrow(st, key_expr) {
+                    st.borrow_bindings.insert(root.to_string());
+                    if move_operand_ident(key_expr).is_none() {
+                        let mut addr_roots = Vec::new();
+                        self.collect_expr_addr_of_roots(st, key_expr, &mut addr_roots);
+                        for src in addr_roots {
+                            if src != root {
+                                if let Some(b) = self.lookup_binding(st, &src) {
+                                    if !b.shape.is_sendable_by_type() {
+                                        st.aliases.entry(root.to_string()).or_insert(src);
+                                        break;
                                     }
                                 }
                             }
@@ -6719,6 +6849,16 @@ impl<'a> Checker<'a> {
         // `m2, x = m, 1`, and multi-value unpack `n, m = make_pair()`.
         if op == AssignOp::Assign {
             self.rebind_assign_targets(st, targets, values, &is_const_write, idx);
+        } else {
+            let pre_st = st.clone();
+            for (i, t) in targets.iter().enumerate() {
+                if is_const_write.get(i).copied().unwrap_or(false)
+                    || matches!(t.kind, PlaceKind::Ident(_))
+                {
+                    continue;
+                }
+                self.record_map_key_stores(st, &pre_st, t, &[], idx);
+            }
         }
     }
 
@@ -6738,6 +6878,13 @@ impl<'a> Checker<'a> {
         if op == AssignOp::Assign {
             let no_const_mask = vec![false; targets.len()];
             self.rebind_assign_targets(st, targets, values, &no_const_mask, 0);
+        } else {
+            let pre_st = st.clone();
+            for t in targets {
+                if !matches!(t.kind, PlaceKind::Ident(_)) {
+                    self.record_map_key_stores(st, &pre_st, t, &[], 0);
+                }
+            }
         }
         self.record_assign_borrow_aliases(st, targets, op, values);
     }
@@ -6936,10 +7083,12 @@ impl<'a> Checker<'a> {
                     if !root.is_empty() && root != "_" && self.binding_may_share(st, root) {
                         self.record_move_const_and_a3_loans(st, root, v, idx);
                     }
+                    self.record_map_key_stores(st, &pre_st, t, &overwritten, idx);
                 }
             }
             self.record_parallel_assign_fanout(st, &pre_st, targets, values, &is_const_write);
         } else if values.len() == 1 && targets.len() > 1 {
+            let pre_st = st.clone();
             let moved_non_owned = self.moved_non_owned_origin_in_expr(st, &values[0]);
             let shapes = self.multi_value_shapes(st, &values[0], targets.len());
             let tys = self.multi_value_tys(st, &values[0], targets.len());
@@ -7101,6 +7250,7 @@ impl<'a> Checker<'a> {
                     if !root.is_empty() && self.binding_may_share(st, root) {
                         self.record_multi_value_may_share(st, root, &shape, &values[0]);
                     }
+                    self.record_map_key_stores(st, &pre_st, t, &[], idx);
                 }
             }
             // Every target is rebound now: join results the callee returns twice.
@@ -7514,6 +7664,7 @@ impl<'a> Checker<'a> {
                                 if !root.is_empty() && root != "_" && self.binding_may_share(&cst, root) {
                                     self.record_move_const_and_a3_loans(&mut cst, root, v, 0);
                                 }
+                                self.record_map_key_stores(&mut cst, &pre_cst, t, &overwritten, 0);
                             }
                         }
                         self.record_parallel_assign_fanout(
@@ -7525,6 +7676,7 @@ impl<'a> Checker<'a> {
                         );
                         self.record_assign_borrow_aliases(&mut cst, targets, *op, values);
                     } else if *op == AssignOp::Assign && values.len() == 1 && targets.len() > 1 {
+                        let pre_cst = cst.clone();
                         let shapes = self.multi_value_shapes(&cst, &values[0], targets.len());
                         let tys = self.multi_value_tys(&cst, &values[0], targets.len());
                         for (i, ((t, shape), ty)) in
@@ -7560,6 +7712,7 @@ impl<'a> Checker<'a> {
                                         &values[0],
                                     );
                                 }
+                                self.record_map_key_stores(&mut cst, &pre_cst, t, &[], 0);
                             }
                         }
                         let bound: Vec<String> = targets
@@ -7570,6 +7723,17 @@ impl<'a> Checker<'a> {
                             })
                             .collect();
                         self.link_multi_value_return_aliases(&mut cst, &values[0], &bound);
+                        self.record_assign_borrow_aliases(&mut cst, targets, *op, values);
+                    } else {
+                        let pre_cst = cst.clone();
+                        for (i, t) in targets.iter().enumerate() {
+                            if is_const_write.get(i).copied().unwrap_or(false)
+                                || matches!(t.kind, PlaceKind::Ident(_))
+                            {
+                                continue;
+                            }
+                            self.record_map_key_stores(&mut cst, &pre_cst, t, &[], 0);
+                        }
                         self.record_assign_borrow_aliases(&mut cst, targets, *op, values);
                     }
                 }
