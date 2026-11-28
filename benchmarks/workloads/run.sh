@@ -6,7 +6,9 @@
 #
 #   Go    : the runtime module pattern (hybench histogram, no cgo needed
 #           for the workloads themselves — the module just carries it)
-#   Rust  : cargo build --release (std only, no deps)
+#   Rust  : cargo run --release (std only, no deps; `run` — not a separate
+#           build-then-exec of ./target/release/* — so a shared
+#           CARGO_TARGET_DIR can't leave a stale binary at that path)
 #   Hybrid: hyb check + hyb build (the checker runs on every workload)
 #
 # Usage: benchmarks/workloads/run.sh [out.csv]
@@ -26,7 +28,7 @@ cp go/main.go "$WORK/gowl/main.go"
 (cd "$WORK/gowl" && go build -o "$WORK/wl-go" . && "$WORK/wl-go")
 
 echo "== Rust twin =="
-(cd rust && cargo build --release --quiet && ./target/release/workloads)
+(cd rust && cargo run --release --quiet)
 
 echo "== Hybrid twins (hyb check + build; the checker runs) =="
 "$HYB" check hy/load.hy
