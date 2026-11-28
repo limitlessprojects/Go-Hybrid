@@ -145,6 +145,7 @@ fi
 #  staticlib's mtime must win ensure_staticlib()'s freshness check.)
 echo "==> smoke test from the tarball (PATH without cargo)"
 SMOKE="$(mktemp -d)"
+trap 'rm -rf "$SMOKE"' EXIT
 ( cd "$SMOKE" && tar xzf "$DIST/$NAME.tar.gz" )
 # BSD paste (macOS) can't read stdin without a file operand — filter in shell
 RUSTLESS_PATH=""
@@ -209,7 +210,6 @@ if { [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; } || [ "$PKG_
         exit 1
     fi
 fi
-rm -rf "$SMOKE"
 
 echo "==> done:"
 ls -la "$DIST/$NAME.tar.gz" "$DIST/$NAME.tar.gz.sha256"
