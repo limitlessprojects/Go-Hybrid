@@ -291,6 +291,7 @@ impl Emitter {
                                     )));
                                 }
                             };
+                            let recv_elem = self.chan_elem_of_expr(chan);
                             self.shadow_local_names(names);
                             self.push(&head);
                             // Go's case clause shares ONE lexical scope with
@@ -327,6 +328,13 @@ impl Emitter {
                             for n in names {
                                 if !bound.contains(&n.as_str()) {
                                     self.local_vars.remove(n);
+                                }
+                            }
+                            if let Some(elem_ty) = recv_elem {
+                                if let Some(first) =
+                                    names.first().filter(|n| bound.contains(&n.as_str()))
+                                {
+                                    self.register_var_from_ty(first, &elem_ty);
                                 }
                             }
                             wrap = Self::case_body_redefines_binding(&arm.body.stmts, &bound);
@@ -1285,30 +1293,68 @@ impl Emitter {
 
     /// Binding hints from the defining values (see `BindingKind`).
     fn hint_from_values(&mut self, names: &[String], values: &[Expr]) {
-        let single_hint = if names.len() == 1 && values.len() == 1 && names[0] != "_" {
-            Some(self.binding_kind_of(&values[0]))
-        } else {
-            None
-        };
-        let ptr_flags: Vec<bool> = if names.len() == values.len() {
-            values.iter().map(|v| self.expr_is_pointer(v)).collect()
+        struct PairHint {
+            name: String,
+            kind: BindingKind,
+            struct_lit_ty: Option<TypeExpr>,
+            user_struct: Option<String>,
+            is_ptr: bool,
+            chan_elem: Option<TypeExpr>,
+            recv_elem: Option<TypeExpr>,
+        }
+
+        let pairs: Vec<PairHint> = if names.len() == values.len() {
+            names
+                .iter()
+                .zip(values)
+                .filter(|(n, _)| n.as_str() != "_")
+                .map(|(n, v)| {
+                    let struct_lit_ty = match v {
+                        Expr::StructLit { ty: Some(t), .. } => Some(t.clone()),
+                        _ => None,
+                    };
+                    PairHint {
+                        name: n.clone(),
+                        kind: self.binding_kind_of(v),
+                        struct_lit_ty,
+                        user_struct: self.user_struct_name_of(v).map(str::to_string),
+                        is_ptr: self.expr_is_pointer(v),
+                        chan_elem: self.chan_elem_of_expr(v),
+                        recv_elem: self.recv_elem_of_expr(v),
+                    }
+                })
+                .collect()
         } else {
             Vec::new()
         };
+        let comma_ok_recv = if names.len() == 2 && values.len() == 1 && names[0] != "_" {
+            self.recv_elem_of_expr(&values[0])
+        } else {
+            None
+        };
         self.shadow_local_names(names);
-        if let Some(kind) = single_hint {
-            if kind != BindingKind::Plain {
-                self.bindings.insert(names[0].clone(), kind);
-            }
-            if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first() {
-                self.register_var_ty(&names[0], t);
-            } else if let Some(sn) = self.user_struct_name_of(&values[0]).map(str::to_string) {
-                self.var_struct.insert(names[0].clone(), sn);
-            }
+        if let Some(elem_ty) = comma_ok_recv {
+            self.register_var_from_ty(&names[0], &elem_ty);
         }
-        for (name, is_ptr) in names.iter().zip(ptr_flags) {
-            if name != "_" && is_ptr {
-                self.pointer_vars.insert(name.clone());
+        for p in pairs {
+            if let Some(elem_ty) = p.recv_elem {
+                self.register_var_from_ty(&p.name, &elem_ty);
+                continue;
+            }
+            if p.kind != BindingKind::Plain {
+                self.bindings.insert(p.name.clone(), p.kind);
+            }
+            if let Some(t) = p.struct_lit_ty {
+                self.register_var_ty(&p.name, &t);
+            } else if let Some(sn) = p.user_struct {
+                self.var_struct.insert(p.name.clone(), sn);
+            }
+            if p.is_ptr {
+                self.pointer_vars.insert(p.name.clone());
+            }
+            if let Some(elem) = p.chan_elem {
+                self.bindings.insert(p.name.clone(), BindingKind::Chan);
+                self.chan_elem.insert(p.name, elem);
             }
         }
     }
@@ -1334,6 +1380,12 @@ impl Emitter {
             if let Some(kind) = self.binding_kind_of_ty(t) {
                 return kind;
             }
+        }
+        if let Expr::Receive { chan, .. } = e {
+            return self
+                .chan_elem_of_expr(chan)
+                .and_then(|t| self.binding_kind_of_ty(&t))
+                .unwrap_or(BindingKind::Plain);
         }
         let (call, args) = match e {
             Expr::Try { operand, .. } => match Self::peel_parens(operand) {
@@ -2234,7 +2286,15 @@ impl Emitter {
                             // SPEC LX13: single-var range over a map binds
                             // the KEY (#2945) — Go's own single-var form.
                             if over_chan || self.is_map_expr(expr) {
+                                let chan_elem_ty = if over_chan {
+                                    self.chan_elem_of_expr(expr)
+                                } else {
+                                    None
+                                };
                                 self.shadow_local_names(vars);
+                                if let Some(elem_ty) = chan_elem_ty {
+                                    self.register_var_from_ty(&vars[0], &elem_ty);
+                                }
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {
                                 // A rust-handle slice (ForeignTy binding)
