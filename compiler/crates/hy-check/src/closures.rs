@@ -1816,6 +1816,25 @@ fn check_deferred_uses(ck: &mut Checker<'_>, st: &FnState, body: &Block) {
     }
 }
 
+fn scope_depth_at(flat: &crate::walk::FlatInfo<'_>, target_idx: usize) -> usize {
+    let mut depth = 0usize;
+    for (_, idx) in &flat.stmts {
+        if let Some(evs) = flat.events.get(idx) {
+            for ev in evs {
+                match ev {
+                    crate::walk::ScopeEvent::Push => depth += 1,
+                    crate::walk::ScopeEvent::Pop => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+        }
+        if *idx == target_idx {
+            break;
+        }
+    }
+    depth
+}
+
 fn inspect_later_defer_fate(
     ck: &Checker<'_>,
     st: &FnState,
@@ -1852,15 +1871,66 @@ fn inspect_later_defer_fate(
         }
     }
 
+    let defer_depth = scope_depth_at(flat, defer_idx);
+    let mut cur_depth = 0usize;
+    let mut shadow_scopes: Vec<std::collections::HashSet<String>> = Vec::new();
     let mut rebound_self = false;
+
     for (stmt, idx) in &flat.stmts {
+        if let Some(evs) = flat.events.get(idx) {
+            for ev in evs {
+                match ev {
+                    crate::walk::ScopeEvent::Push => {
+                        cur_depth += 1;
+                        if *idx > defer_idx && cur_depth > defer_depth {
+                            shadow_scopes.push(std::collections::HashSet::new());
+                        }
+                    }
+                    crate::walk::ScopeEvent::Pop => {
+                        if *idx > defer_idx && cur_depth > defer_depth {
+                            shadow_scopes.pop();
+                        }
+                        cur_depth = cur_depth.saturating_sub(1);
+                    }
+                    crate::walk::ScopeEvent::SelectRecv { names, .. } => {
+                        if *idx > defer_idx {
+                            if let Some(top) = shadow_scopes.last_mut() {
+                                for n in *names {
+                                    top.insert(n.clone());
+                                }
+                            }
+                        }
+                    }
+                    crate::walk::ScopeEvent::MatchBind { name: bname, .. } => {
+                        if *idx > defer_idx {
+                            if let Some(top) = shadow_scopes.last_mut() {
+                                top.insert((*bname).to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if *idx <= defer_idx || flat.in_managed(*idx) {
             continue;
         }
-        if let Some(mv) = stmt_moves_watched_binding(stmt, &watch) {
+        let active_watch: std::collections::HashSet<String> = watch
+            .iter()
+            .filter(|w| !shadow_scopes.iter().any(|s| s.contains(*w)))
+            .cloned()
+            .collect();
+        if let Some(mv) = stmt_moves_watched_binding(ck, st, stmt, &active_watch) {
             return LaterDeferFate::Moved(mv);
         }
-        update_post_defer_watch(ck, st, stmt, name, &mut watch, &mut rebound_self);
+        update_post_defer_watch(
+            ck,
+            st,
+            stmt,
+            name,
+            &mut watch,
+            &mut shadow_scopes,
+            &mut rebound_self,
+        );
     }
     if rebound_self {
         LaterDeferFate::ReboundBeforeMove
@@ -2072,22 +2142,39 @@ fn update_post_defer_watch(
     stmt: &Stmt,
     deferred_name: &str,
     watch: &mut std::collections::HashSet<String>,
+    shadow_scopes: &mut [std::collections::HashSet<String>],
     rebound_self: &mut bool,
 ) {
-    let mut handle_bind = |target: &str, val: Option<&Expr>| {
+    let mut handle_bind = |target: &str, val: Option<&Expr>, is_local_decl: bool| {
         if target == "_" {
             return;
         }
-        let Some(v) = val else {
-            watch.remove(target);
-            if target == deferred_name {
-                *rebound_self = true;
+        let reads_watched = val.is_some_and(|v| {
+            watch.iter().any(|w| {
+                !shadow_scopes.iter().any(|s| s.contains(w))
+                    && ck.value_reads_storage_of(st, v, w)
+            })
+        });
+        if is_local_decl && !shadow_scopes.is_empty() {
+            if reads_watched {
+                if let Some(top) = shadow_scopes.last_mut() {
+                    top.remove(target);
+                }
+                watch.insert(target.to_string());
+            } else if let Some(top) = shadow_scopes.last_mut() {
+                top.insert(target.to_string());
             }
             return;
-        };
-        let reads_watched = watch
-            .iter()
-            .any(|w| ck.value_reads_storage_of(st, v, w));
+        }
+        if shadow_scopes.iter().any(|s| s.contains(target)) {
+            if reads_watched {
+                for s in shadow_scopes.iter_mut() {
+                    s.remove(target);
+                }
+                watch.insert(target.to_string());
+            }
+            return;
+        }
         if reads_watched {
             watch.insert(target.to_string());
         } else {
@@ -2102,7 +2189,7 @@ fn update_post_defer_watch(
         Stmt::Local(l) => {
             for (i, target) in l.names.iter().enumerate() {
                 let val = l.values.get(i).or_else(|| l.values.first());
-                handle_bind(target, val);
+                handle_bind(target, val, true);
             }
         }
         Stmt::Assign {
@@ -2114,7 +2201,7 @@ fn update_post_defer_watch(
             for (i, t) in targets.iter().enumerate() {
                 if let hy_syntax::PlaceKind::Ident(target) = &t.kind {
                     let val = values.get(i).or_else(|| values.first());
-                    handle_bind(target, val);
+                    handle_bind(target, val, false);
                 }
             }
         }
@@ -2126,21 +2213,117 @@ fn update_post_defer_watch(
                 let shapes = ck.iterate_var_shapes(st, expr, vars.len());
                 for (target, shape) in vars.iter().zip(shapes) {
                     if ck.shape_may_share(&shape) {
-                        handle_bind(target, Some(expr));
+                        handle_bind(target, Some(expr), true);
                     } else {
-                        handle_bind(target, None);
+                        handle_bind(target, None, true);
                     }
                 }
             }
+        }
+        Stmt::For {
+            kind: Range { var, .. },
+            ..
+        } => {
+            handle_bind(var, None, true);
         }
         _ => {}
     }
 }
 
-fn stmt_moves_watched_binding(
+fn stmt_consumes_watched_binding(
+    ck: &Checker<'_>,
+    st: &FnState,
     stmt: &Stmt,
     watch: &std::collections::HashSet<String>,
 ) -> Option<crate::model::MoveInfo> {
+    let mut calls = Vec::new();
+    if let Stmt::For {
+        kind: Iterate { expr, .. },
+        ..
+    } = stmt
+    {
+        crate::walk::expr_calls(expr, &mut calls);
+    } else {
+        crate::walk::own_calls(stmt, &mut calls);
+    }
+    for cr in calls {
+        if let Expr::Field { base, name, .. } = crate::model::unwrap_parens(cr.callee) {
+            if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
+                if ck.lookup_binding(st, pkg).is_none() && ck.known_package(pkg) {
+                    if crate::foreign::package_mode(pkg, name) == crate::foreign::CallMode::Consume
+                    {
+                        for a in cr.args {
+                            if let Some(root) = a.value.root_ident() {
+                                if watch.contains(root) {
+                                    return Some(crate::model::MoveInfo {
+                                        span: cr.span,
+                                        kind: crate::model::MoveKind::Consumed,
+                                        desc: format!(
+                                            "the consuming call `{}`",
+                                            cr.callee.render()
+                                        ),
+                                        moved_name: root.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    } else if pkg == "serde_json" && name == "set" {
+                        if let Some(val_arg) = cr.args.get(2) {
+                            if let Some(root) = val_arg.value.root_ident() {
+                                if watch.contains(root) {
+                                    return Some(crate::model::MoveInfo {
+                                        span: cr.span,
+                                        kind: crate::model::MoveKind::Consumed,
+                                        desc: format!(
+                                            "the consuming call `{}`",
+                                            cr.callee.render()
+                                        ),
+                                        moved_name: root.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+            if name == "finish" && cr.args.is_empty() {
+                if let Some(root) = base.root_ident() {
+                    if watch.contains(root) {
+                        return Some(crate::model::MoveInfo {
+                            span: cr.span,
+                            kind: crate::model::MoveKind::Consumed,
+                            desc: format!("the consuming call `{}`", cr.callee.render()),
+                            moved_name: root.to_string(),
+                        });
+                    }
+                }
+            } else if name == "set" && cr.args.len() >= 2 {
+                if let Some(root) = cr.args[1].value.root_ident() {
+                    if watch.contains(root) {
+                        return Some(crate::model::MoveInfo {
+                            span: cr.span,
+                            kind: crate::model::MoveKind::Consumed,
+                            desc: format!("the consuming call `{}`", cr.callee.render()),
+                            moved_name: root.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn stmt_moves_watched_binding(
+    ck: &Checker<'_>,
+    st: &FnState,
+    stmt: &Stmt,
+    watch: &std::collections::HashSet<String>,
+) -> Option<crate::model::MoveInfo> {
+    if let Some(consumed) = stmt_consumes_watched_binding(ck, st, stmt, watch) {
+        return Some(consumed);
+    }
     let check_expr = |e: &Expr, desc: String| -> Option<crate::model::MoveInfo> {
         let mut ops = Vec::new();
         crate::model::collect_move_operands(e, &mut ops);
@@ -2493,4 +2676,42 @@ fn main() {
 "#;
         assert_eq!(codes(src), vec!["HYB-E3003"]);
     }
+#[test]
+    fn reject_defer_when_inner_block_shadows_binding_or_block_consumes_handle() {
+        let src = r#"import "fmt"
+import "rust/flate2"
+
+fn worker(owned map[string]int, done chan<- bool) {
+    owned["k"] = 2
+    done <- true
 }
+
+fn report(m map[string]int) {
+    fmt.println(m["k"])
+}
+
+fn flush(w flate2.writer) {
+    _ = w.write([]byte("tail"))
+}
+
+fn main() {
+    shared := map[string]int{"k": 1}
+    defer report(shared)
+    if true {
+        shared := 1
+        fmt.println(shared)
+    }
+    done := make(chan bool, 1)
+    task worker(move shared, done)
+    <-done
+
+    if true {
+        enc := flate2.new_writer(6)?
+        defer flush(enc)
+        out := enc.finish()?
+        fmt.println(len(out))
+    }
+}
+"#;
+        assert_eq!(codes(src), vec!["HYB-E3003", "HYB-E3003"]);
+    }}
