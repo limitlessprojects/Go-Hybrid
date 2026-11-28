@@ -77,7 +77,7 @@ def scan_file(path):
     hits = []
     open_start = None
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             for n, line in enumerate(f, 1):
                 stripped = line.rstrip("\n")
                 if START_RE.match(stripped):
@@ -104,7 +104,7 @@ def scan_workflow_file(path):
     """
     hits = []
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             for n, line in enumerate(f, 1):
                 stripped = line.rstrip("\n")
                 if not stripped.strip():
