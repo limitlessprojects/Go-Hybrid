@@ -4,6 +4,8 @@ last reopen, not from created_at.
 Every API call is a fixture — the suite never touches the network, and in
 dry mode it hard-fails on any non-GET request, which is the sweeper's
 "safe to run locally" promise."""
+import json
+import tempfile
 import contextlib
 from datetime import datetime, timedelta, timezone
 import importlib.util
@@ -17,6 +19,11 @@ SPEC = importlib.util.spec_from_file_location(
     "queue_sweeper", Path(__file__).with_name("queue_sweeper.py"))
 SWEEPER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SWEEPER)
+
+RUNNER_SPEC = importlib.util.spec_from_file_location(
+    "pr_triage_runner", Path(__file__).with_name("pr_triage_runner.py"))
+RUNNER = importlib.util.module_from_spec(RUNNER_SPEC)
+RUNNER_SPEC.loader.exec_module(RUNNER)
 
 NOW = datetime(2026, 10, 24, 15, tzinfo=timezone.utc)
 CUTOFF = NOW - timedelta(days=SWEEPER.MIN_AGE)
@@ -177,6 +184,194 @@ class ReviewWindowPolicyTests(unittest.TestCase):
                 comment = self.writes[1][2]["body"]
                 self.assertIn(f"review window ({window} days)", comment)
                 self.assertNotIn("20 days", comment)
+
+
+class PrTriageRunnerSafetyTests(unittest.TestCase):
+    """Offline regressions for tools/pr_triage_runner.py live safety guards."""
+
+    def _snapshot_pr(self, *, number=99, ci="FAILURE", mergeable="UNKNOWN",
+                     age_days=20, idle_days=12, labels=(), title="Fix bug",
+                     author="alice"):
+        return {
+            "number": number,
+            "title": title,
+            "createdAt": stamp(NOW - timedelta(days=age_days)),
+            "updatedAt": stamp(NOW - timedelta(days=idle_days)),
+            "isDraft": False,
+            "author": {"login": author},
+            "mergeable": mergeable,
+            "mergeStateStatus": "DIRTY" if mergeable == "CONFLICTING" else "UNKNOWN",
+            "_labels": list(labels),
+            "_ci_rollup": ci,
+            "_suite_concls": {"FAILURE": 1} if ci == "FAILURE" else {},
+        }
+
+    def _run_runner(self, pr, *, live_pr=None, check_runs=None, event_pages=None,
+                    comment_pages=None, extra_args=("--execute",), protected=()):
+        if live_pr is None:
+            live_pr = {
+                "number": pr["number"],
+                "state": "open",
+                "title": pr["title"],
+                "labels": [{"name": l} for l in pr["_labels"]],
+                "mergeable": False if pr["mergeable"] == "CONFLICTING" else True,
+                "head": {"sha": "deadbeef" * 5},
+            }
+        if check_runs is None:
+            check_runs = (200, {
+                "total_count": 1,
+                "check_runs": [{"status": "completed", "conclusion": "failure"}],
+            })
+        event_pages = event_pages if event_pages is not None else {1: (200, [])}
+        comment_pages = comment_pages if comment_pages is not None else {1: (200, [])}
+        reads = []
+        writes = []
+
+        def offline_rest(path, method="GET", body=None):
+            if method == "GET":
+                reads.append(path)
+            else:
+                writes.append((path, method, body))
+                return (201, {}) if method == "POST" else (200, {"state": "closed"})
+            if path == f"/repos/example/project/pulls/{pr['number']}":
+                return (200, live_pr) if not isinstance(live_pr, tuple) else live_pr
+            if f"/commits/" in path and "/check-runs" in path:
+                return check_runs
+            ev_prefix = f"/repos/example/project/issues/{pr['number']}/events?per_page=100&page="
+            if path.startswith(ev_prefix):
+                return event_pages.get(int(path[len(ev_prefix):]), (200, []))
+            cm_prefix = f"/repos/example/project/issues/{pr['number']}/comments?per_page=100&since="
+            if path.startswith(cm_prefix):
+                page = int(path.rsplit("&page=", 1)[1])
+                return comment_pages.get(page, (200, []))
+            raise AssertionError(f"unexpected REST call: {method} {path}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            survey_path = Path(tmp) / "snapshot.json"
+            log_path = Path(tmp) / "runner.log"
+            cand_path = Path(tmp) / "land_candidates.json"
+            survey_path.write_text(json.dumps([pr]), encoding="utf-8")
+            argv = list(extra_args) + ["--survey", str(survey_path)]
+            out = io.StringIO()
+            with patch.object(RUNNER, "TOKEN", "offline-fixture"), \
+                 patch.object(RUNNER, "REPO", "example/project"), \
+                 patch.object(RUNNER, "LOG", str(log_path)), \
+                 patch.object(RUNNER, "LAND_CANDIDATES", str(cand_path)), \
+                 patch.object(RUNNER, "rest_used", 0), \
+                 patch.object(RUNNER, "datetime", FixedDateTime), \
+                 patch.object(RUNNER, "rest", side_effect=offline_rest), \
+                 patch.object(RUNNER.time, "sleep"), \
+                 patch.object(RUNNER, "config_protected", return_value=set(protected)), \
+                 contextlib.redirect_stdout(out):
+                RUNNER.main(argv)
+            return out.getvalue(), reads, writes
+
+    def test_config_protected_fails_closed_when_missing_or_corrupt(self):
+        with patch.object(RUNNER, "_config", None), \
+             patch.object(RUNNER, "_config_file", return_value=None):
+            with self.assertRaises(RuntimeError):
+                RUNNER.config_protected()
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "triage_config.json"
+            bad.write_text("{not-json", encoding="utf-8")
+            with patch.object(RUNNER, "_config", None), \
+                 patch.object(RUNNER, "_config_file", return_value=str(bad)):
+                with self.assertRaises(RuntimeError):
+                    RUNNER.config_protected()
+
+    def test_live_protected_label_added_after_snapshot_prevents_close(self):
+        pr = self._snapshot_pr(ci="FAILURE")
+        live = {
+            "number": 99, "state": "open", "title": "Fix bug",
+            "labels": [{"name": "triage:keep"}],
+            "mergeable": True, "head": {"sha": "a" * 40},
+        }
+        out, _, writes = self._run_runner(pr, live_pr=live)
+        self.assertEqual(writes, [])
+        self.assertIn("protected-label", out)
+
+    def test_live_wildcard_title_rename_prevents_close(self):
+        pr = self._snapshot_pr(ci="FAILURE")
+        live = {
+            "number": 99, "state": "open", "title": "[wildcard] Bold proposal",
+            "labels": [], "mergeable": True, "head": {"sha": "a" * 40},
+        }
+        out, _, writes = self._run_runner(pr, live_pr=live)
+        self.assertEqual(writes, [])
+        self.assertIn("wildcard-title", out)
+
+    def test_live_green_or_pending_ci_prevents_close_on_stale_snapshot(self):
+        pr = self._snapshot_pr(ci="FAILURE")
+        for runs, expected_reason in (
+            ({"total_count": 1, "check_runs": [{"status": "completed", "conclusion": "success"}]}, "ci-green"),
+            ({"total_count": 1, "check_runs": [{"status": "in_progress", "conclusion": None}]}, "ci-pending"),
+            ({"total_count": 150, "check_runs": [{"status": "completed", "conclusion": "failure"}]}, "ci-unverifiable"),
+        ):
+            with self.subTest(reason=expected_reason):
+                out, _, writes = self._run_runner(pr, check_runs=(200, runs))
+                self.assertEqual(writes, [])
+                self.assertIn(expected_reason, out)
+
+    def test_live_resolved_or_null_mergeable_prevents_conflict_close(self):
+        pr = self._snapshot_pr(ci="NONE", mergeable="CONFLICTING", idle_days=15)
+        for live_mergeable in (True, None):
+            with self.subTest(mergeable=live_mergeable):
+                live = {
+                    "number": 99, "state": "open", "title": "Fix bug",
+                    "labels": [], "mergeable": live_mergeable,
+                    "head": {"sha": "a" * 40},
+                }
+                out, _, writes = self._run_runner(
+                    pr, live_pr=live,
+                    check_runs=(200, {"total_count": 0, "check_runs": []}),
+                )
+                self.assertEqual(writes, [])
+                self.assertIn("evidence-stale", out)
+
+    def test_reopen_on_page_2_and_truncated_events_prevent_close(self):
+        pr = self._snapshot_pr(ci="FAILURE")
+        out, reads, writes = self._run_runner(
+            pr,
+            event_pages={
+                1: (200, [{"event": "labeled"}] * 100),
+                2: (200, [reopen_event(NOW - timedelta(hours=2))]),
+            },
+        )
+        self.assertEqual(writes, [])
+        self.assertIn("reopened within window", out)
+        self.assertTrue(any(r.endswith("page=2") for r in reads))
+
+        full_pages = {n: (200, [{"event": "labeled"}] * 100)
+                      for n in range(1, RUNNER.MAX_EVENT_PAGES + 1)}
+        _, _, writes2 = self._run_runner(pr, event_pages=full_pages)
+        self.assertEqual(writes2, [])
+
+    def test_author_comment_uses_since_and_paginates(self):
+        pr = self._snapshot_pr(ci="FAILURE", author="alice")
+        out, reads, writes = self._run_runner(
+            pr,
+            comment_pages={
+                1: (200, [{"user": {"login": "bot"}, "created_at": stamp(NOW - timedelta(hours=10))}] * 100),
+                2: (200, [{"user": {"login": "alice"}, "created_at": stamp(NOW - timedelta(hours=2))}]),
+            },
+        )
+        self.assertEqual(writes, [])
+        self.assertIn("author active", out)
+        self.assertTrue(any("&since=" in r and r.endswith("&page=2") for r in reads))
+
+    def test_label_only_never_closes_even_with_execute(self):
+        pr = self._snapshot_pr(ci="FAILURE")
+        out, reads, writes = self._run_runner(pr, extra_args=("--execute", "--label-only"))
+        self.assertEqual(writes, [])
+        self.assertEqual(reads, [])
+        self.assertIn("--label-only", out)
+
+    def test_live_verified_red_ci_pr_closes_cleanly(self):
+        pr = self._snapshot_pr(ci="FAILURE")
+        out, _, writes = self._run_runner(pr, extra_args=("--execute",))
+        self.assertEqual([m for _, m, _ in writes], ["POST", "PATCH"])
+        self.assertEqual(writes[1][2], {"state": "closed", "state_reason": "not_planned"})
+        self.assertIn("closed=1", out)
 
 
 if __name__ == "__main__":
