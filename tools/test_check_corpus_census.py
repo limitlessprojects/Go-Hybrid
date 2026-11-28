@@ -46,7 +46,12 @@ def consistent_tree(total=3, accept=1, managed=0, reject=2):
     )
     files[".github/workflows/ci.yml"] = f"      - name: x (verdict agreement ({total}/{total} + tripwire)\n"
     files["Makefile"] = f'\t@echo "make corpus           — Tier-0 corpus verdicts ({total}/{total})"\n'
-    files["README.md"] = f"| x | y | z [checker corpus {total}/{total}](tests/checker-corpus/) |\n"
+    files["README.md"] = (
+        f"| x | y | z [checker corpus {total}/{total}](tests/checker-corpus/) + "
+        f"[differential loop {accept + managed}/{accept + managed} + {reject}/{reject}](d) |\n"
+        f"make test-quick   # checker corpus ({total}/{total}) + "
+        f"differential ({accept + managed}/{accept + managed} + {reject}/{reject})\n"
+    )
     files["STATUS.md"] = f"- Phase: something — corpus {total}/{total}, differential FULL\n"
     files["GUARANTEES.md"] = (
         f"  {total} programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were\n"
@@ -100,7 +105,7 @@ class DriftTests(_ProblemsMixin, unittest.TestCase):
         self.assertIn("says 99", hits[0])
 
     def test_stale_readme_claim_is_named(self):
-        hits = self._problems_with("README.md", "| x | y | z [checker corpus 99/99](p) |\n")
+        hits = self._problems_with("README.md", "[checker corpus 99/99](p) differential (1/1 + 2/2)\n")
         self.assertEqual(len(hits), 1)
         self.assertIn("says 99", hits[0])
 
@@ -144,7 +149,7 @@ class DriftTests(_ProblemsMixin, unittest.TestCase):
             ),
             (
                 "README.md",
-                "| x | y | z [checker corpus 3/2](tests/checker-corpus/) |\n",
+                "[checker corpus 3/2](tests/checker-corpus/) differential (1/1 + 2/2)\n",
                 "says 2",
             ),
         ):
@@ -152,6 +157,34 @@ class DriftTests(_ProblemsMixin, unittest.TestCase):
                 hits = self._problems_with(rel, content)
                 self.assertEqual(len(hits), 1)
                 self.assertIn(stale, hits[0])
+
+    def test_stale_parenthesized_readme_claim_is_named(self):
+        """`make test-quick` quotes the corpus as `(N/N)`; that form must be checked too."""
+        hits = self._problems_with(
+            "README.md",
+            "[checker corpus 3/3](p) differential (1/1 + 2/2)\n"
+            "make test-quick   # checker corpus (109/109) + differential (1/1 + 2/2)\n",
+        )
+        self.assertEqual(len(hits), 1)
+        self.assertIn("says 109", hits[0])
+
+    def test_stale_differential_claims_are_named(self):
+        """The accept-side and reject-side ratios derive from the verdict census."""
+        for claim in (
+            "differential loop 40/40 + 2/2",  # stale accept side
+            "differential (1/1 + 80/80)",  # stale reject side
+            "differential (1/1 + 2/3)",  # denominator-only drift
+        ):
+            with self.subTest(claim=claim):
+                hits = self._problems_with("README.md", f"[checker corpus 3/3](p) {claim}\n")
+                self.assertEqual(len(hits), 1)
+                self.assertIn("differential claim says", hits[0])
+                self.assertIn("corpus implies 1/1 + 2/2", hits[0])
+
+    def test_readme_losing_the_differential_claim_is_reported(self):
+        hits = self._problems_with("README.md", "[checker corpus 3/3](p)\n")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("no differential-loop claim found", hits[0])
 
     def test_spike6_assertion_is_not_mistaken_for_the_corpus(self):
         """parse_all.rs asserts the spike-6 count with the same shape."""
