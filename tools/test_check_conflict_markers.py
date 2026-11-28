@@ -189,6 +189,132 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertEqual(list(MOD.scan(str(root))), [])
 
 
+MARKER_BLOCK = "<<<<<<< HEAD\nold\n=======\nnew\n>>>>>>> main\n"
+
+
+class GitAwareScanTests(unittest.TestCase):
+    """candidate_paths() must follow Git's own view of a checkout: tracked
+    files regardless of .gitignore, untracked files unless ignored."""
+
+    def _repo(self):
+        tmp = tempfile.TemporaryDirectory(prefix="gitmarkers-")
+        root = Path(tmp.name)
+        self.addCleanup(tmp.cleanup)
+        self._git(root, "init", "-q")
+        (root / ".gitignore").write_text("results/\n/build/\n", encoding="utf-8")
+        (root / "README.md").write_text("clean\n", encoding="utf-8")
+        self._git(root, "add", ".gitignore", "README.md")
+        self._git(root, "-c", "user.name=Fixture", "-c",
+                   "user.email=fixture@example.invalid", "commit", "-qm", "fixture")
+        return root
+
+    def _git(self, root, *args):
+        subprocess.run(["git", *args], cwd=str(root), check=True,
+                        capture_output=True, timeout=20)
+
+    def _write(self, root, rel, content):
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    def test_ignored_untracked_marker_is_not_reported(self):
+        root = self._repo()
+        self._write(root, "results/old.py", MARKER_BLOCK)
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+    def test_force_added_ignored_file_is_reported(self):
+        root = self._repo()
+        self._write(root, "results/old.py", MARKER_BLOCK)
+        self._git(root, "add", "-f", "results/old.py")
+        hits = list(MOD.scan(str(root)))
+        self.assertEqual([h[0] for h in hits], ["results/old.py"])
+
+    def test_tracked_file_in_skipped_dir_is_reported(self):
+        # target/ is in SKIP_DIRS for the non-Git walk, but a force-added
+        # tracked file there must still be caught in a real checkout.
+        root = self._repo()
+        self._write(root, "target/tracked.py", MARKER_BLOCK)
+        self._git(root, "add", "-f", "target/tracked.py")
+        hits = list(MOD.scan(str(root)))
+        self.assertEqual([h[0] for h in hits], [os.path.join("target", "tracked.py")])
+
+    def test_new_unignored_file_with_spaces_is_reported(self):
+        root = self._repo()
+        self._write(root, "new file.md", MARKER_BLOCK)
+        hits = list(MOD.scan(str(root)))
+        self.assertEqual([h[0] for h in hits], ["new file.md"])
+
+    def test_tracked_modification_is_reported(self):
+        root = self._repo()
+        self._write(root, "README.md", "clean v2\n")
+        self._git(root, "add", "README.md")
+        self._git(root, "-c", "user.name=Fixture", "-c",
+                   "user.email=fixture@example.invalid", "commit", "-qm", "second")
+        self._write(root, "README.md", MARKER_BLOCK)
+        hits = list(MOD.scan(str(root)))
+        self.assertEqual([h[0] for h in hits], ["README.md"])
+
+    def test_deleted_tracked_file_is_not_read(self):
+        root = self._repo()
+        self._write(root, "doomed.md", MARKER_BLOCK)
+        self._git(root, "add", "doomed.md")
+        os.remove(root / "doomed.md")
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+    def test_symlink_to_external_content_is_not_read(self):
+        root = self._repo()
+        outside = Path(tempfile.mkdtemp(prefix="outside-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(outside, ignore_errors=True))
+        target = outside / "evil.md"
+        target.write_text(MARKER_BLOCK, encoding="utf-8")
+        link = root / "link.md"
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unsupported on this platform")
+        self._git(root, "add", "link.md")
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+    def test_linked_worktree_uses_git_rules(self):
+        root = self._repo()
+        wt = Path(tempfile.mkdtemp(prefix="gitmarkers-wt-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(wt, ignore_errors=True))
+        subprocess.run(
+            ["git", "worktree", "add", "-q", str(wt), "-b", "wt-branch"],
+            cwd=str(root), check=True, capture_output=True, timeout=20)
+        self.assertTrue(os.path.isfile(wt / ".git"))  # a file, not a directory
+        self._write(wt, "results/old.py", MARKER_BLOCK)  # ignored, untracked
+        self._write(wt, "tracked.py", MARKER_BLOCK)
+        self._git(wt, "add", "tracked.py")
+        hits = list(MOD.scan(str(wt)))
+        self.assertEqual([h[0] for h in hits], ["tracked.py"])
+
+    def test_non_checkout_tree_keeps_the_old_walk(self):
+        # No .git: behaves like an exported archive, SKIP_DIRS still applies.
+        root = self._repo()
+        self._write(root, "target/tracked.py", MARKER_BLOCK)
+        import shutil
+        shutil.rmtree(root / ".git")
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+    def test_mocked_git_launch_failure_falls_back_to_walk(self):
+        root = self._repo()
+        self._write(root, "results/old.py", MARKER_BLOCK)
+
+        def _raise(*a, **k):
+            raise OSError("git not found")
+
+        orig = MOD.subprocess.run
+        MOD.subprocess.run = _raise
+        try:
+            hits = list(MOD.scan(str(root)))
+        finally:
+            MOD.subprocess.run = orig
+        # Falls back to the plain walk, which has no ignore awareness.
+        self.assertEqual([h[0] for h in hits], ["results/old.py"])
+
+
 class CliTests(unittest.TestCase):
     def _run(self, root):
         return subprocess.run(

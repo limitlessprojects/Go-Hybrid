@@ -32,6 +32,7 @@ Stdlib only. Exit codes: 0 = clean, 1 = problems found, 2 = misuse.
 import argparse
 import os
 import re
+import subprocess
 import sys
 
 START_RE = re.compile(r"^<<<<<<<(\s|$)")
@@ -134,22 +135,53 @@ def _is_workflow(path):
     )
 
 
+def candidate_paths(root):
+    """Yield files to scan, preferring Git's own view of the tree.
+
+    In a checkout (or a linked worktree), `git ls-files` reports exactly
+    what the guard's docstring promises: tracked files regardless of
+    `.gitignore` (so a conflict marker committed under `target/` is still
+    caught) and untracked-but-unignored files (so an ignored generated
+    artifact under `results/` or `build/` is not). Gitlinks, deleted index
+    entries and symlinks are filtered out by the `isfile`/`islink` checks
+    below rather than read. Anything without a `.git` — an extracted
+    archive, a tarball in CI — falls back to the directory walk.
+    """
+    if os.path.lexists(os.path.join(root, ".git")):
+        try:
+            listed = subprocess.run(
+                ["git", "ls-files", "--cached", "--others",
+                 "--exclude-standard", "-z"], cwd=root,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                check=True, timeout=30,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            pass  # Preserve the old filesystem scan on enumeration failure.
+        else:
+            for rel in sorted(set(listed.split(b"\0")) - {b""}):
+                full = os.path.join(root, os.fsdecode(rel))
+                if os.path.isfile(full) and not os.path.islink(full):
+                    yield full
+            return
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for fn in filenames:
+            yield os.path.join(dirpath, fn)
+
+
 def scan(root):
     """Yield (relpath, line_no, line, kind) for every structural defect.
 
     `kind` is "marker" for a conflict block or "workflow" for a column-zero
     line that cannot parse as workflow YAML.
     """
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        for fn in filenames:
-            full = os.path.join(dirpath, fn)
-            if is_text_candidate(full):
-                for n, line in scan_file(full):
-                    yield os.path.relpath(full, root), n, line, "marker"
-            if _is_workflow(full):
-                for n, line in scan_workflow_file(full):
-                    yield os.path.relpath(full, root), n, line, "workflow"
+    for full in candidate_paths(root):
+        if is_text_candidate(full):
+            for n, line in scan_file(full):
+                yield os.path.relpath(full, root), n, line, "marker"
+        if _is_workflow(full):
+            for n, line in scan_workflow_file(full):
+                yield os.path.relpath(full, root), n, line, "workflow"
 
 
 def main():
