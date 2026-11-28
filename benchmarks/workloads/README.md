@@ -42,9 +42,13 @@ percentiles from the same window means inline.
 ## Running
 
 ```bash
-./run.sh
+bash run.sh
+# Also save load and alloc measurements for Go, Rust, and Hybrid:
+bash run.sh results.csv
 ```
 
 Output: one `workload p50=Xns p99=Yns mean=Zns n=N` line per twin, side by
 side. The Hybrid twins are also checker exercises at realistic scale — a
 workload that stops checking is a red build, not a benchmark.
+The optional CSV contains one row per language and workload, with p50,
+p99 and mean in nanoseconds and the measured window count in `n`.
