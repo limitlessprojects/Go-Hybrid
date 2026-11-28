@@ -730,6 +730,8 @@ struct Collector<'a> {
     kind_scopes: Vec<HashMap<String, OpKind>>,
     /// Parallel lexical scope stack tracking declared concrete type names (#2738).
     type_name_scopes: Vec<HashMap<String, String>>,
+    /// Parallel lexical scope stack tracking closure/fn parameter signatures (#4615).
+    fn_param_scopes: Vec<HashMap<String, Vec<(OpKind, Option<&'static str>, String)>>>,
     /// `set[T]` bindings -> their element type text (`"int"`), scoped like
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
@@ -810,6 +812,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
             type_name_scopes: Vec::new(),
+            fn_param_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
@@ -882,6 +885,7 @@ impl<'a> Collector<'a> {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
         self.type_name_scopes.push(HashMap::new());
+        self.fn_param_scopes.push(HashMap::new());
         self.scalar_scopes.push(HashMap::new());
         self.container_elem_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
@@ -892,6 +896,7 @@ impl<'a> Collector<'a> {
         self.scopes.pop();
         self.kind_scopes.pop();
         self.type_name_scopes.pop();
+        self.fn_param_scopes.pop();
         self.scalar_scopes.pop();
         self.container_elem_scopes.pop();
         self.set_elem_scopes.pop();
@@ -910,6 +915,23 @@ impl<'a> Collector<'a> {
         for layer in self.type_name_scopes.iter().rev() {
             if let Some(t) = layer.get(name) {
                 return Some(t.clone());
+            }
+        }
+        None
+    }
+
+    fn bind_fn_params(&mut self, name: &str, params: Vec<(OpKind, Option<&'static str>, String)>) {
+        if name != "_" {
+            if let Some(top) = self.fn_param_scopes.last_mut() {
+                top.insert(name.to_string(), params);
+            }
+        }
+    }
+
+    fn lookup_fn_params(&self, name: &str) -> Option<Vec<(OpKind, Option<&'static str>, String)>> {
+        for layer in self.fn_param_scopes.iter().rev() {
+            if let Some(p) = layer.get(name) {
+                return Some(p.clone());
             }
         }
         None
@@ -1021,6 +1043,9 @@ impl<'a> Collector<'a> {
             // know the new binding is a set record it via bind_set_elem.
             if let Some(top) = self.set_elem_scopes.last_mut() {
                 top.insert(name.to_string(), None);
+            }
+            if let Some(top) = self.fn_param_scopes.last_mut() {
+                top.remove(name);
             }
         }
     }
@@ -1995,6 +2020,19 @@ impl<'a> Collector<'a> {
             self.set_container_elem_scalar(&p.name, ces);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
             self.bind_type_name(&p.name, p.ty.render());
+            if let TypeExpr::Fn { params, .. } = &p.ty {
+                let pinfo = params
+                    .iter()
+                    .map(|param| {
+                        (
+                            self.kind_of_ty(&param.ty, 0),
+                            self.scalar_of_ty(&param.ty),
+                            param.ty.render(),
+                        )
+                    })
+                    .collect();
+                self.bind_fn_params(&p.name, pinfo);
+            }
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -2238,8 +2276,8 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        for ((((name, kind), scalar), set_elem), container_elem_scalar) in
-            l.names.iter().zip(kinds).zip(scalars).zip(set_elems).zip(container_elem_scalars)
+        for (i, ((((name, kind), scalar), set_elem), container_elem_scalar)) in
+            l.names.iter().zip(kinds).zip(scalars).zip(set_elems).zip(container_elem_scalars).enumerate()
         {
             // #1031: a same-scope `:=` re-define keeps the EXISTING variable
             // (and its type) in Go, so only a fresh binding takes the
@@ -2254,6 +2292,33 @@ impl<'a> Collector<'a> {
                 self.set_container_elem_scalar(name, container_elem_scalar);
             }
             self.bind_set_elem(name, set_elem);
+            if let Some(TypeExpr::Fn { params, .. }) = &l.ty {
+                let pinfo: Vec<(OpKind, Option<&'static str>, String)> = params
+                    .iter()
+                    .map(|p| {
+                        (
+                            self.kind_of_ty(&p.ty, 0),
+                            self.scalar_of_ty(&p.ty),
+                            p.ty.render(),
+                        )
+                    })
+                    .collect();
+                self.bind_fn_params(name, pinfo);
+            } else if let Some(val) = l.values.get(i).or_else(|| l.values.first()) {
+                if let Expr::FnLit { params, .. } = unwrap_parens(val) {
+                    let pinfo: Vec<(OpKind, Option<&'static str>, String)> = params
+                        .iter()
+                        .map(|p| {
+                            (
+                                self.param_kind(p, 0),
+                                self.scalar_of_ty(&p.ty),
+                                p.ty.render(),
+                            )
+                        })
+                        .collect();
+                    self.bind_fn_params(name, pinfo);
+                }
+            }
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -2634,6 +2699,20 @@ impl<'a> Collector<'a> {
                     Expr::Ident { name, .. } => {
                         self.check_user_fn_arity(name, args, *span);
                         self.check_user_fn_arg_types(name, args);
+                        if let Some(pinfo) = self.lookup_fn_params(name) {
+                            let want_len = pinfo.len();
+                            if want_len != args.len() {
+                                self.report_local_arity(name, want_len, args.len(), *span);
+                            } else {
+                                self.check_closure_call_params(name, &pinfo, args, *span);
+                            }
+                        } else if let Some(OpKind::Fn(_, Some(ref want))) = self.lookup_kind(name) {
+                            if want.len() != args.len() {
+                                self.report_local_arity(name, want.len(), args.len(), *span);
+                            } else {
+                                self.check_local_fn_kinds(name, want, args, *span);
+                            }
+                        }
                     }
                     Expr::Field { base, name, .. } => {
                         let bk = self.kind_of_expr(base);
@@ -3234,6 +3313,19 @@ impl<'a> Collector<'a> {
                     self.set_container_elem_scalar(&p.name, ces);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
                     self.bind_type_name(&p.name, p.ty.render());
+                    if let TypeExpr::Fn { params, .. } = &p.ty {
+                        let pinfo = params
+                            .iter()
+                            .map(|param| {
+                                (
+                                    self.kind_of_ty(&param.ty, 0),
+                                    self.scalar_of_ty(&param.ty),
+                                    param.ty.render(),
+                                )
+                            })
+                            .collect();
+                        self.bind_fn_params(&p.name, pinfo);
+                    }
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -5750,14 +5842,155 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let int_to_float_conflict = want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            let got_scalar = self.typed_value_scalar(&a.value);
+            let want_scalar = self.scalar_of_ty(&p.ty);
+            let scalar_mismatch = matches!(
+                (want_scalar, got_scalar),
+                (Some(w), Some(g)) if w != g
+            );
+            if kinds_conflict(&want, &got)
+                || int_to_float_conflict
+                || scalar_mismatch
+                || self.sized_array_names_differ(
+                    Some(p.ty.render().as_str()),
+                    self.typed_value_type_name(&a.value).as_deref(),
+                )
+            {
+                let got_label = got_scalar
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| got.label());
+                let want_label = want_scalar
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| p.ty.render());
                 self.emit_e1002(
                     a.value.span(),
                     format!(
                         "cannot use `{}` (value of type `{}`) as `{}` value in argument to func literal (HYB-E1002)",
                         a.value.render(),
-                        got.label(),
-                        want.label()
+                        got_label,
+                        want_label
+                    ),
+                    "argument types must match closure parameter types",
+                );
+            }
+        }
+    }
+
+    fn check_closure_call_params(
+        &mut self,
+        name: &str,
+        param_info: &[(OpKind, Option<&'static str>, String)],
+        args: &[CallArg],
+        span: Span,
+    ) {
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        let want = param_info.len();
+        let got = args.len();
+        if want != got {
+            self.report_local_arity(name, want, got, span);
+            return;
+        }
+        for ((want_kind, want_scalar, want_name), a) in param_info.iter().zip(args.iter()) {
+            if Checker::is_nil_literal(&a.value) && is_non_nilable(want_kind) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use nil as `{}` value in argument to `{}` (HYB-E1002)",
+                        want_name, name
+                    ),
+                    "argument types must match closure parameter types",
+                );
+                continue;
+            }
+            let got_kind = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = want_kind {
+                if !kinds_conflict(inner, &got_kind) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            let int_to_float_conflict = *want_kind == OpKind::Float
+                && got_kind == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            let got_scalar = self.typed_value_scalar(&a.value);
+            let scalar_mismatch = matches!(
+                (*want_scalar, got_scalar),
+                (Some(w), Some(g)) if w != g
+            );
+            if kinds_conflict(want_kind, &got_kind)
+                || int_to_float_conflict
+                || scalar_mismatch
+                || self.sized_array_names_differ(
+                    Some(want_name.as_str()),
+                    self.typed_value_type_name(&a.value).as_deref(),
+                )
+            {
+                let got_label = got_scalar
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| got_kind.label());
+                let want_label = want_scalar
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| want_name.clone());
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` (HYB-E1002)",
+                        a.value.render(),
+                        got_label,
+                        want_label,
+                        name
+                    ),
+                    "argument types must match closure parameter types",
+                );
+            }
+        }
+    }
+
+    fn check_local_fn_kinds(
+        &mut self,
+        name: &str,
+        want: &[OpKind],
+        args: &[CallArg],
+        _span: Span,
+    ) {
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        for (w, a) in want.iter().zip(args.iter()) {
+            if Checker::is_nil_literal(&a.value) && is_non_nilable(w) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use nil as `{}` value in argument to `{}` (HYB-E1002)",
+                        w.label(),
+                        name
+                    ),
+                    "argument types must match closure parameter types",
+                );
+                continue;
+            }
+            let got_kind = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = w {
+                if !kinds_conflict(inner, &got_kind) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            let int_to_float_conflict = *w == OpKind::Float
+                && got_kind == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            if kinds_conflict(w, &got_kind) || int_to_float_conflict {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` (HYB-E1002)",
+                        a.value.render(),
+                        got_kind.label(),
+                        w.label(),
+                        name
                     ),
                     "argument types must match closure parameter types",
                 );
@@ -8147,13 +8380,23 @@ impl<'a> Collector<'a> {
                 }
             }
             Expr::Ident { name, .. } => {
-                if let Some(k) = self.lookup_kind(name) {
+                if let Some(pinfo) = self.lookup_fn_params(name) {
+                    let want_len = pinfo.len();
+                    if want_len != args.len() {
+                        self.report_local_arity(name, want_len, args.len(), span);
+                    } else {
+                        self.check_closure_call_params(name, &pinfo, args, span);
+                    }
+                } else if let Some(k) = self.lookup_kind(name) {
                     match k {
                         // A local bound to a closure or fn-typed value carries
                         // its declared parameter count, so the call's arity is
                         // checkable (#577 C9).
                         OpKind::Fn(_, Some(ref want)) if want.len() != args.len() => {
                             self.report_local_arity(name, want.len(), args.len(), span)
+                        }
+                        OpKind::Fn(_, Some(ref want)) => {
+                            self.check_local_fn_kinds(name, want, args, span);
                         }
                         OpKind::Fn(..) | OpKind::Unknown => {}
                         _ => self.emit_e1002(
