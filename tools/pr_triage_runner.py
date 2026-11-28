@@ -38,10 +38,15 @@ from datetime import datetime, timezone
 
 REPO = "limitlessprojects/Go-Hybrid"
 TOKEN = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
-if not TOKEN:
-    sys.exit("GH_TOKEN missing")
 
 PROTECTED_LABELS = {"triage:wildcard-hold", "triage:pareto", "triage:keep"}
+NON_GATE_CHECKS = frozenset(
+    name.strip().lower()
+    for name in os.environ.get("TRIAGE_NON_GATE_CHECKS", "board").split(",")
+    if name.strip()
+)
+FAILING_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED", "ERROR"})
+PASSING_CONCLUSIONS = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
 MIN_AGE = float(os.environ.get("TRIAGE_MIN_AGE_DAYS", "5"))
 CONFLICT_IDLE = float(os.environ.get("TRIAGE_CONFLICT_IDLE_DAYS", "10"))
 REOPEN_WINDOW = float(os.environ.get("TRIAGE_REOPEN_WINDOW_DAYS", "5"))
@@ -163,15 +168,108 @@ def author_recently_active(number, author_login, days=3.0):
                 return True
     return False
 
+def effective_ci_rollup(pr, non_gate_checks=NON_GATE_CHECKS):
+    """Return (effective_state, failed_gate_concls) for a snapshot PR record.
+
+    If the snapshot includes per-check contexts under commits.nodes[0].commit.statusCheckRollup.contexts,
+    recompute gate-only CI status ignoring non-gate checks (e.g. `board`).
+    Otherwise trust `_ci_rollup` and `_suite_concls` already computed by queue_snapshot.py.
+    """
+    commits = ((pr.get("commits") or {}).get("nodes") or [])
+    rollup = ((commits[0].get("commit") or {}).get("statusCheckRollup")) if commits else None
+    contexts = (rollup.get("contexts") or {}).get("nodes") if isinstance(rollup, dict) else None
+    if contexts is None:
+        return (pr.get("_ci_rollup") or "NONE").upper(), dict(pr.get("_suite_concls") or {})
+
+    gate_states = []
+    failed = {}
+    for node in contexts:
+        if not isinstance(node, dict):
+            continue
+        typename = node.get("__typename")
+        if typename == "StatusContext" or ("context" in node and "name" not in node):
+            name = (node.get("context") or "").strip()
+            state = (node.get("state") or "").upper()
+            if name.lower() in non_gate_checks:
+                continue
+            if state in ("FAILURE", "ERROR"):
+                gate_states.append("FAILURE")
+                failed[name or "status"] = state
+            elif state in ("PENDING", "EXPECTED"):
+                gate_states.append("PENDING")
+            elif state == "SUCCESS":
+                gate_states.append("SUCCESS")
+        else:
+            name = (node.get("name") or "").strip()
+            status = (node.get("status") or "").upper()
+            concl = (node.get("conclusion") or "").upper()
+            if name.lower() in non_gate_checks:
+                continue
+            if status and status != "COMPLETED":
+                gate_states.append("PENDING")
+            elif concl in FAILING_CONCLUSIONS:
+                gate_states.append("FAILURE")
+                failed[name or "check"] = concl
+            elif concl == "CANCELLED":
+                gate_states.append("CANCELLED")
+                failed[name or "check"] = concl
+            elif concl in PASSING_CONCLUSIONS:
+                gate_states.append("SUCCESS")
+            elif concl:
+                gate_states.append("PENDING")
+
+    if not gate_states:
+        return "NONE", {}
+    if "FAILURE" in gate_states:
+        return "FAILURE", failed
+    if "PENDING" in gate_states:
+        return "PENDING", failed
+    if "CANCELLED" in gate_states:
+        return "CANCELLED", failed
+    return "SUCCESS", {}
+
+
+def live_gate_check_failure(number, non_gate_checks=NON_GATE_CHECKS):
+    """Live REST verification before closing a PR for `ci-failure`.
+
+    Returns (has_real_gate_failure, failed_gate_concls). Fails open (False, {})
+    if the PR or check-runs cannot be fetched, or if every failing/cancelled
+    check-run belongs to `non_gate_checks` (such as `board`).
+    """
+    st, pr_live = rest(f"/repos/{REPO}/pulls/{number}")
+    if st != 200 or not pr_live:
+        return False, {}
+    head_sha = (pr_live.get("head") or {}).get("sha")
+    if not head_sha:
+        return False, {}
+    st2, cr = rest(f"/repos/{REPO}/commits/{head_sha}/check-runs?per_page=100")
+    if st2 != 200 or not isinstance(cr, dict):
+        return False, {}
+    runs = cr.get("check_runs") or []
+    failed = {}
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        name = (run.get("name") or "").strip()
+        if name.lower() in non_gate_checks:
+            continue
+        status = (run.get("status") or "").upper()
+        concl = (run.get("conclusion") or "").upper()
+        if status == "COMPLETED" and concl in FAILING_CONCLUSIONS:
+            failed[name or "check"] = concl
+    return bool(failed), failed
+
+
 def reply_for(pr, evidence, extra=""):
-    age = pr["_age_days"]; ci = pr["_ci_rollup"]
+    age = pr["_age_days"]; ci, failed_concls = effective_ci_rollup(pr)
     lines = [
         f"**Automated triage tick (quality-first, deliberate close).**",
         f"",
         f"This PR has been open {age:.0f} days and currently cannot be reviewed for landing:",
     ]
     if "ci-failure" in evidence:
-        concl = ", ".join(f"{k}×{v}" for k, v in pr["_suite_concls"].items() if k and k != "SUCCESS") or "CI FAILURE"
+        concl_map = failed_concls or pr.get("_suite_concls") or {}
+        concl = ", ".join(f"{k}={v}" for k, v in concl_map.items() if k and v != "SUCCESS") or "CI FAILURE"
         lines.append(f"- CI on the head commit is red: rollup **{ci}** ({concl}).")
     if "conflicts" in evidence:
         lines.append(f"- The branch no longer merges cleanly into `main` (merge state: **CONFLICTING**) and has been idle {pr['_idle_days']:.0f} days without a rebase.")
@@ -197,8 +295,9 @@ def decide(pr):
     # Wildcard-experiment submissions are never swept (M1 doctrine); some
     # never received the hold label — catch them by title, flag for review.
     if "wildcard" in title: return "skip", [], ""
-    if pr["_age_days"] < MIN_AGE: return "skip", [], []
-    ci = pr["_ci_rollup"]; mergeable = pr.get("mergeable"); idle = pr["_idle_days"]
+    if pr["_age_days"] < MIN_AGE: return "skip", [], ""
+    ci, _ = effective_ci_rollup(pr)
+    mergeable = pr.get("mergeable"); idle = pr["_idle_days"]
     evidence = []
     if ci == "FAILURE": evidence.append("ci-failure")
     if mergeable == "CONFLICTING" and idle >= CONFLICT_IDLE: evidence.append("conflicts")
@@ -206,7 +305,28 @@ def decide(pr):
         return "skip", [], ""
     return "close", evidence, ""
 
+
+def is_land_candidate(pr):
+    """True if real CI gates are green, PR is mergeable, and not protected."""
+    if set(pr.get("_labels") or []) & PROTECTED_LABELS:
+        return False
+    if int(pr["number"]) in config_protected():
+        return False
+    ci, _ = effective_ci_rollup(pr)
+    if ci != "SUCCESS":
+        return False
+    merge_state = pr.get("mergeStateStatus")
+    if merge_state == "CLEAN":
+        return True
+    # When GitHub marks mergeStateStatus=UNSTABLE solely because a non-gate
+    # check (e.g. `board`) failed or was cancelled, the PR is still a clean
+    # land candidate if mergeable=MERGEABLE and all gate checks succeeded.
+    return merge_state == "UNSTABLE" and pr.get("mergeable") == "MERGEABLE"
+
+
 def main():
+    if not TOKEN:
+        sys.exit("GH_TOKEN missing")
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true", default=not "--execute" in sys.argv)
     ap.add_argument("--execute", action="store_true")
@@ -230,12 +350,9 @@ def main():
     decisions.sort(key=lambda d: -d[0]["_age_days"])
     all_closes = [(p, ev) for p, a, ev, _ in decisions if a == "close"]
     closes = all_closes[: args.max]
-    # Land candidates for the next landing session: green CI, clean merge state,
+    # Land candidates for the next landing session: green gate CI, mergeable,
     # unprotected — surfaced, never closed.
-    land_cands = [p for p in prs
-                  if p["_ci_rollup"] == "SUCCESS" and p.get("mergeStateStatus") == "CLEAN"
-                  and not (set(p["_labels"]) & PROTECTED_LABELS)
-                  and int(p["number"]) not in config_protected()]
+    land_cands = [p for p in prs if is_land_candidate(p)]
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "land_candidates.json"), "w") as f:
         json.dump([{"number": p["number"], "title": p["title"], "age_days": p["_age_days"],
                     "author": (p.get("author") or {}).get("login")} for p in land_cands], f, indent=1)
@@ -264,16 +381,26 @@ def main():
         if author and author_recently_active(num, author):
             print(f"  #{num} author active in last 3d -> survive (respect ongoing work)")
             summary["closes"].append({"number": num, "evidence": ev, "skipped": "author-active"}); continue
-        body = reply_for(p, ev)
-        print(f"  #{num} CLOSE not_planned ev={ev} age={p['_age_days']}d idle={p['_idle_days']}d ci={p['_ci_rollup']} | {p['title'][:55]}")
+        live_ev = list(ev)
+        if "ci-failure" in live_ev:
+            gate_failed, failed_concls = live_gate_check_failure(num)
+            if not gate_failed:
+                live_ev = [e for e in live_ev if e != "ci-failure"]
+                if not live_ev:
+                    print(f"  #{num} live check-runs green on all gates (only non-gate checks failed) -> survive")
+                    summary["closes"].append({"number": num, "evidence": ev, "skipped": "non-gate-ci-only"}); continue
+            else:
+                p["_suite_concls"] = failed_concls
+        body = reply_for(p, live_ev)
+        print(f"  #{num} CLOSE not_planned ev={live_ev} age={p['_age_days']}d idle={p['_idle_days']}d ci={p['_ci_rollup']} | {p['title'][:55]}")
         if args.dry:
-            summary["closes"].append({"number": num, "evidence": ev, "dry": True}); acted += 1; continue
+            summary["closes"].append({"number": num, "evidence": live_ev, "dry": True}); acted += 1; continue
         st, _ = rest(f"/repos/{REPO}/issues/{num}/comments", "POST", {"body": body})
         # state_reason lives on the Issues API, not the pulls API
         st2, _ = rest(f"/repos/{REPO}/issues/{num}", "PATCH", {"state": "closed", "state_reason": "not_planned"})
         ok = st == 201 and st2 == 200
         if ok: acted += 1
-        summary["closes"].append({"number": num, "evidence": ev, "ok": ok, "http": (st, st2)})
+        summary["closes"].append({"number": num, "evidence": live_ev, "ok": ok, "http": (st, st2)})
         print(f"     reply={st} close={st2}")
         time.sleep(1.2)
 

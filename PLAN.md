@@ -1,3 +1,7 @@
+## Contributor follow-up — 2026-11-27, #4608 / PR #4609
+
+Merged current main 67ba97f5 into the existing PR, retaining its REST mergeability refresh, configuration protection and GITHUB_TOKEN fallback. Kept gate-only CI selection and the live pre-close guard; REST null mergeability stays UNKNOWN. All 560 top-level tools tests, the 22 queue tests, 51 registration tests, 12 triage-target tests and registration/conflict guards passed on Linux. Compiler code unchanged; hosted CI and maintainer review remain pending.
+
 # Hybrid Language: Development Plan
 
 ## Contributor validation — triage board target (2026-11-06)
