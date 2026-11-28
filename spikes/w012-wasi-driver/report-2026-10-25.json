@@ -1,0 +1,1262 @@
+{
+  "commit": "20423c5",
+  "machine": "go go1.26.0 on linux/amd64, GOMAXPROCS=4, 4 cpu",
+  "cold_compile_ms": 968.256,
+  "wasm_bytes": 2389305,
+  "parity_files": 127,
+  "bench_files": 25,
+  "parity": [
+    {
+      "file": "01-shared-map-across-tasks.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3001@77:9]",
+      "in_process": "reject managed=false [HYB-E3001@77:9]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "02-shared-map-managed.hy",
+      "expected": "accept+managed",
+      "native": "accept managed=true [HYB-E8001@76:13]",
+      "in_process": "accept managed=true [HYB-E8001@76:13]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "03-pool-shared-struct-unguarded.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3001@82:9]",
+      "in_process": "reject managed=false [HYB-E3001@82:9]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "04-pool-shared-struct-mutex.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3001@91:9]",
+      "in_process": "reject managed=false [HYB-E3001@91:9]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "05-sender-uses-after-move-send.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@71:5]",
+      "in_process": "reject managed=false [HYB-E3003@71:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "06-borrow-returned-from-fn.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3104@55:12]",
+      "in_process": "reject managed=false [HYB-E3104@55:12]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "07-a2-mutate-during-handle-loan.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3101@46:13]",
+      "in_process": "reject managed=false [HYB-E3101@46:13]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "08-a3-map-slot-invalidated.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3102@56:5]",
+      "in_process": "reject managed=false [HYB-E3102@56:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "09-a3-map-slot-valid.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "10-a5-http-handler-capture.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "11-a6-borrow-in-struct-field.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3103@47:11 HYB-E3103@54:9]",
+      "in_process": "reject managed=false [HYB-E3103@47:11 HYB-E3103@54:9]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "12-a7-borrow-by-default.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "13-a7-own-transfer-at-return.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "14-a7-use-after-consuming.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@61:5]",
+      "in_process": "reject managed=false [HYB-E3003@61:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "15-fanin-per-task-state.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "16-move-send-clean.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "17-atomic-channel-immutable.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "18-pool-shared-struct-managed.hy",
+      "expected": "accept+managed",
+      "native": "accept managed=true [HYB-E8001@86:13]",
+      "in_process": "accept managed=true [HYB-E8001@86:13]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "19-freeze-read-through-moved-binding.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@78:14]",
+      "in_process": "reject managed=false [HYB-E3003@78:14]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "20-freeze-alias-write.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@73:5]",
+      "in_process": "reject managed=false [HYB-E3003@73:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "21-let-shared-map-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3001@42:5]",
+      "in_process": "reject managed=false [HYB-E3001@42:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "22-a1c-mapslot-loan-at-spawn.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3001@92:5]",
+      "in_process": "reject managed=false [HYB-E3001@92:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "23-a1c-mapslot-copy-at-spawn.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "24-shadow-scope-map-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3001@48:5]",
+      "in_process": "reject managed=false [HYB-E3001@48:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "25-o40-spawn-callee-proof.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1001@50:10 HYB-E3001@49:5 HYB-E3005@50:5]",
+      "in_process": "reject managed=false [HYB-E1001@50:10 HYB-E3001@49:5 HYB-E3005@50:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "26-call-return-alias-freeze.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@65:5]",
+      "in_process": "reject managed=false [HYB-E3003@65:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "27-const-write-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3006@44:9 HYB-E3006@54:5]",
+      "in_process": "reject managed=false [HYB-E3006@44:9 HYB-E3006@54:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "28-composite-nil-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3001@34:3 HYB-E4001@33:15]",
+      "in_process": "reject managed=false [HYB-E3001@34:3 HYB-E4001@33:15]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "29-struct-param-share-move-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3004@56:17]",
+      "in_process": "reject managed=false [HYB-E3004@56:17]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "30-array-param-share-move-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3004@45:18]",
+      "in_process": "reject managed=false [HYB-E3004@45:18]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "31-generic-call-return-alias-freeze.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@80:5]",
+      "in_process": "reject managed=false [HYB-E3003@80:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "32-select-send-shared-map.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3002@15:9]",
+      "in_process": "reject managed=false [HYB-E3002@15:9]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "33-select-send-safe-values.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "34-select-send-unproven-name.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1001@14:16 HYB-E3005@14:9]",
+      "in_process": "reject managed=false [HYB-E1001@14:16 HYB-E3005@14:9]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "35-default-fallback.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "36-closure-capture-move.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@41:9 HYB-E3003@46:5]",
+      "in_process": "reject managed=false [HYB-E3003@41:9 HYB-E3003@46:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "37-a3-interproc-window.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3102@51:5]",
+      "in_process": "reject managed=false [HYB-E3102@51:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "38-const-closure-alias-write-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3006@52:9 HYB-E3006@60:9 HYB-E3006@64:5 HYB-E3006@65:12 HYB-E3006@67:16 HYB-E3006@67:16]",
+      "in_process": "reject managed=false [HYB-E3006@52:9 HYB-E3006@60:9 HYB-E3006@64:5 HYB-E3006@65:12 HYB-E3006@67:16 HYB-E3006@67:16]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "39-closure-local-alias-move-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3004@34:21]",
+      "in_process": "reject managed=false [HYB-E3004@34:21]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "40-wrapper-alias-freeze.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@75:5]",
+      "in_process": "reject managed=false [HYB-E3003@75:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "41-wrapper-alias-own-move-control.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "42-a3-assign-map-slot-invalidated.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3102@37:5]",
+      "in_process": "reject managed=false [HYB-E3102@37:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "43-copy-ref-element-alias-freeze.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@54:5]",
+      "in_process": "reject managed=false [HYB-E3003@54:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "44-copy-primitive-element-control.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "45-composite-literal-embeds-shared-map.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3001@87:5]",
+      "in_process": "reject managed=false [HYB-E3001@87:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "46-unused-define-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@10:5]",
+      "in_process": "reject managed=false [HYB-E1002@10:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "47-unused-import-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@8:1]",
+      "in_process": "reject managed=false [HYB-E1002@8:1]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "48-repeated-define-name-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@8:5]",
+      "in_process": "reject managed=false [HYB-E1002@8:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "49-blank-define-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@9:5]",
+      "in_process": "reject managed=false [HYB-E1002@9:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "50-move-closure-container-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3001@40:5 HYB-E3003@38:25 HYB-E3003@41:24 HYB-E3003@43:23]",
+      "in_process": "reject managed=false [HYB-E3001@40:5 HYB-E3003@38:25 HYB-E3003@41:24 HYB-E3003@43:23]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "51-make-slice-cap.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "52-shadow-predeclared-struct-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3001@36:5 HYB-E3001@37:5]",
+      "in_process": "reject managed=false [HYB-E3001@36:5 HYB-E3001@37:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "53-array-slice-backing-freeze.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@33:5]",
+      "in_process": "reject managed=false [HYB-E3003@33:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "54-field-store-alias-at-spawn.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@48:5]",
+      "in_process": "reject managed=false [HYB-E3003@48:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "55-field-store-fresh-at-spawn.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "56-defer-live-reference-at-spawn.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@46:18]",
+      "in_process": "reject managed=false [HYB-E3003@46:18]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "57-defer-live-reference-at-send.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@36:18]",
+      "in_process": "reject managed=false [HYB-E3003@36:18]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "58-defer-live-reference-via-alias.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@40:18]",
+      "in_process": "reject managed=false [HYB-E3003@40:18]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "59-rebind-forgets-defer-capture.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@45:18]",
+      "in_process": "reject managed=false [HYB-E3003@45:18]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "60-rebind-without-defer-control.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "61-string-escape-fail-closed.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E0002@32:12]",
+      "in_process": "reject managed=false [HYB-E0002@32:12]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "62-shadowing-binder-last-use.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "63-shadowing-binders-at-spawn.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "64-send-composite-literal-embeds-shared-map.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3002@69:5]",
+      "in_process": "reject managed=false [HYB-E3002@69:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "65-addr-of-call-alias-at-spawn.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@49:5]",
+      "in_process": "reject managed=false [HYB-E3003@49:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "66-addr-of-call-read-control.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "67-adversarial-race-spawn.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3001@38:5]",
+      "in_process": "reject managed=false [HYB-E3001@38:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "78-shadowed-unused-import-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@7:1]",
+      "in_process": "reject managed=false [HYB-E1002@7:1]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "any-arithmetic-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@32:10]",
+      "in_process": "reject managed=false [HYB-E1002@32:10]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "any-call-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@32:10]",
+      "in_process": "reject managed=false [HYB-E1002@32:10]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "any-erasure-primitive-control.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "any-erasure-shared-map-at-spawn.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3001@41:5]",
+      "in_process": "reject managed=false [HYB-E3001@41:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "any-field-access-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@35:10]",
+      "in_process": "reject managed=false [HYB-E1002@35:10]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "any-index-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@32:10]",
+      "in_process": "reject managed=false [HYB-E1002@32:10]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "any-operations-controls-accept.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "append-element-type-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@32:23]",
+      "in_process": "reject managed=false [HYB-E1002@32:23]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "append-spare-capacity-backing-alias.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@44:5]",
+      "in_process": "reject managed=false [HYB-E3003@44:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "array-const-index-assign-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@41:7]",
+      "in_process": "reject managed=false [HYB-E1002@41:7]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "array-const-index-past-length-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@43:21]",
+      "in_process": "reject managed=false [HYB-E1002@43:21]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "atomic-pointer-fail-closed-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3005@73:5]",
+      "in_process": "reject managed=false [HYB-E3005@73:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "call-and-return-controls-accept.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "call-arity-mismatch-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@38:10]",
+      "in_process": "reject managed=false [HYB-E1002@38:10]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "chan-map-aliased-at-send.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3002@39:5]",
+      "in_process": "reject managed=false [HYB-E3002@39:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "chan-of-closure-at-send.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3002@39:5]",
+      "in_process": "reject managed=false [HYB-E3002@39:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "chan-slice-aliased-at-send.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3002@44:5]",
+      "in_process": "reject managed=false [HYB-E3002@44:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "chan-slice-fresh-control.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "const-zero-divisor-const-forms-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E6001@33:10 HYB-E6001@34:9 HYB-E6001@35:10 HYB-E6001@36:12]",
+      "in_process": "reject managed=false [HYB-E6001@33:10 HYB-E6001@34:9 HYB-E6001@35:10 HYB-E6001@36:12]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "control-composite-literal-in-range.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "control-const-expr-within-range.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "control-int8-boundaries.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "control-large-array-length.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "control-negate-variable-wraps.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "control-slice-index-past-length.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "control-uint8-max.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "conversion-arity-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@33:10]",
+      "in_process": "reject managed=false [HYB-E1002@33:10]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "deep-composite-move-fresh-control.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "deep-composite-move-shared-at-spawn.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@55:5]",
+      "in_process": "reject managed=false [HYB-E3003@55:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "defer-arity-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@35:11 HYB-E1002@35:5]",
+      "in_process": "reject managed=false [HYB-E1002@35:11 HYB-E1002@35:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "field-assign-wrong-type-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@37:5]",
+      "in_process": "reject managed=false [HYB-E1002@37:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "map-elem-fresh-map-control.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "map-elem-map-alias-at-spawn.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@57:5]",
+      "in_process": "reject managed=false [HYB-E3003@57:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "map-slot-borrow-callarg-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3104@60:11]",
+      "in_process": "reject managed=false [HYB-E3104@60:11]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "map-slot-borrow-paths-accept.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "member-defer-and-append-controls-accept.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "multivalue-and-void-controls-accept.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "multivalue-arg-arity-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@46:5]",
+      "in_process": "reject managed=false [HYB-E1002@46:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "multivalue-bind-source-count-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E2002@35:5 HYB-E2002@41:5 HYB-E2002@47:5]",
+      "in_process": "reject managed=false [HYB-E2002@35:5 HYB-E2002@41:5 HYB-E2002@47:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "multivalue-in-single-value-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@44:10 HYB-E2002@44:10]",
+      "in_process": "reject managed=false [HYB-E1002@44:10 HYB-E2002@44:10]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "n5-zero-map-first-write.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "parallel-bind-count-and-decl-type-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@32:5 HYB-E1002@37:5 HYB-E1002@41:5 HYB-E1002@44:5 HYB-E1002@49:12 HYB-E1002@49:15]",
+      "in_process": "reject managed=false [HYB-E1002@32:5 HYB-E1002@37:5 HYB-E1002@41:5 HYB-E1002@44:5 HYB-E1002@49:12 HYB-E1002@49:15]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "ptr-to-map-at-spawn.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3001@45:5]",
+      "in_process": "reject managed=false [HYB-E3001@45:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "range-bound-type-forms-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E2009@30:17 HYB-E2009@31:17 HYB-E2009@32:17 HYB-E2009@35:14 HYB-E2009@39:14 HYB-E2009@41:17]",
+      "in_process": "reject managed=false [HYB-E2009@30:17 HYB-E2009@31:17 HYB-E2009@32:17 HYB-E2009@35:14 HYB-E2009@39:14 HYB-E2009@41:17]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "return-type-mismatch-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@41:13]",
+      "in_process": "reject managed=false [HYB-E1002@41:13]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "return-value-count-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@36:5]",
+      "in_process": "reject managed=false [HYB-E1002@36:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "select-two-recv-define-arms-accept.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "slice-elem-map-alias-at-spawn.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@41:5]",
+      "in_process": "reject managed=false [HYB-E3003@41:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "struct-and-conversion-controls-accept.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "struct-field-slice-elem-alias.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E3003@45:5]",
+      "in_process": "reject managed=false [HYB-E3003@45:5]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "struct-literal-unknown-field-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@37:12]",
+      "in_process": "reject managed=false [HYB-E1002@37:12]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "type-name-in-value-position-controls-accept.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "type-name-in-value-position-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@51:12 HYB-E1002@55:10 HYB-E1002@55:5 HYB-E1002@56:15 HYB-E1002@57:10 HYB-E1002@58:10 HYB-E1002@59:10]",
+      "in_process": "reject managed=false [HYB-E1002@51:12 HYB-E1002@55:10 HYB-E1002@55:5 HYB-E1002@56:15 HYB-E1002@57:10 HYB-E1002@58:10 HYB-E1002@59:10]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "typed-const-assign-overflow-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E6002@44:9]",
+      "in_process": "reject managed=false [HYB-E6002@44:9]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "typed-const-expression-controls-accept.hy",
+      "expected": "accept",
+      "native": "accept managed=false []",
+      "in_process": "accept managed=false []",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "typed-const-expression-overflow-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E6002@35:10 HYB-E6002@36:10 HYB-E6002@37:10 HYB-E6002@38:10 HYB-E6002@39:10 HYB-E6002@40:10 HYB-E6002@41:10 HYB-E6002@41:10 HYB-E6002@42:10]",
+      "in_process": "reject managed=false [HYB-E6002@35:10 HYB-E6002@36:10 HYB-E6002@37:10 HYB-E6002@38:10 HYB-E6002@39:10 HYB-E6002@40:10 HYB-E6002@41:10 HYB-E6002@41:10 HYB-E6002@42:10]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "undefined-member-call-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@42:10]",
+      "in_process": "reject managed=false [HYB-E1002@42:10]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "untyped-nil-decl-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E4003@35:9]",
+      "in_process": "reject managed=false [HYB-E4003@35:9]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    },
+    {
+      "file": "void-as-value-reject.hy",
+      "expected": "reject",
+      "native": "reject managed=false [HYB-E1002@43:10]",
+      "in_process": "reject managed=false [HYB-E1002@43:10]",
+      "native_matches_corpus": true,
+      "in_process_matches_corpus": true,
+      "engines_agree": true
+    }
+  ],
+  "parity_native_ok": 127,
+  "parity_in_process_ok": 127,
+  "parity_engines_agree": 127,
+  "bench": [
+    {
+      "Engine": "native-subprocess",
+      "Reps": [
+        {
+          "n": 100,
+          "p50_ms": 1.468,
+          "p90_ms": 1.858,
+          "p99_ms": 2.684,
+          "min_ms": 1.048,
+          "max_ms": 3.059,
+          "mean_ms": 1.511
+        },
+        {
+          "n": 100,
+          "p50_ms": 1.563,
+          "p90_ms": 1.976,
+          "p99_ms": 2.448,
+          "min_ms": 1.076,
+          "max_ms": 2.861,
+          "mean_ms": 1.597
+        },
+        {
+          "n": 100,
+          "p50_ms": 1.563,
+          "p90_ms": 2.072,
+          "p99_ms": 2.609,
+          "min_ms": 1.038,
+          "max_ms": 3.319,
+          "mean_ms": 1.623
+        }
+      ],
+      "All": {
+        "n": 300,
+        "p50_ms": 1.528,
+        "p90_ms": 1.973,
+        "p99_ms": 2.684,
+        "min_ms": 1.038,
+        "max_ms": 3.319,
+        "mean_ms": 1.577
+      },
+      "Floor": {
+        "n": 30,
+        "p50_ms": 0.912,
+        "p90_ms": 1.073,
+        "p99_ms": 1.832,
+        "min_ms": 0.812,
+        "max_ms": 1.832,
+        "mean_ms": 0.969
+      },
+      "Drift": 0,
+      "Errs": 0
+    },
+    {
+      "Engine": "in-process-wasi",
+      "Reps": [
+        {
+          "n": 100,
+          "p50_ms": 1.649,
+          "p90_ms": 3.354,
+          "p99_ms": 13.772,
+          "min_ms": 0.503,
+          "max_ms": 13.912,
+          "mean_ms": 2.224
+        },
+        {
+          "n": 100,
+          "p50_ms": 1.63,
+          "p90_ms": 6.107,
+          "p99_ms": 10.51,
+          "min_ms": 0.336,
+          "max_ms": 12.476,
+          "mean_ms": 2.604
+        },
+        {
+          "n": 100,
+          "p50_ms": 1.394,
+          "p90_ms": 3.608,
+          "p99_ms": 8.658,
+          "min_ms": 0.299,
+          "max_ms": 10.738,
+          "mean_ms": 1.937
+        }
+      ],
+      "All": {
+        "n": 300,
+        "p50_ms": 1.578,
+        "p90_ms": 4.398,
+        "p99_ms": 10.738,
+        "min_ms": 0.299,
+        "max_ms": 13.912,
+        "mean_ms": 2.255
+      },
+      "Floor": {
+        "n": 30,
+        "p50_ms": 0.184,
+        "p90_ms": 0.865,
+        "p99_ms": 3.226,
+        "min_ms": 0.1,
+        "max_ms": 3.226,
+        "mean_ms": 0.458
+      },
+      "Drift": 0,
+      "Errs": 0
+    }
+  ]
+}
