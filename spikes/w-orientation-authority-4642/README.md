@@ -15,6 +15,7 @@ and tests each one separately.
 | Runtime authority | `orientation_authority.py` | `Turn` witness carrying (mesh, epoch, ordered triple, coordinate digest); `Mesh.commit` is the only write path and checks all four |
 | Static authority | `witness_checker.py` | the rule as an indexed type checked intraprocedurally over a tiny Hybrid-shaped IR, including witnesses that cross helper boundaries |
 | Cases | `cases/*.hyc` | ten labelled programs, four of them positive controls |
+| Opaque-API control | `go-control/` | the proposal's own drop condition: a plain Go library with an unforgeable witness, measured end to end |
 | Measurements | `measure.py` | every number quoted in RESULTS.md |
 
 ## Reproduction
@@ -22,9 +23,14 @@ and tests each one separately.
 ```bash
 python3 -m unittest discover -s spikes/w-orientation-authority-4642/tests -p "test_*.py" -v
 python3 spikes/w-orientation-authority-4642/measure.py
+
+cd spikes/w-orientation-authority-4642/go-control
+go test ./...
+go test ./mesh -run XXX -bench . -benchmem
 ```
 
-Python 3.10+, standard library only. No toolchain, no network, no compiler crate.
+Python 3.10+, standard library only. The Go module is dependency-free (`go 1.22` directive);
+any modern toolchain builds it. No network, no compiler crate.
 
 ## The rule, in one table
 
@@ -46,5 +52,8 @@ Python 3.10+, standard library only. No toolchain, no network, no compiler crate
 - The static rule needs *dependent* return indices on witness-returning helpers, and a
   new effect check for helpers that `edit` a mesh they were handed (`HYB-E4647`). Neither
   is in the proposal; the second one is a soundness hole in it.
-- The proposal's own drop condition — an opaque Go API with the same guarantees — was
-  **not** tested here and remains the deciding experiment.
+- The proposal's own drop condition now has a measured answer: a plain Go library
+  (`go-control/`) reproduces the runtime guarantee with no caller bookkeeping, at ~380 ns
+  per commit (94% of it a SHA-256 digest). What it cannot reproduce is the compile-time
+  half. That narrows the feature's justification to "static, and closed under code written
+  later" — an argument about enforceability, not expressiveness.

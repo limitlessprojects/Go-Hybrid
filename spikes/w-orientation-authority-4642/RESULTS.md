@@ -131,11 +131,9 @@ a one-level transitive effect walk.
 - **No control flow, loops, generics, method receivers, closures, or `managed` blocks.**
   A `managed("...", "other")` block around the write is a permitted bypass under the
   current GUARANTEES row 8 — the rule as modelled would not see it.
-- **No comparison against an opaque Go API.** The proposal's own drop condition is "if an
-  ordinary opaque Go API gives the same guarantees at the same boundaries without
-  recomputation or caller bookkeeping, drop the feature". That experiment needs a Go
-  build of both variants and was not run. **It remains the open question**, and it is the
-  one I would fund next: it is the only measurement that can decide the proposal.
+- **The opaque-Go-API control is in section 8.** The proposal's own drop condition is now
+  measured: a plain Go library reproduces the runtime guarantee. What it cannot reproduce
+  is the compile-time half.
 - **No soundness proof.** Indexed types over a real language need a progress/preservation
   argument; this is a prototype checker with tests, nothing more.
 
@@ -149,13 +147,89 @@ a one-level transitive effect walk.
 | Witness mint (with digest) | 7.1 µs on CPython; dominated by hashing |
 | Checker | 35.2 µs/case mean, no fixpoint |
 | New diagnostics | 5 codes (`E4642`–`E4647`) |
+| Go opaque API, full gate (section 8) | 380 ns/commit, 0 allocs; 21 ns without the digest |
 
 ## 7. Verdict for the ledger
 
 **Feasible, cheap at runtime, and more expensive at the type level than the proposal
-implies.** The numeric half reproduces exactly and the runtime gate catches every control
-once a coordinate digest is added. The language half is implementable but requires
-dependent indices on witness-returning helpers and an effect check for callees that edit a
-mesh they were handed — neither is in the proposal's design, and the second is a
-soundness hole in it. The deciding experiment (opaque Go API with the same guarantees)
-was not run and is the thing to do next.
+implies — and the proposal's own drop condition fires.** The numeric half reproduces
+exactly and the runtime gate catches every control once a coordinate digest is added. The
+language half is implementable but requires dependent indices on witness-returning helpers
+and an effect check for callees that edit a mesh they were handed — neither is in the
+proposal's design, and the second is a soundness hole in it. Section 8 then shows that a
+plain Go library already delivers the runtime guarantee with no caller bookkeeping, which
+leaves the feature's justification resting on the compile-time claim alone.
+
+## 8. The opaque Go API control — the proposal's own drop condition
+
+The proposal's falsification milestone ends with: *"If an ordinary opaque Go API gives the
+same guarantees at the same boundaries without recomputation or caller bookkeeping, I would
+drop the language feature."* That API exists, so it was written and measured.
+
+`go-control/` is a two-package Go module (no dependencies, `go 1.22` directive):
+
+- `mesh` — the opaque API. `Mesh`'s coordinate slice is unexported; `Observe` returns a
+  `Turn` whose every field is unexported and whose validity depends on a package-held mint
+  capability; `Insert` is the only write path and checks identity, epoch, ordered triple
+  and a digest of the classified coordinates.
+- `naive` — the sign-only control: same exact predicate, returns a bare `int8`, applies
+  whatever it is told.
+
+| Control (same four as section 3) | Opaque API | Sign-only |
+|---|---|---|
+| wrong vertex order | `ErrTriple` | applied |
+| coordinate edit (epoch bump) | `ErrEpoch` | applied |
+| other mesh at the same epoch | `ErrMesh` | applied |
+| witness through a helper, reused for another triple | `ErrTriple` | applied |
+| zero-value `Turn{}` (forgery) | `ErrForged` | n/a |
+| coordinate write behind the epoch counter (in-package) | `ErrCoords` | n/a |
+
+No caller bookkeeping: the caller holds a value and passes it. No recomputation: `Insert`
+never re-runs the predicate, it compares a 128-bit digest. The guarantee is identical to
+the modelled language rule at every boundary the rule covers — but it is a **runtime**
+rejection, not a compile-time one.
+
+### Cost, measured
+
+`go1.27.4 windows/amd64`, i5-1035G4 @ 1.10 GHz, `-benchmem`, median of 3 runs, 0 allocs
+across the board:
+
+| Operation | ns/op |
+|---|---:|
+| naive float64 sign (`mesh.Sign`) | 1.0 |
+| exact predicate, unit-determinant family (`classify`) | 74 |
+| unchecked write (`m.epoch++`) | 7 |
+| insert, epoch/triple/mesh checks only | 21 |
+| insert, full gate with 128-bit digest | 380 |
+| observe (predicate + digest + binding) | 480–553 |
+
+Two things follow. The **authority checks themselves are ~21 ns** — about 3x an unchecked
+write, which is noise in any real mesh edit. The **digest is 360 ns, i.e. 94% of the gate**,
+and it is the part that makes the API's guarantee survive a write that bypasses the epoch
+counter. SHA-256 over 48 bytes is the wrong primitive for this: an ordered per-triple
+version stamp, or a 64-bit multiply-mix over the three coordinates, would keep the same
+property for a few nanoseconds. That optimisation is not measured here and would be the
+first thing to fix if the API route were chosen.
+
+### What the delta actually is
+
+The Go API matches the runtime guarantee, so the proposal's drop condition is met for the
+runtime half. Three differences survive, and only the first is measured:
+
+1. **Cost.** 380 ns per commit against 0 ns for a static rule — 94% of it the digest.
+2. **Compile-time vs runtime.** The static rule rejects a *program*; the API rejects an
+   *operation*. A caller that ignores the returned error does not corrupt the mesh (the
+   write does not happen), so the failure mode is a silent no-op, not unsoundness.
+3. **Closure under future code.** Nothing stops a colleague adding
+   `func (m *Mesh) ForceInsert(...)`, or a second write path in another file; the API's
+   guarantee is a property of today's code, and only review keeps it. A language rule is a
+   property of every accepted program, including ones written next year. **This is the
+   only argument for the feature that the control cannot answer — and it is an argument
+   about enforceability, not about expressiveness.**
+
+So: the proposal's premise ("a sign can be mathematically right and still authorize the
+wrong edit") is true of *sign-returning* libraries and false of an opaque-witness library.
+Under its own drop condition, the entry should be recorded as **learned: the runtime half
+is available in Go today; the language feature must justify itself on the static half
+alone.**
+
