@@ -291,22 +291,41 @@ class RunnerOutputTests(unittest.TestCase):
 
 
 class WorktreeShaTests(unittest.TestCase):
-    def run_worktree_job(self, pin, broken=False):
+    def run_worktree_job(self, pin, broken=False, dirty=None, linked=True):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             repo, worktree = root / 'repo', root / 'worktree'
             subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            tracked = repo / 'tracked.txt'
+            tracked.write_text('committed\n', encoding='utf-8')
+            subprocess.run(['git', '-C', str(repo), 'add', 'tracked.txt'], check=True)
             subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Fixture',
                             '-c', 'user.email=fixture@example.invalid',
                             '-c', 'commit.gpgsign=false', 'commit', '-q',
-                            '--allow-empty', '-m', 'fixture'], check=True)
-            subprocess.run(['git', '-C', str(repo), 'worktree', 'add',
-                            '--quiet', '--detach', str(worktree), 'HEAD'], check=True)
+                            '-m', 'fixture'], check=True)
+            if linked:
+                subprocess.run(['git', '-C', str(repo), 'worktree', 'add',
+                                '--quiet', '--detach', str(worktree), 'HEAD'], check=True)
+                self.assertTrue((worktree / '.git').is_file())
+            else:
+                worktree = repo
             at = subprocess.check_output(['git', '-C', str(worktree),
                                           'rev-parse', 'HEAD'], text=True).strip()
-            self.assertTrue((worktree / '.git').is_file())
             if broken:
                 (worktree / '.git').write_text('gitdir: missing-metadata\n', encoding='utf-8')
+            tracked_in_worktree = worktree / 'tracked.txt'
+            if dirty == 'unstaged':
+                tracked_in_worktree.write_text('local edit\n', encoding='utf-8')
+            elif dirty == 'staged':
+                tracked_in_worktree.write_text('local edit\n', encoding='utf-8')
+                subprocess.run(['git', '-C', str(worktree), 'add', 'tracked.txt'], check=True)
+            elif dirty == 'deleted':
+                tracked_in_worktree.unlink()
+            elif dirty == 'staged-new-file':
+                (worktree / 'extra.txt').write_text('new\n', encoding='utf-8')
+                subprocess.run(['git', '-C', str(worktree), 'add', 'extra.txt'], check=True)
+            elif dirty == 'untracked':
+                (worktree / 'scratch.txt').write_text('scratch\n', encoding='utf-8')
             setup_marker, command_marker = root / 'setup.ran', root / 'command.ran'
             job_path, results = root / 'job.json', root / 'results'
             job_path.write_text(json.dumps({
@@ -349,6 +368,62 @@ class WorktreeShaTests(unittest.TestCase):
         self.assertFalse(setup_ran)
         self.assertFalse(command_ran)
         self.assertIn('failed to resolve HEAD', summary['steps'][0]['out_tail'])
+
+    def test_explicit_pin_rejects_dirty_tracked_checkout(self):
+        for dirty in ('unstaged', 'staged', 'deleted', 'staged-new-file'):
+            with self.subTest(dirty=dirty):
+                code, summary, setup_ran, command_ran = self.run_worktree_job('exact', dirty=dirty)
+                self.assertEqual(code, 1)
+                self.assertFalse(summary['ok'])
+                self.assertFalse(setup_ran)
+                self.assertFalse(command_ran)
+                self.assertEqual([(s['name'], s['exit']) for s in summary['steps']], [('sha-check', 1)])
+                self.assertIn('staged or unstaged changes', summary['steps'][0]['out_tail'])
+
+    def test_explicit_pin_rejects_dirty_linked_worktree(self):
+        code, summary, setup_ran, command_ran = self.run_worktree_job('exact', dirty='unstaged', linked=True)
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertFalse(setup_ran)
+        self.assertFalse(command_ran)
+
+    def test_explicit_pin_accepts_clean_checkout_with_untracked_scratch(self):
+        code, summary, setup_ran, command_ran = self.run_worktree_job('exact', dirty='untracked')
+        self.assertEqual(code, 0)
+        self.assertTrue(summary['ok'])
+        self.assertTrue(setup_ran)
+        self.assertTrue(command_ran)
+        self.assertEqual([s['name'] for s in summary['steps']], ['sha-check', 'setup', 'command'])
+
+    def test_head_mode_job_still_accepts_dirty_checkout(self):
+        code, summary, setup_ran, command_ran = self.run_worktree_job('HEAD', dirty='unstaged')
+        self.assertEqual(code, 0)
+        self.assertTrue(summary['ok'])
+        self.assertTrue(setup_ran)
+        self.assertTrue(command_ran)
+
+    def test_explicit_pin_rejects_dirty_non_linked_checkout(self):
+        code, summary, setup_ran, command_ran = self.run_worktree_job('exact', dirty='staged', linked=False)
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertFalse(setup_ran)
+        self.assertFalse(command_ran)
+
+    def test_failed_status_probe_fails_closed(self):
+        real_run_cmd = runner.run_cmd
+
+        def fake_run_cmd(cmd, timeout, cwd=None, env=None):
+            if isinstance(cmd, list) and cmd[:2] == ['git', 'status']:
+                return 1, 0.0, 'simulated status failure'
+            return real_run_cmd(cmd, timeout, cwd=cwd, env=env)
+
+        with patch.object(runner, 'run_cmd', side_effect=fake_run_cmd):
+            code, summary, setup_ran, command_ran = self.run_worktree_job('exact')
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertFalse(setup_ran)
+        self.assertFalse(command_ran)
+        self.assertIn('failed to verify tracked checkout status', summary['steps'][0]['out_tail'])
 
 
 if __name__ == '__main__':
