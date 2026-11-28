@@ -216,7 +216,23 @@ def main():
             sha_ok = False
             record("sha-check", "check", 1, 0.0, "repo at {} but job pins {}".format(at, want))
         else:
-            record("sha-check", "check", 0, 0.0, "at {}".format(at))
+            # HEAD matches the pin, but tracked files may still carry staged or
+            # unstaged edits (or deletions) that HEAD alone cannot reveal; an
+            # explicit pin must certify the checkout content, not just its HEAD.
+            status_code, _, status_out = run_cmd(
+                ["git", "status", "--porcelain=v1", "--untracked-files=no",
+                 "--ignore-submodules=none"], 10, cwd=repo_dir, env=sha_env,
+            )
+            if status_code != 0:
+                sha_ok = False
+                record("sha-check", "check", 1, 0.0, "failed to verify tracked checkout status")
+            elif status_out.strip():
+                sha_ok = False
+                record("sha-check", "check", 1, 0.0,
+                       "tracked checkout has staged or unstaged changes; "
+                       "cannot certify pinned sha {}".format(at))
+            else:
+                record("sha-check", "check", 0, 0.0, "at {}".format(at))
     elif want not in (None, "HEAD", ""):
         # A pinned job against a checkout with no .git (e.g. the Kaggle worker's
         # codeload-tarball fallback): there is nothing to verify the pin against,
@@ -236,7 +252,7 @@ def main():
     if not sha_ok:
         print(
             "[{}] check sha-check: failed ({}), skipping setup and commands".format(
-                UTC(), "pin unverifiable" if unverifiable_pin else "commit mismatch"
+                UTC(), "pin unverifiable" if unverifiable_pin else "checkout verification failed"
             ),
             flush=True,
         )
