@@ -191,26 +191,33 @@ class TestRunnerShaValidation(unittest.TestCase):
         # In `git worktree` and submodule checkouts, `.git` is a regular file
         # (`gitdir: <path>`) rather than a directory. Both exact-SHA pins and
         # `HEAD` pins must still run `sha-check` against `git rev-parse HEAD`.
+        # Use a real `git worktree add` (not just a hand-rolled gitfile) so the
+        # checkout actually has its tracked content, matching what `git
+        # status` needs to tell a clean pinned checkout from a dirty one.
         with tempfile.TemporaryDirectory(prefix="test-sha-gitfile-") as td:
             root = Path(td)
-            real_git_dir = subprocess.check_output(
-                ["git", "rev-parse", "--git-dir"],
-                cwd=str(self.repo_dir),
-                text=True,
-            ).strip()
-            real_git_path = (self.repo_dir / real_git_dir).resolve()
-            actual_head = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                cwd=str(self.repo_dir),
-                text=True,
-            ).strip()
+            fixture_repo = root / "fixture-repo"
+            fixture_repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(fixture_repo)], check=True)
+            subprocess.run(
+                ["git", "-C", str(fixture_repo), "-c", "user.name=Fixture",
+                 "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                 "commit", "-q", "--allow-empty", "-m", "fixture"],
+                check=True,
+            )
 
             worktree_repo = root / "worktree-repo"
-            worktree_repo.mkdir()
+            subprocess.run(
+                ["git", "-C", str(fixture_repo), "worktree", "add", "--quiet",
+                 "--detach", str(worktree_repo), "HEAD"],
+                check=True,
+            )
             gitfile = worktree_repo / ".git"
-            gitfile.write_text(f"gitdir: {real_git_path}\n", encoding="utf-8")
             self.assertTrue(gitfile.is_file())
             self.assertFalse(gitfile.is_dir())
+            actual_head = subprocess.check_output(
+                ["git", "-C", str(worktree_repo), "rev-parse", "HEAD"], text=True,
+            ).strip()
 
             # 1. Exact commit SHA pin against a gitfile worktree checkout succeeds.
             cmd_marker = root / "cmd-pinned.ran"
