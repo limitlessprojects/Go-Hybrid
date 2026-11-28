@@ -171,6 +171,21 @@ class PackageReleaseIsolationTests(unittest.TestCase):
         self.assertTrue(self.log.is_file(), "the smoke never ran hyb")
         return [json.loads(line) for line in self.log.read_text().splitlines()]
 
+    def test_failed_smoke_removes_extracted_archive(self):
+        fake_hyb = Path(self.env["HYB_TEST_FAKE_HYB"])
+        fake_hyb.write_text(fake_hyb.read_text().replace("hello, Hybrid!", "bad output"))
+
+        result = subprocess.run(
+            ["sh", str(self.repo / "tools" / "package_release.sh"), VERSION],
+            env=self.env, cwd=self.root,
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("SMOKE FAILED", result.stderr)
+        smoke_dir = Path(self.smoke_env()[0]["exe"]).parent.parent
+        self.assertFalse(smoke_dir.exists(), f"left extraction behind at {smoke_dir}")
+
     def test_clean_env_ships_fresh_artifacts_checksum_and_fresh_lib(self):
         self.package()
         self.assertEqual(
