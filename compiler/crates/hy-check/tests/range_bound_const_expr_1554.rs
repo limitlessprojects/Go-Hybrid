@@ -84,3 +84,19 @@ fn compound_integer_const_bound_stays_accepted() {
 fn const_cycle_terminates_without_e2009() {
     accepts_without_e2009(&range_with("const a = b\nconst b = a", "a"));
 }
+
+#[test]
+fn type_param_and_const_shadows_on_range_bounds_and_conversions_3853() {
+    accepts_without_e2009(
+        "const n = 1.5\nfn f[n](hi int) {\n    for i in 0..hi {\n        _ = i\n    }\n}\nfn main() {}\n",
+    );
+    accepts_without_e2009(
+        "const n = 1.5\nfn f[n](n int) {\n    for i in 0..n {\n        _ = i\n    }\n}\nfn main() {}\n",
+    );
+    accepts_without_e2009(
+        "const u32 = 1\nfn u32(x int) int { return x }\nfn main() {\n    var hi int = 10\n    for i in u32(0)..hi {\n        _ = i\n    }\n}\n",
+    );
+    rejects_with_e2009(
+        "const a u32 = 1\nconst b = a\nfn main() {\n    var hi u64 = 10\n    for i in b..hi {\n        _ = i\n    }\n}\n",
+    );
+}
