@@ -232,6 +232,10 @@ def registered_discoveries(workflow_text):
                 start = arguments[index + 1]
             elif argument in ("-p", "--pattern") and index + 1 < len(arguments):
                 pattern = arguments[index + 1]
+            elif argument.startswith("-s") and len(argument) > 2:
+                start = argument[2:].removeprefix("=")
+            elif argument.startswith("-p") and len(argument) > 2:
+                pattern = argument[2:].removeprefix("=")
             elif argument.startswith("--start-directory="):
                 start = argument.split("=", 1)[1]
             elif argument.startswith("--pattern="):
