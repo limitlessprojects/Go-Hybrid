@@ -1,5 +1,6 @@
 """Offline archive download integrity tests; no GitHub requests or real tokens."""
 import contextlib
+import hashlib
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import http.client
@@ -251,6 +252,73 @@ class DownloadIntegrityTests(unittest.TestCase):
             self.fetch(root, io.BytesIO(b"complete archive"))
             self.assertEqual((root / "result/results.zip").read_bytes(), b"complete archive")
             self.assertEqual([p.name for p in (root / "result").iterdir()], ["results.zip"])
+
+
+class DownloadDigestTests(unittest.TestCase):
+    """Issue #4241: the artifact list advertises a sha256 per artifact, and
+    actions_fetch ignored it — a completed HTTP response whose bytes disagree
+    with the digest replaced a previous valid archive and still reported
+    success. The digest must be validated as metadata before the transport is
+    opened, and the received bytes compared before publication."""
+
+    ABSENT = object()
+    GOOD = b"complete fixture archive"
+    BAD_DIGESTS = ("", "not-a-digest", "abc123" * 11, 42, "0" * 63, "g" * 64)
+
+    def digest_of(self, payload):
+        return hashlib.sha256(payload).hexdigest()
+
+    def fetch(self, directory, digest, body=None):
+        artifact = {"name": "results",
+                    "archive_download_url": "https://example.invalid/archive",
+                    "size_in_bytes": len(self.GOOD)}
+        if digest is not self.ABSENT:
+            artifact["sha256_sha"] = digest
+        response = io.BytesIO(self.GOOD if body is None else body)
+        opened = mock.Mock(return_value=response)
+        with mock.patch.object(job, "gh_api", return_value={"artifacts": [artifact]}), \
+             mock.patch.object(job, "gh_token", return_value="offline-fixture"), \
+             mock.patch.object(job.urllib.request, "urlopen", opened), \
+             contextlib.redirect_stderr(io.StringIO()), \
+             contextlib.redirect_stdout(io.StringIO()):
+            return job.actions_fetch(123, str(directory)), opened
+
+    def test_valid_digest_publishes_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, _ = self.fetch(Path(tmp), self.digest_of(self.GOOD))
+            self.assertEqual(rc, 0)
+            self.assertEqual((Path(tmp) / "result/results.zip").read_bytes(), self.GOOD)
+
+    def test_digest_mismatch_preserves_previous_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = Path(tmp) / "result"
+            result.mkdir()
+            dest = result / "results.zip"
+            dest.write_bytes(b"previous validated archive")
+            rc, _ = self.fetch(Path(tmp), self.digest_of(b"different payload"))
+            self.assertEqual(rc, 1)
+            self.assertEqual(dest.read_bytes(), b"previous validated archive")
+            self.assertEqual([p.name for p in result.iterdir()], ["results.zip"])
+
+    def test_digest_mismatch_without_previous_archive_publishes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, _ = self.fetch(Path(tmp), self.digest_of(b"different payload"))
+            self.assertEqual(rc, 1)
+            self.assertEqual(sorted(p.name for p in (Path(tmp) / "result").iterdir()), [])
+
+    def test_invalid_digest_metadata_refuses_transport(self):
+        for digest in self.BAD_DIGESTS:
+            with self.subTest(digest=digest), tempfile.TemporaryDirectory() as tmp:
+                rc, opened = self.fetch(Path(tmp), digest)
+                self.assertEqual(rc, 1)
+                self.assertEqual(opened.call_count, 0, digest)
+
+    def test_absent_or_null_digest_preserves_legacy_path(self):
+        for digest in (self.ABSENT, None):
+            with self.subTest(digest=digest), tempfile.TemporaryDirectory() as tmp:
+                rc, _ = self.fetch(Path(tmp), digest)
+                self.assertEqual(rc, 0)
+                self.assertEqual((Path(tmp) / "result/results.zip").read_bytes(), self.GOOD)
 
 
 if __name__ == "__main__":

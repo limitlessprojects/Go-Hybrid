@@ -16,6 +16,7 @@ Kaggle kernel slug: from worker/kernel-metadata.json (id field).
 Exit codes: 0 = success, 1 = the fetch retrieved nothing (failed download,
 no artifacts, or no summary.json), 2 = usage error.
 """
+import hashlib
 import json
 import math
 import os
@@ -370,6 +371,15 @@ def actions_fetch(run_id, jobdir):
         if os.path.dirname(dest) != result_dir:
             print("actions fetch: refusing unsafe artifact destination {!r}".format(dest), file=sys.stderr)
             return 1
+        # The artifact list advertises a sha256 per artifact. Validate it
+        # as metadata before opening the transport: a malformed digest is
+        # a bad response, not a reason to download and hope.
+        digest = a.get("sha256_sha")
+        if digest is not None and (not isinstance(digest, str) or len(digest) != 64
+                                   or not all(c in "0123456789abcdefABCDEF" for c in digest)):
+            print("actions fetch: refusing artifact {} with invalid sha256 metadata {!r}".format(
+                name, digest), file=sys.stderr)
+            return 1
         req = urllib.request.Request(url)
         # GitHub redirects archive downloads to a signed storage URL. urllib
         # forwards normal headers across hosts; do not send our token there.
@@ -378,6 +388,15 @@ def actions_fetch(run_id, jobdir):
         # via a sibling temporary file so write/replace failures preserve it too.
         with urllib.request.urlopen(req, timeout=120) as r:
             data = r.read()
+        # A completed response whose bytes disagree with the advertised
+        # digest must not replace a previous valid archive; compare the
+        # full payload before touching the temporary file.
+        if digest is not None:
+            actual = hashlib.sha256(data).hexdigest()
+            if actual != digest.lower():
+                print("actions fetch: artifact {} digest mismatch (advertised {}, received {})".format(
+                    name, digest.lower(), actual), file=sys.stderr)
+                return 1
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(dir=os.path.dirname(dest),
