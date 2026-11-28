@@ -119,7 +119,7 @@ class Gh:
     def patch(self, path, body):
         return self.req("PATCH", path, body)[1]
 
-    def paginate(self, path, max_pages=20, key=None):
+    def paginate(self, path, max_pages=20, key=None, stop_when=None):
         """Follow page links; unwrap dict envelopes like {"workflow_runs": [...]}."""
         out, page = [], 1
         while page <= max_pages:
@@ -135,6 +135,8 @@ class Gh:
             if not data:
                 break
             out.extend(data)
+            if stop_when is not None and stop_when(data, out):
+                break
             if len(data) < 100:
                 break
             page += 1
@@ -175,12 +177,65 @@ def age_days(iso, now):
 
 # ---------------------------------------------------------------- scan
 
+def load_resume_cache(out_dir, main_sha):
+    """Load unchanged PR items from an existing TRIAGE.json or TRIAGE.partial.json."""
+    if not out_dir:
+        return {}
+    out = Path(out_dir)
+    cached = {}
+    for fname in ("TRIAGE.json", "TRIAGE.partial.json"):
+        p = out / fname
+        if not p.exists():
+            continue
+        try:
+            data = json.loads(p.read_text())
+        except Exception:
+            continue
+        if data.get("main") != main_sha:
+            continue
+        for it in data.get("items") or []:
+            if isinstance(it, dict) and "number" in it and "head_sha" in it:
+                cached[it["number"]] = it
+    return cached
+
+
 def collect(cfg, gh, args):
     now = datetime.now(timezone.utc)
-    prs = gh.paginate("/repos/%s/pulls?state=open&sort=created&direction=desc" % gh.repo)
-    log("open PRs: %d" % len(prs))
+    limit = getattr(args, "limit", None)
+    since_pr = getattr(args, "since_pr", None)
+    resume = getattr(args, "resume", False)
+    out_dir = getattr(args, "out", None)
+
+    max_pages = 20
+    if limit is not None and limit > 0 and since_pr is None:
+        max_pages = min(20, max(1, (limit + 99) // 100))
+
+    def should_stop(page_items, all_items):
+        if since_pr is not None and any(
+            (p.get("number") or 0) < since_pr for p in page_items if isinstance(p, dict)
+        ):
+            return True
+        if limit is not None and limit > 0 and since_pr is None and len(all_items) >= limit:
+            return True
+        return False
+
+    log("fetching open PRs (max_pages=%d, limit=%s, since_pr=%s)..." % (max_pages, limit, since_pr))
+    prs = gh.paginate(
+        "/repos/%s/pulls?state=open&sort=created&direction=desc" % gh.repo,
+        max_pages=max_pages,
+        stop_when=should_stop,
+    )
+    if since_pr is not None:
+        prs = [p for p in prs if (p.get("number") or 0) >= since_pr]
+    if limit is not None and limit > 0:
+        prs = prs[:limit]
+    log("open PRs selected: %d" % len(prs))
     main_sha = gh.get("/repos/%s/commits/main" % gh.repo)["sha"]
     log("main: %s" % main_sha[:10])
+
+    resume_cache = load_resume_cache(out_dir, main_sha) if resume else {}
+    if resume_cache:
+        log("resume cache loaded: %d cached PR entries for main %s" % (len(resume_cache), main_sha[:10]))
 
     # overlap detection via the main-side compare is only worth its cost inside
     # the actionable rebase window; a PR 600 commits behind is a stale-base
@@ -197,6 +252,16 @@ def collect(cfg, gh, args):
 
     def one(pr):
         n = pr["number"]
+        head_sha = (pr.get("head") or {}).get("sha", "")
+        short_head = head_sha[:12]
+        cached_it = resume_cache.get(n)
+        if cached_it and cached_it.get("head_sha") == short_head:
+            reused = dict(cached_it)
+            reused["age_days"] = age_days(pr["created_at"], now)
+            reused["idle_days"] = age_days(pr["updated_at"], now)
+            reused["current_labels"] = [l["name"] for l in (pr.get("labels") or [])]
+            return reused
+
         full = gh.get("/repos/%s/pulls/%d" % (gh.repo, n)) or {}
         files = gh.paginate("/repos/%s/pulls/%d/files?per_page=100" % (gh.repo, n)) or []
         paths = [f["filename"] for f in files if f.get("filename")]
@@ -204,7 +269,6 @@ def collect(cfg, gh, args):
         adds = sum(f.get("additions", 0) or 0 for f in files)
         dels = sum(f.get("deletions", 0) or 0 for f in files)
 
-        head_sha = (pr.get("head") or {}).get("sha", "")
         behind_by, overlap_paths, merge_base = 0, set(), (main_sha if head_sha == main_sha else None)
         cmp1 = None if head_sha == main_sha else gh.get("/repos/%s/compare/%s...%s" % (gh.repo, main_sha, head_sha))
         if cmp1:
@@ -227,7 +291,7 @@ def collect(cfg, gh, args):
             "current_labels": [l["name"] for l in (pr.get("labels") or [])],
             "mergeable": full.get("mergeable"),
             "mergeable_state": full.get("mergeable_state"),
-            "head_sha": pr["head"]["sha"][:12],
+            "head_sha": short_head,
             "files": len(paths),
             "paths_sample": sorted(paths)[:12],
             "additions": adds,
@@ -241,6 +305,9 @@ def collect(cfg, gh, args):
 
     items = []
     workers = getattr(args, "jobs", 6)
+    partial_path = (Path(out_dir) / "TRIAGE.partial.json") if out_dir else None
+    if partial_path:
+        partial_path.parent.mkdir(parents=True, exist_ok=True)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(one, pr): pr["number"] for pr in prs}
         for fut in as_completed(futs):
@@ -248,6 +315,10 @@ def collect(cfg, gh, args):
             items.append(it)
             if len(items) % 20 == 0 or len(items) == len(prs):
                 log("  ... %d/%d scanned" % (len(items), len(prs)))
+                if partial_path:
+                    partial_path.write_text(
+                        json.dumps({"main": main_sha, "items": items}, ensure_ascii=False)
+                    )
     items.sort(key=lambda x: -x["number"])
     for it in items:
         log("  #%d %s — behind %d, mergeable %s, +%d/%d files %d" % (
@@ -485,10 +556,12 @@ def cmd_scan(args):
 def cmd_approve(args):
     cfg = load_cfg()
     gh = Gh(cfg["repo"], load_token(args))
-    prs = gh.paginate("/repos/%s/pulls?state=open&per_page=100" % gh.repo)
+    pages = getattr(args, "pages", 20) or 20
+    log("fetching open PR heads and action_required workflow runs (max_pages=%d)..." % pages)
+    prs = gh.paginate("/repos/%s/pulls?state=open&per_page=100" % gh.repo, max_pages=pages)
     heads = {pr["head"]["sha"]: pr["number"] for pr in prs}
     runs = gh.paginate("/repos/%s/actions/runs?event=pull_request&status=action_required&per_page=100" % gh.repo,
-                       key="workflow_runs")
+                       max_pages=pages, key="workflow_runs")
     todo, seen = [], set()
     for r in runs:
         sha = r.get("head_sha", "")
@@ -646,10 +719,18 @@ def main():
     p.add_argument("--verify", type=int, default=0, metavar="K",
                    help="run worktree merge gate on top-K land-candidates")
     p.add_argument("--jobs", type=int, default=6, help="parallel fetch workers")
+    p.add_argument("--limit", type=int, default=None, metavar="N",
+                   help="chunked foreground scan: evaluate at most the newest N open PRs")
+    p.add_argument("--since-pr", type=int, default=None, metavar="MIN_PR",
+                   help="chunked foreground scan: only evaluate open PRs with number >= MIN_PR")
+    p.add_argument("--resume", action="store_true",
+                   help="reuse unchanged head_sha entries from an existing TRIAGE.json/TRIAGE.partial.json")
     p.set_defaults(fn=cmd_scan)
 
     p = sub.add_parser("approve", help="approve action_required CI runs")
     p.add_argument("--max", type=int, default=None)
+    p.add_argument("--pages", type=int, default=20, metavar="P",
+                   help="cap pagination pages for foreground approve runs")
     p.add_argument("--dry", action="store_true")
     p.set_defaults(fn=cmd_approve)
 
