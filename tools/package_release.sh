@@ -84,7 +84,7 @@ command -v go >/dev/null || { echo "go not on PATH" >&2; exit 1; }
 echo "==> building hyrt staticlib (crate-local)"
 ( cd "$REPO_ROOT/runtime/rust/hyrt" && \
   if [ -n "$RUST_TARGET" ]; then \
-      env CARGO_BUILD_JOBS=2 $CROSS_ENV cargo build --release --target "$RUST_TARGET" --quiet; \
+      env CARGO_BUILD_JOBS=2 "$CROSS_ENV" cargo build --release --target "$RUST_TARGET" --quiet; \
   else \
       CARGO_BUILD_JOBS=2 cargo build --release --quiet; fi )
 
@@ -93,7 +93,7 @@ echo "==> building hyrt staticlib (crate-local)"
 echo "==> building hyb (release)"
 ( cd "$REPO_ROOT/compiler" && \
   if [ -n "$RUST_TARGET" ]; then \
-      env CARGO_BUILD_JOBS=2 $CROSS_ENV cargo build --release -p hyb --target "$RUST_TARGET" --quiet; \
+      env CARGO_BUILD_JOBS=2 "$CROSS_ENV" cargo build --release -p hyb --target "$RUST_TARGET" --quiet; \
   else \
       cargo build --release -p hyb --quiet; fi )
 HYB_BIN="$REPO_ROOT/compiler/target/release/hyb"
