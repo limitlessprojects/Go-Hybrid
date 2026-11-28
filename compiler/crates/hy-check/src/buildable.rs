@@ -9092,52 +9092,101 @@ impl<'a> Collector<'a> {
     /// Reject operands whose resolved kind can never be an `error` (argument 0) or
     /// a `string` (argument 1) with HYB-E1002 (SPEC-LANGUAGE E2).
     fn check_errors_wrap_operands(&mut self, args: &[CallArg]) {
-        let ek = self.kind_of_expr(&args[0].value);
-        if matches!(
-            ek,
-            OpKind::Int
-                | OpKind::Float
-                | OpKind::Bool
-                | OpKind::Str
-                | OpKind::Slice(_)
-                | OpKind::Array(_)
-                | OpKind::Map(..)
-                | OpKind::Chan(_)
-                | OpKind::Fn(..)
-                | OpKind::Option(_)
-                | OpKind::Void
-        ) {
+        if let Some(tp) = self.expr_type_param(&args[0].value) {
             self.emit_e1002(
                 args[0].value.span(),
                 format!(
-                    "`errors.wrap` needs an `error` as its first argument, got `{}` (HYB-E1002)",
-                    ek.label()
+                    "`errors.wrap` needs an `error` as its first argument, got type parameter `{}` (HYB-E1002)",
+                    tp
                 ),
                 "write `errors.wrap(err, \"context\")` with an error value first (SPEC-LANGUAGE E2)",
             );
+        } else {
+            let ek = self.kind_of_expr(&args[0].value);
+            let non_error_foreign = matches!(
+                &ek,
+                OpKind::Foreign(f)
+                    if matches!(
+                        f.as_str(),
+                        "bytes.buffer"
+                            | "strings.builder"
+                            | "sync.mutex"
+                            | "sync.rw_mutex"
+                            | "sync.wait_group"
+                            | "os.file"
+                            | "bufio.reader"
+                            | "bufio.writer"
+                            | "bufio.scanner"
+                            | "time.time"
+                            | "time.duration"
+                            | "serde_json.value"
+                            | "serde_json.view"
+                            | "flate2.writer"
+                    )
+            );
+            if non_error_foreign
+                || matches!(
+                    ek,
+                    OpKind::Int
+                        | OpKind::Float
+                        | OpKind::Bool
+                        | OpKind::Str
+                        | OpKind::Slice(_)
+                        | OpKind::Array(_)
+                        | OpKind::Map(..)
+                        | OpKind::Chan(_)
+                        | OpKind::Fn(..)
+                        | OpKind::Option(_)
+                        | OpKind::Void
+                )
+            {
+                self.emit_e1002(
+                    args[0].value.span(),
+                    format!(
+                        "`errors.wrap` needs an `error` as its first argument, got `{}` (HYB-E1002)",
+                        ek.label()
+                    ),
+                    "write `errors.wrap(err, \"context\")` with an error value first (SPEC-LANGUAGE E2)",
+                );
+            }
         }
-        let mk = self.kind_of_expr(&args[1].value);
-        if matches!(
-            mk,
-            OpKind::Int
-                | OpKind::Float
-                | OpKind::Bool
-                | OpKind::Slice(_)
-                | OpKind::Array(_)
-                | OpKind::Map(..)
-                | OpKind::Chan(_)
-                | OpKind::Fn(..)
-                | OpKind::Option(_)
-                | OpKind::Void
-        ) {
+        if let Some(tp) = self.expr_type_param(&args[1].value) {
             self.emit_e1002(
                 args[1].value.span(),
                 format!(
-                    "`errors.wrap` needs a `string` message as its second argument, got `{}` (HYB-E1002)",
-                    mk.label()
+                    "`errors.wrap` needs a `string` message as its second argument, got type parameter `{}` (HYB-E1002)",
+                    tp
                 ),
                 "write `errors.wrap(err, \"context\")` with a string context message (SPEC-LANGUAGE E2)",
             );
+        } else {
+            let mk = self.kind_of_expr(&args[1].value);
+            if matches!(
+                mk,
+                OpKind::Int
+                    | OpKind::Float
+                    | OpKind::Bool
+                    | OpKind::Slice(_)
+                    | OpKind::Array(_)
+                    | OpKind::Map(..)
+                    | OpKind::Chan(_)
+                    | OpKind::Struct(_)
+                    | OpKind::Pointer(_)
+                    | OpKind::Interface
+                    | OpKind::Foreign(_)
+                    | OpKind::Fn(..)
+                    | OpKind::Option(_)
+                    | OpKind::Void
+            ) {
+                self.emit_e1002(
+                    args[1].value.span(),
+                    format!(
+                        "`errors.wrap` needs a `string` message as its second argument, got `{}` (HYB-E1002)",
+                        mk.label()
+                    ),
+                    "write `errors.wrap(err, \"context\")` with a string context message (SPEC-LANGUAGE E2)",
+                );
+            }
         }
     }
 

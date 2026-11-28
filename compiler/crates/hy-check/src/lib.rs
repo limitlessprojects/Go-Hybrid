@@ -5401,4 +5401,25 @@ mod tests {
             .count();
         assert_eq!(e3006_count, 2, "{:?}", r.diagnostics);
     }
+
+    #[test]
+    fn errors_wrap_rejects_struct_pointer_interface_foreign_and_type_params() {
+        let cases = [
+            "import \"errors\"\nstruct ctx_meta { code int }\nfn f(err error, m ctx_meta) error {\n  return errors.wrap(err, m)\n}",
+            "import \"errors\"\nfn f(err error, p *int) error {\n  return errors.wrap(err, p)\n}",
+            "import \"errors\"\nfn f(err error, a any) error {\n  return errors.wrap(err, a)\n}",
+            "import \"errors\"\nfn f(err error) error {\n  return errors.wrap(err, err)\n}",
+            "import \"errors\"\nfn f(b bytes.buffer) error {\n  return errors.wrap(b, \"ctx\")\n}",
+            "import \"errors\"\nfn f[t](x t, err error) error {\n  return errors.wrap(err, x)\n}",
+        ];
+        for src in cases {
+            let out = check(src);
+            assert!(
+                out.diagnostics.iter().any(|d| d.code == "HYB-E1002"),
+                "expected HYB-E1002 for:\n{src}\ngot: {:?}",
+                out.diagnostics
+            );
+        }
+    }
+
 }
