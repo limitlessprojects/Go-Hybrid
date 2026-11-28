@@ -1,0 +1,1616 @@
+[
+  {
+    "kind": "corpus",
+    "name": "02-shared-map-managed.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/02-shared-map-managed.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n\t\"strings\"\n)\n\nconst n_shards = 4\n\nconst corpus = \"the quick brown fox jumps over the lazy dog \" + \"the dog barks and the fox runs hybrid quick hybrid\"\n\nfunc chunk_of(words []string, i int, n int) []string {\n\tsize := (len(words) + n - 1) / n\n\ta := i * size\n\tb := min(a+size, len(words))\n\treturn append([]string{}, words[a:b]...)\n}\n\nfunc tally(shard []string, counts map[string]int, done chan<- bool) {\n\tfor _, w := range shard {\n\t\tcounts[w]++\n\t}\n\tdone <- true\n}\n\nfunc main() {\n\twords := strings.Split(corpus, \" \")\n\t{ // managed [mutex] shards tallied under the runner mutex (audited via hyb check --report-managed) tickets: CORPUS-02\n\t\tcounts := map[string]int{}\n\t\tdone := make(chan bool, n_shards)\n\t\tfor i := 0; i < n_shards; i++ {\n\t\t\tchunk := chunk_of(words, i, n_shards)\n\t\t\tgo tally(chunk, counts, done)\n\t\t}\n\t\tfor hyBlank0 := 0; hyBlank0 < n_shards; hyBlank0++ {\n\t\t\t<-done\n\t\t}\n\t\tfmt.Println(fmt.Sprintf(\"unique words: %v\", len(counts)))\n\t\tn := counts[\"hybrid\"]\n\t\tfmt.Println(fmt.Sprintf(\"'hybrid' appears %v times\", n))\n\t}\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3440880280031706,
+      "t_bce": 0.3428875679965131,
+      "bce_counts": {
+        "IsSliceInBounds": 2
+      },
+      "bce_sites": [
+        {
+          "line": 16,
+          "col": 33,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 32,
+          "col": 21,
+          "kind": "IsSliceInBounds"
+        }
+      ],
+      "asm_calls": {
+        "panicBounds": 3,
+        "panicdivide": 1,
+        "chansend1": 2
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3264431509996939,
+      "t_bce": 0.3282536289989366,
+      "bce_counts": {
+        "IsSliceInBounds": 2
+      },
+      "bce_sites": [
+        {
+          "line": 16,
+          "col": 33,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 32,
+          "col": 21,
+          "kind": "IsSliceInBounds"
+        }
+      ],
+      "asm_calls": {
+        "panicBounds": 3,
+        "panicdivide": 1,
+        "chansend1": 2
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "09-a3-map-slot-valid.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/09-a3-map-slot-valid.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype service struct {\n\treplicas int\n\ttag      string\n}\n\ntype env struct {\n\tservices map[string]service\n}\n\nfunc scale_then_register(e *env, existing string, n int, fresh string) {\n\tsvc := e.services[existing]\n\tsvc.replicas = n\n\tsvc.tag = \"scaled\"\n\te.services[existing] = svc\n\te.services[fresh] = service{replicas: 1, tag: \"new\"}\n}\n\nfunc main() {\n\te := env{services: map[string]service{\"frontend\": service{replicas: 2, tag: \"prod\"}, \"api\": service{replicas: 3, tag: \"prod\"}}}\n\tscale_then_register(&e, \"frontend\", 5, \"cache\")\n\tfmt.Println(fmt.Sprintf(\"services: %v\", len(e.services)))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3436517560003267,
+      "t_bce": 0.3519891189971531,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3194488250010181,
+      "t_bce": 0.32225093400120386,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "12-a7-borrow-by-default.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/12-a7-borrow-by-default.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n\t\"hybrid.program/jsonbinding\"\n\t\"os\"\n\t\"path/filepath\"\n)\n\nfunc count_active(doc jsonbinding.Value) (int, error) {\n\tn := 0\n\thyT0, hyErr1 := doc.Array(\"users\")\n\tif hyErr1 != nil {\n\t\treturn 0, hyErr1\n\t}\n\tfor _, u := range hyT0 {\n\t\thyT2, hyErr3 := u.Int(\"logins\")\n\t\tif hyErr3 != nil {\n\t\t\treturn 0, hyErr3\n\t\t}\n\t\tif hyT2 > 0 {\n\t\t\tn++\n\t\t}\n\t}\n\treturn n, nil\n}\n\nfunc main() {\n\thyErr := func() (hyErr error) {\n\t\tdoc, hyErr0 := jsonbinding.Parse([]byte(`{\"users\":[{\"name\":\"ada\",\"logins\":5},{\"name\":\"linus\",\"logins\":0}]}`))\n\t\tif hyErr0 != nil {\n\t\t\thyErr = hyErr0\n\t\t\treturn\n\t\t}\n\t\ta, hyErr1 := count_active(doc)\n\t\tif hyErr1 != nil {\n\t\t\thyErr = hyErr1\n\t\t\treturn\n\t\t}\n\t\tb, hyErr2 := count_active(doc)\n\t\tif hyErr2 != nil {\n\t\t\thyErr = hyErr2\n\t\t\treturn\n\t\t}\n\t\thyErr3 := doc.Set(\"audited\", true)\n\t\tif hyErr3 != nil {\n\t\t\thyErr = hyErr3\n\t\t\treturn\n\t\t}\n\t\tfmt.Println(fmt.Sprintf(\"active=%v recount=%v\", a, b))\n\t\treturn\n\t}()\n\tif hyErr != nil {\n\t\tfmt.Fprintln(os.Stderr, filepath.Base(os.Args[0])+\":\", hyErr)\n\t\tos.Exit(1)\n\t}\n}\n",
+    "go126": {
+      "compiled": false,
+      "error": "main.go:5:2: no required module provides package hybrid.program/jsonbinding; to add it:\n\tgo get hybrid.program/jsonbinding"
+    },
+    "go127": {
+      "compiled": false,
+      "error": "main.go:5:2: no required module provides package hybrid.program/jsonbinding; to add it:\n\tgo get hybrid.program/jsonbinding"
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "13-a7-own-transfer-at-return.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/13-a7-own-transfer-at-return.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n\t\"hybrid.program/jsonbinding\"\n\t\"os\"\n\t\"path/filepath\"\n)\n\nfunc summary(doc jsonbinding.Value) (jsonbinding.Value, error) {\n\tv := jsonbinding.NewObject()\n\tn := 0\n\thyT0, hyErr1 := doc.Array(\"users\")\n\tif hyErr1 != nil {\n\t\treturn *new(jsonbinding.Value), hyErr1\n\t}\n\tfor _, u := range hyT0 {\n\t\thyT2, hyErr3 := u.Int(\"logins\")\n\t\tif hyErr3 != nil {\n\t\t\treturn *new(jsonbinding.Value), hyErr3\n\t\t}\n\t\tif hyT2 > 0 {\n\t\t\tn++\n\t\t}\n\t}\n\tv.Set(\"active\", n)\n\treturn v, nil\n}\n\nfunc main() {\n\thyErr := func() (hyErr error) {\n\t\tdoc, hyErr0 := jsonbinding.Parse([]byte(`{\"users\":[{\"name\":\"ada\",\"logins\":5},{\"name\":\"linus\",\"logins\":0}]}`))\n\t\tif hyErr0 != nil {\n\t\t\thyErr = hyErr0\n\t\t\treturn\n\t\t}\n\t\ts, hyErr1 := summary(doc)\n\t\tif hyErr1 != nil {\n\t\t\thyErr = hyErr1\n\t\t\treturn\n\t\t}\n\t\thyErr2 := s.Set(\"cached_at\", \"2026-10-12\")\n\t\tif hyErr2 != nil {\n\t\t\thyErr = hyErr2\n\t\t\treturn\n\t\t}\n\t\thyT3, hyErr4 := jsonbinding.ToStringPretty(s)\n\t\tif hyErr4 != nil {\n\t\t\thyErr = hyErr4\n\t\t\treturn\n\t\t}\n\t\tfmt.Println(hyT3)\n\t\treturn\n\t}()\n\tif hyErr != nil {\n\t\tfmt.Fprintln(os.Stderr, filepath.Base(os.Args[0])+\":\", hyErr)\n\t\tos.Exit(1)\n\t}\n}\n",
+    "go126": {
+      "compiled": false,
+      "error": "main.go:5:2: no required module provides package hybrid.program/jsonbinding; to add it:\n\tgo get hybrid.program/jsonbinding"
+    },
+    "go127": {
+      "compiled": false,
+      "error": "main.go:5:2: no required module provides package hybrid.program/jsonbinding; to add it:\n\tgo get hybrid.program/jsonbinding"
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "15-fanin-per-task-state.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/15-fanin-per-task-state.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n\t\"strings\"\n)\n\nconst n_shards = 4\n\nconst corpus = \"the quick brown fox jumps over the lazy dog \" + \"the dog barks and the fox runs hybrid quick hybrid\"\n\nfunc chunk_of(words []string, i int, n int) []string {\n\tsize := (len(words) + n - 1) / n\n\ta := i * size\n\tb := min(a+size, len(words))\n\treturn append([]string{}, words[a:b]...)\n}\n\nfunc tally(shard []string, results chan<- map[string]int) {\n\tlocal := map[string]int{}\n\tfor _, w := range shard {\n\t\tlocal[w]++\n\t}\n\tresults <- local\n}\n\nfunc main() {\n\twords := strings.Split(corpus, \" \")\n\tresults := make(chan map[string]int, n_shards)\n\tfor i := 0; i < n_shards; i++ {\n\t\tchunk := chunk_of(words, i, n_shards)\n\t\tgo tally(chunk, results)\n\t}\n\tmerged := map[string]int{}\n\tfor hyBlank0 := 0; hyBlank0 < n_shards; hyBlank0++ {\n\t\tshard_counts := <-results\n\t\tfor w, n := range shard_counts {\n\t\t\tmerged[w] += n\n\t\t}\n\t}\n\tfmt.Println(fmt.Sprintf(\"unique words: %v\", len(merged)))\n\tn := merged[\"hybrid\"]\n\tfmt.Println(fmt.Sprintf(\"'hybrid' appears %v times\", n))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3467076029992313,
+      "t_bce": 0.35005477200320456,
+      "bce_counts": {
+        "IsSliceInBounds": 2
+      },
+      "bce_sites": [
+        {
+          "line": 16,
+          "col": 33,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 31,
+          "col": 20,
+          "kind": "IsSliceInBounds"
+        }
+      ],
+      "asm_calls": {
+        "panicBounds": 3,
+        "panicdivide": 1,
+        "chansend1": 2
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.31989317899933667,
+      "t_bce": 0.3305300809988694,
+      "bce_counts": {
+        "IsSliceInBounds": 2
+      },
+      "bce_sites": [
+        {
+          "line": 16,
+          "col": 33,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 31,
+          "col": 20,
+          "kind": "IsSliceInBounds"
+        }
+      ],
+      "asm_calls": {
+        "panicBounds": 3,
+        "panicdivide": 1,
+        "chansend1": 2
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "16-move-send-clean.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/16-move-send-clean.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype row struct {\n\tkey string\n\tval int\n}\n\ntype batch struct {\n\tseq  int\n\trows []row\n}\n\nconst n_batches = 8\n\nfunc build_batch(seq int) batch {\n\tvar rows []row\n\tfor i := 0; i < 4; i++ {\n\t\trows = append(rows, row{key: fmt.Sprintf(\"k%v-%v\", seq, i), val: seq*10 + i})\n\t}\n\treturn batch{seq: seq, rows: rows}\n}\n\nfunc persist(rows []row) int {\n\treturn len(rows)\n}\n\nfunc consumer(batches <-chan batch, acks chan<- int) {\n\tfor b := range batches {\n\t\tpersist(b.rows)\n\t\tacks <- b.seq\n\t}\n}\n\nfunc main() {\n\tbatches := make(chan batch, 8)\n\tacks := make(chan int, 8)\n\tgo consumer(batches, acks)\n\tfor seq := 0; seq < n_batches; seq++ {\n\t\tb := build_batch(seq)\n\t\tbatches <- b\n\t}\n\tclose(batches)\n\tfor hyBlank0 := 0; hyBlank0 < n_batches; hyBlank0++ {\n\t\t<-acks\n\t}\n\tfmt.Println(fmt.Sprintf(\"ingested %v batches\", n_batches))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3427686299983179,
+      "t_bce": 0.3458297549987037,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 3,
+        "closechan": 1
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3238874279995798,
+      "t_bce": 0.3190701050007192,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 3,
+        "closechan": 1
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "17-atomic-channel-immutable.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/17-atomic-channel-immutable.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n\t\"sync/atomic\"\n)\n\nconst n_probes = 4\n\nconst calls = 1000\n\nvar thresholds = []int{10, 50, 250, 1000}\n\ntype sample struct {\n\tprobe int\n\tabove int\n}\n\nfunc measure(i int, c int) int {\n\treturn (i*137 + c*31) % 1200\n}\n\nfunc probe(id int, n int, hits *atomic.Int64, samples chan<- sample) {\n\tvar above int\n\tfor c := 0; c < n; c++ {\n\t\tms := measure(id, c)\n\t\tif ms > thresholds[3] {\n\t\t\thits.Add(1)\n\t\t\tabove++\n\t\t}\n\t}\n\tsamples <- sample{probe: id, above: above}\n}\n\nfunc main() {\n\tvar hits atomic.Int64\n\tsamples := make(chan sample, n_probes)\n\tfor i := 0; i < n_probes; i++ {\n\t\tgo probe(i, calls, &hits, samples)\n\t}\n\tvar total int\n\tfor hyBlank0 := 0; hyBlank0 < n_probes; hyBlank0++ {\n\t\ts := <-samples\n\t\ttotal += s.above\n\t}\n\tslow := thresholds[3]\n\tfmt.Println(fmt.Sprintf(\"calls over %vms: atomic=%v reported=%v\", slow, hits.Load(), total))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.34597429600034957,
+      "t_bce": 0.3544657550010015,
+      "bce_counts": {
+        "IsInBounds": 3
+      },
+      "bce_sites": [
+        {
+          "line": 27,
+          "col": 21,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 46,
+          "col": 20,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 39,
+          "col": 11,
+          "kind": "IsInBounds"
+        }
+      ],
+      "asm_calls": {
+        "chansend1": 2,
+        "panicBounds": 3
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3237981500024034,
+      "t_bce": 0.3424269040006038,
+      "bce_counts": {
+        "IsInBounds": 3
+      },
+      "bce_sites": [
+        {
+          "line": 27,
+          "col": 21,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 46,
+          "col": 20,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 39,
+          "col": 11,
+          "kind": "IsInBounds"
+        }
+      ],
+      "asm_calls": {
+        "chansend1": 2,
+        "panicBounds": 3
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "18-pool-shared-struct-managed.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/18-pool-shared-struct-managed.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n\t\"sync\"\n)\n\nconst n_workers = 4\n\nvar seed_urls = []string{\"https://example.com/a\", \"https://example.com/b\", \"https://example.com/c\", \"https://example.com/d\", \"https://example.com/e\", \"https://example.com/f\"}\n\ntype pool_stats struct {\n\tmu        sync.Mutex\n\tprocessed int\n\tfailures  int\n}\n\nfunc fetch(url string) bool {\n\treturn len(url)%3 != 0\n}\n\nfunc worker(id int, jobs <-chan string, stats *pool_stats, done chan<- bool) {\n\tfor url := range jobs {\n\t\tok := fetch(url)\n\t\tstats.mu.Lock()\n\t\tstats.processed++\n\t\tif !ok {\n\t\t\tstats.failures++\n\t\t}\n\t\tstats.mu.Unlock()\n\t}\n\tdone <- true\n}\n\nfunc main() {\n\t{ // managed [mutex] pool stats under the pool mutex (lock stays) (audited via hyb check --report-managed) tickets: CORPUS-18\n\t\tjobs := make(chan string, len(seed_urls))\n\t\tstats := pool_stats{}\n\t\tdone := make(chan bool, n_workers)\n\t\tfor i := 0; i < n_workers; i++ {\n\t\t\tgo worker(i, jobs, &stats, done)\n\t\t}\n\t\tfor _, url := range seed_urls {\n\t\t\tjobs <- url\n\t\t}\n\t\tclose(jobs)\n\t\tfor hyBlank0 := 0; hyBlank0 < n_workers; hyBlank0++ {\n\t\t\t<-done\n\t\t}\n\t\tstats.mu.Lock()\n\t\tp, f := stats.processed, stats.failures\n\t\tstats.mu.Unlock()\n\t\tfmt.Println(fmt.Sprintf(\"processed=%v failures=%v\", p, f))\n\t}\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3439866959997744,
+      "t_bce": 0.3465670740006317,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 2,
+        "closechan": 1
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3185708679993695,
+      "t_bce": 0.3202541150021716,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 2,
+        "closechan": 1
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "23-a1c-mapslot-copy-at-spawn.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/23-a1c-mapslot-copy-at-spawn.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype service struct {\n\treplicas int\n\ttag      string\n}\n\ntype env struct {\n\tservices map[string]service\n}\n\nfunc bump_report(id string, n int, replicas int, done chan<- bool) {\n\tfmt.Println(fmt.Sprintf(\"%v: %v\", id, replicas+n))\n\tdone <- true\n}\n\nfunc main() {\n\te := env{services: map[string]service{\"frontend\": service{replicas: 2, tag: \"prod\"}}}\n\tdone := make(chan bool, 1)\n\tsvc := e.services[\"frontend\"]\n\tcurrent := svc.replicas\n\te.services[\"frontend\"] = svc\n\tgo bump_report(\"frontend\", 3, current, done)\n\t<-done\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.34555415800059563,
+      "t_bce": 0.3520606769998267,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 1
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3168015209994337,
+      "t_bce": 0.3168277570002829,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 1
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "33-select-send-safe-values.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/33-select-send-safe-values.hy",
+    "emitted": true,
+    "go_src": "package main\n\nfunc main() {\n\tmessage := \"ready\"\n\tmessages := make(chan string, 1)\n\tresults := make(chan int, 1)\n\troutes := make(chan chan int, 1)\n\tselect {\n\tcase messages <- message:\n\tcase routes <- results:\n\t}\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.24418917699949816,
+      "t_bce": 0.24642283800130826,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.24320491699836566,
+      "t_bce": 0.23889665599926957,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "35-default-fallback.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/35-default-fallback.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc main() {\n\tch := make(chan string)\n\tselect {\n\tcase ch <- \"ready\":\n\t\tfmt.Println(\"sent\")\n\tdefault:\n\t\tfmt.Println(\"idle\")\n\t}\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3407885449996684,
+      "t_bce": 0.3310394440013624,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.30709873900195817,
+      "t_bce": 0.31595456400100375,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "41-wrapper-alias-own-move-control.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/41-wrapper-alias-own-move-control.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc same(m map[string]int) map[string]int {\n\treturn m\n}\n\nfunc sink(results <-chan map[string]int, done chan<- bool) {\n\tm := <-results\n\tfmt.Println(fmt.Sprintf(\"count: %v\", len(m)))\n\tdone <- true\n}\n\nfunc main() {\n\tagg := map[string]int{}\n\tagg[\"a\"] = 1\n\tresults := make(chan map[string]int, 1)\n\tdone := make(chan bool, 1)\n\tgo sink(results, done)\n\talias := same(same(agg))\n\tfmt.Println(fmt.Sprintf(\"before: %v\", len(alias)))\n\tresults <- agg\n\t<-done\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.34541470799740637,
+      "t_bce": 0.3516271379994578,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 2
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3128844620005111,
+      "t_bce": 0.3179105340022943,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 2
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "44-copy-primitive-element-control.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/44-copy-primitive-element-control.hy",
+    "emitted": true,
+    "go_src": "package main\n\nfunc worker(d []int, done chan<- bool) {\n\td[0] = 9\n\tdone <- true\n}\n\nfunc main() {\n\tsrc := []int{1}\n\tdst := make([]int, 1)\n\tcopy(dst, src)\n\tdone := make(chan bool, 1)\n\tgo worker(dst, done)\n\tsrc[0] = 5\n\t<-done\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.2514567310026905,
+      "t_bce": 0.25021658599871444,
+      "bce_counts": {
+        "IsInBounds": 2
+      },
+      "bce_sites": [
+        {
+          "line": 4,
+          "col": 3,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 13,
+          "col": 11,
+          "kind": "IsInBounds"
+        }
+      ],
+      "asm_calls": {
+        "chansend1": 2,
+        "panicBounds": 2
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.23547178900116705,
+      "t_bce": 0.24413299899970298,
+      "bce_counts": {
+        "IsInBounds": 2
+      },
+      "bce_sites": [
+        {
+          "line": 4,
+          "col": 3,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 13,
+          "col": 11,
+          "kind": "IsInBounds"
+        }
+      ],
+      "asm_calls": {
+        "chansend1": 2,
+        "panicBounds": 2
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "51-make-slice-cap.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/51-make-slice-cap.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc main() {\n\ts := make([]int, 3, 10)\n\ts[0] = 1\n\tfmt.Println(fmt.Sprintf(\"len %v cap %v\", len(s), cap(s)))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.33690509000007296,
+      "t_bce": 0.34107335999942734,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3154634790007549,
+      "t_bce": 0.316216250997968,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "55-field-store-fresh-at-spawn.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/55-field-store-fresh-at-spawn.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype holder struct {\n\tm map[string]int\n}\n\nfunc worker(h holder) {\n\th.m[\"task\"]++\n}\n\nfunc main() {\n\tvar h holder = holder{m: map[string]int{}}\n\th.m = map[string]int{}\n\tgo worker(h)\n\tfmt.Println(\"worker spawned\")\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3375785249991168,
+      "t_bce": 0.340960012999858,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.31294430600246415,
+      "t_bce": 0.3383467659987218,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "60-rebind-without-defer-control.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/60-rebind-without-defer-control.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc main() {\n\tshared := map[string]int{}\n\talias := shared\n\tshared = map[string]int{}\n\talias[\"main\"]++\n\tfmt.Println(fmt.Sprintf(\"%v %v\", len(shared), len(alias)))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.34709914099948946,
+      "t_bce": 0.34418299200115143,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3123836040031165,
+      "t_bce": 0.3108723960031057,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "62-shadowing-binder-last-use.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/62-shadowing-binder-last-use.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype item struct {\n\tx int\n}\n\nfunc worker(m map[string]item, done chan bool) {\n\tfor i := 0; i < 1000; i++ {\n\t\tm[\"w\"] = item{x: i}\n\t}\n\tdone <- true\n}\n\nfunc main() {\n\tm := map[string]item{\"a\": item{x: 0}}\n\tdone := make(chan bool, 1)\n\tn := m[\"a\"]\n\tn.x = 1\n\tm[\"a\"] = n\n\tgo worker(m, done)\n\ttotal := 0\n\tfor n := 0; n < 1000; n++ {\n\t\ttotal += n\n\t}\n\t<-done\n\tfmt.Println(total)\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3341135150003538,
+      "t_bce": 0.3475526660004107,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 2
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3178380030003609,
+      "t_bce": 0.3202643180011364,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 2
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "63-shadowing-binders-at-spawn.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/63-shadowing-binders-at-spawn.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype service struct {\n\treplicas int\n}\n\nfunc worker(m map[string]service, done chan bool) {\n\tdone <- true\n}\n\nfunc main() {\n\tm := map[string]service{\"a\": service{replicas: 1}}\n\tn := m[\"a\"]\n\tn.replicas = 5\n\tm[\"a\"] = n\n\tdone := make(chan bool, 1)\n\tgo worker(m, done)\n\ttotal := 0\n\tif n := 2; n > 1 {\n\t\ttotal += n\n\t}\n\tf := func() (n int) {\n\t\tn = 7\n\t\treturn\n\t}\n\ttotal += f()\n\t<-done\n\tfmt.Println(total)\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3404027099968516,
+      "t_bce": 0.3709627790012746,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 2
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.31451288500102237,
+      "t_bce": 0.3149093680003716,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 2
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "66-addr-of-call-read-control.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/66-addr-of-call-read-control.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype holder struct {\n\tm map[string]int\n}\n\nfunc read(h *holder) int {\n\treturn len(h.m)\n}\n\nfunc worker(h holder) {\n\th.m[\"task\"]++\n}\n\nfunc main() {\n\tvar h holder = holder{m: map[string]int{}}\n\th.m = map[string]int{}\n\tn := read(&h)\n\tgo worker(h)\n\tfmt.Println(fmt.Sprintf(\"%v\", n))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.34854555199854076,
+      "t_bce": 0.33888460399975884,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3127187799982494,
+      "t_bce": 0.31819487199754803,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "any-erasure-primitive-control.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/any-erasure-primitive-control.hy",
+    "emitted": true,
+    "go_src": "package main\n\nfunc worker(v any, done chan<- bool) {\n\tdone <- true\n}\n\nfunc main() {\n\tvar v any = 42\n\tdone := make(chan bool, 1)\n\tgo worker(v, done)\n\t<-done\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.25438796900198213,
+      "t_bce": 0.24928241800080286,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 2
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.230147254998883,
+      "t_bce": 0.23687020000215853,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 2
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "any-operations-controls-accept.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/any-operations-controls-accept.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc box() any {\n\tvar g int = 1\n\treturn g\n}\n\nfunc take(v any) {\n\tfmt.Println(\"taken\")\n}\n\nfunc worker(v any, done chan<- bool) {\n\tdone <- true\n}\n\ntype s struct {\n\tv any\n}\n\nfunc main() {\n\tvar a any = 1\n\ta = \"str\"\n\tfmt.Println(fmt.Sprintf(\"%v\", a))\n\tvar v any = 42\n\tfmt.Println(fmt.Sprintf(\"%v\", v))\n\tx := box()\n\tfmt.Println(fmt.Sprintf(\"%v\", x))\n\txs := []any{1, \"two\"}\n\tfmt.Println(fmt.Sprintf(\"%v\", len(xs)))\n\tm := map[string]any{}\n\tm[\"k\"] = 1\n\tfmt.Println(fmt.Sprintf(\"%v\", len(m)))\n\tvar q s\n\tq.v = 5\n\tfmt.Println(fmt.Sprintf(\"%v\", q.v))\n\ttake(1)\n\tdone := make(chan bool, 1)\n\tgo worker(v, done)\n\t<-done\n\tif a == 1 {\n\t\tfmt.Println(\"eq\")\n\t}\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3476435410011618,
+      "t_bce": 0.3449284640009864,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 2
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3208015419986623,
+      "t_bce": 0.33488134300205274,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 2
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "call-and-return-controls-accept.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/call-and-return-controls-accept.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype counter struct {\n\tn int\n}\n\nfunc (c *counter) bump(k int) int {\n\tc.n = c.n + k\n\treturn c.n\n}\n\nfunc add(a int, b int) int {\n\treturn a + b\n}\n\nfunc naked() (n int) {\n\tn = 7\n\treturn\n}\n\nfunc short() (int, error) {\n\treturn 1, nil\n}\n\nfunc two() (int, int) {\n\treturn 1, 2\n}\n\nfunc forward() (int, int) {\n\treturn two()\n}\n\nfunc floaty() float64 {\n\treturn 1\n}\n\nfunc sliced() []int {\n\txs := []int{1, 2}\n\treturn xs\n}\n\nfunc anyval() any {\n\tvar g int = 1\n\treturn g\n}\n\nfunc main() {\n\tr := add(1, 2)\n\tvar c counter\n\tm := c.bump(2)\n\tf := func(x int) int {\n\t\treturn x + 1\n\t}\n\tq := f(1)\n\tfmt.Println(fmt.Sprintf(\"%v %v %v\", r, m, q))\n\tfmt.Println(fmt.Sprintf(\"%v\", naked()))\n\tv, e := short()\n\tfmt.Println(fmt.Sprintf(\"%v %v\", v, e))\n\ta, b := forward()\n\tfmt.Println(fmt.Sprintf(\"%v %v\", a, b))\n\tfmt.Println(fmt.Sprintf(\"%v\", floaty()))\n\tfmt.Println(fmt.Sprintf(\"%v\", len(sliced())))\n\tfmt.Println(fmt.Sprintf(\"%v\", anyval()))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3447310519986786,
+      "t_bce": 0.35072812600265024,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.32748821600034717,
+      "t_bce": 0.32783277799899224,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "chan-slice-fresh-control.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/chan-slice-fresh-control.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc consumer(ch <-chan []int) {\n\txs := <-ch\n\tfmt.Println(fmt.Sprintf(\"n: %v\", len(xs)))\n}\n\nfunc main() {\n\tch := make(chan []int, 1)\n\tgo consumer(ch)\n\tch <- []int{1, 2, 3}\n\tfmt.Println(\"done\")\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3326972279974143,
+      "t_bce": 0.3459090770011244,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 1
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3150826599994616,
+      "t_bce": 0.3151627199986251,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 1
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "control-composite-literal-in-range.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/control-composite-literal-in-range.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype user struct {\n\tage int8\n}\n\nfunc main() {\n\tu := user{age: 127}\n\txs := []int8{127}\n\tfmt.Println(fmt.Sprintf(\"%v %v\", u.age, xs[0]))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.33551286500005517,
+      "t_bce": 0.35117094599991105,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.31696690000171657,
+      "t_bce": 0.3153974119995837,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "control-const-expr-within-range.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/control-const-expr-within-range.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc main() {\n\tvar n int8 = 100 + 27\n\tfmt.Println(fmt.Sprintf(\"%v\", n))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3379032480006572,
+      "t_bce": 0.3400342599998112,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3101911880003172,
+      "t_bce": 0.3100295570002345,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "control-int8-boundaries.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/control-int8-boundaries.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc main() {\n\tvar hi int8 = 127\n\tvar lo int8 = -128\n\tfmt.Println(fmt.Sprintf(\"%v %v\", hi, lo))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.33742867699766066,
+      "t_bce": 0.3516335269996489,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.31070119099967997,
+      "t_bce": 0.3169439040029829,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "control-large-array-length.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/control-large-array-length.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc main() {\n\tvar a [300]int8\n\tfmt.Println(fmt.Sprintf(\"%v\", len(a)))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.33645154500118224,
+      "t_bce": 0.3361280019998958,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.30785810700035654,
+      "t_bce": 0.31471312400026363,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "control-negate-variable-wraps.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/control-negate-variable-wraps.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc main() {\n\tvar n int8 = -128\n\tvar m int8 = -n\n\tfmt.Println(fmt.Sprintf(\"%v\", m))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3336303069991118,
+      "t_bce": 0.3377290879980137,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3124331440012611,
+      "t_bce": 0.3195914440002525,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "control-slice-index-past-length.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/control-slice-index-past-length.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc main() {\n\txs := []int{1, 2}\n\tif len(xs) > 300 {\n\t\tfmt.Println(fmt.Sprintf(\"%v\", xs[300]))\n\t}\n\tfmt.Println(fmt.Sprintf(\"%v\", len(xs)))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.33432690399786225,
+      "t_bce": 0.3338987150018511,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.314171335001447,
+      "t_bce": 0.3117939160001697,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "control-uint8-max.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/control-uint8-max.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc main() {\n\tvar n uint8 = 255\n\tfmt.Println(fmt.Sprintf(\"%v\", n))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.337780516998464,
+      "t_bce": 0.34411370900124894,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3135581709975668,
+      "t_bce": 0.313218624000001,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "deep-composite-move-fresh-control.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/deep-composite-move-fresh-control.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype holder struct {\n\tm map[string]int\n}\n\nfunc worker(xs []holder, done chan<- bool) {\n\tfmt.Println(fmt.Sprintf(\"n: %v\", len(xs)))\n\tdone <- true\n}\n\nfunc main() {\n\txs := []holder{holder{m: map[string]int{\"a\": 1}}}\n\tdone := make(chan bool, 1)\n\tgo worker(xs, done)\n\t<-done\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3679652469982102,
+      "t_bce": 0.3428162429991062,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 1
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.31380867199914064,
+      "t_bce": 0.3081544849992497,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 1
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "local-composite-chan-recv-accept.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/local-composite-chan-recv-accept.hy",
+    "emitted": true,
+    "go_src": "package main\n\nfunc main() {\n\tch := make(chan int, 1)\n\tch <- 7\n\tchs := make([]chan int, 0)\n\tchs = append(chs, ch)\n\tsub := append(chs, ch)\n\tv := <-sub[0]\n\t_ = v\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.24586079199798405,
+      "t_bce": 0.2454737309999473,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 1
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.23373197600085405,
+      "t_bce": 0.23923569599719485,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 1
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "map-elem-fresh-map-control.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/map-elem-fresh-map-control.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype env struct {\n\tservices map[string]map[string]int\n}\n\nfunc worker(services map[string]map[string]int, done chan<- bool) {\n\tfmt.Println(fmt.Sprintf(\"frontend replicas: %v\", services[\"frontend\"][\"replicas\"]))\n\tdone <- true\n}\n\nfunc main() {\n\te := env{services: map[string]map[string]int{\"frontend\": map[string]int{\"replicas\": 2}}}\n\tm := e.services\n\tfresh := map[string]int{\"z\": 5}\n\tdone := make(chan bool, 1)\n\tgo worker(m, done)\n\tfresh[\"z\"] = 9\n\t<-done\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.34073615899978904,
+      "t_bce": 0.3564576319986372,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 1
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.31181520099926274,
+      "t_bce": 0.3437013039983867,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 1
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "map-slot-borrow-paths-accept.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/map-slot-borrow-paths-accept.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype service struct {\n\treplicas int\n\ttag      string\n}\n\ntype env struct {\n\tservices map[string]service\n}\n\nfunc touch(s *service) {\n\ts.replicas = 7\n}\n\nfunc bump(e *env) {\n\tn := e.services[\"a\"]\n\tn.replicas = 3\n\te.services[\"a\"] = n\n\tm := e.services[\"b\"]\n\tm.replicas = 4\n\te.services[\"b\"] = m\n}\n\nfunc main() {\n\te := env{services: map[string]service{\"a\": service{replicas: 1, tag: \"t\"}, \"b\": service{replicas: 2, tag: \"u\"}}}\n\tbump(&e)\n\ttmp := e.services[\"a\"]\n\ttouch(&tmp)\n\tra := e.services[\"a\"].replicas\n\trb := e.services[\"b\"].replicas\n\trc := tmp.replicas\n\tfmt.Println(fmt.Sprintf(\"%v %v %v\", ra, rb, rc))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.34294600399880437,
+      "t_bce": 0.3440442309984064,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.31759683399650385,
+      "t_bce": 0.32122375299877604,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "member-defer-and-append-controls-accept.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/member-defer-and-append-controls-accept.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n\t\"sync/atomic\"\n)\n\n// ---- Hybrid prelude: slice pop (auto-generated; do not edit) ----\nfunc hy_pop[t any](s *[]t) t {\n\tn := len(*s)\n\tv := (*s)[n-1]\n\t*s = (*s)[:n-1]\n\treturn v\n}\n\ntype c struct {\n\tn int\n}\n\nfunc (x *c) bump(k int) int {\n\tx.n = x.n + k\n\treturn x.n\n}\n\ntype holder struct {\n\ta int\n\tf func(a int) int\n}\n\ntype r struct {\n\tn int\n}\n\nfunc (x *r) stop() {\n\tfmt.Println(\"stopped\")\n}\n\nfunc g(a int) {\n\tfmt.Println(fmt.Sprintf(\"%v\", a))\n}\n\nfunc inc(a int) int {\n\treturn a + 1\n}\n\nfunc probe(hits *atomic.Int64) {\n\thits.Add(1)\n\tfmt.Println(fmt.Sprintf(\"%v\", hits.Load()))\n}\n\nfunc main() {\n\tvar z c\n\tfmt.Println(fmt.Sprintf(\"%v\", z.bump(2)))\n\tvar h holder\n\th.f = inc\n\tfmt.Println(fmt.Sprintf(\"%v\", h.a))\n\tfmt.Println(fmt.Sprintf(\"%v\", h.f(1)))\n\tstack := []int{1, 2}\n\tpopped := hy_pop(&stack)\n\tfmt.Println(fmt.Sprintf(\"%v\", popped))\n\tdefer g(1)\n\tvar q r\n\tdefer q.stop()\n\tch := make(chan int, 1)\n\tdefer close(ch)\n\txs := []int{1}\n\tfmt.Println(fmt.Sprintf(\"%v\", len(append(xs, 2, 3))))\n\tss := []string{\"a\"}\n\tbs := \"b\"\n\tfmt.Println(fmt.Sprintf(\"%v\", len(append(ss, bs))))\n\ta := []int{1}\n\tb := []int{2}\n\tfmt.Println(fmt.Sprintf(\"%v\", len(append(a, b...))))\n\tfs := []float64{}\n\tfmt.Println(fmt.Sprintf(\"%v\", len(append(fs, 1))))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3477094269983354,
+      "t_bce": 0.3586617769979057,
+      "bce_counts": {
+        "IsInBounds": 2,
+        "IsSliceInBounds": 1
+      },
+      "bce_sites": [
+        {
+          "line": 11,
+          "col": 11,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 9,
+          "col": 6,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 9,
+          "col": 6,
+          "kind": "IsSliceInBounds"
+        }
+      ],
+      "asm_calls": {
+        "closechan": 1,
+        "panicBounds": 3
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.32159355000112555,
+      "t_bce": 0.33360896299927845,
+      "bce_counts": {
+        "IsInBounds": 2,
+        "IsSliceInBounds": 1
+      },
+      "bce_sites": [
+        {
+          "line": 11,
+          "col": 11,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 9,
+          "col": 6,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 9,
+          "col": 6,
+          "kind": "IsSliceInBounds"
+        }
+      ],
+      "asm_calls": {
+        "closechan": 1,
+        "panicBounds": 3
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "multivalue-and-void-controls-accept.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/multivalue-and-void-controls-accept.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc two() (int, int) {\n\treturn 1, 2\n}\n\nfunc fwd() (int, int) {\n\treturn two()\n}\n\nfunc g(a int, b int) {\n\tfmt.Println(fmt.Sprintf(\"%v %v\", a, b))\n}\n\nfunc v() {\n\tfmt.Println(\"v ran\")\n}\n\nfunc one() int {\n\treturn 1\n}\n\nfunc main() {\n\ta, b := two()\n\tfmt.Println(fmt.Sprintf(\"%v %v\", a, b))\n\tvar x int\n\tvar y int\n\tx, y = two()\n\tfmt.Println(fmt.Sprintf(\"%v %v\", x, y))\n\tp, q := fwd()\n\tfmt.Println(fmt.Sprintf(\"%v %v\", p, q))\n\tg(two())\n\tv()\n\tdefer v()\n\tm := map[string]int{}\n\tmv, ok := m[\"k\"]\n\tfmt.Println(fmt.Sprintf(\"%v %v\", mv, ok))\n\tc := make(chan int, 1)\n\tc <- 7\n\tcv, cok := <-c\n\tfmt.Println(fmt.Sprintf(\"%v %v\", cv, cok))\n\ts := one()\n\tt := one() + 1\n\tg(one(), 2)\n\tfmt.Println(fmt.Sprintf(\"%v %v\", s, t))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.33926505699855625,
+      "t_bce": 0.36751136199745815,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 1
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.32103360899782274,
+      "t_bce": 0.3232706720009446,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 1
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "n5-zero-map-first-write.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/n5-zero-map-first-write.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype tally = map[string]int\n\ntype bag struct {\n\tlabel  string\n\tcounts map[string]int\n}\n\ntype shelf struct {\n\ttop  bag\n\ttags tally\n}\n\nfunc main() {\n\tvar m map[string]int = map[string]int{}\n\tm[\"a\"] = 1\n\tvar b bag = bag{counts: map[string]int{}}\n\tb.counts[\"k\"] = 2\n\tkeyed := bag{label: \"x\", counts: map[string]int{}}\n\tkeyed.counts[\"x\"] = 3\n\tvar s shelf = shelf{top: bag{counts: map[string]int{}}, tags: tally{}}\n\ts.top.counts[\"t\"] = 4\n\ts.tags[\"g\"] = 5\n\tp := &bag{counts: map[string]int{}}\n\tp.counts[\"p\"] = 6\n\tvar t tally = tally{}\n\tt[\"z\"] += 7\n\tfmt.Println(len(m), len(b.counts), fmt.Sprintf(\"%v %v\", keyed.label, keyed.counts[\"x\"]), s.top.counts[\"t\"]+s.tags[\"g\"], p.counts[\"p\"], t[\"z\"])\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3562065830010397,
+      "t_bce": 0.34704179800246493,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.31463768600224284,
+      "t_bce": 0.3284851089993026,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "select-two-recv-define-arms-accept.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/select-two-recv-define-arms-accept.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc main() {\n\ta := make(chan int, 1)\n\tb := make(chan int, 1)\n\ta <- 1\n\tb <- 2\n\ttotal := 0\n\tselect {\n\tcase v := <-a:\n\t\ttotal += v\n\tcase w, ok := <-b:\n\t\tif ok {\n\t\t\ttotal += w\n\t\t}\n\t}\n\tfmt.Println(total)\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.339349324000068,
+      "t_bce": 0.33953578699947684,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 2
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3198308030005137,
+      "t_bce": 0.33435202600230696,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 2
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "struct-and-conversion-controls-accept.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/struct-and-conversion-controls-accept.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype p struct {\n\tn int\n}\n\ntype s struct {\n\ta int\n\tb int\n\tf float64\n\tq p\n}\n\nfunc two() (int, int) {\n\treturn 1, 2\n}\n\nfunc main() {\n\tv := int(1)\n\tw := string(65)\n\tfmt.Println(fmt.Sprintf(\"%v %v\", v, w))\n\txs := []int{1}\n\tys := append(xs, 2, 3)\n\tfmt.Println(fmt.Sprintf(\"%v\", len(ys)))\n\tone := s{a: 1}\n\tboth := s{a: 1, b: 2}\n\tfmt.Println(fmt.Sprintf(\"%v %v\", one.a, both.b))\n\tvar z s\n\tz.f = 1\n\tfmt.Println(fmt.Sprintf(\"%v\", z.f))\n\tvar r p\n\tz.q = r\n\tfmt.Println(fmt.Sprintf(\"%v\", z.q.n))\n\tvar a any = 1\n\ta = \"str\"\n\tfmt.Println(fmt.Sprintf(\"%v\", a))\n\tx, y := two()\n\tfmt.Println(fmt.Sprintf(\"%v %v\", x, y))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.344591731998662,
+      "t_bce": 0.3498815420025494,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3170309470006032,
+      "t_bce": 0.32710607099943445,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "type-name-in-value-position-controls-accept.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/type-name-in-value-position-controls-accept.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\ntype holder struct {\n\tn int\n}\n\nfunc main() {\n\ti := int(3.0)\n\tb := uint8(200)\n\tfmt.Println(fmt.Sprintf(\"%v %v\", i, b))\n\tp := new(holder)\n\tp.n = 7\n\tc := make(chan int, 1)\n\tc <- 1\n\ts := make([]int, 4)\n\tfmt.Println(fmt.Sprintf(\"%v %v %v\", p.n, <-c, len(s)))\n\tlit := holder{n: 2}\n\tfmt.Println(fmt.Sprintf(\"%v\", lit.n))\n\tholder := 5\n\tfmt.Println(fmt.Sprintf(\"%v\", holder))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.34666436999759753,
+      "t_bce": 0.34304726799746277,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 1
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3160288450017106,
+      "t_bce": 0.31807030200070585,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 1
+      }
+    }
+  },
+  {
+    "kind": "corpus",
+    "name": "typed-const-expression-controls-accept.hy",
+    "path": "/home/user/builds/Go-Hybrid/tests/checker-corpus/typed-const-expression-controls-accept.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nconst top uint8 = 255\n\nconst mid uint8 = 100\n\nfunc main() {\n\tt := uint8(44)\n\tfmt.Println(fmt.Sprintf(\"%v\", t))\n\tvar x uint8 = 200\n\tvar y uint8 = 100\n\ts := x + y\n\tfmt.Println(fmt.Sprintf(\"%v\", s))\n\tvar z uint8 = 255\n\tw := z + 1\n\tfmt.Println(fmt.Sprintf(\"%v\", w))\n\ta := uint8(100) + uint8(20)\n\tb := int64(1) << 62\n\tc := uint8(255)\n\td := mid + 1\n\tfmt.Println(fmt.Sprintf(\"%v %v %v %v %v\", a, b, c, d, top))\n\te := uint8(255) > 1\n\tfmt.Println(fmt.Sprintf(\"%v\", e))\n\tf := 1 + 2\n\tg := 1.5 + 2.5\n\tfmt.Println(fmt.Sprintf(\"%v %v\", f, g))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3697419339987391,
+      "t_bce": 0.3500575830003072,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3153901510013384,
+      "t_bce": 0.3307295949998661,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "example",
+    "name": "01-hello",
+    "path": "/home/user/builds/Go-Hybrid/examples/01-hello/program.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc main() {\n\tname := \"Hybrid\"\n\tcount := 0\n\tcount += 1\n\tfmt.Println(fmt.Sprintf(\"hello, %v!\", name))\n\tfmt.Printf(\"count=%d ok=%v\\n\", count, count == 1)\n\tlangs := []string{\"Go\", \"Rust\", \"Hybrid\"}\n\tfor i, l := range langs {\n\t\tfmt.Println(fmt.Sprintf(\"%v: %v\", i, l))\n\t}\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3432221100010793,
+      "t_bce": 0.3445040340011474,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3178598679987772,
+      "t_bce": 0.31428050999966217,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {}
+    }
+  },
+  {
+    "kind": "example",
+    "name": "02-cli-cat",
+    "path": "/home/user/builds/Go-Hybrid/examples/02-cli-cat/program.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n\t\"io\"\n\t\"os\"\n\t\"path/filepath\"\n)\n\nfunc main() {\n\tcode, hyErr := func() (code int, hyErr error) {\n\t\targs := os.Args\n\t\tif len(args) < 2 {\n\t\t\tfmt.Fprintln(os.Stderr, \"usage: cat <file>\")\n\t\t\treturn 1, nil\n\t\t}\n\t\tf, hyErr0 := os.Open(args[1])\n\t\tif hyErr0 != nil {\n\t\t\thyErr = hyErr0\n\t\t\treturn\n\t\t}\n\t\tdefer f.Close()\n\t\tdata, hyErr1 := io.ReadAll(f)\n\t\tif hyErr1 != nil {\n\t\t\thyErr = hyErr1\n\t\t\treturn\n\t\t}\n\t\tos.Stdout.Write(data)\n\t\treturn 0, nil\n\t\treturn\n\t}()\n\tif hyErr != nil {\n\t\tfmt.Fprintln(os.Stderr, filepath.Base(os.Args[0])+\":\", hyErr)\n\t\tos.Exit(1)\n\t}\n\tos.Exit(code)\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3460983839977416,
+      "t_bce": 0.3527978219972283,
+      "bce_counts": {
+        "IsInBounds": 1
+      },
+      "bce_sites": [
+        {
+          "line": 33,
+          "col": 48,
+          "kind": "IsInBounds"
+        }
+      ],
+      "asm_calls": {
+        "panicBounds": 1
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3418486449991178,
+      "t_bce": 0.3280418699978327,
+      "bce_counts": {
+        "IsInBounds": 1
+      },
+      "bce_sites": [
+        {
+          "line": 33,
+          "col": 48,
+          "kind": "IsInBounds"
+        }
+      ],
+      "asm_calls": {
+        "panicBounds": 1
+      }
+    }
+  },
+  {
+    "kind": "example",
+    "name": "03-worker-pool",
+    "path": "/home/user/builds/Go-Hybrid/examples/03-worker-pool/program.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n\t\"sort\"\n\t\"time\"\n)\n\ntype job struct {\n\tinput   int\n\tcost_ms int\n}\n\ntype result struct {\n\tworker int\n\tvalue  int\n}\n\nfunc worker(id int, jobs <-chan job, results chan<- result) {\n\tfor j := range jobs {\n\t\ttime.Sleep(time.Duration(j.cost_ms) * time.Millisecond)\n\t\tresults <- result{worker: id, value: j.input * 2}\n\t}\n}\n\nfunc main() {\n\tconst n_workers = 4\n\tjobs := make(chan job, 16)\n\tresults := make(chan result, 16)\n\tfor i := 0; i < n_workers; i++ {\n\t\tgo worker(i, jobs, results)\n\t}\n\tinputs := []int{3, 1, 4, 1, 5, 9, 2, 6}\n\tfor _, v := range inputs {\n\t\tjobs <- job{input: v, cost_ms: (v % 3)}\n\t}\n\tclose(jobs)\n\tvar got []int\n\tfor len(got) < len(inputs) {\n\t\tr := <-results\n\t\tgot = append(got, r.value)\n\t}\n\tsort.Ints(got)\n\tfmt.Println(got)\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.3426450549995934,
+      "t_bce": 0.3482458559992665,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 3,
+        "closechan": 1
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.31697231300131534,
+      "t_bce": 0.3263470079982653,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 3,
+        "closechan": 1
+      }
+    }
+  },
+  {
+    "kind": "example",
+    "name": "04-pipeline-backpressure",
+    "path": "/home/user/builds/Go-Hybrid/examples/04-pipeline-backpressure/program.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n\t\"time\"\n)\n\nfunc producer(out chan<- int) {\n\thyLo0 := 1\n\thyHi1 := 8\n\tfor i, hyCont2 := hyLo0, hyLo0 <= hyHi1; hyCont2; i++ {\n\t\thyCont2 = i != hyHi1\n\t\tout <- i\n\t}\n\tclose(out)\n}\n\nfunc squarer(in <-chan int, out chan<- int) {\n\tfor v := range in {\n\t\ttime.Sleep(time.Duration(5) * time.Millisecond)\n\t\tout <- v * v\n\t}\n\tclose(out)\n}\n\nfunc main() {\n\traw := make(chan int, 2)\n\tsq := make(chan int, 2)\n\tgo producer(raw)\n\tgo squarer(raw, sq)\n\tvar total int\n\tdeadline := time.After(time.Duration(2) * time.Second)\nhyLoop:\n\tfor {\n\t\tselect {\n\t\tcase v, ok := <-sq:\n\t\t\tif !ok {\n\t\t\t\tbreak hyLoop\n\t\t\t}\n\t\t\ttotal += v\n\t\tcase <-deadline:\n\t\t\tpanic(\"pipeline timed out\")\n\t\t}\n\t}\n\tfmt.Println(fmt.Sprintf(\"total=%v\", total))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.34700962500210153,
+      "t_bce": 0.3533744879969163,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 4,
+        "closechan": 4
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.32352608599831,
+      "t_bce": 0.3201485710014822,
+      "bce_counts": {},
+      "bce_sites": [],
+      "asm_calls": {
+        "chansend1": 4,
+        "closechan": 4
+      }
+    }
+  },
+  {
+    "kind": "example",
+    "name": "05-json-transform",
+    "path": "/home/user/builds/Go-Hybrid/examples/05-json-transform/program.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n\t\"hybrid.program/jsonbinding\"\n\t\"os\"\n\t\"path/filepath\"\n)\n\nfunc main() {\n\thyErr := func() (hyErr error) {\n\t\tdoc, hyErr0 := jsonbinding.Parse([]byte(`{\"users\":[{\"name\":\"ada\",\"logins\":5},{\"name\":\"linus\",\"logins\":2}]}`))\n\t\tif hyErr0 != nil {\n\t\t\thyErr = hyErr0\n\t\t\treturn\n\t\t}\n\t\tvar names []string\n\t\thyT1, hyErr2 := doc.Array(\"users\")\n\t\tif hyErr2 != nil {\n\t\t\thyErr = hyErr2\n\t\t\treturn\n\t\t}\n\t\tfor _, u := range hyT1 {\n\t\t\thyT3, hyErr4 := u.Int(\"logins\")\n\t\t\tif hyErr4 != nil {\n\t\t\t\thyErr = hyErr4\n\t\t\t\treturn\n\t\t\t}\n\t\t\tif hyT3 >= 3 {\n\t\t\t\thyT5, hyErr6 := u.String(\"name\")\n\t\t\t\tif hyErr6 != nil {\n\t\t\t\t\thyErr = hyErr6\n\t\t\t\t\treturn\n\t\t\t\t}\n\t\t\t\tnames = append(names, hyT5)\n\t\t\t}\n\t\t}\n\t\tout, hyErr7 := jsonbinding.ToStringPretty(users_json(names))\n\t\tif hyErr7 != nil {\n\t\t\thyErr = hyErr7\n\t\t\treturn\n\t\t}\n\t\tfmt.Println(out)\n\t\treturn\n\t}()\n\tif hyErr != nil {\n\t\tfmt.Fprintln(os.Stderr, filepath.Base(os.Args[0])+\":\", hyErr)\n\t\tos.Exit(1)\n\t}\n}\n\nfunc users_json(names []string) jsonbinding.Value {\n\tv := jsonbinding.NewObject()\n\tarr := jsonbinding.NewArray()\n\tfor _, n := range names {\n\t\tarr.PushString(n)\n\t}\n\tv.Set(\"active\", arr)\n\treturn v\n}\n",
+    "go126": {
+      "compiled": false,
+      "error": "main.go:5:2: no required module provides package hybrid.program/jsonbinding; to add it:\n\tgo get hybrid.program/jsonbinding"
+    },
+    "go127": {
+      "compiled": false,
+      "error": "main.go:5:2: no required module provides package hybrid.program/jsonbinding; to add it:\n\tgo get hybrid.program/jsonbinding"
+    }
+  },
+  {
+    "kind": "example",
+    "name": "06-http-server",
+    "path": "/home/user/builds/Go-Hybrid/examples/06-http-server/program.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n\t\"net/http\"\n\t\"net/http/httptest\"\n\t\"os\"\n\t\"path/filepath\"\n\t\"strconv\"\n\t\"strings\"\n)\n\nfunc logging(next http.Handler) http.Handler {\n\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tfmt.Fprintln(os.Stderr, fmt.Sprintf(\"%v %v\", r.Method, r.URL.Path))\n\t\tnext.ServeHTTP(w, r)\n\t})\n}\n\nfunc main() {\n\thyErr := func() (hyErr error) {\n\t\tmux := http.NewServeMux()\n\t\tmux.Handle(\"/hello\", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\t\tfmt.Fprintln(w, \"hello from Hybrid\")\n\t\t}))\n\t\tmux.Handle(\"/add/\", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\t\ta, hyErr0 := strconv.Atoi(r.URL.Query().Get(\"a\"))\n\t\t\tif hyErr0 != nil {\n\t\t\t\thttp.Error(w, hyErr0.Error(), http.StatusBadRequest)\n\t\t\t\treturn\n\t\t\t}\n\t\t\tb, hyErr1 := strconv.Atoi(r.URL.Query().Get(\"b\"))\n\t\t\tif hyErr1 != nil {\n\t\t\t\thttp.Error(w, hyErr1.Error(), http.StatusBadRequest)\n\t\t\t\treturn\n\t\t\t}\n\t\t\tfmt.Fprintf(w, \"%v+%v=%v\\n\", a, b, a+b)\n\t\t}))\n\t\tfor _, path := range []string{\"/hello\", \"/add/?a=40&b=2\"} {\n\t\t\thyReq2, hyErr3 := http.NewRequest(\"GET\", path, nil)\n\t\t\tif hyErr3 != nil {\n\t\t\t\thyErr = hyErr3\n\t\t\t\treturn\n\t\t\t}\n\t\t\thyRec4 := httptest.NewRecorder()\n\t\t\tmux.ServeHTTP(hyRec4, hyReq2)\n\t\t\tcode, body := hyRec4.Code, strings.TrimSuffix(hyRec4.Body.String(), \"\\n\")\n\t\t\tfmt.Println(fmt.Sprintf(\"%v %v\", code, body))\n\t\t}\n\t\treturn\n\t}()\n\tif hyErr != nil {\n\t\tfmt.Fprintln(os.Stderr, filepath.Base(os.Args[0])+\":\", hyErr)\n\t\tos.Exit(1)\n\t}\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.7493003560011857,
+      "t_bce": 0.7658736329976819,
+      "bce_counts": {
+        "IsInBounds": 1,
+        "IsSliceInBounds": 2
+      },
+      "bce_sites": [
+        {
+          "line": 53,
+          "col": 48,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 47,
+          "col": 68,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 51,
+          "col": 3,
+          "kind": "IsSliceInBounds"
+        }
+      ],
+      "asm_calls": {
+        "panicBounds": 3
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.7082488410014776,
+      "t_bce": 0.7445865849986149,
+      "bce_counts": {
+        "IsInBounds": 1
+      },
+      "bce_sites": [
+        {
+          "line": 53,
+          "col": 48,
+          "kind": "IsInBounds"
+        }
+      ],
+      "asm_calls": {
+        "panicBounds": 1
+      }
+    }
+  },
+  {
+    "kind": "example",
+    "name": "07-lru-generics",
+    "path": "/home/user/builds/Go-Hybrid/examples/07-lru-generics/program.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\n// ---- Hybrid prelude: option (auto-generated; do not edit) ----\ntype option[v any] struct {\n\tval v\n\tok  bool\n}\n\nfunc some[v any](val v) option[v] {\n\treturn option[v]{val: val, ok: true}\n}\n\nfunc (o option[v]) unwrap() v {\n\tif !o.ok {\n\t\tpanic(\"HY-PANIC/unwrap-none\")\n\t}\n\treturn o.val\n}\n\nfunc (o option[v]) or(defaultVal v) v {\n\tif !o.ok {\n\t\treturn defaultVal\n\t}\n\treturn o.val\n}\n\nfunc (o option[v]) is_some() bool {\n\treturn o.ok\n}\n\nfunc (o option[v]) is_none() bool {\n\treturn !o.ok\n}\n\ntype lru_cache[k comparable, v any] struct {\n\tcap     int\n\tentries map[k]v\n\torder   []k\n}\n\nfunc lru_cache_new[k comparable, v any](cap int) lru_cache[k, v] {\n\treturn lru_cache[k, v]{cap: cap, entries: map[k]v{}, order: []k{}}\n}\n\nfunc (c *lru_cache[k, v]) get(key k) option[v] {\n\tif v, ok := c.entries[key]; ok {\n\t\tc.touch(key)\n\t\treturn some(v)\n\t}\n\treturn option[v]{}\n}\n\nfunc (c *lru_cache[k, v]) put(key k, value v) {\n\tif _, ok := c.entries[key]; !ok && len(c.order) == c.cap {\n\t\tevict := c.order[0]\n\t\tc.order = c.order[1:]\n\t\tdelete(c.entries, evict)\n\t}\n\tc.entries[key] = value\n\tc.touch(key)\n}\n\nfunc (c *lru_cache[k, v]) touch(key k) {\n\tfor i, e := range c.order {\n\t\tif e == key {\n\t\t\tc.order = append(c.order[:i], c.order[i+1:]...)\n\t\t\tbreak\n\t\t}\n\t}\n\tc.order = append(c.order, key)\n}\n\nfunc main() {\n\tc := lru_cache_new[string, int](2)\n\tc.put(\"a\", 1)\n\tc.put(\"b\", 2)\n\t_ = c.get(\"a\")\n\tc.put(\"c\", 3)\n\thyMatch0 := c.get(\"b\")\n\tif hyMatch0.ok {\n\t\tv := hyMatch0.val\n\t\tfmt.Println(fmt.Sprintf(\"b=%v\", v))\n\t} else {\n\t\tfmt.Println(\"b evicted\")\n\t}\n\thyMatch1 := c.get(\"a\")\n\tif hyMatch1.ok {\n\t\tv := hyMatch1.val\n\t\tfmt.Println(fmt.Sprintf(\"a=%v\", v))\n\t} else {\n\t\tfmt.Println(\"a evicted\")\n\t}\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.36843533999854117,
+      "t_bce": 0.41840592000153265,
+      "bce_counts": {
+        "IsInBounds": 1,
+        "IsSliceInBounds": 9
+      },
+      "bce_sites": [
+        {
+          "line": 59,
+          "col": 19,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 70,
+          "col": 28,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 70,
+          "col": 41,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 64,
+          "col": 9,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 51,
+          "col": 10,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 81,
+          "col": 11,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 83,
+          "col": 19,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 90,
+          "col": 19,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 67,
+          "col": 6,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 49,
+          "col": 6,
+          "kind": "IsSliceInBounds"
+        }
+      ],
+      "asm_calls": {
+        "panicBounds": 17,
+        "panicwrap": 8
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.3445636700016621,
+      "t_bce": 0.36548364499685704,
+      "bce_counts": {
+        "IsInBounds": 1,
+        "IsSliceInBounds": 9
+      },
+      "bce_sites": [
+        {
+          "line": 59,
+          "col": 19,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 70,
+          "col": 28,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 70,
+          "col": 41,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 64,
+          "col": 9,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 51,
+          "col": 10,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 81,
+          "col": 11,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 83,
+          "col": 19,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 90,
+          "col": 19,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 67,
+          "col": 6,
+          "kind": "IsSliceInBounds"
+        },
+        {
+          "line": 49,
+          "col": 6,
+          "kind": "IsSliceInBounds"
+        }
+      ],
+      "asm_calls": {
+        "panicBounds": 17,
+        "panicwrap": 8
+      }
+    }
+  },
+  {
+    "kind": "example",
+    "name": "08-graph-ownership",
+    "path": "/home/user/builds/Go-Hybrid/examples/08-graph-ownership/program.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"fmt\"\n)\n\n// ---- Hybrid prelude: set (auto-generated; do not edit) ----\ntype set[t comparable] struct {\n\tm map[t]struct{}\n}\n\nfunc (s *set[t]) insert(v t) bool {\n\tif s.m == nil {\n\t\ts.m = make(map[t]struct{})\n\t}\n\t_, existed := s.m[v]\n\ts.m[v] = struct{}{}\n\treturn !existed\n}\n\nfunc (s *set[t]) contains(v t) bool {\n\t_, ok := s.m[v]\n\treturn ok\n}\n\nfunc (s *set[t]) remove(v t) {\n\tdelete(s.m, v)\n}\n\nfunc (s set[t]) len() int {\n\treturn len(s.m)\n}\n\n// ---- Hybrid prelude: slice pop (auto-generated; do not edit) ----\nfunc hy_pop[t any](s *[]t) t {\n\tn := len(*s)\n\tv := (*s)[n-1]\n\t*s = (*s)[:n-1]\n\treturn v\n}\n\ntype node struct {\n\tvalue int\n\tedges []node_id\n}\n\ntype graph struct {\n\tnodes map[node_id]node\n}\n\ntype node_id = int\n\nfunc (g *graph) add_node(value int) node_id {\n\tid := node_id(len(g.nodes))\n\tg.nodes[id] = node{value: value}\n\treturn id\n}\n\nfunc (g *graph) connect(from node_id, to node_id) {\n\tn := g.nodes[from]\n\tn.edges = append(n.edges, to)\n\tg.nodes[from] = n\n}\n\nfunc (g graph) reachable(from node_id, target node_id) bool {\n\tif from == target {\n\t\treturn true\n\t}\n\tseen := set[node_id]{}\n\tstack := []node_id{from}\n\tfor len(stack) > 0 {\n\t\tcur := hy_pop(&stack)\n\t\tif !seen.insert(cur) {\n\t\t\tcontinue\n\t\t}\n\t\tif cur == target {\n\t\t\treturn true\n\t\t}\n\t\tfor _, e := range g.nodes[cur].edges {\n\t\t\tstack = append(stack, e)\n\t\t}\n\t}\n\treturn false\n}\n\nfunc main() {\n\tg := graph{nodes: map[node_id]node{}}\n\ta := g.add_node(1)\n\tb := g.add_node(2)\n\tc := g.add_node(3)\n\td := g.add_node(4)\n\tg.connect(a, b)\n\tg.connect(b, c)\n\tg.connect(c, a)\n\tg.connect(c, d)\n\tfmt.Println(fmt.Sprintf(\"a reaches d: %v\", g.reachable(a, d)))\n\tfmt.Println(fmt.Sprintf(\"d reaches a: %v\", g.reachable(d, a)))\n}\n",
+    "go126": {
+      "compiled": true,
+      "t_base": 0.35432081899853074,
+      "t_bce": 0.36830371700125397,
+      "bce_counts": {
+        "IsInBounds": 3,
+        "IsSliceInBounds": 1
+      },
+      "bce_sites": [
+        {
+          "line": 37,
+          "col": 11,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 72,
+          "col": 16,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 35,
+          "col": 6,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 35,
+          "col": 6,
+          "kind": "IsSliceInBounds"
+        }
+      ],
+      "asm_calls": {
+        "panicBounds": 4,
+        "panicwrap": 3
+      }
+    },
+    "go127": {
+      "compiled": true,
+      "t_base": 0.33483168200109503,
+      "t_bce": 0.34579196099730325,
+      "bce_counts": {
+        "IsInBounds": 3,
+        "IsSliceInBounds": 1
+      },
+      "bce_sites": [
+        {
+          "line": 37,
+          "col": 11,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 72,
+          "col": 16,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 35,
+          "col": 6,
+          "kind": "IsInBounds"
+        },
+        {
+          "line": 35,
+          "col": 6,
+          "kind": "IsSliceInBounds"
+        }
+      ],
+      "asm_calls": {
+        "panicBounds": 4,
+        "panicwrap": 3
+      }
+    }
+  },
+  {
+    "kind": "example",
+    "name": "09-go-imports-hybrid",
+    "path": "/home/user/builds/Go-Hybrid/examples/09-go-imports-hybrid/program.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"errors\"\n\t\"hybrid.program/regexbinding\"\n)\n\nfunc validate_email(s string) (string, error) {\n\tok, hyErr0 := regexbinding.IsMatch(`^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$`, s)\n\tif hyErr0 != nil {\n\t\treturn \"\", hyErr0\n\t}\n\tif !ok {\n\t\treturn \"\", errors.New(\"invalid email address\")\n\t}\n\treturn s, nil\n}\n\nfunc simple_pattern(p string) bool {\n\treturn regexbinding.IsValid(p)\n}\n",
+    "go126": {
+      "compiled": false,
+      "error": "main.go:5:2: no required module provides package hybrid.program/regexbinding; to add it:\n\tgo get hybrid.program/regexbinding"
+    },
+    "go127": {
+      "compiled": false,
+      "error": "main.go:5:2: no required module provides package hybrid.program/regexbinding; to add it:\n\tgo get hybrid.program/regexbinding"
+    }
+  },
+  {
+    "kind": "example",
+    "name": "10-rust-crate-import",
+    "path": "/home/user/builds/Go-Hybrid/examples/10-rust-crate-import/program.hy",
+    "emitted": true,
+    "go_src": "package main\n\nimport (\n\t\"encoding/hex\"\n\t\"fmt\"\n\t\"hybrid.program/sha3binding\"\n\t\"os\"\n\t\"path/filepath\"\n\t\"time\"\n)\n\nfunc main() {\n\thyErr := func() (hyErr error) {\n\t\twords := []string{\"hybrid\", \"go\", \"rust\"}\n\t\tfor _, w := range words {\n\t\t\tdigest, hyErr0 := sha3binding.Digest256([]byte(w))\n\t\t\tif hyErr0 != nil {\n\t\t\t\thyErr = hyErr0\n\t\t\t\treturn\n\t\t\t}\n\t\t\tfmt.Println(fmt.Sprintf(\"%v: %v\u2026\", w, hex.EncodeToString(digest[:8])))\n\t\t}\n\t\tt0 := time.Now()\n\t\tchecksum, hyErr1 := sha3binding.StreamChecksum(1000000, 7)\n\t\tif hyErr1 != nil {\n\t\t\thyErr = hyErr1\n\t\t\treturn\n\t\t}\n\t\tdt := time.Since(t0)\n\t\tfmt.Println(fmt.Sprintf(\"1M hashes in %vms, checksum=%v\", dt.Milliseconds(), checksum))\n\t\treturn\n\t}()\n\tif hyErr != nil {\n\t\tfmt.Fprintln(os.Stderr, filepath.Base(os.Args[0])+\":\", hyErr)\n\t\tos.Exit(1)\n\t}\n}\n",
+    "go126": {
+      "compiled": false,
+      "error": "main.go:6:2: no required module provides package hybrid.program/sha3binding; to add it:\n\tgo get hybrid.program/sha3binding"
+    },
+    "go127": {
+      "compiled": false,
+      "error": "main.go:6:2: no required module provides package hybrid.program/sha3binding; to add it:\n\tgo get hybrid.program/sha3binding"
+    }
+  }
+]
