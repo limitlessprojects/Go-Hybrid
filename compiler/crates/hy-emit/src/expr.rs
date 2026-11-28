@@ -1014,6 +1014,17 @@ impl Emitter {
         }
     }
 
+    /// `Type.name` resolves to a declared associated fn (not a local, not a package root).
+    fn is_assoc_fn(&self, base: &Expr, head: &str) -> bool {
+        let Expr::Ident { name: root, .. } = Self::unwrap_parens(base) else {
+            return false;
+        };
+        !self.is_unshadowed_pkg_root(root)
+            && !self.bindings.contains_key(root)
+            && !self.local_vars.contains(root)
+            && self.assoc_fns.contains(&format!("{}.{}", root, head))
+    }
+
     fn is_unshadowed_builtin(&self, name: &str) -> bool {
         !self.local_vars.contains(name) && !self.fn_shapes.contains_key(name)
     }
@@ -1092,7 +1103,11 @@ impl Emitter {
 
         // --- slice `.pop()` → prelude helper (example 08's stack shape) ---
         if let Expr::Field { base, name, .. } = callee {
-            if name == "pop" && args.is_empty() && !self.is_user_struct_expr(base) {
+            if name == "pop"
+                && args.is_empty()
+                && !self.is_user_struct_expr(base)
+                && !self.is_assoc_fn(base, "pop")
+            {
                 let peeled = Self::unwrap_parens(base);
                 if matches!(
                     peeled,
