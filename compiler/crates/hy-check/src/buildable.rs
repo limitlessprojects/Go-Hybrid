@@ -1033,15 +1033,28 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// `set[int]` -> `"int"`.
+    /// `set[int]` -> `"int"`; `*set[int]` -> `"int"` too. The prelude declares
+    /// `insert` / `contains` / `remove` on `*set[t]` receivers, so
+    /// `p.insert(v)` on a `*set[T]` takes the same `T`. One pointer level only:
+    /// a declared `**set[T]` has no methods in Go.
     fn set_elem_of_ty(ty: &TypeExpr) -> Option<String> {
+        let ty = match ty {
+            TypeExpr::Pointer { to, .. } => to.as_ref(),
+            t => t,
+        };
         if let TypeExpr::Named { name, .. } = ty {
-            return name
-                .strip_prefix("set[")
-                .and_then(|r| r.strip_suffix(']'))
-                .map(|t| t.to_string());
+            return Self::set_elem_of_type_name(name);
         }
         None
+    }
+
+    /// Rendered type text: `set[int]` / `*set[int]` -> `"int"`.
+    fn set_elem_of_type_name(name: &str) -> Option<String> {
+        name.strip_prefix('*')
+            .unwrap_or(name)
+            .strip_prefix("set[")
+            .and_then(|r| r.strip_suffix(']'))
+            .map(|t| t.to_string())
     }
 
     /// The element type text of a set-valued expression, when provable.
@@ -1056,7 +1069,44 @@ impl<'a> Collector<'a> {
                 None
             }
             Expr::StructLit { ty: Some(t), .. } => Self::set_elem_of_ty(t),
-            // `mk()` where `fn mk() set[T]` — the declared single result.
+            // `p := &s` — a pointer to a set keeps the element type (Go's
+            // method set of `*set[T]` takes the same `T`).
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => self.set_elem_of_expr(operand),
+            // `x.seen` where `struct g { seen set[T] }` (also through a
+            // pointer and generic substitution): the declared field type.
+            Expr::Field { base, name, .. } => {
+                let k = self.kind_of_expr(base);
+                let field_ty = self.struct_field_type_name(&k, name)?;
+                Self::set_elem_of_type_name(&field_ty)
+            }
+            // `new(set[T])` — the builtin `new` over the prelude set type
+            // (neither `new` nor `set` shadowed by a binding/declaration).
+            Expr::Call { callee, args, .. }
+                if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if name == "new")
+                    && args.len() == 1
+                    && self.lookup_kind("new").is_none()
+                    && !self.ck.fns.contains_key("new") =>
+            {
+                // The parser folds the type argument into one identifier
+                // (`Ident { name: "set[int]" }`).
+                match unwrap_parens(&args[0].value) {
+                    Expr::Ident { name, .. }
+                        if self.lookup_kind("set").is_none()
+                            && !self.ck.structs.contains_key("set") =>
+                    {
+                        name.strip_prefix("set[")
+                            .and_then(|r| r.strip_suffix(']'))
+                            .map(|t| t.to_string())
+                    }
+                    _ => None,
+                }
+            }
+            // `mk()` where `fn mk() set[T]` (or `*set[T]`) — the declared single result.
             Expr::Call { callee, .. } => match unwrap_parens(callee) {
                 Expr::Ident { name, .. } if self.lookup_kind(name).is_none() => self
                     .ck
