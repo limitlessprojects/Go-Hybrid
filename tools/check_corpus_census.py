@@ -3,7 +3,9 @@
 
 `tests/checker-corpus/` is the spec, and several files restate its size:
 `parse_all.rs` asserts it, `ci.yml` and the `Makefile` name it in a step
-label, and `README.md` / `GUARANTEES.md` / `ast.rs` describe it in prose.
+label, and `README.md` / `GUARANTEES.md` / `ast.rs` describe it in prose. The corpus
+README and the GUARANTEES evidence inventory also restate the *breakdown*, so
+both are checked against the derived one.
 Every corpus PR has to move those numbers, so they drift apart whenever one
 is missed — and a stale count is not cosmetic: it is a claim about the spec
 that the spec contradicts.
@@ -76,11 +78,32 @@ TOTAL_SURFACES: list[tuple[str, str, str]] = [
     ),
 ]
 
-# the corpus README also restates the total and the verdict breakdown
-README_BREAKDOWN = (
-    "tests/checker-corpus/README.md",
-    r"corpus:\s*(\d+) programs\D+ACCEPT (\d+)\D+ACCEPT-MANAGED (\d+)\D+REJECT (\d+)",
-)
+# Surfaces that restate the verdict breakdown, not just the total. Each entry
+# is (path, regex, group order) — the group order names what every capture
+# group holds, so a surface with a different sentence shape (GUARANTEES.md
+# writes REJECT first and no total) is checked with the same code.
+#
+# The GUARANTEES evidence inventory is policed here for the same reason the
+# corpus README is: it is prose that restates the corpus, and issue #3724
+# settled that no breakdown claim may drift uncovered. It had already drifted
+# (67 REJECT / 32 ACCEPT / 2 ACCEPT-MANAGED against 92/45/2, a breakdown that
+# does not even sum to the 139 programs stated in the same paragraph).
+BREAKDOWN_SURFACES: list[tuple[str, str, tuple[str, ...]]] = [
+    (
+        "tests/checker-corpus/README.md",
+        r"corpus:\s*(\d+) programs\D+ACCEPT (\d+)\D+ACCEPT-MANAGED (\d+)\D+REJECT (\d+)",
+        ("total", "ACCEPT", "ACCEPT-MANAGED", "REJECT"),
+    ),
+    (
+        "GUARANTEES.md",
+        r"Current census:\s*\*\*(\d+) REJECT / (\d+) ACCEPT / (\d+) ACCEPT-MANAGED\*\*",
+        ("REJECT", "ACCEPT", "ACCEPT-MANAGED"),
+    ),
+]
+
+# the count keys the broken-down surfaces are compared against, in the order
+# `census()` distinguishes them (ACCEPT-MANAGED is a class of its own).
+COUNT_KEYS = ("ACCEPT", "ACCEPT-MANAGED", "REJECT")
 
 
 def census(corpus_dir: Path) -> tuple[int, Counter]:
@@ -123,35 +146,34 @@ def check_total_surfaces(root: Path, total: int) -> list[str]:
 
 
 def check_breakdown(root: Path, total: int, counts: Counter) -> list[str]:
-    rel, pattern = README_BREAKDOWN
-    path = root / rel
-    if not path.exists():
-        return [f"{rel}: missing"]
-    text = path.read_text(encoding="utf-8")
-    matches = list(re.finditer(pattern, text, re.M))
-    if not matches:
-        return [
-            f"{rel}: no verdict breakdown found — the pattern no longer matches; "
-            f"update this guard"
-        ]
     problems: list[str] = []
-    for match in matches:
-        line = text.count("\n", 0, match.start()) + 1
-        claimed_total, accept, managed, reject = (int(g) for g in match.groups())
-        if claimed_total != total:
+    for rel, pattern, order in BREAKDOWN_SURFACES:
+        path = root / rel
+        if not path.exists():
+            problems.append(f"{rel}: missing")
+            continue
+        text = path.read_text(encoding="utf-8")
+        matches = list(re.finditer(pattern, text, re.M))
+        if not matches:
             problems.append(
-                f"{rel}: line {line}: says {claimed_total} programs, corpus holds {total}"
+                f"{rel}: no verdict breakdown found — the pattern no longer "
+                f"matches; update this guard"
             )
-        if (accept, managed, reject) != (
-            counts["ACCEPT"],
-            counts["ACCEPT-MANAGED"],
-            counts["REJECT"],
-        ):
-            problems.append(
-                f"{rel}: line {line}: breakdown says ACCEPT {accept} / ACCEPT-MANAGED {managed} / "
-                f"REJECT {reject}, corpus holds ACCEPT {counts['ACCEPT']} / "
-                f"ACCEPT-MANAGED {counts['ACCEPT-MANAGED']} / REJECT {counts['REJECT']}"
-            )
+            continue
+        for match in matches:
+            line = text.count("\n", 0, match.start()) + 1
+            claimed = dict(zip(order, (int(g) for g in match.groups())))
+            if "total" in claimed and claimed["total"] != total:
+                problems.append(
+                    f"{rel}: line {line}: says {claimed['total']} programs, corpus holds {total}"
+                )
+            wrong = [k for k in COUNT_KEYS if claimed.get(k, counts[k]) != counts[k]]
+            if wrong:
+                said = " · ".join(f"{k} {claimed[k]}" for k in wrong)
+                held = " · ".join(f"{k} {counts[k]}" for k in wrong)
+                problems.append(
+                    f"{rel}: line {line}: breakdown says {said}, corpus holds {held}"
+                )
     return problems
 
 
@@ -195,7 +217,7 @@ def main() -> int:
         return 1
 
     print(
-        f"OK: all {len(TOTAL_SURFACES) + 1} corpus census surfaces agree with the "
+        f"OK: all {len(TOTAL_SURFACES) + len(BREAKDOWN_SURFACES)} corpus census surfaces agree with the "
         f"corpus ({total} programs: ACCEPT {counts['ACCEPT']} · "
         f"ACCEPT-MANAGED {counts['ACCEPT-MANAGED']} · REJECT {counts['REJECT']})."
     )
