@@ -210,32 +210,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
             }
         }
         if report_managed {
-            println!(
-                "managed: {} block(s), {} of {} spawn/send sites resolved via managed ({:.1}%)",
-                result.managed.managed_blocks,
-                result.managed.sites_via_managed,
-                result.managed.total_sites,
-                result.managed.pct()
-            );
-            // Row 14 (discussion #4): the audit is a table of invariants
-            // bypassed, not a bare number.
-            if !result.managed.categories.is_empty() {
-                let cats: Vec<String> = result
-                    .managed
-                    .categories
-                    .iter()
-                    .map(|(c, n)| format!("{}: {}", c, n))
-                    .collect();
-                println!("  categories: {}", cats.join(", "));
-            }
-            for b in &result.managed.blocks {
-                let tickets = if b.tickets.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{}]", b.tickets.join(", "))
-                };
-                println!("  block: [{}] \"{}\"{}", b.category, b.reason, tickets);
-            }
+            print_managed_report(&result.managed);
         }
         if result.diagnostics.is_empty() {
             println!("{}: OK (0 diagnostics)", file);
@@ -264,6 +239,35 @@ fn cmd_check(args: &[String]) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// The `--report-managed` audit table (SPEC O6.3): counts, then every block.
+fn print_managed_report(managed: &hy_diag::ManagedReport) {
+    println!(
+        "managed: {} block(s), {} of {} spawn/send sites resolved via managed ({:.1}%)",
+        managed.managed_blocks,
+        managed.sites_via_managed,
+        managed.total_sites,
+        managed.pct()
+    );
+    // Row 14 (discussion #4): the audit is a table of invariants
+    // bypassed, not a bare number.
+    if !managed.categories.is_empty() {
+        let cats: Vec<String> = managed
+            .categories
+            .iter()
+            .map(|(c, n)| format!("{}: {}", c, n))
+            .collect();
+        println!("  categories: {}", cats.join(", "));
+    }
+    for b in &managed.blocks {
+        let tickets = if b.tickets.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", b.tickets.join(", "))
+        };
+        println!("  block: [{}] \"{}\"{}", b.category, b.reason, tickets);
     }
 }
 
@@ -795,7 +799,7 @@ fn render_build_error(e: &BuildError) -> String {
 }
 
 fn cmd_build(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--emit-proof] [--race] [--deny-managed] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
+    const USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--emit-proof] [--race] [--deny-managed] [--report-managed] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
     // Validate the entire invocation before touching the filesystem or the
     // toolchain, mirroring cmd_check/cmd_generate: a mistyped option or a
     // missing value must not fall back to a default and build something else.
@@ -804,6 +808,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
     let mut emit_go_only = false;
     let mut emit_proof = false;
     let mut deny_managed = false;
+    let mut report_managed = false;
     // --race hands `-race` to the underlying `go build`. The race
     // detector needs cgo, so the flag also forces CGO_ENABLED=1 on the
     // plain single-file path (the bridge path already sets it). Off by
@@ -838,6 +843,11 @@ fn cmd_build(args: &[String]) -> ExitCode {
                 }
                 "--deny-managed" => {
                     deny_managed = true;
+                    i += 1;
+                    continue;
+                }
+                "--report-managed" => {
+                    report_managed = true;
                     i += 1;
                     continue;
                 }
@@ -965,6 +975,12 @@ fn cmd_build(args: &[String]) -> ExitCode {
             println!("{}", d.render_head());
         }
         return ExitCode::FAILURE;
+    }
+
+    // SPEC O6.3: `hyb build --report-managed` prints the same audit table as
+    // `hyb check`. A report, not a gate: the build carries on.
+    if report_managed {
+        print_managed_report(&result.managed);
     }
 
     // CI policy gate (--deny-managed): any managed block fails the build
