@@ -72,7 +72,10 @@ class UpgradeTests(unittest.TestCase):
             cli = self.payload / "hyb"
             cli.write_text(
                 "#!/bin/sh\n"
-                + ("exit 42\n" if defect == "broken CLI" else f"printf '%s\\n' '{version}'\n"),
+                + ("exit 42\n" if defect == "broken CLI" else
+                   'case "$0" in */bin/hyb) exit 42 ;; esac\n'
+                   if defect == "broken after promotion" else "")
+                + f"printf '%s\\n' '{version}'\n",
                 encoding="utf-8",
             )
             cli.chmod(0o755)
@@ -111,6 +114,33 @@ class UpgradeTests(unittest.TestCase):
                     capture_output=True, text=True, timeout=5,
                 )
                 self.assertEqual((probe.returncode, probe.stdout), (0, "old\n"))
+
+    def test_promoted_cli_failure_restores_previous_installation(self):
+        self.package("old")
+        installed = self.install_release()
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        before = self.snapshot()
+        self.package("new", "broken after promotion")
+        failed = self.install_release()
+        self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        # The extracted candidate succeeds; only its final installed path fails.
+        self.assertIn("==> sha256 verified", failed.stdout)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(list(self.install.glob(".hybrid-install.*")), [])
+        probe = subprocess.run(
+            [str(self.bin_dir / "hyb")], env=self.env,
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual((probe.returncode, probe.stdout), (0, "old\n"))
+
+    def test_promoted_cli_failure_does_not_publish_fresh_launcher(self):
+        self.package("new", "broken after promotion")
+        failed = self.install_release()
+        self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        self.assertFalse((self.bin_dir / "hyb").exists())
+        self.assertFalse((self.install / "bin" / "hyb").exists())
+        self.assertFalse((self.install / "runtime").exists())
+        self.assertEqual(list(self.install.glob(".hybrid-install.*")), [])
 
     def test_healthy_upgrade_replaces_previous_installation(self):
         for version in ("old", "new"):
