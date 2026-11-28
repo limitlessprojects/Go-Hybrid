@@ -1,0 +1,23 @@
+{
+ "generated": "2026-11-28T04:11:27.274418+00:00",
+ "order": [
+  4355,
+  4353,
+  4484,
+  4385,
+  4321,
+  4320,
+  3316,
+  4384,
+  1790
+ ],
+ "excluded_as_dup": [],
+ "board_promoted_since_analysis": [
+  2088,
+  2370,
+  4648,
+  2117,
+  4383
+ ],
+ "note": "four-gate battery per PR vs current main (heads behind_by=5 at check time). #4320/#3316 and #4384/#1790 adjudicated DISTINCT work on shared files \u2014 dup flags advisory false positives, both sides proceed. Cluster members 2088, 2370, 4648, 2117, 4383 were board-promoted bot:land-candidate after the 2026-11-27 analysis; fold in on the next survey."
+}
