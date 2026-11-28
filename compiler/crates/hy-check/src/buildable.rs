@@ -8718,9 +8718,24 @@ impl<'a> Collector<'a> {
                     // struct, pointer, or interface only has `.pop()` if it
                     // declares the method; without one Go refuses the call with
                     // "<base>.pop undefined (type ... has no field or method pop)".
-                    if matches!(
+                    if let Some(tp) = self.expr_type_param(base) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot call `.pop()` on `{}` (type parameter `{}`) (HYB-E1002)",
+                                base.render(),
+                                tp
+                            ),
+                            "`.pop()` is a built-in only on slices (`[]T`); unconstrained type parameters do not declare `.pop()`",
+                        );
+                    } else if matches!(
                         bk,
-                        OpKind::Struct(_) | OpKind::Pointer(_) | OpKind::Interface
+                        OpKind::Struct(_)
+                            | OpKind::Pointer(_)
+                            | OpKind::Interface
+                            | OpKind::Option(_)
+                            | OpKind::Fn(..)
+                            | OpKind::Foreign(_)
                     ) {
                         self.emit_e1002(
                             span,
@@ -8728,7 +8743,7 @@ impl<'a> Collector<'a> {
                                 "`{}` has no field or method `pop` (HYB-E1002)",
                                 base.render()
                             ),
-                            "a struct, pointer, or interface supports `.pop()` only when it declares a `pop` method; `pop` is a built-in only on slices",
+                            "a struct, pointer, interface, option, function, or foreign handle supports `.pop()` only when it declares a `pop` method; `pop` is a built-in only on slices",
                         );
                     }
                 } else if !has_method {
@@ -9633,6 +9648,18 @@ impl<'a> Collector<'a> {
                     return; // arity handled by builtins.rs
                 }
                 let op = &args[0].value;
+                if let Some(tp) = self.expr_type_param(op) {
+                    self.emit_e1002(
+                        op.span(),
+                        format!(
+                            "invalid argument `{}` (type `{}`) for built-in `{name}` (HYB-E1002)",
+                            op.render(),
+                            tp
+                        ),
+                        "argument to `real` or `imag` must be a complex number (`complex64` or `complex128`)",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 if matches!(
                     ak,
@@ -9646,14 +9673,16 @@ impl<'a> Collector<'a> {
                         | OpKind::Pointer(_)
                         | OpKind::Fn(..)
                         | OpKind::Interface
+                        | OpKind::Option(_)
+                        | OpKind::Foreign(_)
+                        | OpKind::Void
                 ) {
                     self.emit_e1002(
                         op.span(),
                         format!(
-                            "invalid argument `{}` (type `{}`) for built-in `{name}` — Go refuses `invalid argument: {} (must be complex)` (HYB-E1002)",
+                            "invalid argument `{}` (type `{}`) for built-in `{name}` (HYB-E1002)",
                             op.render(),
-                            ak.label(),
-                            op.render()
+                            ak.label()
                         ),
                         "argument to `real` or `imag` must be a complex number (`complex64` or `complex128`)",
                     );
@@ -9664,6 +9693,18 @@ impl<'a> Collector<'a> {
                     return; // arity handled by builtins.rs
                 }
                 for arg in args {
+                    if let Some(tp) = self.expr_type_param(&arg.value) {
+                        self.emit_e1002(
+                            arg.value.span(),
+                            format!(
+                                "invalid argument `{}` (type `{}`) in `complex` (HYB-E1002)",
+                                arg.value.render(),
+                                tp
+                            ),
+                            "arguments to `complex` must be floating-point numbers (`float32` or `float64`)",
+                        );
+                        continue;
+                    }
                     let ak = self.kind_of_expr(&arg.value);
                     if matches!(
                         ak,
@@ -9677,14 +9718,16 @@ impl<'a> Collector<'a> {
                             | OpKind::Pointer(_)
                             | OpKind::Fn(..)
                             | OpKind::Interface
+                            | OpKind::Option(_)
+                            | OpKind::Foreign(_)
+                            | OpKind::Void
                     ) {
                         self.emit_e1002(
                             arg.value.span(),
                             format!(
-                                "invalid argument `{}` (type `{}`) in `complex` — Go refuses `invalid argument: {} (must be float)` (HYB-E1002)",
+                                "invalid argument `{}` (type `{}`) in `complex` (HYB-E1002)",
                                 arg.value.render(),
-                                ak.label(),
-                                arg.value.render()
+                                ak.label()
                             ),
                             "arguments to `complex` must be floating-point numbers (`float32` or `float64`)",
                         );
