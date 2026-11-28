@@ -29,7 +29,12 @@ use hy_syntax::{
 
 fn is_slot_loan_expr(ck: &Checker<'_>, st: &FnState, e: &Expr) -> bool {
     let _ = as_addr_of;
-    walk::addr_of_index_base_path(e).is_some_and(|p| {
+    // #4026: `addr_of_index_base_path` needs an `Expr::Index` hop, so a direct
+    // struct-field address-of (`f := &a.bal`) produced no path, the loan was
+    // never marked, and `p := &f` passed while the index form `&m["a"]` was
+    // rejected. Accept the field-only shape as a slot loan too.
+    let path = walk::addr_of_index_base_path(e).or_else(|| walk::addr_of_field_base_path(e));
+    path.is_some_and(|p| {
         ck.lookup_binding(st, p.split('.').next().unwrap_or(&p)).is_some_and(|b| {
             matches!(b.shape, TypeShape::Map(..) | TypeShape::Slice(_) | TypeShape::Array(_) | TypeShape::Struct(_) | TypeShape::Pointer(_))
         })
