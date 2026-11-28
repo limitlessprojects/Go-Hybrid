@@ -1112,3 +1112,24 @@ the move freeze reach the send path as well.
 | struct-chan-shared-map-send-reject | REJECT | A1b | `HYB-E3003` | the map field aliases the sender's `m`; moving the struct over the channel freezes that storage, so `m["after"] = 2` is a write through a live alias |
 
 With this registration the corpus is **139 programs — ACCEPT 45 · ACCEPT-MANAGED 2 · REJECT 92**.
+
+-------------------------------------------------------------------------------
+
+### prelude-local-shadow-reject / prelude-local-shadow-controls-accept — REJECT + ACCEPT (bounty track: grow the adversarial corpus)
+
+A local binding named `hy_pop` captures the lowered `.pop()` call (issue
+#4695 variant E): `.pop()` on a slice lowers to `hy_pop(&stack)` inside the
+user's own function body, so a local `hy_pop` in scope shadows the
+package-level prelude helper and the emitted Go cannot build. The reject
+fixture pins the collision; the accept fixture pins the three legal
+neighbours a careless version of the rule would refuse (local declared
+after the call, local confined to a sibling block, local with no `.pop()`
+use at all). Top-level prelude-name collisions are a different shape
+(issue #777) and are not covered here.
+
+| case | verdict | rule | code | note |
+|------|---------|------|------|------|
+| prelude-local-shadow-reject | REJECT | BUILDABLE | `HYB-E1002` | local `hy_pop := 1` in scope at a `.pop()` call site; the lowered `hy_pop(&stack)` resolves to the local, Go refuses it |
+| prelude-local-shadow-controls-accept | ACCEPT | — | — | local-after-call, sibling-block local, and local-without-pop all build cleanly; the shadow rule must not fire on any of them |
+
+With this registration the corpus is **141 programs — ACCEPT 46 · ACCEPT-MANAGED 2 · REJECT 93**.
