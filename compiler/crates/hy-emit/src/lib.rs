@@ -512,6 +512,7 @@ pub(crate) fn is_package_root(name: &str) -> bool {
             | "log"
             | "gzip"
             | "tar"
+            | "bytes"
             | "sha3"
             | "serde_json"
             | "regex"
