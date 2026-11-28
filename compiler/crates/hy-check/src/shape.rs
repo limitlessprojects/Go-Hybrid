@@ -774,7 +774,7 @@ impl<'a> Checker<'a> {
     }
 
     fn peel_option_receiver_ty(&self, ty: &TypeExpr) -> Option<(TypeExpr, bool)> {
-        if self.structs.contains_key("option") {
+        if self.structs.contains_key("option") || self.struct_type_params.contains_key("option") {
             return None;
         }
         let mut cur = self.resolve_type_alias(ty);
@@ -790,7 +790,7 @@ impl<'a> Checker<'a> {
     }
 
     fn is_prelude_set_receiver(&self, recv: &TypeShape) -> bool {
-        if self.structs.contains_key("set") {
+        if self.structs.contains_key("set") || self.struct_type_params.contains_key("set") {
             return false;
         }
         let inner = match recv {
