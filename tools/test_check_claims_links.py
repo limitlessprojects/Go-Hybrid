@@ -78,6 +78,54 @@ class CheckClaimsLinksTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn({"row": 1, "kind": "missing", "target": target}, report["issues"])
 
+    def test_balanced_bare_destinations_are_checked_in_full(self):
+        for target in ("evidence(notes).md", "evidence(outer(inner)).md",
+                       "docs/evidence(notes).md"):
+            with self.subTest(target=target):
+                claims = CLAIMS.replace("[spec](SPEC-LANGUAGE.md)", f"[spec]({target})")
+                (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+                result = self.run_tool()
+                report = json.loads(result.stdout)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn({"row": 1, "kind": "missing", "target": target}, report["issues"])
+
+                path = self.root / target
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# evidence\n", encoding="utf-8")
+                result = self.run_tool()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(json.loads(result.stdout)["links"], 4)
+
+    def test_parenthesized_destination_preserves_title_and_verdict_offset(self):
+        target = "tests/checker-corpus/01-bad(notes).hy"
+        (self.root / target).write_text("// EXPECTED-VERDICT: ACCEPT\n", encoding="utf-8")
+        claims = CLAIMS.replace("tests/checker-corpus/01-bad.hy)",
+                                target + '#details "Evidence (title)")')
+        (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+        result = self.run_tool()
+        report = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(report["issues"], [{"row": 1, "kind": "verdict-mismatch",
+                                          "target": target, "expected": "REJECT", "found": "ACCEPT"}])
+
+    def test_escaped_parentheses_in_destinations_name_literal_files(self):
+        for target in (r"evidence\(notes\).md", r"evidence\).md"):
+            with self.subTest(target=target):
+                path = target.replace(r"\(", "(").replace(r"\)", ")")
+                (self.root / path).write_text("# evidence\n", encoding="utf-8")
+                claims = CLAIMS.replace("[spec](SPEC-LANGUAGE.md)", f"[spec]({target})")
+                (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+                result = self.run_tool()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(json.loads(result.stdout)["links"], 4)
+
+    def test_unbalanced_destination_is_not_a_truncated_link(self):
+        claims = CLAIMS.replace("[spec](SPEC-LANGUAGE.md)", "[spec](missing(notes.md)")
+        (self.root / "GUARANTEES.md").write_text(claims, encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["links"], 3)
+
     def test_angle_delimited_external_and_fragment_links_are_skipped(self):
         claims = CLAIMS.replace("(https://example.com/spec)", "(<https://example.com/spec>)")
         claims = claims.replace("(#row-2)", "(<#row-2>)")
