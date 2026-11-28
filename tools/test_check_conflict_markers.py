@@ -1,11 +1,13 @@
 """Tests for tools/check_conflict_markers.py (stdlib only, no network)."""
 import importlib.util
+import io
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("check_conflict_markers.py")
 SPEC = importlib.util.spec_from_file_location("conflict_markers", SCRIPT)
@@ -14,6 +16,29 @@ SPEC.loader.exec_module(MOD)
 
 
 class MarkerDetectionTests(unittest.TestCase):
+    def test_directory_traversal_error_cannot_report_clean(self):
+        def failing_walk(root, onerror=None):
+            yield root, [], []
+            onerror(PermissionError(13, "Permission denied", "blocked"))
+
+        with patch.object(MOD.os, "walk", side_effect=failing_walk):
+            with self.assertRaises(PermissionError):
+                list(MOD.scan("fixture"))
+
+    def test_cli_reports_directory_traversal_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            def failing_walk(directory, onerror=None):
+                onerror(PermissionError(13, "Permission denied", "blocked"))
+                yield directory, [], []
+
+            with (patch.object(MOD.os, "walk", side_effect=failing_walk),
+                  patch.object(sys, "argv", ["checker", "--root", root]),
+                  patch("sys.stderr", new_callable=io.StringIO) as stderr):
+                self.assertEqual(MOD.main(), 2)
+                self.assertIn("scan error:", stderr.getvalue())
+                self.assertIn("blocked", stderr.getvalue())
+                self.assertNotIn("Traceback", stderr.getvalue())
+
     def _tree(self, files):
         tmp = tempfile.TemporaryDirectory(prefix="markers-")
         root = Path(tmp.name)

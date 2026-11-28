@@ -134,13 +134,18 @@ def _is_workflow(path):
     )
 
 
+def _walk_error(error):
+    """A partial tree walk must never be reported as a clean scan."""
+    raise error
+
+
 def scan(root):
     """Yield (relpath, line_no, line, kind) for every structural defect.
 
     `kind` is "marker" for a conflict block or "workflow" for a column-zero
     line that cannot parse as workflow YAML.
     """
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_walk_error):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for fn in filenames:
             full = os.path.join(dirpath, fn)
@@ -159,7 +164,11 @@ def main():
     if not os.path.isdir(args.root):
         print(f"usage error: {args.root} is not a directory", file=sys.stderr)
         return 2
-    found = list(scan(args.root))
+    try:
+        found = list(scan(args.root))
+    except OSError as error:
+        print(f"scan error: {error}", file=sys.stderr)
+        return 2
     if not found:
         print("conflict markers: none")
         return 0
