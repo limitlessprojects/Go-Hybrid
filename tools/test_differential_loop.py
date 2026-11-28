@@ -529,6 +529,125 @@ class RaceDetectorTests(unittest.TestCase):
         self.assertTrue(ok, detail)
         self.assertEqual(detail, "exit 0")
 
+    def test_second_undocumented_race_after_documented_race_fails(self):
+        ok, detail = self.run_race_case(
+            RACE_ON_MAP + "\n" + RACE_ON_SLICE,
+            ["concurrent map writes (Go fatal, pre-registered)"],
+            exit_code=66,
+        )
+        self.assertFalse(ok, detail)
+        self.assertIn("data race detected", detail)
+
+    def test_hazard_word_in_source_path_does_not_mask_unrelated_race(self):
+        path_poisoned = RACE_ON_SLICE.replace(
+            "/tmp/case/rb.go", "/tmp/02-shared-map-managed/rb.go"
+        )
+        ok, detail = self.run_race_case(
+            path_poisoned, ["concurrent map writes (Go fatal, pre-registered)"]
+        )
+        self.assertFalse(ok, detail)
+        self.assertIn("data race detected", detail)
+
+    def test_hazard_word_in_goroutine_creation_stack_does_not_mask_unrelated_race(self):
+        spawn_poisoned = RACE_ON_SLICE.replace(
+            "==================\n",
+            "",
+        ).rstrip() + (
+            "\n\nGoroutine 7 (running) created at:\n"
+            "  main.mapSpawner()\n"
+            "      /tmp/case/rb.go:33 +0x8f\n"
+            "==================\n"
+        )
+        spawn_poisoned = "==================\n" + spawn_poisoned
+        ok, detail = self.run_race_case(
+            spawn_poisoned, ["concurrent map writes (Go fatal, pre-registered)"]
+        )
+        self.assertFalse(ok, detail)
+        self.assertIn("data race detected", detail)
+
+    def test_mid_identifier_substring_does_not_match_hazard_subject(self):
+        substring_poisoned = RACE_ON_SLICE.replace(
+            "main.bump()", "main.semaphoreBump()"
+        )
+        ok, detail = self.run_race_case(
+            substring_poisoned, ["concurrent map writes (Go fatal, pre-registered)"]
+        )
+        self.assertFalse(ok, detail)
+        self.assertIn("data race detected", detail)
+
+    def test_documented_race_with_deep_stack_beyond_sixty_lines_is_documented(self):
+        deep_frames = "".join(
+            f"  main.frame{i}()\n      /tmp/case/rb.go:{100 + i} +0x10\n"
+            for i in range(35)
+        )
+        deep_map_race = (
+            "==================\n"
+            "WARNING: DATA RACE\n"
+            "Read at 0x00c00009c0f0 by goroutine 8:\n"
+            + deep_frames
+            + "  runtime.mapaccess1_faststr()\n"
+            "      /home/user/tools/go/src/internal/runtime/maps/runtime_faststr.go:101 +0x0\n"
+            "==================\n"
+        )
+        ok, detail = self.run_race_case(
+            deep_map_race,
+            ["concurrent map writes (Go fatal, pre-registered)"],
+            exit_code=66,
+        )
+        self.assertTrue(ok, detail)
+        self.assertIn("documented RUNTIME-HAZARD race", detail)
+
+    def test_documented_race_allows_go_race_exit_66_and_documented_fatal(self):
+        ok66, detail66 = self.run_race_case(
+            RACE_ON_MAP + "Found 1 data race(s)\n",
+            ["concurrent map writes (Go fatal, pre-registered)"],
+            exit_code=66,
+        )
+        self.assertTrue(ok66, detail66)
+
+        ok_fatal, detail_fatal = self.run_race_case(
+            RACE_ON_MAP + "fatal error: concurrent map writes\n",
+            ["concurrent map writes (Go fatal, pre-registered)"],
+            exit_code=2,
+        )
+        self.assertTrue(ok_fatal, detail_fatal)
+
+    def test_documented_race_does_not_mask_unrelated_panic_or_exit_code(self):
+        for extra_stderr, code in (
+            ("panic: runtime error: index out of range [3] with length 2\n", 2),
+            ("fatal error: all goroutines are asleep - deadlock!\n", 2),
+            ("", 1),
+            ("", 137),
+        ):
+            with self.subTest(extra_stderr=extra_stderr, code=code):
+                ok, detail = self.run_race_case(
+                    RACE_ON_MAP + extra_stderr,
+                    ["concurrent map writes (Go fatal, pre-registered)"],
+                    exit_code=code,
+                )
+                self.assertFalse(ok, detail)
+
+    def test_race_fixture_cases_remain_pinned(self):
+        fixture_path = pathlib.Path(__file__).parent / "tests" / "differential_race_cases.json"
+        spec = json.loads(fixture_path.read_text(encoding="utf-8"))
+        payloads = {
+            "multi_race_second_undocumented_fails": RACE_ON_MAP + "\n" + RACE_ON_SLICE,
+            "source_path_noun_does_not_mask_race": RACE_ON_SLICE.replace(
+                "/tmp/case/rb.go", "/tmp/02-shared-map-managed/rb.go"
+            ),
+            "documented_race_with_unrelated_panic_fails": (
+                RACE_ON_MAP + "panic: runtime error: index out of range [1] with length 1\n"
+            ),
+        }
+        for case in spec["cases"]:
+            with self.subTest(name=case["name"]):
+                ok, detail = self.run_race_case(
+                    payloads[case["name"]],
+                    case["hazards"],
+                    exit_code=case["exit_code"],
+                )
+                self.assertEqual(ok, case["expect_ok"], detail)
+
     def test_race_ignored_when_option_off(self):
         """Without race=True a race report must not change the verdict.
 
