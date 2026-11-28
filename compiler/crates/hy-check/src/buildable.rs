@@ -1514,6 +1514,25 @@ impl<'a> Collector<'a> {
                 .find_map(|a| self.typed_value_scalar(&a.value));
             return Some(vec![res_scalar]);
         }
+        if name == "complex" && args.len() == 2 {
+            let s0 = self.typed_value_scalar(&args[0].value);
+            let s1 = self.typed_value_scalar(&args[1].value);
+            let res = match (s0, s1) {
+                (Some("float32"), _) | (_, Some("float32")) => Some("complex64"),
+                (Some("float64"), _) | (_, Some("float64")) => Some("complex128"),
+                _ => None,
+            };
+            return Some(vec![res]);
+        }
+        if (name == "real" || name == "imag") && args.len() == 1 {
+            let s = self.typed_value_scalar(&args[0].value);
+            let res = match s {
+                Some("complex64") => Some("float32"),
+                Some("complex128") => Some("float64"),
+                _ => None,
+            };
+            return Some(vec![res]);
+        }
         if args.len() == 1
             && !self.ck.structs.contains_key(name.as_str())
             && !self.ck.enums.contains_key(name.as_str())
@@ -9657,6 +9676,19 @@ impl<'a> Collector<'a> {
                         ),
                         "argument to `real` or `imag` must be a complex number (`complex64` or `complex128`)",
                     );
+                } else if let Some(s) = self.typed_value_scalar(op) {
+                    if !matches!(s, "complex64" | "complex128") {
+                        self.emit_e1002(
+                            op.span(),
+                            format!(
+                                "invalid argument `{}` (type `{}`) for built-in `{name}` — Go refuses `invalid argument: {} (must be complex)` (HYB-E1002)",
+                                op.render(),
+                                s,
+                                op.render()
+                            ),
+                            "argument to `real` or `imag` must be a complex number (`complex64` or `complex128`)",
+                        );
+                    }
                 }
             }
             "complex" => {
@@ -9687,6 +9719,39 @@ impl<'a> Collector<'a> {
                                 arg.value.render()
                             ),
                             "arguments to `complex` must be floating-point numbers (`float32` or `float64`)",
+                        );
+                    } else if let Some(s) = self.typed_value_scalar(&arg.value) {
+                        if !matches!(s, "float32" | "float64") {
+                            self.emit_e1002(
+                                arg.value.span(),
+                                format!(
+                                    "invalid argument `{}` (type `{}`) in `complex` — Go refuses `invalid argument: {} (must be float)` (HYB-E1002)",
+                                    arg.value.render(),
+                                    s,
+                                    arg.value.render()
+                                ),
+                                "arguments to `complex` must be floating-point numbers (`float32` or `float64`)",
+                            );
+                        }
+                    }
+                }
+                let s0 = self.typed_value_scalar(&args[0].value);
+                let s1 = self.typed_value_scalar(&args[1].value);
+                if let (Some(t0), Some(t1)) = (s0, s1) {
+                    if matches!(t0, "float32" | "float64")
+                        && matches!(t1, "float32" | "float64")
+                        && t0 != t1
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid operation: complex({}, {}) (mismatched types {} and {}) (HYB-E1002)",
+                                args[0].value.render(),
+                                args[1].value.render(),
+                                t0,
+                                t1
+                            ),
+                            "arguments to `complex` must have identical floating-point types (`float32` or `float64`)",
                         );
                     }
                 }
