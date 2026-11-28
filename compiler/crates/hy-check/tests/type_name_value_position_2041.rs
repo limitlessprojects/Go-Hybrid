@@ -6,8 +6,8 @@
 //! passed `hyb check` and failed `go build` with "<type> (type) is not an
 //! expression" (Row 13 BUILDABLE).
 //!
-//! Gap 3 of the issue (qualified types such as `http.Client`) needs an
-//! import-aware type table and is not covered here.
+//! Gap 3 (qualified types such as `http.Client`) is checked against a table
+//! of well-known exported std types of imported, unshadowed packages.
 
 use hy_check::check_file;
 use hy_diag::Severity;
@@ -69,6 +69,46 @@ fn rejects_any_as_call_argument() {
 
 fn main() {
     inspect(any)
+}
+"#,
+    );
+}
+
+#[test]
+fn rejects_qualified_type_name_in_value_position() {
+    assert_reject(
+        r#"import "net/http"
+
+fn main() {
+    c := http.client
+    fmt.println(c)
+}
+"#,
+    );
+}
+
+#[test]
+fn rejects_qualified_type_name_as_call_argument() {
+    assert_reject(
+        r#"import "sync"
+
+fn take(v any) {}
+
+fn main() {
+    take(sync.mutex)
+}
+"#,
+    );
+}
+
+#[test]
+fn accepts_qualified_type_conversion() {
+    assert_accept(
+        r#"import "time"
+
+fn main() {
+    d := time.duration(5)
+    fmt.println(d)
 }
 "#,
     );
