@@ -46,8 +46,8 @@
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
     AssignOp, BinOp, Block, CallArg, Decl, Expr, FieldInit, File, FnDecl, FnResult, ForKind,
-    InterpPart, LitKind, LocalDecl, LocalKind, MatchPattern, Param, Place, PlaceKind, SelectArmKind,
-    Stmt, TypeExpr, UnOp,
+    InterpPart, LitKind, LocalDecl, LocalKind, MatchPattern, Param, Place, PlaceKind,
+    SelectArmKind, Stmt, TypeExpr, UnOp,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -60,6 +60,12 @@ use crate::model::{as_addr_of, unwrap_parens, Checker};
 /// are rejected at check time rather than failing `go build`.
 /// `Unknown` stays permissive (fail-open for operand checks; concurrency
 /// boundaries remain fail-closed in `sendability.rs`).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct FnScalarSig {
+    pub(crate) results: Vec<Option<&'static str>>,
+    pub(crate) params: Vec<Option<&'static str>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OpKind {
     Unknown,
@@ -89,7 +95,10 @@ pub(crate) enum OpKind {
     /// signature is known (`None` = unknown, e.g. a `fn`-typed value whose
     /// declaration is out of reach). The count is what closes the
     /// closure/method-value arity bypass (#577 C9).
-    Fn(Vec<OpKind>, Option<Vec<OpKind>>),
+    /// Function kind: result kinds, declared parameter kinds when known, and
+    /// canonical scalar spellings (#4751) so `fn(int) int` vs `fn(int64) int64`
+    /// is caught before `go build`.
+    Fn(Vec<OpKind>, Option<Vec<OpKind>>, FnScalarSig),
     /// #2823 — `option[T]` carries its payload kind. `Unknown` here would be
     /// fail-open in every operand guard, so `op + 1`, `takes_int(op)` and
     /// `var s string = op.unwrap()` all passed and failed `go build`.
@@ -132,19 +141,28 @@ impl OpKind {
             OpKind::Struct(Some(n)) => format!("struct {}", n),
             OpKind::Struct(None) => "struct".to_string(),
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
-            OpKind::Fn(res, params) => {
+            OpKind::Fn(res, params, scalars) => {
+                let slot_label = |k: &OpKind, sc: Option<&'static str>| -> String {
+                    sc.map(|s| s.to_string()).unwrap_or_else(|| k.label())
+                };
                 let p_str = match params {
-                    Some(ps) => ps.iter().map(|p| p.label()).collect::<Vec<_>>().join(", "),
+                    Some(ps) => ps
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| slot_label(p, scalars.params.get(i).copied().flatten()))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     None => "...".to_string(),
                 };
-                match res.len() {
+                let res_labels: Vec<String> = res
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| slot_label(r, scalars.results.get(i).copied().flatten()))
+                    .collect();
+                match res_labels.len() {
                     0 => format!("fn({})", p_str),
-                    1 => format!("fn({}) {}", p_str, res[0].label()),
-                    _ => format!(
-                        "fn({}) ({})",
-                        p_str,
-                        res.iter().map(|r| r.label()).collect::<Vec<_>>().join(", ")
-                    ),
+                    1 => format!("fn({}) {}", p_str, res_labels[0]),
+                    _ => format!("fn({}) ({})", p_str, res_labels.join(", ")),
                 }
             }
             OpKind::Option(e) => format!("option[{}]", e.label()),
@@ -217,31 +235,45 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Foreign(_), _) | (_, Foreign(_)) => false,
         (a, b) if a == b => false,
         // Same container shape: recurse into the element kinds.
-        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
-            kinds_conflict(a, b)
-        }
+        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => kinds_conflict(a, b),
         (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
         (Pointer(a), Pointer(b)) => kinds_conflict(a, b),
         // #2823: an option only satisfies an option (with a compatible
         // payload); every other pairing falls through to the mismatch arm, so
         // `op + 1` and `takes_int(op)` are refused exactly as Go refuses them.
         (Option(a), Option(b)) => kinds_conflict(a, b),
-        (Fn(r1, p1), Fn(r2, p2)) => {
+        (Fn(r1, p1, s1), Fn(r2, p2, s2)) => {
             if r1.len() != r2.len() {
                 return true;
             }
-            for (w, g) in r1.iter().zip(r2.iter()) {
-                if w != &OpKind::Unknown && g != &OpKind::Unknown && w != g {
+            for (i, (w, g)) in r1.iter().zip(r2.iter()).enumerate() {
+                if kinds_conflict(w, g) {
                     return true;
+                }
+                if let (Some(sw), Some(sg)) = (
+                    s1.results.get(i).copied().flatten(),
+                    s2.results.get(i).copied().flatten(),
+                ) {
+                    if sw != sg {
+                        return true;
+                    }
                 }
             }
             if let (Some(ps1), Some(ps2)) = (p1, p2) {
                 if ps1.len() != ps2.len() {
                     return true;
                 }
-                for (w, g) in ps1.iter().zip(ps2.iter()) {
-                    if w != &OpKind::Unknown && g != &OpKind::Unknown && w != g {
+                for (i, (w, g)) in ps1.iter().zip(ps2.iter()).enumerate() {
+                    if kinds_conflict(w, g) {
                         return true;
+                    }
+                    if let (Some(sw), Some(sg)) = (
+                        s1.params.get(i).copied().flatten(),
+                        s2.params.get(i).copied().flatten(),
+                    ) {
+                        if sw != sg {
+                            return true;
+                        }
                     }
                 }
             }
@@ -501,13 +533,14 @@ fn copy_element_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
         // Struct whose name did not resolve is not evidence of mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
         (a, b) if a == b => false,
-        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) | (Pointer(a), Pointer(b)) => {
-            copy_element_kinds_conflict(a, b)
-        }
+        (Slice(a), Slice(b))
+        | (Array(a), Array(b))
+        | (Chan(a), Chan(b))
+        | (Pointer(a), Pointer(b)) => copy_element_kinds_conflict(a, b),
         (Map(k1, v1), Map(k2, v2)) => {
             copy_element_kinds_conflict(k1, k2) || copy_element_kinds_conflict(v1, v2)
         }
-        (Fn(..), Fn(..)) => false,
+        (Fn(..), Fn(..)) => kinds_conflict(a, b),
         _ => true,
     }
 }
@@ -931,26 +964,24 @@ impl<'a> Collector<'a> {
                 }
                 None
             }
-            Expr::SliceLit { elem: Some(t), .. } => {
-                match t.as_ref() {
-                    TypeExpr::Array { elem, .. } => Some(elem.render()),
-                    TypeExpr::Slice { elem, .. } => Some(elem.render()),
-                    _ => {
-                        let r = t.render();
-                        if let Some(elem) = r.strip_prefix("[]") {
-                            Some(elem.to_string())
-                        } else if let Some(elem) = r.strip_prefix("[") {
-                            if let Some(close) = elem.find(']') {
-                                Some(elem[close + 1..].to_string())
-                            } else {
-                                Some(r)
-                            }
+            Expr::SliceLit { elem: Some(t), .. } => match t.as_ref() {
+                TypeExpr::Array { elem, .. } => Some(elem.render()),
+                TypeExpr::Slice { elem, .. } => Some(elem.render()),
+                _ => {
+                    let r = t.render();
+                    if let Some(elem) = r.strip_prefix("[]") {
+                        Some(elem.to_string())
+                    } else if let Some(elem) = r.strip_prefix("[") {
+                        if let Some(close) = elem.find(']') {
+                            Some(elem[close + 1..].to_string())
                         } else {
                             Some(r)
                         }
+                    } else {
+                        Some(r)
                     }
                 }
-            }
+            },
             Expr::Slice { base, .. } => self.slice_element_type_name(base),
             Expr::Try { operand, .. } => self.slice_element_type_name(operand),
             Expr::Call { callee, args, .. } => {
@@ -1347,16 +1378,7 @@ impl<'a> Collector<'a> {
             return None;
         }
         match (CompFamily::split(&want_s), CompFamily::split(got)) {
-            (
-                Some(CompFamily::Chan {
-                    elem: we,
-                    ..
-                }),
-                Some(CompFamily::Chan {
-                    elem: ge,
-                    ..
-                }),
-            ) => {
+            (Some(CompFamily::Chan { elem: we, .. }), Some(CompFamily::Chan { elem: ge, .. })) => {
                 // Direction mismatches here are the E3012 coercion layer's
                 // territory (its slice/map-literal arms already reject
                 // them); a second E1002 on the same span is a double
@@ -1367,14 +1389,8 @@ impl<'a> Collector<'a> {
                 (we != ge).then_some("slice element types differ")
             }
             (
-                Some(CompFamily::Array {
-                    len: wl,
-                    elem: we,
-                }),
-                Some(CompFamily::Array {
-                    len: gl,
-                    elem: ge,
-                }),
+                Some(CompFamily::Array { len: wl, elem: we }),
+                Some(CompFamily::Array { len: gl, elem: ge }),
             ) => {
                 if let (Some(a), Some(b)) = (wl, gl) {
                     if a != b {
@@ -1384,14 +1400,8 @@ impl<'a> Collector<'a> {
                 (we != ge).then_some("array element types differ")
             }
             (
-                Some(CompFamily::Map {
-                    key: wk,
-                    value: wv,
-                }),
-                Some(CompFamily::Map {
-                    key: gk,
-                    value: gv,
-                }),
+                Some(CompFamily::Map { key: wk, value: wv }),
+                Some(CompFamily::Map { key: gk, value: gv }),
             ) => {
                 if wk != gk {
                     Some("map key types differ")
@@ -1433,9 +1443,7 @@ impl<'a> Collector<'a> {
     fn container_elem_scalar_of_ty(&self, ty: &TypeExpr) -> Option<&'static str> {
         let resolved = self.ck.resolve_type_alias(ty);
         match &resolved {
-            TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
-                self.scalar_of_ty(elem)
-            }
+            TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => self.scalar_of_ty(elem),
             TypeExpr::Map { value, .. } => self.scalar_of_ty(value),
             TypeExpr::Pointer { to, .. } => match to.as_ref() {
                 TypeExpr::Array { elem, .. } => self.scalar_of_ty(elem),
@@ -1473,7 +1481,10 @@ impl<'a> Collector<'a> {
                         }
                     }
                     if let Some(fd) = self.ck.fns.get(name.as_str()) {
-                        if fd.receiver.is_none() && fd.type_params.is_empty() && fd.results.len() == 1 {
+                        if fd.receiver.is_none()
+                            && fd.type_params.is_empty()
+                            && fd.results.len() == 1
+                        {
                             return self.container_elem_scalar_of_ty(&fd.results[0].ty);
                         }
                     }
@@ -1506,12 +1517,15 @@ impl<'a> Collector<'a> {
             if fd.receiver.is_some() || !fd.type_params.is_empty() {
                 return None;
             }
-            return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+            return Some(
+                fd.results
+                    .iter()
+                    .map(|r| self.scalar_of_ty(&r.ty))
+                    .collect(),
+            );
         }
         if name == "min" || name == "max" {
-            let res_scalar = args
-                .iter()
-                .find_map(|a| self.typed_value_scalar(&a.value));
+            let res_scalar = args.iter().find_map(|a| self.typed_value_scalar(&a.value));
             return Some(vec![res_scalar]);
         }
         if args.len() == 1
@@ -1584,11 +1598,7 @@ impl<'a> Collector<'a> {
     /// genuine aliases never conflict. One shared boundary check for the
     /// struct-literal (#2782), append (#2796) and slice/map-literal (#2788)
     /// arms.
-    fn scalar_names_conflict(
-        &self,
-        want: Option<&'static str>,
-        got: Option<&'static str>,
-    ) -> bool {
+    fn scalar_names_conflict(&self, want: Option<&'static str>, got: Option<&'static str>) -> bool {
         matches!((want, got), (Some(w), Some(g)) if w != g)
     }
 
@@ -1660,7 +1670,11 @@ impl<'a> Collector<'a> {
             return vec![None; n];
         }
         if n == l.values.len() {
-            return l.values.iter().map(|v| self.initializer_scalar(v)).collect();
+            return l
+                .values
+                .iter()
+                .map(|v| self.initializer_scalar(v))
+                .collect();
         }
         if n >= 2 && l.values.len() == 1 {
             if let Expr::Call { callee, args, .. } = unwrap_parens(&l.values[0]) {
@@ -1931,7 +1945,7 @@ impl<'a> Collector<'a> {
                         }
                     }
                 }
-            } else if f.name == "init" 
+            } else if f.name == "init"
                 && (!f.params.is_empty() || !f.results.is_empty() || !f.type_params.is_empty())
             {
                 self.diags.push(
@@ -2116,10 +2130,7 @@ impl<'a> Collector<'a> {
                 "a parallel declaration binds positionally; the name and value counts must match",
             );
         }
-        if l.names.len() > 1
-            && l.values.len() == 1
-            && is_definitely_single_value(&l.values[0])
-        {
+        if l.names.len() > 1 && l.values.len() == 1 && is_definitely_single_value(&l.values[0]) {
             self.emit_e1002(
                 l.span,
                 format!(
@@ -2167,9 +2178,8 @@ impl<'a> Collector<'a> {
             } else if l.values.len() > 1 && l.values.len() == l.names.len() {
                 for (name, v) in l.names.iter().zip(l.values.iter()) {
                     let vk = self.kind_of_expr(v);
-                    let int_float_conflict = want == OpKind::Float
-                        && vk == OpKind::Int
-                        && !self.is_untyped_int_const(v);
+                    let int_float_conflict =
+                        want == OpKind::Float && vk == OpKind::Int && !self.is_untyped_int_const(v);
                     // #2770: concrete numeric type differing under one `OpKind`.
                     let scalar_mismatch = matches!(
                         (self.scalar_of_ty(t), self.typed_value_scalar(v)),
@@ -2208,9 +2218,11 @@ impl<'a> Collector<'a> {
         // #2858: track container element numeric scalar for slices/arrays/maps
         let container_elem_scalars: Vec<Option<&'static str>> = match &l.ty {
             Some(t) => vec![self.container_elem_scalar_of_ty(t); l.names.len()],
-            None if l.values.len() == l.names.len() => {
-                l.values.iter().map(|v| self.container_elem_scalar_of_expr(v)).collect()
-            }
+            None if l.values.len() == l.names.len() => l
+                .values
+                .iter()
+                .map(|v| self.container_elem_scalar_of_expr(v))
+                .collect(),
             _ => vec![None; l.names.len()],
         };
         let set_elems: Vec<Option<String>> = (0..l.names.len())
@@ -2229,7 +2241,10 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 // `a := [2]int{..}` / `b := a`: an inferred sized array keeps
                 // its length so `a = [3]int{..}`, `take(a)` etc. are compared.
-                if let Some(tn) = self.typed_value_type_name(val).filter(|t| is_sized_array_spelling(t)) {
+                if let Some(tn) = self
+                    .typed_value_type_name(val)
+                    .filter(|t| is_sized_array_spelling(t))
+                {
                     self.bind_type_name(name, tn);
                 } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
@@ -2238,8 +2253,13 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        for ((((name, kind), scalar), set_elem), container_elem_scalar) in
-            l.names.iter().zip(kinds).zip(scalars).zip(set_elems).zip(container_elem_scalars)
+        for ((((name, kind), scalar), set_elem), container_elem_scalar) in l
+            .names
+            .iter()
+            .zip(kinds)
+            .zip(scalars)
+            .zip(set_elems)
+            .zip(container_elem_scalars)
         {
             // #1031: a same-scope `:=` re-define keeps the EXISTING variable
             // (and its type) in Go, so only a fresh binding takes the
@@ -2316,9 +2336,8 @@ impl<'a> Collector<'a> {
         if unheaded_array_shorthand || untyped_integral_float_to_int {
             return;
         }
-        let int_float_conflict = want == OpKind::Float
-            && vk == OpKind::Int
-            && !self.is_untyped_int_const(&cd.value);
+        let int_float_conflict =
+            want == OpKind::Float && vk == OpKind::Int && !self.is_untyped_int_const(&cd.value);
         let scalar_mismatch = matches!(
             (self.scalar_of_ty(t), self.const_expr_scalar(&cd.value)),
             (Some(w), Some(v)) if w != v
@@ -2385,9 +2404,7 @@ impl<'a> Collector<'a> {
         }
         match unwrap_parens(e) {
             Expr::Ident { name, .. } => self.ck.file.decls.iter().find_map(|d| match d {
-                Decl::Const(other) if other.name == *name => {
-                    other.ty.as_ref().map(|t| t.render())
-                }
+                Decl::Const(other) if other.name == *name => other.ty.as_ref().map(|t| t.render()),
                 _ => None,
             }),
             _ => None,
@@ -2477,7 +2494,11 @@ impl<'a> Collector<'a> {
                 // checked here.
                 if (targets.len() == 1 && values.len() == 1) || values.len() > 1 {
                     for v in values {
-                        self.check_single_value_position(v, "an assignment", /*binding_position=*/ true);
+                        self.check_single_value_position(
+                            v,
+                            "an assignment",
+                            /*binding_position=*/ true,
+                        );
                     }
                 }
                 self.check_assign_operands(targets, *op, values, *span);
@@ -2554,9 +2575,7 @@ impl<'a> Collector<'a> {
                             // silently dropped. Record the binding so the
                             // write places and the pointer-receiver call
                             // below reject instead of certifying the pass.
-                            if v != "_"
-                                && matches!(k, OpKind::Struct(_) | OpKind::Array(_))
-                            {
+                            if v != "_" && matches!(k, OpKind::Struct(_) | OpKind::Array(_)) {
                                 if let Some(top) = self.copy_var_scopes.last_mut() {
                                     top.insert(v.clone());
                                 }
@@ -2573,14 +2592,25 @@ impl<'a> Collector<'a> {
                                     self.set_scalar(&vars[0], Some(iter_elem_scalar));
                                 }
                             } else if vars.len() >= 2 {
-                                if vars[0] != "_" && matches!(self.kind_of_expr(expr), OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str) {
+                                if vars[0] != "_"
+                                    && matches!(
+                                        self.kind_of_expr(expr),
+                                        OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str
+                                    )
+                                {
                                     self.set_scalar(&vars[0], Some("int"));
                                 }
                                 if vars[1] != "_" {
                                     self.set_scalar(&vars[1], Some(iter_elem_scalar));
                                 }
                             }
-                        } else if vars.len() >= 2 && vars[0] != "_" && matches!(self.kind_of_expr(expr), OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str) {
+                        } else if vars.len() >= 2
+                            && vars[0] != "_"
+                            && matches!(
+                                self.kind_of_expr(expr),
+                                OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str
+                            )
+                        {
                             self.set_scalar(&vars[0], Some("int"));
                         }
                     }
@@ -2675,7 +2705,8 @@ impl<'a> Collector<'a> {
                             if let Some(b) = binding {
                                 self.define_elidable(b, subject.span());
                                 // #2915: payload binding `some(v)` inherits the element type of `option[T]`.
-                                let bind_k = if segments.first().map(|s| s.as_str()) == Some("some") {
+                                let bind_k = if segments.first().map(|s| s.as_str()) == Some("some")
+                                {
                                     if let OpKind::Option(elem) = &subject_kind {
                                         (**elem).clone()
                                     } else {
@@ -2688,7 +2719,12 @@ impl<'a> Collector<'a> {
                             }
                         }
                         MatchPattern::Lit(lit) => {
-                            self.check_match_lit_pattern(subject, &subject_kind, lit, subject.span());
+                            self.check_match_lit_pattern(
+                                subject,
+                                &subject_kind,
+                                lit,
+                                subject.span(),
+                            );
                         }
                         MatchPattern::Wildcard => {}
                     }
@@ -2745,9 +2781,9 @@ impl<'a> Collector<'a> {
                     self.push_scope();
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
-                    // #887: a channel send in a select arm is also a single-value
-                    // position.
-                    self.check_single_value_position(value, "a channel send", false);
+                            // #887: a channel send in a select arm is also a single-value
+                            // position.
+                            self.check_single_value_position(value, "a channel send", false);
                             self.expr(chan);
                             self.expr(value);
                             self.check_send_elem(chan, value);
@@ -3000,7 +3036,8 @@ impl<'a> Collector<'a> {
                 // in an enclosing lexical/generic scope or declared at package scope,
                 // Go captures or collides with `fmt` (`fmt.Sprintf undefined` or
                 // `fmt redeclared in this block`).
-                if parts.iter().any(|p| matches!(p, InterpPart::Expr(_))) && self.is_fmt_shadowed() {
+                if parts.iter().any(|p| matches!(p, InterpPart::Expr(_))) && self.is_fmt_shadowed()
+                {
                     self.emit_e1002(
                         *span,
                         "string interpolation requires package `fmt`, which is shadowed by an in-scope `fmt` declaration — Go refuses `fmt.Sprintf` (HYB-E1002)".to_string(),
@@ -3121,8 +3158,12 @@ impl<'a> Collector<'a> {
                         // unhashable map key past the checker inside a
                         // chan/slice/array wrapper or type alias.
                         match unwrap_parens(&first_arg.value) {
-                            Expr::Index { base, index, span } if matches!(unwrap_parens(base), Expr::Ident { name, .. } if self.lookup_kind(name).is_none() && !self.file_consts.contains_key(name) && !self.ck.fns.contains_key(name)) => {
-                                self.check_named_type_instantiation(&format!("{}[{}]", base.render(), index.render()), *span);
+                            Expr::Index { base, index, span } if matches!(unwrap_parens(base), Expr::Ident { name, .. } if self.lookup_kind(name).is_none() && !self.file_consts.contains_key(name) && !self.ck.fns.contains_key(name)) =>
+                            {
+                                self.check_named_type_instantiation(
+                                    &format!("{}[{}]", base.render(), index.render()),
+                                    *span,
+                                );
                             }
                             _ => {}
                         }
@@ -3147,7 +3188,11 @@ impl<'a> Collector<'a> {
                 // only rejected when the callee cannot take it.
                 if self.multi_value_arg_count(args).is_none() {
                     for a in args {
-                        self.check_single_value_position(&a.value, "a call argument", /*binding_position=*/ false);
+                        self.check_single_value_position(
+                            &a.value,
+                            "a call argument",
+                            /*binding_position=*/ false,
+                        );
                     }
                 } else {
                     self.check_multi_value_arg_arity(callee, args, *span);
@@ -3252,12 +3297,9 @@ impl<'a> Collector<'a> {
                         self.exempt(name);
                     }
                 }
-                let result_kinds: Vec<OpKind> = results
-                    .iter()
-                    .map(|r| self.kind_of_ty(&r.ty, 0))
-                    .collect();
-                let all_named =
-                    !results.is_empty() && results.iter().all(|r| r.name.is_some());
+                let result_kinds: Vec<OpKind> =
+                    results.iter().map(|r| self.kind_of_ty(&r.ty, 0)).collect();
+                let all_named = !results.is_empty() && results.iter().all(|r| r.name.is_some());
                 let error_tail = matches!(
                     results.last().map(|r| &r.ty),
                     Some(TypeExpr::Named { name, .. }) if name == "error"
@@ -3435,7 +3477,11 @@ impl<'a> Collector<'a> {
         if trimmed.starts_with("map[") {
             return Some("map");
         }
-        if trimmed.starts_with("func(") || trimmed.starts_with("fn(") || trimmed == "fn" || trimmed == "func" {
+        if trimmed.starts_with("func(")
+            || trimmed.starts_with("fn(")
+            || trimmed == "fn"
+            || trimmed == "func"
+        {
             return Some("function");
         }
         if trimmed.starts_with("set[") || trimmed == "set" {
@@ -3580,7 +3626,12 @@ impl<'a> Collector<'a> {
         // #3561: if `head` is shadowed by a value binding in any enclosing scope,
         // using it in a type position causes Go to resolve it to the shadowing
         // variable, failing compilation with `<ident> is not a type` (Row 13 BUILDABLE).
-        if self.scopes.iter().rev().any(|layer| layer.contains_key(head)) {
+        if self
+            .scopes
+            .iter()
+            .rev()
+            .any(|layer| layer.contains_key(head))
+        {
             let is_type = self.ck.structs.contains_key(head)
                 || self.ck.struct_type_params.contains_key(head)
                 || self.ck.enums.contains_key(head)
@@ -3666,9 +3717,7 @@ impl<'a> Collector<'a> {
 
     fn param_kind(&self, p: &Param, depth: usize) -> OpKind {
         match &p.ty {
-            TypeExpr::Named { name, .. } if name.is_empty() => {
-                self.kind_of_named(&p.name, depth)
-            }
+            TypeExpr::Named { name, .. } if name.is_empty() => self.kind_of_named(&p.name, depth),
             _ => self.kind_of_ty(&p.ty, depth),
         }
     }
@@ -3687,6 +3736,53 @@ impl<'a> Collector<'a> {
                 self.kind_of_named(&p.name, depth)
             }
             _ => self.kind_of_ty_with_subst(&p.ty, subst, depth),
+        }
+    }
+
+    fn scalar_of_ty_resolved(&self, ty: &TypeExpr) -> Option<&'static str> {
+        let resolved = self.ck.resolve_type_alias(ty);
+        self.scalar_of_ty(&resolved)
+    }
+
+    fn scalar_of_ty_with_subst(
+        &self,
+        ty: &TypeExpr,
+        subst: &HashMap<String, String>,
+    ) -> Option<&'static str> {
+        if let TypeExpr::Named { name, .. } = ty {
+            if let Some(concrete) = subst.get(name.as_str()) {
+                return self.scalar_of_type_name(concrete.trim());
+            }
+        }
+        self.scalar_of_ty_resolved(ty)
+    }
+
+    fn param_scalar(&self, p: &Param) -> Option<&'static str> {
+        match &p.ty {
+            TypeExpr::Named { name, .. } if name.is_empty() => {
+                let resolved = self.ck.resolve_type_alias(&TypeExpr::Named {
+                    name: p.name.clone(),
+                    span: p.span,
+                });
+                self.scalar_of_ty(&resolved)
+            }
+            _ => self.scalar_of_ty_resolved(&p.ty),
+        }
+    }
+
+    fn param_scalar_with_subst(
+        &self,
+        p: &Param,
+        subst: &HashMap<String, String>,
+    ) -> Option<&'static str> {
+        match &p.ty {
+            TypeExpr::Named { name, .. } if name.is_empty() => {
+                if let Some(concrete) = subst.get(&p.name) {
+                    return self.scalar_of_type_name(concrete.trim());
+                }
+                self.param_scalar(p)
+            }
+            _ => self.scalar_of_ty_with_subst(&p.ty, subst),
         }
     }
 
@@ -3709,16 +3805,30 @@ impl<'a> Collector<'a> {
                 Box::new(self.kind_of_ty(key, depth + 1)),
                 Box::new(self.kind_of_ty(value, depth + 1)),
             ),
-            TypeExpr::Chan { elem, .. } => {
-                OpKind::Chan(Box::new(self.kind_of_ty(elem, depth + 1)))
+            TypeExpr::Chan { elem, .. } => OpKind::Chan(Box::new(self.kind_of_ty(elem, depth + 1))),
+            TypeExpr::Option { elem, .. } => {
+                OpKind::Option(Box::new(self.kind_of_ty(elem, depth + 1)))
             }
-            TypeExpr::Option { elem, .. } => OpKind::Option(Box::new(self.kind_of_ty(elem, depth + 1))),
-            TypeExpr::Fn { params, results, .. } => OpKind::Fn(
+            TypeExpr::Fn {
+                params, results, ..
+            } => OpKind::Fn(
                 results
                     .iter()
                     .map(|r| self.kind_of_ty(r, depth + 1))
                     .collect(),
-                Some(params.iter().map(|p| self.param_kind(p, depth + 1)).collect()),
+                Some(
+                    params
+                        .iter()
+                        .map(|p| self.param_kind(p, depth + 1))
+                        .collect(),
+                ),
+                FnScalarSig {
+                    results: results
+                        .iter()
+                        .map(|r| self.scalar_of_ty_resolved(r))
+                        .collect(),
+                    params: params.iter().map(|p| self.param_scalar(p)).collect(),
+                },
             ),
         }
     }
@@ -3744,9 +3854,9 @@ impl<'a> Collector<'a> {
             "float32" | "float64" | "f32" | "f64" | "complex64" | "complex128" | "c64" | "c128" => {
                 OpKind::Float
             }
-            "int" | "uint" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
-            | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
-            | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
+            "int" | "uint" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64"
+            | "int64" | "u8" | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64"
+            | "usize" | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
             // A curated foreign named type (`os.file`, `bufio.reader`,
             // `net.conn`, `serde_json.value`, ...) is resolved, not
             // unresolved: the same table #3521 uses at move boundaries. It
@@ -3838,7 +3948,9 @@ impl<'a> Collector<'a> {
             TypeExpr::Option { elem, .. } => {
                 OpKind::Option(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
             }
-            TypeExpr::Fn { params, results, .. } => OpKind::Fn(
+            TypeExpr::Fn {
+                params, results, ..
+            } => OpKind::Fn(
                 results
                     .iter()
                     .map(|r| self.kind_of_ty_with_subst(r, subst, depth + 1))
@@ -3849,6 +3961,16 @@ impl<'a> Collector<'a> {
                         .map(|p| self.param_kind_with_subst(p, subst, depth + 1))
                         .collect(),
                 ),
+                FnScalarSig {
+                    results: results
+                        .iter()
+                        .map(|r| self.scalar_of_ty_with_subst(r, subst))
+                        .collect(),
+                    params: params
+                        .iter()
+                        .map(|p| self.param_scalar_with_subst(p, subst))
+                        .collect(),
+                },
             ),
         }
     }
@@ -3999,13 +4121,26 @@ impl<'a> Collector<'a> {
                     return OpKind::Bool;
                 }
                 let head = Checker::base_named_type_str(name);
-                if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                if let Some(f) = self
+                    .ck
+                    .fns
+                    .get(name.as_str())
+                    .or_else(|| self.ck.fns.get(head))
+                {
                     return OpKind::Fn(
                         f.results
                             .iter()
                             .map(|r| self.kind_of_ty(&r.ty, 0))
                             .collect(),
                         Some(f.params.iter().map(|p| self.param_kind(p, 0)).collect()),
+                        FnScalarSig {
+                            results: f
+                                .results
+                                .iter()
+                                .map(|r| self.scalar_of_ty_resolved(&r.ty))
+                                .collect(),
+                            params: f.params.iter().map(|p| self.param_scalar(p)).collect(),
+                        },
                     );
                 }
                 OpKind::Unknown
@@ -4127,6 +4262,14 @@ impl<'a> Collector<'a> {
                                     .map(|r| self.kind_of_ty(&r.ty, 0))
                                     .collect(),
                                 Some(m.params.iter().map(|p| self.param_kind(p, 0)).collect()),
+                                FnScalarSig {
+                                    results: m
+                                        .results
+                                        .iter()
+                                        .map(|r| self.scalar_of_ty_resolved(&r.ty))
+                                        .collect(),
+                                    params: m.params.iter().map(|p| self.param_scalar(p)).collect(),
+                                },
                             );
                         }
                     }
@@ -4140,12 +4283,25 @@ impl<'a> Collector<'a> {
                     for p in &m.params {
                         params.push(self.param_kind(p, 0));
                     }
+                    let mut param_scalars = Vec::with_capacity(m.params.len() + 1);
+                    param_scalars.push(None);
+                    for p in &m.params {
+                        param_scalars.push(self.param_scalar(p));
+                    }
                     return OpKind::Fn(
                         m.results
                             .iter()
                             .map(|r| self.kind_of_ty(&r.ty, 0))
                             .collect(),
                         Some(params),
+                        FnScalarSig {
+                            results: m
+                                .results
+                                .iter()
+                                .map(|r| self.scalar_of_ty_resolved(&r.ty))
+                                .collect(),
+                            params: param_scalars,
+                        },
                     );
                 }
                 OpKind::Unknown
@@ -4172,11 +4328,15 @@ impl<'a> Collector<'a> {
             Expr::FnLit {
                 params, results, ..
             } => OpKind::Fn(
-                results
-                    .iter()
-                    .map(|r| self.kind_of_ty(&r.ty, 0))
-                    .collect(),
+                results.iter().map(|r| self.kind_of_ty(&r.ty, 0)).collect(),
                 Some(params.iter().map(|p| self.param_kind(p, 0)).collect()),
+                FnScalarSig {
+                    results: results
+                        .iter()
+                        .map(|r| self.scalar_of_ty_resolved(&r.ty))
+                        .collect(),
+                    params: params.iter().map(|p| self.param_scalar(p)).collect(),
+                },
             ),
             Expr::Call { callee, args, .. } => match self.call_result_kinds(callee, args) {
                 Some(res) if res.is_empty() => OpKind::Void,
@@ -4189,12 +4349,9 @@ impl<'a> Collector<'a> {
     fn call_result_kinds(&self, callee: &Expr, args: &[CallArg]) -> Option<Vec<OpKind>> {
         let bare = unwrap_parens(callee);
         match bare {
-            Expr::FnLit { results, .. } => Some(
-                results
-                    .iter()
-                    .map(|r| self.kind_of_ty(&r.ty, 0))
-                    .collect(),
-            ),
+            Expr::FnLit { results, .. } => {
+                Some(results.iter().map(|r| self.kind_of_ty(&r.ty, 0)).collect())
+            }
             Expr::SliceLit {
                 elem: Some(t),
                 items,
@@ -4204,7 +4361,7 @@ impl<'a> Collector<'a> {
             }
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
-                    if let OpKind::Fn(res, _) = k {
+                    if let OpKind::Fn(res, _, _) = k {
                         return Some(res);
                     }
                     return None;
@@ -4248,7 +4405,12 @@ impl<'a> Collector<'a> {
                     return Some(vec![conv]);
                 }
                 let head = Checker::base_named_type_str(name);
-                if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                if let Some(f) = self
+                    .ck
+                    .fns
+                    .get(name.as_str())
+                    .or_else(|| self.ck.fns.get(head))
+                {
                     return Some(
                         f.results
                             .iter()
@@ -4290,7 +4452,7 @@ impl<'a> Collector<'a> {
                         );
                     }
                 }
-                if let Some(OpKind::Fn(res, _)) = self.struct_field_kind(&bk, name) {
+                if let Some(OpKind::Fn(res, _, _)) = self.struct_field_kind(&bk, name) {
                     return Some(res);
                 }
                 None
@@ -4373,7 +4535,6 @@ impl<'a> Collector<'a> {
         OpKind::Pointer(Box::new(inner))
     }
 
-
     fn check_filepath_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         if matches!(
             member,
@@ -4404,14 +4565,23 @@ impl<'a> Collector<'a> {
             if args.iter().any(|a| a.spread) {
                 self.emit_e1002(
                     span,
-                    format!("cannot use `...` in call to non-variadic `filepath.{member}` (HYB-E1002)"),
+                    format!(
+                        "cannot use `...` in call to non-variadic `filepath.{member}` (HYB-E1002)"
+                    ),
                     &format!("`filepath.{member}` does not accept variadic spread arguments"),
                 );
             } else if args.len() != expected {
-                let noun = if expected == 1 { "argument" } else { "arguments" };
+                let noun = if expected == 1 {
+                    "argument"
+                } else {
+                    "arguments"
+                };
                 self.emit_e1002(
                     span,
-                    format!("`filepath.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    format!(
+                        "`filepath.{member}` takes {expected} {noun}, got {} (HYB-E1002)",
+                        args.len()
+                    ),
                     &format!("provide exactly {expected} {noun} to `filepath.{member}`"),
                 );
             }
@@ -4442,10 +4612,17 @@ impl<'a> Collector<'a> {
                     &format!("`path.{member}` does not accept variadic spread arguments"),
                 );
             } else if args.len() != expected {
-                let noun = if expected == 1 { "argument" } else { "arguments" };
+                let noun = if expected == 1 {
+                    "argument"
+                } else {
+                    "arguments"
+                };
                 self.emit_e1002(
                     span,
-                    format!("`path.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    format!(
+                        "`path.{member}` takes {expected} {noun}, got {} (HYB-E1002)",
+                        args.len()
+                    ),
                     &format!("provide exactly {expected} {noun} to `path.{member}`"),
                 );
             }
@@ -4458,7 +4635,9 @@ impl<'a> Collector<'a> {
         ) {
             self.emit_e1002(
                 span,
-                format!("cannot call `url.{member}`: type `url.{member}` is not a function (HYB-E1002)"),
+                format!(
+                    "cannot call `url.{member}`: type `url.{member}` is not a function (HYB-E1002)"
+                ),
                 &format!("`url.{member}` is a type name, not a callable function"),
             );
             return;
@@ -4479,17 +4658,25 @@ impl<'a> Collector<'a> {
                     &format!("`url.{member}` does not accept variadic spread arguments"),
                 );
             } else if args.len() != expected {
-                let noun = if expected == 1 { "argument" } else { "arguments" };
+                let noun = if expected == 1 {
+                    "argument"
+                } else {
+                    "arguments"
+                };
                 self.emit_e1002(
                     span,
-                    format!("`url.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    format!(
+                        "`url.{member}` takes {expected} {noun}, got {} (HYB-E1002)",
+                        args.len()
+                    ),
                     &format!("provide exactly {expected} {noun} to `url.{member}`"),
                 );
             }
         } else if member == "join_path" && args.is_empty() {
             self.emit_e1002(
                 span,
-                "`url.join_path` requires at least 1 argument `(base[, ...])`, got 0 (HYB-E1002)".to_string(),
+                "`url.join_path` requires at least 1 argument `(base[, ...])`, got 0 (HYB-E1002)"
+                    .to_string(),
                 "provide at least 1 path argument to `url.join_path`",
             );
         }
@@ -4508,7 +4695,10 @@ impl<'a> Collector<'a> {
     // blesses are listed, and every accepted call matches its Go signature.
     fn check_strconv_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
         // Package-level values and types are not callable.
-        if matches!(member, "int_size" | "err_range" | "err_syntax" | "num_error") {
+        if matches!(
+            member,
+            "int_size" | "err_range" | "err_syntax" | "num_error"
+        ) {
             self.emit_e1002(
                 span,
                 format!("`strconv.{member}` is not a function — it is a package-level value/type and cannot be called (HYB-E1002)"),
@@ -4523,20 +4713,38 @@ impl<'a> Collector<'a> {
             // QuoteRune(r), QuoteRuneToASCII(r), QuoteRuneToGraphic(r),
             // QuoteToASCII(s), QuoteToGraphic(s), QuotedPrefix(s),
             // Unquote(s)
-            "atoi" | "itoa" | "parse_bool" | "format_bool" | "can_backquote"
-            | "is_graphic" | "is_print" | "quote" | "quote_rune"
-            | "quote_rune_to_ascii" | "quote_rune_to_graphic" | "quote_to_ascii"
-            | "quote_to_graphic" | "quoted_prefix" | "unquote" => Some(1),
+            "atoi"
+            | "itoa"
+            | "parse_bool"
+            | "format_bool"
+            | "can_backquote"
+            | "is_graphic"
+            | "is_print"
+            | "quote"
+            | "quote_rune"
+            | "quote_rune_to_ascii"
+            | "quote_rune_to_graphic"
+            | "quote_to_ascii"
+            | "quote_to_graphic"
+            | "quoted_prefix"
+            | "unquote" => Some(1),
             // 2 args: ParseComplex(s, bitSize), ParseFloat(s, bitSize),
             // FormatInt(i, base), FormatUint(u, base), AppendBool(dst, b),
             // AppendQuote(dst, s), AppendQuoteRune(dst, r),
             // AppendQuoteRuneToASCII(dst, r), AppendQuoteRuneToGraphic(dst, r),
             // AppendQuoteToASCII(dst, s), AppendQuoteToGraphic(dst, s),
             // UnquoteChar(s, quote)
-            "parse_complex" | "parse_float" | "format_int" | "format_uint"
-            | "append_bool" | "append_quote" | "append_quote_rune"
-            | "append_quote_rune_to_ascii" | "append_quote_rune_to_graphic"
-            | "append_quote_to_ascii" | "append_quote_to_graphic"
+            "parse_complex"
+            | "parse_float"
+            | "format_int"
+            | "format_uint"
+            | "append_bool"
+            | "append_quote"
+            | "append_quote_rune"
+            | "append_quote_rune_to_ascii"
+            | "append_quote_rune_to_graphic"
+            | "append_quote_to_ascii"
+            | "append_quote_to_graphic"
             | "unquote_char" => Some(2),
             // 3 args: ParseInt(s, base, bitSize), ParseUint(s, base, bitSize),
             // AppendInt(dst, i, base), AppendUint(dst, u, base)
@@ -4553,7 +4761,9 @@ impl<'a> Collector<'a> {
             if args.iter().any(|a| a.spread) {
                 self.emit_e1002(
                     span,
-                    format!("cannot use `...` in call to non-variadic `strconv.{member}` (HYB-E1002)"),
+                    format!(
+                        "cannot use `...` in call to non-variadic `strconv.{member}` (HYB-E1002)"
+                    ),
                     &format!("`strconv.{member}` does not accept variadic spread arguments"),
                 );
             } else if args.len() != expected {
@@ -4589,7 +4799,10 @@ impl<'a> Collector<'a> {
     }
 
     fn check_sort_package_call(&mut self, member: &str, args: &[CallArg], span: Span) {
-        if matches!(member, "interface" | "int_slice" | "float64_slice" | "string_slice") {
+        if matches!(
+            member,
+            "interface" | "int_slice" | "float64_slice" | "string_slice"
+        ) {
             self.emit_e1002(
                 span,
                 format!("cannot call `sort.{member}`: `sort.{member}` is a type, not a function (HYB-E1002)"),
@@ -4599,8 +4812,16 @@ impl<'a> Collector<'a> {
         }
 
         let expected_arity = match member {
-            "ints" | "ints_are_sorted" | "float64s" | "float64s_are_sorted" | "strings"
-            | "strings_are_sorted" | "sort" | "stable" | "is_sorted" | "reverse" => Some(1),
+            "ints"
+            | "ints_are_sorted"
+            | "float64s"
+            | "float64s_are_sorted"
+            | "strings"
+            | "strings_are_sorted"
+            | "sort"
+            | "stable"
+            | "is_sorted"
+            | "reverse" => Some(1),
             "search_ints" | "search_float64s" | "search_strings" | "search" | "slice"
             | "slice_is_sorted" | "slice_stable" => Some(2),
             _ => None,
@@ -4614,10 +4835,17 @@ impl<'a> Collector<'a> {
                     &format!("`sort.{member}` does not accept variadic spread arguments"),
                 );
             } else if args.len() != expected {
-                let noun = if expected == 1 { "argument" } else { "arguments" };
+                let noun = if expected == 1 {
+                    "argument"
+                } else {
+                    "arguments"
+                };
                 self.emit_e1002(
                     span,
-                    format!("`sort.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    format!(
+                        "`sort.{member}` takes {expected} {noun}, got {} (HYB-E1002)",
+                        args.len()
+                    ),
                     &format!("provide exactly {expected} {noun} to `sort.{member}`"),
                 );
             }
@@ -4662,10 +4890,17 @@ impl<'a> Collector<'a> {
 
         if let Some(expected) = expected_arity {
             if args.len() != expected {
-                let noun = if expected == 1 { "argument" } else { "arguments" };
+                let noun = if expected == 1 {
+                    "argument"
+                } else {
+                    "arguments"
+                };
                 self.emit_e1002(
                     span,
-                    format!("`sync.{member}` takes {expected} {noun}, got {} (HYB-E1002)", args.len()),
+                    format!(
+                        "`sync.{member}` takes {expected} {noun}, got {} (HYB-E1002)",
+                        args.len()
+                    ),
                     &format!("provide exactly {expected} {noun} to `sync.{member}`"),
                 );
             }
@@ -4705,7 +4940,9 @@ impl<'a> Collector<'a> {
     /// foreign/shapes types: those live on a different root (scalar/interface
     /// composite literals) and their members are emitted verbatim by design.
     fn check_value_position_type_name(&mut self, ty: &TypeExpr) {
-        let TypeExpr::Named { name, span, .. } = ty else { return };
+        let TypeExpr::Named { name, span, .. } = ty else {
+            return;
+        };
         let name = name.trim();
         if name.is_empty() || name.contains('.') || name != Checker::base_named_type_str(name) {
             return;
@@ -4743,12 +4980,7 @@ impl<'a> Collector<'a> {
         );
     }
 
-    fn check_struct_literal(
-        &mut self,
-        ty: Option<&TypeExpr>,
-        fields: &[FieldInit],
-        span: Span,
-    ) {
+    fn check_struct_literal(&mut self, ty: Option<&TypeExpr>, fields: &[FieldInit], span: Span) {
         for f in fields {
             self.check_single_value_position(&f.value, "a struct literal field", false);
         }
@@ -4941,10 +5173,9 @@ impl<'a> Collector<'a> {
                         .or_else(|| self.find_untyped_nonconst_shift(rhs))
                 }
             }
-            Expr::Binary { lhs, rhs, .. } => {
-                self.find_untyped_nonconst_shift(lhs)
-                    .or_else(|| self.find_untyped_nonconst_shift(rhs))
-            }
+            Expr::Binary { lhs, rhs, .. } => self
+                .find_untyped_nonconst_shift(lhs)
+                .or_else(|| self.find_untyped_nonconst_shift(rhs)),
             Expr::Unary { operand, .. } => self.find_untyped_nonconst_shift(operand),
             _ => None,
         }
@@ -4969,7 +5200,11 @@ impl<'a> Collector<'a> {
             return;
         }
         let arg = &args[0].value;
-        self.check_single_value_position(arg, "a type conversion", /*binding_position=*/ false);
+        self.check_single_value_position(
+            arg,
+            "a type conversion",
+            /*binding_position=*/ false,
+        );
 
         // #3767: In Go specification (§Operators / Arithmetic operators / Integer operators):
         // "If the left operand of a non-constant shift expression is an untyped constant,
@@ -5264,13 +5499,7 @@ impl<'a> Collector<'a> {
     /// uninferrable; this check owns only the argument count and the
     /// explicit-instantiation type-argument count (Go refuses a wrong one
     /// with `got N type arguments but want M`).
-    fn check_generic_call_arity(
-        &mut self,
-        name: &str,
-        f: &FnDecl,
-        args: &[CallArg],
-        span: Span,
-    ) {
+    fn check_generic_call_arity(&mut self, name: &str, f: &FnDecl, args: &[CallArg], span: Span) {
         if name.contains('[') && name.ends_with(']') {
             // Explicit instantiation `id[int, string](...)`: Go refuses a
             // wrong type-argument count before it looks at the arguments.
@@ -5620,9 +5849,8 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            let int_to_float_conflict = want == OpKind::Float
-                && got == OpKind::Int
-                && !self.is_untyped_int_const(&a.value);
+            let int_to_float_conflict =
+                want == OpKind::Float && got == OpKind::Int && !self.is_untyped_int_const(&a.value);
             // #2770: both sides share `OpKind::Float`/`Int` but differ in the
             // concrete type (`float32` vs `float64`, `int` vs `int64`).
             let scalar_mismatch = matches!(
@@ -5689,9 +5917,8 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            let int_to_float_conflict = want == OpKind::Float
-                && got == OpKind::Int
-                && !self.is_untyped_int_const(&a.value);
+            let int_to_float_conflict =
+                want == OpKind::Float && got == OpKind::Int && !self.is_untyped_int_const(&a.value);
             // #2770: concrete numeric type differing under one `OpKind`.
             let scalar_mismatch = matches!(
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
@@ -5781,19 +6008,21 @@ impl<'a> Collector<'a> {
                     if res.len() == want.len() {
                         for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
                             if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
-                                let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
+                                let got_s = res_scalars
+                                    .as_ref()
+                                    .and_then(|rs| rs.get(i).copied().flatten());
                                 self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
                             }
                         }
                         return;
                     }
-                    if !res.is_empty()
-                        && self.fn_results_error_tail
-                        && res.len() + 1 == want.len()
+                    if !res.is_empty() && self.fn_results_error_tail && res.len() + 1 == want.len()
                     {
                         for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
                             if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
-                                let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
+                                let got_s = res_scalars
+                                    .as_ref()
+                                    .and_then(|rs| rs.get(i).copied().flatten());
                                 self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
                             }
                         }
@@ -5837,8 +6066,8 @@ impl<'a> Collector<'a> {
             //   * the last result is `error` — the emitter's E3 zero-fill
             //     turns `return v` into `return v, nil` (corpus 13).
             // Anything else is a genuine arity error.
-            let short_ok = nv < nw
-                && ((nv == 0 && self.fn_results_all_named) || self.fn_results_error_tail);
+            let short_ok =
+                nv < nw && ((nv == 0 && self.fn_results_all_named) || self.fn_results_error_tail);
             if short_ok {
                 for (i, (v, w)) in values.iter().zip(want.iter()).enumerate() {
                     self.check_single_value_position(v, "a return statement", false);
@@ -5885,7 +6114,9 @@ impl<'a> Collector<'a> {
     }
 
     fn report_array_return_mismatch(&mut self, val: &Expr, idx: usize, span: Span) {
-        let Some(want_name) = self.fn_result_type_names.get(idx) else { return };
+        let Some(want_name) = self.fn_result_type_names.get(idx) else {
+            return;
+        };
         let got_name = self.typed_value_type_name(val);
         if self.sized_array_names_differ(Some(want_name.as_str()), got_name.as_deref()) {
             let got_label = got_name.as_deref().unwrap_or("array");
@@ -5934,10 +6165,15 @@ impl<'a> Collector<'a> {
         );
     }
 
-    fn report_return_conflict(&mut self, val: &Expr, got: &OpKind, want: &OpKind, span: Span) -> bool {
-        let is_untyped_int_to_float = *want == OpKind::Float
-            && *got == OpKind::Int
-            && self.is_untyped_int_const(val);
+    fn report_return_conflict(
+        &mut self,
+        val: &Expr,
+        got: &OpKind,
+        want: &OpKind,
+        span: Span,
+    ) -> bool {
+        let is_untyped_int_to_float =
+            *want == OpKind::Float && *got == OpKind::Int && self.is_untyped_int_const(val);
         let conflict = (*want == OpKind::Float && *got == OpKind::Int && !is_untyped_int_to_float)
             || kinds_conflict(want, got);
         if !conflict {
@@ -6066,9 +6302,10 @@ impl<'a> Collector<'a> {
                                     )
                                 }));
                         if cannot_be_byte && !is_byte_slice {
-                            let d_label = dst_elem_ty
-                                .map(|d| format!("[]{}", d))
-                                .unwrap_or_else(|| self.kind_of_expr(&first.value).label().to_string());
+                            let d_label =
+                                dst_elem_ty.map(|d| format!("[]{}", d)).unwrap_or_else(|| {
+                                    self.kind_of_expr(&first.value).label().to_string()
+                                });
                             self.emit_e1002(
                                 extra.value.span(),
                                 format!(
@@ -6195,9 +6432,10 @@ impl<'a> Collector<'a> {
         };
         let got = self.kind_of_expr(value);
         if want.is_numeric() && got.is_numeric() {
-            if let (Some(w), Some(g)) =
-                (self.chan_element_scalar(chan), self.typed_value_scalar(value))
-            {
+            if let (Some(w), Some(g)) = (
+                self.chan_element_scalar(chan),
+                self.typed_value_scalar(value),
+            ) {
                 if w != g {
                     self.emit_send_mismatch(value, g, w);
                 }
@@ -6207,9 +6445,8 @@ impl<'a> Collector<'a> {
         // A typed int value reaches a float channel through the (Float, Int)
         // arm of `kinds_conflict`, which must stay open for untyped int
         // constants; the same #682 U5 disambiguation applies here.
-        let typed_int_to_float = want == OpKind::Float
-            && got == OpKind::Int
-            && !self.is_untyped_int_const(value);
+        let typed_int_to_float =
+            want == OpKind::Float && got == OpKind::Int && !self.is_untyped_int_const(value);
         if kinds_conflict(&want, &got) || typed_int_to_float {
             self.emit_send_mismatch(value, &got.label(), &want.label());
         }
@@ -6323,7 +6560,9 @@ impl<'a> Collector<'a> {
         };
         if kinds_conflict(subject_kind, &pat_kind) {
             let lit_str = match lit {
-                LitKind::Int(s) | LitKind::Float(s) | LitKind::Str(s) | LitKind::RawStr(s) => s.as_str(),
+                LitKind::Int(s) | LitKind::Float(s) | LitKind::Str(s) | LitKind::RawStr(s) => {
+                    s.as_str()
+                }
                 LitKind::Bool(true) => "true",
                 LitKind::Bool(false) => "false",
                 LitKind::Char(_) => "char",
@@ -6345,7 +6584,13 @@ impl<'a> Collector<'a> {
     /// Family A (#425, #3155): `if cond` and `for cond` require a boolean condition.
     fn check_bool_condition(&mut self, cond: &Expr, construct: &str) {
         self.check_single_value_position(cond, "a boolean condition", false);
-        if matches!(unwrap_parens(cond), Expr::Lit { kind: LitKind::Nil, .. }) {
+        if matches!(
+            unwrap_parens(cond),
+            Expr::Lit {
+                kind: LitKind::Nil,
+                ..
+            }
+        ) {
             self.emit_e1002(
                 cond.span(),
                 format!(
@@ -6378,7 +6623,11 @@ impl<'a> Collector<'a> {
         // `!two_bools()` / `-two_ints()`, which Go rejects with
         // "multiple-value ... in single-value context" / "(no value) used as
         // value". Same check a binary operand already runs.
-        self.check_single_value_position(operand, "a unary operand", /*binding_position=*/ false);
+        self.check_single_value_position(
+            operand,
+            "a unary operand",
+            /*binding_position=*/ false,
+        );
         // Issue #1777: `kind_of_expr` maps a nil literal to `Unknown`, and
         // `Unknown` is permissive in the gates below — so `!nil` and `-nil`
         // passed check and failed `go build`
@@ -6491,7 +6740,11 @@ impl<'a> Collector<'a> {
                     OpKind::Map(_, _) => true,
                     OpKind::Slice(_) => true,
                     OpKind::Array(_) => self.is_addressable_expr(base),
-                    OpKind::Pointer(inner) if matches!(*inner, OpKind::Array(_) | OpKind::Slice(_)) => true,
+                    OpKind::Pointer(inner)
+                        if matches!(*inner, OpKind::Array(_) | OpKind::Slice(_)) =>
+                    {
+                        true
+                    }
                     OpKind::Unknown => true,
                     _ => false,
                 }
@@ -6564,8 +6817,16 @@ impl<'a> Collector<'a> {
         // `multiple-value two() (value of type (int, int)) in single-value
         // context`, and the kind inference below would otherwise take the
         // call's FIRST result and silently accept it as an int.
-        self.check_single_value_position(lhs, "a binary operation", /*binding_position=*/ false);
-        self.check_single_value_position(rhs, "a binary operation", /*binding_position=*/ false);
+        self.check_single_value_position(
+            lhs,
+            "a binary operation",
+            /*binding_position=*/ false,
+        );
+        self.check_single_value_position(
+            rhs,
+            "a binary operation",
+            /*binding_position=*/ false,
+        );
         let lk = self.kind_of_expr(lhs);
         let rk = self.kind_of_expr(rhs);
         match op {
@@ -6672,14 +6933,28 @@ impl<'a> Collector<'a> {
                     BinOp::Gt => ">",
                     _ => ">=",
                 };
-                let l_ok = matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
-                let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
+                let l_ok = matches!(
+                    lk,
+                    OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str
+                );
+                let r_ok = matches!(
+                    rk,
+                    OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str
+                );
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
                     && lk.is_numeric() != rk.is_numeric();
-                let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
-                    || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
-                if !l_ok || !r_ok || mismatch || int_float_conflict || self.scalar_conflict(lhs, rhs) {
+                let int_float_conflict =
+                    (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
+                        || (lk == OpKind::Int
+                            && rk == OpKind::Float
+                            && !self.is_untyped_int_const(lhs));
+                if !l_ok
+                    || !r_ok
+                    || mismatch
+                    || int_float_conflict
+                    || self.scalar_conflict(lhs, rhs)
+                {
                     self.emit_e1002(
                         span,
                         format!(
@@ -6695,14 +6970,28 @@ impl<'a> Collector<'a> {
             }
             // B3: `+` accepts numeric+numeric or string+string.
             BinOp::Add => {
-                let l_ok = matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
-                let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
+                let l_ok = matches!(
+                    lk,
+                    OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str
+                );
+                let r_ok = matches!(
+                    rk,
+                    OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str
+                );
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
                     && lk.is_numeric() != rk.is_numeric();
-                let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
-                    || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
-                if !l_ok || !r_ok || mismatch || int_float_conflict || self.scalar_conflict(lhs, rhs) {
+                let int_float_conflict =
+                    (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
+                        || (lk == OpKind::Int
+                            && rk == OpKind::Float
+                            && !self.is_untyped_int_const(lhs));
+                if !l_ok
+                    || !r_ok
+                    || mismatch
+                    || int_float_conflict
+                    || self.scalar_conflict(lhs, rhs)
+                {
                     self.emit_e1002(
                         span,
                         format!(
@@ -6722,8 +7011,11 @@ impl<'a> Collector<'a> {
                     BinOp::Mul => "*",
                     _ => "/",
                 };
-                let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
-                    || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
+                let int_float_conflict =
+                    (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
+                        || (lk == OpKind::Int
+                            && rk == OpKind::Float
+                            && !self.is_untyped_int_const(lhs));
                 if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || int_float_conflict
@@ -6743,12 +7035,7 @@ impl<'a> Collector<'a> {
                 }
             }
             // `%`, bitwise, and shifts require integer operands.
-            BinOp::Mod
-            | BinOp::BitOr
-            | BinOp::BitXor
-            | BinOp::BitAnd
-            | BinOp::Shl
-            | BinOp::Shr => {
+            BinOp::Mod | BinOp::BitOr | BinOp::BitXor | BinOp::BitAnd | BinOp::Shl | BinOp::Shr => {
                 let op_str = match op {
                     BinOp::Mod => "%",
                     BinOp::BitOr => "|",
@@ -6824,8 +7111,9 @@ impl<'a> Collector<'a> {
                     let is_untyped_int_to_float = tk == OpKind::Float
                         && vk == OpKind::Int
                         && self.is_untyped_int_const(&values[0]);
-                    let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
-                        || kinds_conflict(&tk, &vk);
+                    let conflict =
+                        (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                            || kinds_conflict(&tk, &vk);
                     // #2770: `g = f` between a `float64` and a `float32` local.
                     let scalar_mismatch = matches!(
                         (self.place_scalar(target), self.typed_value_scalar(&values[0])),
@@ -6880,8 +7168,9 @@ impl<'a> Collector<'a> {
                         let is_untyped_int_to_float = tpk == OpKind::Float
                             && vk == OpKind::Int
                             && self.is_untyped_int_const(v);
-                        let conflict = (tpk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
-                            || kinds_conflict(&tpk, &vk);
+                        let conflict =
+                            (tpk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                                || kinds_conflict(&tpk, &vk);
                         let scalar_mismatch = matches!(
                             (self.place_scalar(t), self.typed_value_scalar(v)),
                             (Some(tp), Some(vp)) if tp != vp
@@ -6952,7 +7241,11 @@ impl<'a> Collector<'a> {
                 }
             }
             AssignOp::Inc | AssignOp::Dec => {
-                let op_str = if matches!(op, AssignOp::Inc) { "++" } else { "--" };
+                let op_str = if matches!(op, AssignOp::Inc) {
+                    "++"
+                } else {
+                    "--"
+                };
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float) {
                     self.emit_e1002(
                         span,
@@ -6987,16 +7280,22 @@ impl<'a> Collector<'a> {
                     );
                 }
                 let vk = self.kind_of_expr(val);
-                let t_ok = matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
-                let v_ok = matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
+                let t_ok = matches!(
+                    tk,
+                    OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str
+                );
+                let v_ok = matches!(
+                    vk,
+                    OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str
+                );
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
                     && tk.is_numeric() != vk.is_numeric();
-                let is_untyped_int_to_float = tk == OpKind::Float
-                    && vk == OpKind::Int
-                    && self.is_untyped_int_const(val);
-                let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
-                    || kinds_conflict(&tk, &vk);
+                let is_untyped_int_to_float =
+                    tk == OpKind::Float && vk == OpKind::Int && self.is_untyped_int_const(val);
+                let conflict =
+                    (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                        || kinds_conflict(&tk, &vk);
                 let scalar_mismatch = matches!(
                     (self.place_scalar(target), self.typed_value_scalar(val)),
                     (Some(tp), Some(vp)) if tp != vp
@@ -7040,11 +7339,11 @@ impl<'a> Collector<'a> {
                     AssignOp::MulAssign => "*=",
                     _ => "/=",
                 };
-                let is_untyped_int_to_float = tk == OpKind::Float
-                    && vk == OpKind::Int
-                    && self.is_untyped_int_const(val);
-                let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
-                    || kinds_conflict(&tk, &vk);
+                let is_untyped_int_to_float =
+                    tk == OpKind::Float && vk == OpKind::Int && self.is_untyped_int_const(val);
+                let conflict =
+                    (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                        || kinds_conflict(&tk, &vk);
                 let scalar_mismatch = matches!(
                     (self.place_scalar(target), self.typed_value_scalar(val)),
                     (Some(tp), Some(vp)) if tp != vp
@@ -7097,10 +7396,11 @@ impl<'a> Collector<'a> {
                 }
                 let vk = self.kind_of_expr(val);
                 let is_shift = matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign);
-                let scalar_mismatch = !is_shift && matches!(
-                    (self.place_scalar(target), self.typed_value_scalar(val)),
-                    (Some(tp), Some(vp)) if tp != vp
-                );
+                let scalar_mismatch = !is_shift
+                    && matches!(
+                        (self.place_scalar(target), self.typed_value_scalar(val)),
+                        (Some(tp), Some(vp)) if tp != vp
+                    );
                 if !matches!(tk, OpKind::Unknown | OpKind::Int)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int)
                     || scalar_mismatch
@@ -7165,11 +7465,7 @@ impl<'a> Collector<'a> {
     ) {
         let indexable = matches!(
             bk,
-            OpKind::Unknown
-                | OpKind::Slice(_)
-                | OpKind::Array(_)
-                | OpKind::Map(_, _)
-                | OpKind::Str
+            OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(_) | OpKind::Map(_, _) | OpKind::Str
         ) || matches!(
             bk,
             OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(_))
@@ -7187,11 +7483,13 @@ impl<'a> Collector<'a> {
             return;
         }
         // For slices, arrays, and strings, the index must be an integer.
-        self.check_single_value_position(index, "an index expression", /*binding_position=*/ false);
+        self.check_single_value_position(
+            index,
+            "an index expression",
+            /*binding_position=*/ false,
+        );
         if let OpKind::Map(key_kind, _) = bk {
-            if **key_kind != OpKind::Unknown
-                && *ik != OpKind::Unknown
-            {
+            if **key_kind != OpKind::Unknown && *ik != OpKind::Unknown {
                 let is_untyped_int_to_float = **key_kind == OpKind::Float
                     && *ik == OpKind::Int
                     && self.is_untyped_int_const(index);
@@ -7204,9 +7502,10 @@ impl<'a> Collector<'a> {
                 let idx_scalar = self.typed_value_scalar(index);
                 let width_conflict = matches!((key_scalar, idx_scalar),
                     (Some(a), Some(b)) if a != b);
-                let conflict = (**key_kind == OpKind::Float && *ik == OpKind::Int && !is_untyped_int_to_float)
-                    || kinds_conflict(key_kind, ik)
-                    || width_conflict;
+                let conflict =
+                    (**key_kind == OpKind::Float && *ik == OpKind::Int && !is_untyped_int_to_float)
+                        || kinds_conflict(key_kind, ik)
+                        || width_conflict;
                 if conflict {
                     // #3292: prefer the declared spellings over the kind
                     // labels, which collapse int32/int64 to `int` and make
@@ -7386,7 +7685,11 @@ impl<'a> Collector<'a> {
         let mut hi_const: Option<i128> = None;
         for (idx, bound_opt) in [lo, hi].into_iter().enumerate() {
             let Some(bound) = bound_opt else { continue };
-            self.check_single_value_position(bound, "a slice bound", /*binding_position=*/ false);
+            self.check_single_value_position(
+                bound,
+                "a slice bound",
+                /*binding_position=*/ false,
+            );
             let k = self.kind_of_expr(bound);
             if !matches!(k, OpKind::Unknown | OpKind::Int | OpKind::Void) {
                 self.emit_e1002(
@@ -7445,8 +7748,7 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        if let (Some(lo_expr), Some(hi_expr), Some(lo_v), Some(hi_v)) =
-            (lo, hi, lo_const, hi_const)
+        if let (Some(lo_expr), Some(hi_expr), Some(lo_v), Some(hi_v)) = (lo, hi, lo_const, hi_const)
         {
             if lo_v > hi_v {
                 self.emit_e1002(
@@ -7566,7 +7868,13 @@ impl<'a> Collector<'a> {
         let expected = self.kind_of_ty(&resolved_ty, 0);
         for item in items {
             let bare = unwrap_parens(item);
-            if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+            if matches!(
+                bare,
+                Expr::Lit {
+                    kind: LitKind::Nil,
+                    ..
+                }
+            ) {
                 continue;
             }
             if self.non_single_value_count(item).is_some() {
@@ -7618,15 +7926,20 @@ impl<'a> Collector<'a> {
             // into `float32`) slipped through and failed `go build`
             // (`cannot use i (variable of type int) as int64 value in array
             // or slice literal`).
-            let scalar_mismatch = self
-                .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            let scalar_mismatch = self.scalar_names_conflict(
+                self.scalar_of_ty(&resolved_ty),
+                self.typed_value_scalar(item),
+            );
             // #3412: the kind model also collapses container inners
             // (`chan int64` and `chan int32` are both `Chan(Int)`), so a
             // typed element whose composite inner differs passed the equal
             // kind arm and failed `go build`. Deep-compare the spellings;
             // aliases and type parameters fail open.
             let deep_conflict = if ik == expected && expected != OpKind::Interface {
-                self.deep_composite_conflict(&resolved_ty, self.typed_value_type_name(item).as_deref())
+                self.deep_composite_conflict(
+                    &resolved_ty,
+                    self.typed_value_type_name(item).as_deref(),
+                )
             } else {
                 None
             };
@@ -7636,18 +7949,19 @@ impl<'a> Collector<'a> {
             if ik == expected && !scalar_mismatch && deep_conflict.is_none() {
                 continue;
             }
-            let is_untyped_int_to_float = expected == OpKind::Float
-                && ik == OpKind::Int
-                && self.is_untyped_int_const(item);
-            let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
-                || kinds_conflict(&expected, &ik)
-                || scalar_mismatch
-                || deep_conflict.is_some();
+            let is_untyped_int_to_float =
+                expected == OpKind::Float && ik == OpKind::Int && self.is_untyped_int_const(item);
+            let conflict =
+                (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
+                    || kinds_conflict(&expected, &ik)
+                    || scalar_mismatch
+                    || deep_conflict.is_some();
             if !conflict {
                 continue;
             }
             let got_ty = if deep_conflict.is_some() {
-                self.typed_value_type_name(item).unwrap_or_else(|| ik.label().to_string())
+                self.typed_value_type_name(item)
+                    .unwrap_or_else(|| ik.label().to_string())
             } else {
                 ik.label().to_string()
             };
@@ -7676,7 +7990,13 @@ impl<'a> Collector<'a> {
         let expected = self.kind_of_ty(&resolved_ty, 0);
         for item in items {
             let bare = unwrap_parens(item);
-            if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+            if matches!(
+                bare,
+                Expr::Lit {
+                    kind: LitKind::Nil,
+                    ..
+                }
+            ) {
                 continue;
             }
             if self.non_single_value_count(item).is_some() {
@@ -7723,14 +8043,19 @@ impl<'a> Collector<'a> {
             }
             let ik = self.kind_of_expr(item);
             // #2788: a typed element of another concrete numeric width.
-            let scalar_mismatch = self
-                .scalar_names_conflict(self.scalar_of_ty(&resolved_ty), self.typed_value_scalar(item));
+            let scalar_mismatch = self.scalar_names_conflict(
+                self.scalar_of_ty(&resolved_ty),
+                self.typed_value_scalar(item),
+            );
             // #3412: the kind model collapses container inners, so a typed
             // element whose composite inner differs passed the equal kind
             // arm. Deep-compare the spellings; aliases and type parameters
             // fail open.
             let deep_conflict = if ik == expected && expected != OpKind::Interface {
-                self.deep_composite_conflict(&resolved_ty, self.typed_value_type_name(item).as_deref())
+                self.deep_composite_conflict(
+                    &resolved_ty,
+                    self.typed_value_type_name(item).as_deref(),
+                )
             } else {
                 None
             };
@@ -7740,24 +8065,22 @@ impl<'a> Collector<'a> {
             if ik == expected && !scalar_mismatch && deep_conflict.is_none() {
                 continue;
             }
-            if expected == OpKind::Float
-                && ik == OpKind::Int
-                && self.is_untyped_int_const(item)
-            {
+            if expected == OpKind::Float && ik == OpKind::Int && self.is_untyped_int_const(item) {
                 continue;
             }
-            let is_untyped_int_to_float = expected == OpKind::Float
-                && ik == OpKind::Int
-                && self.is_untyped_int_const(item);
-            let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
-                || kinds_conflict(&expected, &ik)
-                || scalar_mismatch
-                || deep_conflict.is_some();
+            let is_untyped_int_to_float =
+                expected == OpKind::Float && ik == OpKind::Int && self.is_untyped_int_const(item);
+            let conflict =
+                (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
+                    || kinds_conflict(&expected, &ik)
+                    || scalar_mismatch
+                    || deep_conflict.is_some();
             if !conflict {
                 continue;
             }
             let got_ty = if deep_conflict.is_some() {
-                self.typed_value_type_name(item).unwrap_or_else(|| ik.label().to_string())
+                self.typed_value_type_name(item)
+                    .unwrap_or_else(|| ik.label().to_string())
             } else {
                 ik.label().to_string()
             };
@@ -7832,8 +8155,7 @@ impl<'a> Collector<'a> {
         for item in rest {
             match unwrap_parens(item) {
                 Expr::Lit {
-                    kind: LitKind::Nil,
-                    ..
+                    kind: LitKind::Nil, ..
                 } => {
                     self.emit_e1002(
                         item.span(),
@@ -7851,7 +8173,9 @@ impl<'a> Collector<'a> {
                     kind: LitKind::Float(f),
                     ..
                 } if head_text == "int"
-                    && f.replace('_', "").parse::<f64>().is_ok_and(|v| v.fract() == 0.0) => {}
+                    && f.replace('_', "")
+                        .parse::<f64>()
+                        .is_ok_and(|v| v.fract() == 0.0) => {}
                 _ => checked.push(item.clone()),
             }
         }
@@ -7913,26 +8237,32 @@ impl<'a> Collector<'a> {
             {
                 let kk = self.kind_of_expr(k);
                 // #2788: a typed key of another concrete numeric width.
-                let scalar_mismatch = self
-                    .scalar_names_conflict(self.scalar_of_ty(&resolved_key), self.typed_value_scalar(k));
+                let scalar_mismatch = self.scalar_names_conflict(
+                    self.scalar_of_ty(&resolved_key),
+                    self.typed_value_scalar(k),
+                );
                 // #3412: the kind model collapses container inners, so a
                 // typed key whose composite inner differs passed the equal
                 // kind arm (`map[chan int64]string{...}` into `map[chan int32]string`).
                 let deep_conflict = if kk == exp_key && exp_key != OpKind::Interface {
-                self.deep_composite_conflict(&resolved_key, self.typed_value_type_name(k).as_deref())
-            } else {
-                None
-            };
-                let is_untyped_int_to_float = exp_key == OpKind::Float
-                    && kk == OpKind::Int
-                    && self.is_untyped_int_const(k);
-                let conflict = (exp_key == OpKind::Float && kk == OpKind::Int && !is_untyped_int_to_float)
-                    || kinds_conflict(&exp_key, &kk)
-                    || scalar_mismatch
-                    || deep_conflict.is_some();
+                    self.deep_composite_conflict(
+                        &resolved_key,
+                        self.typed_value_type_name(k).as_deref(),
+                    )
+                } else {
+                    None
+                };
+                let is_untyped_int_to_float =
+                    exp_key == OpKind::Float && kk == OpKind::Int && self.is_untyped_int_const(k);
+                let conflict =
+                    (exp_key == OpKind::Float && kk == OpKind::Int && !is_untyped_int_to_float)
+                        || kinds_conflict(&exp_key, &kk)
+                        || scalar_mismatch
+                        || deep_conflict.is_some();
                 if kk != OpKind::Unknown && conflict {
                     let got_ty = if deep_conflict.is_some() {
-                        self.typed_value_type_name(k).unwrap_or_else(|| kk.label().to_string())
+                        self.typed_value_type_name(k)
+                            .unwrap_or_else(|| kk.label().to_string())
                     } else {
                         kk.label().to_string()
                     };
@@ -7983,31 +8313,43 @@ impl<'a> Collector<'a> {
                 && self.non_single_value_count(v).is_none()
             {
                 let bare_v = unwrap_parens(v);
-                if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
+                if matches!(
+                    bare_v,
+                    Expr::Lit {
+                        kind: LitKind::Nil,
+                        ..
+                    }
+                ) {
                     continue;
                 }
                 let vk = self.kind_of_expr(v);
                 // #2788: a typed value of another concrete numeric width.
-                let scalar_mismatch = self
-                    .scalar_names_conflict(self.scalar_of_ty(&resolved_val), self.typed_value_scalar(v));
+                let scalar_mismatch = self.scalar_names_conflict(
+                    self.scalar_of_ty(&resolved_val),
+                    self.typed_value_scalar(v),
+                );
                 // #3412: the kind model collapses container inners, so a
                 // typed value whose composite inner differs passed the equal
                 // kind arm (`map[string]chan int64` into `map[string]chan int32`).
                 let deep_conflict = if vk == exp_val && exp_val != OpKind::Interface {
-                self.deep_composite_conflict(&resolved_val, self.typed_value_type_name(v).as_deref())
-            } else {
-                None
-            };
-                let is_untyped_int_to_float = exp_val == OpKind::Float
-                    && vk == OpKind::Int
-                    && self.is_untyped_int_const(v);
-                let conflict = (exp_val == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
-                    || kinds_conflict(&exp_val, &vk)
-                    || scalar_mismatch
-                    || deep_conflict.is_some();
+                    self.deep_composite_conflict(
+                        &resolved_val,
+                        self.typed_value_type_name(v).as_deref(),
+                    )
+                } else {
+                    None
+                };
+                let is_untyped_int_to_float =
+                    exp_val == OpKind::Float && vk == OpKind::Int && self.is_untyped_int_const(v);
+                let conflict =
+                    (exp_val == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                        || kinds_conflict(&exp_val, &vk)
+                        || scalar_mismatch
+                        || deep_conflict.is_some();
                 if vk != OpKind::Unknown && conflict {
                     let got_ty = if deep_conflict.is_some() {
-                        self.typed_value_type_name(v).unwrap_or_else(|| vk.label().to_string())
+                        self.typed_value_type_name(v)
+                            .unwrap_or_else(|| vk.label().to_string())
                     } else {
                         vk.label().to_string()
                     };
@@ -8152,7 +8494,7 @@ impl<'a> Collector<'a> {
                         // A local bound to a closure or fn-typed value carries
                         // its declared parameter count, so the call's arity is
                         // checkable (#577 C9).
-                        OpKind::Fn(_, Some(ref want)) if want.len() != args.len() => {
+                        OpKind::Fn(_, Some(ref want), _) if want.len() != args.len() => {
                             self.report_local_arity(name, want.len(), args.len(), span)
                         }
                         OpKind::Fn(..) | OpKind::Unknown => {}
@@ -8182,10 +8524,7 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
-                    if pkg == "errors"
-                        && name == "wrap"
-                        && self.lookup_kind(pkg).is_none()
-                    {
+                    if pkg == "errors" && name == "wrap" && self.lookup_kind(pkg).is_none() {
                         if args.len() != 2 {
                             self.emit_e1002(
                                 span,
@@ -8211,10 +8550,7 @@ impl<'a> Collector<'a> {
                     // an in-scope parameter, local binding, loop variable, closure argument,
                     // type parameter, or package-level declaration, emitted Go fails
                     // downstream compilation (Row 13 BUILDABLE).
-                    if pkg == "fmt"
-                        && self.lookup_kind(pkg).is_none()
-                        && self.is_os_shadowed()
-                    {
+                    if pkg == "fmt" && self.lookup_kind(pkg).is_none() && self.is_os_shadowed() {
                         if matches!(name.as_str(), "eprint" | "eprintln" | "eprintf") {
                             self.emit_e1002(
                                 span,
@@ -8230,12 +8566,15 @@ impl<'a> Collector<'a> {
                                 Expr::Ident { name: b, .. } => {
                                     self.lookup_type_name(b).as_deref() == Some("[]byte")
                                         || self.lookup_type_name(b).as_deref() == Some("[]u8")
-                                        || self.slice_element_type_name(arg_expr).as_deref() == Some("byte")
-                                        || self.slice_element_type_name(arg_expr).as_deref() == Some("u8")
+                                        || self.slice_element_type_name(arg_expr).as_deref()
+                                            == Some("byte")
+                                        || self.slice_element_type_name(arg_expr).as_deref()
+                                            == Some("u8")
                                 }
                                 other => {
                                     self.slice_element_type_name(other).as_deref() == Some("byte")
-                                        || self.slice_element_type_name(other).as_deref() == Some("u8")
+                                        || self.slice_element_type_name(other).as_deref()
+                                            == Some("u8")
                                 }
                             };
                             if is_bytes {
@@ -8274,7 +8613,10 @@ impl<'a> Collector<'a> {
                     }
                     if pkg == "time"
                         && self.lookup_kind(pkg).is_none()
-                        && matches!(name.as_str(), "milliseconds" | "seconds" | "minutes" | "hours")
+                        && matches!(
+                            name.as_str(),
+                            "milliseconds" | "seconds" | "minutes" | "hours"
+                        )
                     {
                         if args.len() != 1 {
                             self.emit_e1002(
@@ -8447,9 +8789,7 @@ impl<'a> Collector<'a> {
                                         ),
                                         &format!("pass a string literal or expression as format to `fmt.{}`", name),
                                     );
-                                } else if let Some(kind_label) =
-                                    self.nonstring_format_kind(bare)
-                                {
+                                } else if let Some(kind_label) = self.nonstring_format_kind(bare) {
                                     self.emit_e1002(
                                         span,
                                         format!(
@@ -8488,9 +8828,7 @@ impl<'a> Collector<'a> {
                                         "`fmt.fprintf` requires a string format second argument, found non-string literal (HYB-E1002)".to_string(),
                                         "pass a string literal or expression as format to `fmt.fprintf`",
                                     );
-                                } else if let Some(kind_label) =
-                                    self.nonstring_format_kind(bare)
-                                {
+                                } else if let Some(kind_label) = self.nonstring_format_kind(bare) {
                                     self.emit_e1002(
                                         span,
                                         format!(
@@ -8705,9 +9043,14 @@ impl<'a> Collector<'a> {
                     // `u.cb(1, 2)` where `cb fn(x int) int` — the field type
                     // states the count.
                     if !has_method {
-                        if let OpKind::Fn(_, Some(ref want)) = fk {
+                        if let OpKind::Fn(_, Some(ref want), _) = fk {
                             if want.len() != args.len() {
-                                self.report_local_arity(&callee.render(), want.len(), args.len(), span);
+                                self.report_local_arity(
+                                    &callee.render(),
+                                    want.len(),
+                                    args.len(),
+                                    span,
+                                );
                             }
                         }
                     }
@@ -8748,8 +9091,12 @@ impl<'a> Collector<'a> {
                     let is_lowered = matches!(bk, OpKind::Slice(_))
                         && LOWERED_METHOD_INTRINSICS.contains(&name.as_str());
                     let needle = format!("{}.{} undefined", base.render(), name);
-                    if is_fully_resolved(&bk) && !is_lowered
-                        && !self.diags.iter().any(|d| d.code == "HYB-E1002" && d.message.contains(&needle))
+                    if is_fully_resolved(&bk)
+                        && !is_lowered
+                        && !self
+                            .diags
+                            .iter()
+                            .any(|d| d.code == "HYB-E1002" && d.message.contains(&needle))
                     {
                         self.emit_e1002(
                             span,
@@ -8952,7 +9299,10 @@ impl<'a> Collector<'a> {
     }
 
     fn check_field_selector(&mut self, base: &Expr, name: &str, span: Span) {
-        if let Expr::Ident { name: ident_name, .. } = unwrap_parens(base) {
+        if let Expr::Ident {
+            name: ident_name, ..
+        } = unwrap_parens(base)
+        {
             if self.is_imported_pkg_root(ident_name)
                 || self.ck.enums.contains_key(ident_name.as_str())
                 || self.ck.structs.contains_key(ident_name.as_str())
@@ -8966,16 +9316,26 @@ impl<'a> Collector<'a> {
         self.check_field_selector_kind(&base.render(), name, &bk, span);
     }
 
-    fn check_field_selector_kind(&mut self, base_render: &str, name: &str, bk: &OpKind, span: Span) {
+    fn check_field_selector_kind(
+        &mut self,
+        base_render: &str,
+        name: &str,
+        bk: &OpKind,
+        span: Span,
+    ) {
         if !is_fully_resolved(bk) || matches!(bk, OpKind::Interface) {
             return;
         }
-        let is_lowered = matches!(bk, OpKind::Slice(_)) && LOWERED_METHOD_INTRINSICS.contains(&name);
+        let is_lowered =
+            matches!(bk, OpKind::Slice(_)) && LOWERED_METHOD_INTRINSICS.contains(&name);
         if is_lowered {
             return;
         }
         let is_option_method = match bk {
-            OpKind::Option(_) => matches!(name, "is_some" | "is_none" | "unwrap" | "unwrap_or" | "expect"),
+            OpKind::Option(_) => matches!(
+                name,
+                "is_some" | "is_none" | "unwrap" | "unwrap_or" | "expect"
+            ),
             _ => false,
         };
         if is_option_method {
@@ -8984,20 +9344,27 @@ impl<'a> Collector<'a> {
 
         let has_field = self.struct_field_kind(bk, name).is_some();
         let sn_opt = self.struct_base_name(bk);
-        let has_method = sn_opt
-            .as_ref()
-            .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn.clone(), name.to_string())));
+        let has_method = sn_opt.as_ref().is_some_and(|sn| {
+            self.ck
+                .method_decls
+                .contains_key(&(sn.clone(), name.to_string()))
+        });
 
         let is_struct_like = matches!(bk, OpKind::Struct(_) | OpKind::Pointer(_));
         let struct_known = if is_struct_like {
-            sn_opt.as_ref().is_some_and(|sn| self.ck.structs.contains_key(sn))
+            sn_opt
+                .as_ref()
+                .is_some_and(|sn| self.ck.structs.contains_key(sn))
         } else {
             false
         };
 
         if (!is_struct_like || struct_known) && !has_field && !has_method {
             let needle = format!("{}.{} undefined", base_render, name);
-            if self.diags.iter().any(|d| (d.span == span && d.code == "HYB-E1002") || (d.code == "HYB-E1002" && d.message.contains(&needle))) {
+            if self.diags.iter().any(|d| {
+                (d.span == span && d.code == "HYB-E1002")
+                    || (d.code == "HYB-E1002" && d.message.contains(&needle))
+            }) {
                 return;
             }
             self.emit_e1002(
@@ -9029,7 +9396,10 @@ impl<'a> Collector<'a> {
                 OpKind::Map(_, _) | OpKind::Str => false,
                 OpKind::Slice(_) | OpKind::Unknown => true,
                 OpKind::Pointer(inner) => {
-                    matches!(*inner, OpKind::Array(_) | OpKind::Slice(_) | OpKind::Unknown)
+                    matches!(
+                        *inner,
+                        OpKind::Array(_) | OpKind::Slice(_) | OpKind::Unknown
+                    )
                 }
                 OpKind::Array(_) => self.is_addressable_value_receiver(base),
                 _ => false,
@@ -9150,8 +9520,17 @@ impl<'a> Collector<'a> {
         // spread argument is legal.
         if matches!(
             name,
-            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
-                | "real" | "imag" | "complex"
+            "len"
+                | "cap"
+                | "close"
+                | "delete"
+                | "min"
+                | "max"
+                | "clear"
+                | "copy"
+                | "real"
+                | "imag"
+                | "complex"
         ) && args.iter().any(|a| a.spread)
         {
             self.emit_e1002(
@@ -9352,10 +9731,8 @@ impl<'a> Collector<'a> {
                                 (Some(a), Some(b)) if a != b
                             );
                             let arg_ty = self.typed_value_type_name(key_arg);
-                            let array_mismatch = self.sized_array_names_differ(
-                                Some(&elem),
-                                arg_ty.as_deref(),
-                            );
+                            let array_mismatch =
+                                self.sized_array_names_differ(Some(&elem), arg_ty.as_deref());
                             if kinds_conflict(&want, &got)
                                 || int_to_float_conflict
                                 || scalar_mismatch
@@ -9396,10 +9773,8 @@ impl<'a> Collector<'a> {
                         // #3240: compare sized array length on map key arguments
                         let map_key_ty = self.map_key_type_name(Some(map_arg));
                         let arg_ty = self.typed_value_type_name(key_arg);
-                        let del_array_conflict = self.sized_array_names_differ(
-                            map_key_ty.as_deref(),
-                            arg_ty.as_deref(),
-                        );
+                        let del_array_conflict =
+                            self.sized_array_names_differ(map_key_ty.as_deref(), arg_ty.as_deref());
                         // #3518: reject untyped nil passed to non-nilable map key types
                         if Checker::is_nil_literal(key_arg) && is_non_nilable(k_expected) {
                             let k_label = del_key_scalar
@@ -9563,8 +9938,10 @@ impl<'a> Collector<'a> {
                             _ => false,
                         };
                         if copy_element_kinds_conflict(dst_elem, src_elem) || elem_ty_conflict {
-                            let d_label = dst_elem_ty.unwrap_or_else(|| dst_elem.label().to_string());
-                            let s_label = src_elem_ty.unwrap_or_else(|| src_elem.label().to_string());
+                            let d_label =
+                                dst_elem_ty.unwrap_or_else(|| dst_elem.label().to_string());
+                            let s_label =
+                                src_elem_ty.unwrap_or_else(|| src_elem.label().to_string());
                             self.emit_e1002(
                                 span,
                                 format!(
@@ -9581,7 +9958,8 @@ impl<'a> Collector<'a> {
                         let is_byte = dst_elem_ty.as_deref().map_or(false, |t| {
                             matches!(crate::const_overflow::canonical_int_type_name(t), "uint8")
                         });
-                        let is_unknown = matches!(**dst_elem, OpKind::Unknown) && dst_elem_ty.is_none();
+                        let is_unknown =
+                            matches!(**dst_elem, OpKind::Unknown) && dst_elem_ty.is_none();
                         if !is_byte && !is_unknown {
                             let label = dst_elem_ty.unwrap_or_else(|| dst_elem.label().to_string());
                             self.emit_e1002(
@@ -9833,8 +10211,8 @@ impl<'a> Collector<'a> {
                 ..
             } if items.is_empty() => {}
             Expr::MapLit { entries, .. } if entries.is_empty() => {}
-            Expr::Index { base, .. }
-                if matches!(unwrap_parens(base), Expr::Ident { name, .. } if self.lookup_kind(name).is_none() && !self.file_consts.contains_key(name) && !self.ck.fns.contains_key(name)) => {}
+            Expr::Index { base, .. } if matches!(unwrap_parens(base), Expr::Ident { name, .. } if self.lookup_kind(name).is_none() && !self.file_consts.contains_key(name) && !self.ck.fns.contains_key(name)) =>
+                {}
             Expr::StructLit {
                 ty: Some(TypeExpr::Chan { .. }),
                 fields,
@@ -9845,14 +10223,20 @@ impl<'a> Collector<'a> {
                     if self.lookup_kind(bname).is_some() {
                         self.emit_e2005(
                             span,
-                            format!("cannot use `{}` as type in argument to `new` (HYB-E2005)", op.render()),
+                            format!(
+                                "cannot use `{}` as type in argument to `new` (HYB-E2005)",
+                                op.render()
+                            ),
                             "`new` takes a type — not a field access on a variable",
                         );
                     }
                 } else {
                     self.emit_e2005(
                         span,
-                        format!("cannot use `{}` as type in argument to `new` (HYB-E2005)", op.render()),
+                        format!(
+                            "cannot use `{}` as type in argument to `new` (HYB-E2005)",
+                            op.render()
+                        ),
                         "`new` takes a type name — not an expression",
                     );
                 }
@@ -9860,7 +10244,10 @@ impl<'a> Collector<'a> {
             _ => {
                 self.emit_e2005(
                     span,
-                    format!("argument to `new` must be a type, found expression `{}` (HYB-E2005)", op.render()),
+                    format!(
+                        "argument to `new` must be a type, found expression `{}` (HYB-E2005)",
+                        op.render()
+                    ),
                     "`new` takes a type name — not a value or expression",
                 );
             }
@@ -9930,24 +10317,10 @@ impl<'a> Collector<'a> {
 
     fn check_io_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
         match name {
-            "eof"
-            | "err_unexpected_eof"
-            | "err_no_progress"
-            | "err_short_buffer"
-            | "err_short_write"
-            | "err_closed_pipe"
-            | "discard"
-            | "reader"
-            | "writer"
-            | "closer"
-            | "seeker"
-            | "read_closer"
-            | "write_closer"
-            | "read_writer"
-            | "pipe_reader"
-            | "pipe_writer"
-            | "section_reader"
-            | "limited_reader"
+            "eof" | "err_unexpected_eof" | "err_no_progress" | "err_short_buffer"
+            | "err_short_write" | "err_closed_pipe" | "discard" | "reader" | "writer"
+            | "closer" | "seeker" | "read_closer" | "write_closer" | "read_writer"
+            | "pipe_reader" | "pipe_writer" | "section_reader" | "limited_reader"
             | "offset_writer" => {
                 self.emit_e1002(
                     span,
@@ -9959,7 +10332,10 @@ impl<'a> Collector<'a> {
                 if !args.is_empty() {
                     self.emit_e1002(
                         span,
-                        format!("`io.pipe` takes 0 arguments `()`, got {} (HYB-E1002)", args.len()),
+                        format!(
+                            "`io.pipe` takes 0 arguments `()`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
                         "write `io.pipe()`",
                     );
                 }
@@ -9968,7 +10344,10 @@ impl<'a> Collector<'a> {
                 if args.len() != 1 {
                     self.emit_e1002(
                         span,
-                        format!("`io.read_all` takes exactly 1 argument `(r)`, got {} (HYB-E1002)", args.len()),
+                        format!(
+                            "`io.read_all` takes exactly 1 argument `(r)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
                         "write `io.read_all(r)`",
                     );
                 }
@@ -9977,7 +10356,10 @@ impl<'a> Collector<'a> {
                 if args.len() != 2 {
                     self.emit_e1002(
                         span,
-                        format!("`io.copy` takes exactly 2 arguments `(dst, src)`, got {} (HYB-E1002)", args.len()),
+                        format!(
+                            "`io.copy` takes exactly 2 arguments `(dst, src)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
                         "write `io.copy(dst, src)`",
                     );
                 }
@@ -10189,8 +10571,7 @@ impl<'a> Checker<'a> {
             collect_comparable_type_params(ty, &param_names, &mut comparable_needed);
         }
         for p in type_params {
-            if p.constraint.as_deref() == Some("any")
-                && comparable_needed.contains(p.name.as_str())
+            if p.constraint.as_deref() == Some("any") && comparable_needed.contains(p.name.as_str())
             {
                 self.diags.push(
                     Diagnostic::error(
@@ -10576,16 +10957,21 @@ fn main() {
 /// literal from its first item, or `None` when it infers none.
 fn untyped_slice_head_ty(first: &Expr) -> Option<TypeExpr> {
     let span = first.span();
-    let named = |n: &str| Some(TypeExpr::Named { name: n.to_string(), span });
+    let named = |n: &str| {
+        Some(TypeExpr::Named {
+            name: n.to_string(),
+            span,
+        })
+    };
     match first {
         Expr::Paren { inner, .. } => untyped_slice_head_ty(inner),
         Expr::Unary {
             op: UnOp::Neg,
             operand,
             ..
-        } => untyped_slice_head_ty(operand).filter(|t| {
-            matches!(t, TypeExpr::Named { name, .. } if name == "int" || name == "float64")
-        }),
+        } => untyped_slice_head_ty(operand).filter(
+            |t| matches!(t, TypeExpr::Named { name, .. } if name == "int" || name == "float64"),
+        ),
         Expr::Lit { kind, .. } => match kind {
             LitKind::Int(_) => named("int"),
             LitKind::Float(_) => named("float64"),
@@ -10599,7 +10985,6 @@ fn untyped_slice_head_ty(first: &Expr) -> Option<TypeExpr> {
     }
 }
 
-
 fn block_has_try(b: &Block) -> bool {
     b.stmts.iter().any(stmt_has_try)
 }
@@ -10607,12 +10992,18 @@ fn block_has_try(b: &Block) -> bool {
 fn stmt_has_try(s: &Stmt) -> bool {
     match s {
         Stmt::Local(l) => l.values.iter().any(expr_has_try),
-        Stmt::Assign { targets, values, .. } => {
-            targets.iter().any(place_has_try) || values.iter().any(expr_has_try)
-        }
+        Stmt::Assign {
+            targets, values, ..
+        } => targets.iter().any(place_has_try) || values.iter().any(expr_has_try),
         Stmt::Expr { expr, .. } => expr_has_try(expr),
         Stmt::Send { chan, value, .. } => expr_has_try(chan) || expr_has_try(value),
-        Stmt::If { init, cond, then, otherwise, .. } => {
+        Stmt::If {
+            init,
+            cond,
+            then,
+            otherwise,
+            ..
+        } => {
             init.as_deref().map_or(false, stmt_has_try)
                 || expr_has_try(cond)
                 || block_has_try(then)
@@ -10634,9 +11025,9 @@ fn stmt_has_try(s: &Stmt) -> bool {
         Stmt::Managed { body, .. } => block_has_try(body),
         Stmt::Match { subject, arms, .. } => {
             expr_has_try(subject)
-                || arms.iter().any(|a| {
-                    a.guard.as_ref().map_or(false, expr_has_try) || block_has_try(&a.body)
-                })
+                || arms
+                    .iter()
+                    .any(|a| a.guard.as_ref().map_or(false, expr_has_try) || block_has_try(&a.body))
         }
         Stmt::Defer { call, .. } => expr_has_try(call),
         Stmt::Block { block, .. } => block_has_try(block),
@@ -10685,9 +11076,9 @@ fn expr_has_try(e: &Expr) -> bool {
         Expr::Move { operand, .. } | Expr::AddrOf { operand, .. } => expr_has_try(operand),
         Expr::Receive { chan, .. } => expr_has_try(chan),
         Expr::SliceLit { items, .. } => items.iter().any(expr_has_try),
-        Expr::MapLit { entries, .. } => {
-            entries.iter().any(|(k, v)| expr_has_try(k) || expr_has_try(v))
-        }
+        Expr::MapLit { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| expr_has_try(k) || expr_has_try(v)),
         Expr::StructLit { fields, .. } => fields.iter().any(|f| expr_has_try(&f.value)),
         Expr::Paren { inner, .. } => expr_has_try(inner),
         Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => false,
