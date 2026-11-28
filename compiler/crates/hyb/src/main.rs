@@ -599,7 +599,7 @@ fn generate_one(
         .map_err(|e| format!("reading {}: {}", dir.display(), e))?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().map(|x| x == "go").unwrap_or(false))
+        .filter(|p| p.is_file() && p.extension().map(|x| x == "go").unwrap_or(false))
         // Generated .hy.go files join the production package. Go test files
         // may declare a separate <package>_test package and cannot choose it,
         // and pre-existing .hy.go outputs are generated artifacts (not
@@ -1213,7 +1213,7 @@ fn cmd_build_package(
         {
             let entry = entry.map_err(|e| format!("readdir: {}", e))?;
             let p = entry.path();
-            if p.extension().map(|x| x == "go").unwrap_or(false) {
+            if p.is_file() && p.extension().map(|x| x == "go").unwrap_or(false) {
                 let mut text = std::fs::read_to_string(&p)
                     .map_err(|e| format!("reading {}: {}", p.display(), e))?;
                 // The runtime copies' hybridge import follows the consumer's

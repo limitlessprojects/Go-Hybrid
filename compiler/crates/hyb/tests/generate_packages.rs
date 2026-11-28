@@ -102,3 +102,19 @@ fn conflicting_non_test_packages_still_reject() {
     assert!(stderr.contains("disagree on the package"), "{}", stderr);
     assert!(!m.0.join("calc.hy.go").exists());
 }
+
+#[test]
+fn generate_ignores_sibling_directories_ending_in_dot_go() {
+    let m = Module::new("sibling-dir");
+    m.write("app.go", "package demo\n");
+    // Create a sibling subdirectory explicitly named nested.go
+    let nested_dir = m.0.join("nested.go");
+    fs::create_dir_all(&nested_dir).unwrap();
+    fs::write(nested_dir.join("other.go"), "package other\n").unwrap();
+
+    let out = m.hyb(&["generate", "calc.hy"]);
+    assert_success(&out);
+    let gen = fs::read_to_string(m.0.join("calc.hy.go")).expect("read generated calc.hy.go");
+    assert!(gen.contains("package demo"));
+}
+
