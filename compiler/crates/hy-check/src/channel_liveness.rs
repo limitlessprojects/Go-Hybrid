@@ -190,11 +190,33 @@ impl ChannelLivenessChecker {
                 for s in &body.stmts {
                     self.check_stmt(s);
                 }
-                let has_unconditional_exit = matches!(
+                // The body is walked a second time so that a capability moved
+                // inside a loop that can run more than once is reported as
+                // moved twice (#4289 — `for i in 0..10 { task worker(move tx) }`
+                // really does move `tx` on every iteration).
+                //
+                // That second walk must only happen when the loop can
+                // actually reach a second iteration. When it cannot, the
+                // second walk re-visits a move that happened exactly once and
+                // reported it as "affine capability 'X' moved more than once"
+                // (#4769). Two shapes make a second iteration impossible:
+                //
+                //  - the body ends in an unconditional `break`/`return`, so
+                //    the first iteration leaves the loop
+                //    (test_issue_4289_loop_unconditional_break_accept);
+                //  - the range bounds make the trip count at most one
+                //    (`for i in 0..1`), so there is no second iteration to
+                //    reach regardless of how the body ends (#4769).
+                //
+                // When the trip count is unknown (a non-literal bound), the
+                // conservative second walk is kept: an unknown trip count
+                // may still iterate more than once.
+                let exits_after_first = matches!(
                     body.stmts.last(),
                     Some(Stmt::Break { .. } | Stmt::Return { .. })
                 );
-                if !has_unconditional_exit {
+                let single_iteration = self.is_single_iteration_loop_for_liveness(kind, body);
+                if !exits_after_first && !single_iteration {
                     for s in &body.stmts {
                         self.check_stmt(s);
                     }
@@ -374,6 +396,59 @@ impl ChannelLivenessChecker {
             _ => {
                 self.check_expr(arg);
             }
+        }
+    }
+
+    /// True when this loop's body provably runs at most once, so a second
+    /// walk over it cannot observe a second occurrence of anything.
+    ///
+    /// Only a `Range` loop with literal bounds can be answered. When the
+    /// bound is not a literal the answer is `false` — an unknown trip count
+    /// keeps the conservative second walk, so a multi-iteration loop still
+    /// gets its capability double-move reported (#4289).
+    ///
+    /// The trip count mirrors the loop semantics used elsewhere in the
+    /// checker: `lo..hi` is exclusive and `lo..=hi` is inclusive, and a
+    /// range whose upper bound is below its lower bound runs zero times.
+    fn is_single_iteration_loop_for_liveness(
+        &self,
+        kind: &ForKind,
+        _body: &Block,
+    ) -> bool {
+        let ForKind::Range { lo, hi, inclusive, .. } = kind else {
+            return false;
+        };
+        let (Some(lo), Some(hi)) = (Self::as_int_lit_for_liveness(lo), Self::as_int_lit_for_liveness(hi)) else {
+            return false;
+        };
+        let count = if *inclusive {
+            if hi >= lo {
+                hi.checked_sub(lo).and_then(|d| d.checked_add(1))
+            } else {
+                Some(0)
+            }
+        } else if hi > lo {
+            hi.checked_sub(lo)
+        } else {
+            Some(0)
+        };
+        matches!(count, Some(c) if c <= 1)
+    }
+
+    /// Integer literal value, unwrapping parentheses and a leading minus.
+    fn as_int_lit_for_liveness(expr: &Expr) -> Option<i64> {
+        match expr {
+            Expr::Lit {
+                kind: LitKind::Int(s),
+                ..
+            } => crate::arith::int_lit_value(s).and_then(|v| i64::try_from(v).ok()),
+            Expr::Paren { inner, .. } => Self::as_int_lit_for_liveness(inner),
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => Self::as_int_lit_for_liveness(operand).and_then(|v| v.checked_neg()),
+            _ => None,
         }
     }
 
