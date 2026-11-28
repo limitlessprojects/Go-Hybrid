@@ -50,6 +50,11 @@ hyb.exe build program.hy -o app.exe
 if ($LASTEXITCODE -eq 0) { .\app.exe }
 ```
 
+Rust is not needed to use the prebuilt release. If an installed `rustc`
+on PATH reports a version other than 1.99.0, `hyb.exe` may stop with
+`HYB-E9001`. Remove that Rust toolchain from PATH for this PowerShell
+session, or select Rust 1.99.0 if you need to keep Rust on PATH.
+
 Run the build from the directory containing your program if it lives
 outside the extracted release directory.
 
