@@ -93,6 +93,7 @@ BASE_URL="https://github.com/$REPO/releases/download/${TAG}"
 # --- download + verify ---
 TMP="$(mktemp -d)"
 STAGE=""
+LAUNCHER_STAGE=""
 TRANSACTION_ACTIVE=0
 OLD_RUNTIME=0
 OLD_BIN=0
@@ -127,6 +128,7 @@ cleanup() {
     trap - EXIT HUP INT TERM
     rollback_install || :
     rm -rf "$TMP"
+    if [ -n "$LAUNCHER_STAGE" ]; then rm -rf "$LAUNCHER_STAGE"; fi
     if [ -n "$STAGE" ] && [ "$TRANSACTION_ACTIVE" -eq 0 ]; then
         rm -rf "$STAGE"
     fi
@@ -186,6 +188,29 @@ mkdir "$STAGE/bin"
 cp "$PACKAGE_DIR/hyb" "$STAGE/bin/hyb"
 chmod +x "$STAGE/bin/hyb"
 
+# --- launcher (bakes the install path; runtime override still wins) ---
+# Encode the path as a shell literal; the launcher parses it again later.
+# The closing quote also preserves trailing newlines in command substitution.
+shell_quote() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
+if [ -d "$BIN_DIR/hyb" ]; then
+    echo "install.sh: launcher destination is a directory; existing installation preserved" >&2
+    exit 1
+fi
+LAUNCHER_STAGE="$(mktemp -d "$BIN_DIR/.hybrid-launcher.XXXXXX")"
+cat > "$LAUNCHER_STAGE/hyb" <<LAUNCH
+#!/bin/sh
+# Hybrid launcher (installed by install.sh) — wires the packaged runtime.
+HYB_HOME=$(shell_quote "$INSTALL_DIR")
+[ -n "\${HYB_INSTALL_DIR:-}" ] && HYB_HOME="\$HYB_INSTALL_DIR"
+export HYB_RUNTIME_DIR="\${HYB_RUNTIME_DIR:-\$HYB_HOME/runtime}"
+exec "\$HYB_HOME/bin/hyb" "\$@"
+LAUNCH
+chmod +x "$LAUNCHER_STAGE/hyb"
+
 # Keep rollback copies beside the staged payloads until promotion succeeds.
 TRANSACTION_ACTIVE=1
 if [ -e "$INSTALL_DIR/runtime" ] || [ -L "$INSTALL_DIR/runtime" ]; then
@@ -212,26 +237,13 @@ if ! mv "$STAGE/bin" "$INSTALL_DIR/bin"; then
     exit 1
 fi
 NEW_BIN=1
+if [ -d "$BIN_DIR/hyb" ] || ! mv -f "$LAUNCHER_STAGE/hyb" "$BIN_DIR/hyb"; then
+    echo "install.sh: could not install the new launcher" >&2
+    exit 1
+fi
 TRANSACTION_ACTIVE=0
 
-# --- launcher (bakes the install path; runtime override still wins) ---
-# Encode the path as a shell literal; the launcher parses it again later.
-# The closing quote also preserves trailing newlines in command substitution.
-shell_quote() {
-    printf "'"
-    printf '%s' "$1" | sed "s/'/'\\\\''/g"
-    printf "'"
-}
-mkdir -p "$BIN_DIR"
-cat > "$BIN_DIR/hyb" <<LAUNCH
-#!/bin/sh
-# Hybrid launcher (installed by install.sh) — wires the packaged runtime.
-HYB_HOME=$(shell_quote "$INSTALL_DIR")
-[ -n "\${HYB_INSTALL_DIR:-}" ] && HYB_HOME="\$HYB_INSTALL_DIR"
-export HYB_RUNTIME_DIR="\${HYB_RUNTIME_DIR:-\$HYB_HOME/runtime}"
-exec "\$HYB_HOME/bin/hyb" "\$@"
-LAUNCH
-chmod +x "$BIN_DIR/hyb"
+
 
 # --- verify (hyb explain exits 0; hyb --help exits 2 BY DESIGN) ---
 if "$BIN_DIR/hyb" explain E0002 >/dev/null 2>&1; then
