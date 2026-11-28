@@ -1,5 +1,6 @@
-//! go_keyword_names.rs — HYB-E1002: a declaration named `default`
-//! (GUARANTEES Row 13, accepted ⇒ buildable).
+//! go_keyword_names.rs — HYB-E1002: a declaration named `default` or
+//! prelude-reserved names (`none`, `option`, `hy_pop`, `hy_n5_make`,
+//! and `set` when the prelude type is used) (GUARANTEES Row 13, accepted ⇒ buildable).
 //!
 //! `default` is the one Go keyword Hybrid does not reserve. LX3 reserves
 //! the rest (`switch`, `range`, `goto`, `fallthrough`, `case`, … — #103,
@@ -25,23 +26,157 @@
 //!
 //! Enum variants are left alone: their emission is a separate surface.
 //!
-//! The same pass also rejects a declaration named `none`. SPEC LX3 lists
-//! `none` as a predeclared identifier (shadowable with a lint), but hy-emit
-//! treats every bare Ident `none` as the option constructor and refuses it
-//! outside `return none` against an option result. A declaration named
-//! `none` therefore passes `hyb check` and fails `hyb build` (Row 13).
-//! Rejecting the declaration sites fails closed until emit learns to honour
-//! shadowing; `return none` and match arms `none:` / `none =>` are not
-//! declarations and stay accepted.
+//! The same pass also rejects declarations named `none`, `option`,
+//! `hy_pop`, and `hy_n5_make` (and `set` when the set prelude type is used)
+//! to prevent collisions with emitted Go prelude helpers and types
+//! (issues #777, #4695).
 
 use crate::model::Checker;
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    Block, Decl, Expr, FnResult, ForKind, InterpPart, MatchPattern, Param, Place, PlaceKind,
+    Block, Decl, Expr, File, FnResult, ForKind, InterpPart, MatchPattern, Param, Place, PlaceKind,
     SelectArmKind, Stmt, TypeExpr, TypeParam,
 };
 
 const GO_ONLY_KEYWORD: &str = "default";
+
+fn file_uses_set_prelude(file: &File) -> bool {
+    fn type_uses_set(ty: &TypeExpr) -> bool {
+        match ty {
+            TypeExpr::Named { name, .. } => name.starts_with("set[") || name == "set",
+            TypeExpr::Pointer { to, .. }
+            | TypeExpr::Slice { elem: to, .. }
+            | TypeExpr::Chan { elem: to, .. }
+            | TypeExpr::Option { elem: to, .. } => type_uses_set(to),
+            TypeExpr::Array { elem, .. } => type_uses_set(elem),
+            TypeExpr::Map { key, value, .. } => type_uses_set(key) || type_uses_set(value),
+            TypeExpr::Fn { params, results, .. } => {
+                params.iter().any(|p| type_uses_set(&p.ty)) || results.iter().any(type_uses_set)
+            }
+        }
+    }
+
+    fn expr_uses_set(e: &Expr) -> bool {
+        match e {
+            Expr::StructLit { ty: Some(ty), .. } => type_uses_set(ty),
+            Expr::Paren { inner, .. } => expr_uses_set(inner),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Expr(x) => expr_uses_set(x),
+                _ => false,
+            }),
+            Expr::Binary { lhs, rhs, .. } => expr_uses_set(lhs) || expr_uses_set(rhs),
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. } => expr_uses_set(operand),
+            Expr::Receive { chan, .. } => expr_uses_set(chan),
+            Expr::Index { base, index, .. } => expr_uses_set(base) || expr_uses_set(index),
+            Expr::Slice { base, lo, hi, .. } => {
+                expr_uses_set(base)
+                    || lo.as_ref().is_some_and(|l| expr_uses_set(l))
+                    || hi.as_ref().is_some_and(|h| expr_uses_set(h))
+            }
+            Expr::Field { base, .. } => expr_uses_set(base),
+            Expr::Call { callee, args, .. } => {
+                expr_uses_set(callee) || args.iter().any(|a| expr_uses_set(&a.value))
+            }
+            Expr::SliceLit { elem, items, .. } => {
+                elem.as_ref().is_some_and(|e| type_uses_set(e)) || items.iter().any(expr_uses_set)
+            }
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } => {
+                type_uses_set(key)
+                    || type_uses_set(value)
+                    || entries
+                        .iter()
+                        .any(|(k, v)| expr_uses_set(k) || expr_uses_set(v))
+            }
+            Expr::FnLit { body, .. } => block_uses_set(body),
+            _ => false,
+        }
+    }
+
+    fn block_uses_set(b: &Block) -> bool {
+        b.stmts.iter().any(stmt_uses_set)
+    }
+
+    fn stmt_uses_set(s: &Stmt) -> bool {
+        match s {
+            Stmt::Local(l) => {
+                l.ty.as_ref().is_some_and(type_uses_set) || l.values.iter().any(expr_uses_set)
+            }
+            Stmt::Assign { values, .. } => values.iter().any(expr_uses_set),
+            Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => expr_uses_set(expr),
+            Stmt::Send { chan, value, .. } => expr_uses_set(chan) || expr_uses_set(value),
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                init.as_ref().is_some_and(|i| stmt_uses_set(i))
+                    || expr_uses_set(cond)
+                    || block_uses_set(then)
+                    || otherwise.as_ref().is_some_and(|o| stmt_uses_set(o))
+            }
+            Stmt::For { kind, body, .. } => {
+                let kind_matches = match kind {
+                    ForKind::While { cond } => expr_uses_set(cond),
+                    ForKind::Range { lo, hi, .. } => expr_uses_set(lo) || expr_uses_set(hi),
+                    ForKind::Iterate { expr, .. } => expr_uses_set(expr),
+                    ForKind::Infinite => false,
+                };
+                kind_matches || block_uses_set(body)
+            }
+            Stmt::Task { callee, args, .. } => {
+                expr_uses_set(callee) || args.iter().any(|a| expr_uses_set(&a.value))
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => block_uses_set(body),
+            Stmt::Match { subject, arms, .. } => {
+                expr_uses_set(subject) || arms.iter().any(|a| block_uses_set(&a.body))
+            }
+            Stmt::Select { arms, .. } => arms.iter().any(|a| block_uses_set(&a.body)),
+            Stmt::Return { values, .. } => values.iter().any(expr_uses_set),
+            Stmt::Break { .. } | Stmt::Continue { .. } => false,
+        }
+    }
+
+    for d in &file.decls {
+        match d {
+            Decl::Const(c) => {
+                if c.ty.as_ref().is_some_and(type_uses_set) || expr_uses_set(&c.value) {
+                    return true;
+                }
+            }
+            Decl::Struct(s) => {
+                if s.fields.iter().any(|f| type_uses_set(&f.ty)) {
+                    return true;
+                }
+            }
+            Decl::TypeAlias(t) => {
+                if type_uses_set(&t.ty) {
+                    return true;
+                }
+            }
+            Decl::Fn(f) => {
+                if f.params.iter().any(|p| type_uses_set(&p.ty))
+                    || f.results.iter().any(|r| type_uses_set(&r.ty))
+                    || f.receiver.as_ref().is_some_and(|r| type_uses_set(&r.ty))
+                    || f.body.as_ref().is_some_and(block_uses_set)
+                {
+                    return true;
+                }
+            }
+            Decl::Import { .. } | Decl::Enum(_) => {}
+        }
+    }
+    false
+}
 
 impl<'a> Checker<'a> {
     pub(crate) fn check_go_keyword_names(&mut self) {
@@ -94,12 +229,80 @@ impl<'a> Checker<'a> {
                     self.path.clone(),
                     span,
                     format!(
-                        "{what} named `none` — `none` is Hybrid's option constructor, so hy-emit                          cannot treat the name as an ordinary binding and `hyb build` fails (HYB-E1002)"
+                        "{what} named `none` — `none` is Hybrid's option constructor, so hy-emit cannot treat the name as an ordinary binding and `hyb build` fails (HYB-E1002)"
                     ),
                 )
                 .with_notes(vec![
                     "why: hy-emit spells every bare Ident `none` as the option constructor (`return none` against option[T], or `not yet supported` elsewhere), so a declaration named `none` is accepted by check and then fails emit — GUARANTEES Row 13".to_string(),
                     "fix: rename it (`none_val`, `absent`, …); keep `none` for `return none` / match arms on `option[T]`".to_string(),
+                ]),
+            );
+            return;
+        }
+        if name == "option" {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "{what} named `option` — `option` is Hybrid's reserved prelude option type (HYB-E1002)"
+                    ),
+                )
+                .with_notes(vec![
+                    "why: hy-emit emits `type option[v any] struct` into the Go package block, so declaring `option` collides with the prelude — GUARANTEES Row 13".to_string(),
+                    "fix: rename the declaration to an unreserved identifier".to_string(),
+                ]),
+            );
+            return;
+        }
+        if name == "hy_pop" {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "{what} named `hy_pop` — `hy_pop` is a reserved runtime prelude helper, so declaring it collides with slice pop lowering and `hyb build` fails (HYB-E1002)"
+                    ),
+                )
+                .with_notes(vec![
+                    "why: hy-emit lowers slice `.pop()` to `hy_pop(&s)` and emits `func hy_pop[t any](s *[]t) t`, so a declaration named `hy_pop` collides in Go package or local scope — GUARANTEES Row 13".to_string(),
+                    "fix: rename the declaration to an unreserved identifier".to_string(),
+                ]),
+            );
+            return;
+        }
+        if name == "hy_n5_make" {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "{what} named `hy_n5_make` — `hy_n5_make` is a reserved runtime prelude helper, so declaring it collides with slice allocation lowering and `hyb build` fails (HYB-E1002)"
+                    ),
+                )
+                .with_notes(vec![
+                    "why: hy-emit emits `func hy_n5_make[t any](...)` for slice allocation, so a declaration named `hy_n5_make` collides with the prelude in Go package block — GUARANTEES Row 13".to_string(),
+                    "fix: rename the declaration to an unreserved identifier".to_string(),
+                ]),
+            );
+            return;
+        }
+        if name == "set" && matches!(what, "fn" | "const" | "type alias" | "type") && file_uses_set_prelude(self.file) {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "{what} named `set` — `set` is Hybrid's built-in set type used in this package, so declaring it collides with `type set` in the emitted Go (HYB-E1002)"
+                    ),
+                )
+                .with_notes(vec![
+                    "why: hy-emit emits `type set[t comparable] struct` into the Go package block when sets are used, so a declaration named `set` collides in Go — GUARANTEES Row 13".to_string(),
+                    "fix: rename the declaration to an unreserved identifier".to_string(),
                 ]),
             );
             return;
