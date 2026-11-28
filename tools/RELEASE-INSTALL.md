@@ -36,8 +36,14 @@ curl -fsSL https://raw.githubusercontent.com/limitlessprojects/Go-Hybrid/main/in
 
 ## Verify the claim, don't trust it
 
-The full acceptance suite lives in the repo (`make examples` — all ten
-target programs byte-exact; `make differential`; checker corpus 20/20).
+The acceptance suite lives in the repository. From a source checkout matching
+this release, run:
+
+- `make examples` to build and run the example programs.
+- `make corpus` to compare checker verdicts against the registered expectations.
+- `make differential` to build and run accepted fixtures and check rejected ones.
+- `make census` to see the fixture count and verdict breakdown for that revision.
+
 Read the honest-claims paragraph in SPEC-LANGUAGE.md §9.2 (or
 GUARANTEES.md, the line-by-line claims table) before relying on the safety
 checks in production.
