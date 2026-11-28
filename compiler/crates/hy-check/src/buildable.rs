@@ -6840,14 +6840,26 @@ impl<'a> Collector<'a> {
                                 self.typed_value_type_name(&values[0]).as_deref(),
                             ))
                     {
+                        // Naming the OpKind CLASS (`int`) for a pair like `int64 = int32`
+                        // produces "cannot assign a value of type `int` ... (type `int`)",
+                        // which reads as int-to-int and hides why Go refuses. The precise
+                        // declared names are already computed above for the sized-array
+                        // check; use them, falling back to the kind label only when a name
+                        // genuinely cannot be resolved.
+                        let v_name = self
+                            .typed_value_type_name(&values[0])
+                            .unwrap_or_else(|| vk.label().to_string());
+                        let t_name = self
+                            .place_type_name(target)
+                            .unwrap_or_else(|| tk.label().to_string());
                         self.emit_e1002(
                             span,
                             format!(
                                 "cannot assign a value of type `{}` to `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
-                                vk.label(),
+                                v_name,
                                 target.render(),
-                                tk.label(),
-                                tk.label()
+                                t_name,
+                                t_name
                             ),
                             "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
                         );
