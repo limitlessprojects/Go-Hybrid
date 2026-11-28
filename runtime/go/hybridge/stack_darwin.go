@@ -66,5 +66,8 @@ func acquireDeep() int {
 
 // releaseDeep frees a pooled stack acquired by acquireDeep.
 func releaseDeep(i int) {
+	if i < 0 || i >= deepStacks {
+		return
+	}
 	atomic.AndUint64(&deepBits, ^(uint64(1) << uint(i)))
 }
