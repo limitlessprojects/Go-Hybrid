@@ -1,0 +1,5 @@
+go/main.go text eol=lf
+rust/src/main.rs text eol=lf
+hy/load.hy text eol=lf
+hy/alloc.hy text eol=lf
+rust/Cargo.toml text eol=lf
