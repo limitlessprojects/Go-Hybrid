@@ -1,5 +1,4 @@
-"""Offline regressions for #1525: the review window is measured from the
-last reopen, not from created_at.
+"""Offline regressions for the PR queue sweeper and snapshot tools.
 
 Every API call is a fixture — the suite never touches the network, and in
 dry mode it hard-fails on any non-GET request, which is the sweeper's
@@ -8,8 +7,12 @@ import contextlib
 from datetime import datetime, timedelta, timezone
 import importlib.util
 import io
+import json
+import os
 from pathlib import Path
+import runpy
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -177,6 +180,26 @@ class ReviewWindowPolicyTests(unittest.TestCase):
                 comment = self.writes[1][2]["body"]
                 self.assertIn(f"review window ({window} days)", comment)
                 self.assertNotIn("20 days", comment)
+
+
+class QueueSnapshotTests(unittest.TestCase):
+    def test_output_path_with_or_without_parent_directory(self):
+        script = Path(__file__).resolve().with_name("queue_snapshot.py")
+        pull_requests = {"nodes": [], "pageInfo": {"hasNextPage": False}}
+        response = json.dumps({"data": {"repository": {"pullRequests": pull_requests}}}).encode()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outputs = ("snapshot.json", "nested/snapshot.json", str(root / "absolute" / "snapshot.json"))
+            with contextlib.chdir(root):
+                for output in outputs:
+                    with (
+                        self.subTest(output=output),
+                        patch.dict(os.environ, {"GH_TOKEN": "test-token", "SURVEY_OUT": output}),
+                        patch("urllib.request.urlopen", return_value=io.BytesIO(response)),
+                        contextlib.redirect_stdout(io.StringIO()),
+                    ):
+                        runpy.run_path(str(script))
+                        self.assertEqual([], json.loads(Path(output).read_text(encoding="utf-8")))
 
 
 if __name__ == "__main__":
