@@ -74,6 +74,60 @@ class DupPlanner(unittest.TestCase):
         plan = sh.plan_phase_a(items, clusters, is_open=lambda n: True)
         self.assertEqual(plan, [])
 
+    def test_closed_member_is_filtered(self):
+        # Reproducer for #3031: closed cluster members must not be planned for Phase A
+        items = [_item(5, dup_members=[6, 7]), _item(6), _item(7)]
+        clusters = [[5, 6, 7]]
+        plan = sh.plan_phase_a(items, clusters, is_open=lambda n: n in (5, 7))
+        self.assertEqual(plan, [(5, [7])])
+
+
+class LabelAgeTests(unittest.TestCase):
+    """Phase A / B dup handling tracks label age and respects unlabel events (#3031)."""
+
+    def test_unlabeled_resets_label_age(self):
+        gh = unittest.mock.MagicMock()
+        events = [
+            {"event": "labeled", "label": {"name": "bot:dup-of:#1"}, "created_at": "2026-10-01T00:00:00Z"},
+            {"event": "unlabeled", "label": {"name": "bot:dup-of:#1"}, "created_at": "2026-10-02T00:00:00Z"},
+        ]
+        gh.req.return_value = (200, events)
+        from datetime import datetime, timezone
+        now = datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc)
+        age = sh._label_age_days(gh, 10, "bot:dup-of:#1", now)
+        self.assertIsNone(age)
+
+    def test_relabeled_uses_newest_labeled_date(self):
+        gh = unittest.mock.MagicMock()
+        events = [
+            {"event": "labeled", "label": {"name": "bot:dup-of:#1"}, "created_at": "2026-10-01T00:00:00Z"},
+            {"event": "unlabeled", "label": {"name": "bot:dup-of:#1"}, "created_at": "2026-10-02T00:00:00Z"},
+            {"event": "labeled", "label": {"name": "bot:dup-of:#1"}, "created_at": "2026-10-04T00:00:00Z"},
+        ]
+        gh.req.return_value = (200, events)
+        from datetime import datetime, timezone
+        now = datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc)
+        age = sh._label_age_days(gh, 10, "bot:dup-of:#1", now)
+        self.assertEqual(age, 1.0)
+
+
+class MergeMsgParsing(unittest.TestCase):
+    """W5 merge messages must extract all issue refs including Closes/Resolves (#3031)."""
+
+    def test_parse_issue_refs_single_fix(self):
+        self.assertEqual(sh.parse_issue_refs("Fixes #123"), ["123"])
+
+    def test_parse_issue_refs_closes_resolves_and_colons(self):
+        text = "Closes #821\nResolves: #867\nFixes: #900"
+        self.assertEqual(sh.parse_issue_refs(text), ["821", "867", "900"])
+
+    def test_parse_issue_refs_deduplicates(self):
+        text = "fix #100, Fixes: #100\n(fixes #100)"
+        self.assertEqual(sh.parse_issue_refs(text), ["100"])
+
+    def test_parse_issue_refs_empty(self):
+        self.assertEqual(sh.parse_issue_refs("no issue refs here"), [])
+
 
 class ConflictClassifier(unittest.TestCase):
     """Docs-only conflicts resolve deterministically; anything else is human
