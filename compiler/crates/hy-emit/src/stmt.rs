@@ -105,7 +105,15 @@ impl Emitter {
                     marker.push_str(&format!(" tickets: {}", tickets.join(", ")));
                 }
                 self.push(&marker);
+                let first_witness = self.witnesses.len();
                 self.emit_block_body(&body.stmts)?;
+                // Reclassify only sends emitted inside this managed block.
+                // Task witnesses have no send status.
+                for witness in &mut self.witnesses[first_witness..] {
+                    if let Some(status) = &mut witness.status {
+                        *status = crate::witness::SendStatus::Managed;
+                    }
+                }
                 self.push("}");
                 Ok(())
             }
@@ -335,6 +343,15 @@ impl Emitter {
                             let c = self.emit_expr(chan, 0)?;
                             let v = self.emit_expr(value, 0)?;
                             self.push(&format!("case {} <- {}:", c, v));
+
+                            // SelectArm has no span of its own. The send site
+                            // runs from the channel through the sent value.
+                            let span = hy_diag::Span {
+                                end: value.span().end,
+                                ..chan.span()
+                            };
+                            self.witnesses
+                                .push(crate::witness::witness_send(chan, value, span));
                         }
                         SelectArmKind::Default => self.push("default:"),
                     }
