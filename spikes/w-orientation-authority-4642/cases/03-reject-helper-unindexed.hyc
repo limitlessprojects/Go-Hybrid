@@ -1,0 +1,11 @@
+# expect: reject HYB-E4645
+# The helper drops the indices on the way out. A bare 'turn' proves nothing.
+fn classify(m: mesh) -> turn {
+    o = observe(m, 0, 1, 2)
+    return orientation(o)
+}
+
+fn hull(m: mesh) {
+    t = call classify(m)
+    insert(m, 0, 1, 2, t)
+}

@@ -1,0 +1,5 @@
+# expect: reject HYB-E4645
+# The caller keeps the sign and mints nothing: the ordinary-library shape.
+fn hull(m: mesh) {
+    insert(m, 0, 1, 2, 1)
+}
