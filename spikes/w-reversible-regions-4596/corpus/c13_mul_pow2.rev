@@ -1,0 +1,6 @@
+# name: c13_mul_pow2
+# expect: R012_PRIM_NOT_IN_ALGEBRA
+# 类别：乘法混合（2 的幂乘子，真的不可逆）
+program c13_mul_pow2
+
+mul x0, 8

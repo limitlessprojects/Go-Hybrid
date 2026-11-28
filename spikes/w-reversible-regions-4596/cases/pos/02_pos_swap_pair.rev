@@ -1,0 +1,9 @@
+# name: pos_swap_pair
+# expect: ADMIT
+# 例 2（正）：两对独立 swap + 一次常量 XOR。验证 swap 的自逆性与"整段逆序"。
+# 逆向顺序必须与正向相反，因此这条案例能抓出"只逐条取逆、忘记反序"的 bug。
+program pos_swap_pair
+
+swap x0, x1
+swap x2, x3
+xori x4, 0x00ff00ff00ff00ff

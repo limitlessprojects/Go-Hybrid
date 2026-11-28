@@ -1,0 +1,7 @@
+# name: neg_task_capture
+# expect: R009_TASK_CAPTURE
+# 例 9（负）：task capture。另一个 task 可能观察到区域中途的状态，
+# 逆执行回到初值并不能让"已被看见的中间态"消失。
+program neg_task_capture
+
+capture "task"

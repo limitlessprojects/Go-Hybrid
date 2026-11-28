@@ -1,0 +1,8 @@
+# name: c03_xorshift_left
+# expect: R003_LOSSY_SHIFT
+# 类别：移位混合（xorshift 家族的左移半步）
+# 注意：x ^= x<<13 作为一个整体是双射，但它的单个语句 shl 不是。
+# 这正暴露"逐语句代数"的边界：单元可逆 ≠ 语句可逆。
+program c03_xorshift_left
+
+shl x0, 13

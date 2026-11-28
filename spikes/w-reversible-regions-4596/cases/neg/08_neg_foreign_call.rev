@@ -1,0 +1,7 @@
+# name: neg_foreign_call
+# expect: R008_FOREIGN_CALL
+# 例 8（负）：间接外部调用。没有声明逆向契约的调用一律拒绝；
+# 这就是 issue 里 "Arbitrary Go or Rust calls cannot qualify without trusted inverse contracts"。
+program neg_foreign_call
+
+call "peer.Commit"

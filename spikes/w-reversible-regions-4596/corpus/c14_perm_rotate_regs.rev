@@ -1,0 +1,6 @@
+# name: c14_perm_rotate_regs
+# expect: ADMIT
+# 类别：可逆置换
+program c14_perm_rotate_regs
+
+perm 1 2 3 0 5 6 7 4

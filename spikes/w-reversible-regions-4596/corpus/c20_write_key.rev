@@ -1,0 +1,6 @@
+# name: c20_write_key
+# expect: R013_WRITE_IMMUTABLE_KEY
+# 类别：写保留值（key 只读；逆函数也要用它，写它会破坏逆向契约）
+program c20_write_key
+
+add key, 1

@@ -1,0 +1,9 @@
+# name: c18_three_stage_mix
+# expect: ADMIT
+# 类别：算术混合（三段式，全原语）
+program c18_three_stage_mix
+
+add x0, 7
+xor x0, x2
+rotl x2, 3
+subv x4, x6

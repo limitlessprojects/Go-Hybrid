@@ -1,0 +1,8 @@
+# name: c11_sbox_even_multiplier
+# expect: R014_SBOX_NOT_BIJECTIVE
+# 类别：查表（声明了但表不是双射：A 为偶数，字节两两碰撞）
+program c11_sbox_even_multiplier
+
+sbox SB affine 0x1c 0x00
+
+sboxb x0, SB

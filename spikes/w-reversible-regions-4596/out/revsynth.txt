@@ -1,0 +1,69 @@
+﻿== 20 个例子（10 正 / 10 负）：检查器判定 vs 预注册 ==
+file                        verdict  code                          expect                        ok    if
+01_pos_rotl_xor_key.rev     ADMIT                                  ADMIT                         true  0
+02_pos_swap_pair.rev        ADMIT                                  ADMIT                         true  0
+03_pos_arx_round.rev        ADMIT                                  ADMIT                         true  0
+04_pos_perm_cycle.rev       ADMIT                                  ADMIT                         true  0
+05_pos_branch_addsub.rev    ADMIT                                  ADMIT                         true  1
+06_pos_branch_nested.rev    ADMIT                                  ADMIT                         true  2
+07_pos_branch_xor_key.rev   ADMIT                                  ADMIT                         true  1
+08_pos_wide_mix.rev         ADMIT                                  ADMIT                         true  0
+09_pos_sbox_bytes.rev       ADMIT                                  ADMIT                         true  0
+10_pos_full_mix_branch.rev  ADMIT                                  ADMIT                         true  1
+01_neg_assign_zero.rev      REJECT   R001_ASSIGN_CONST             R001_ASSIGN_CONST             true  0
+02_neg_lossy_mask.rev       REJECT   R002_LOSSY_MASK               R002_LOSSY_MASK               true  0
+03_neg_shift_trunc.rev      REJECT   R003_LOSSY_SHIFT              R003_LOSSY_SHIFT              true  0
+04_neg_disc_clobber.rev     REJECT   R004_DISCRIMINATOR_CLOBBERED  R004_DISCRIMINATOR_CLOBBERED  true  1
+05_neg_disc_foreign.rev     REJECT   R005_DISCRIMINATOR_FOREIGN    R005_DISCRIMINATOR_FOREIGN    true  1
+06_neg_alias_escape.rev     REJECT   R006_ALIAS_ESCAPE             R006_ALIAS_ESCAPE             true  0
+07_neg_chansend.rev         REJECT   R007_EFFECT_CHANSEND          R007_EFFECT_CHANSEND          true  0
+08_neg_foreign_call.rev     REJECT   R008_FOREIGN_CALL             R008_FOREIGN_CALL             true  0
+09_neg_task_capture.rev     REJECT   R009_TASK_CAPTURE             R009_TASK_CAPTURE             true  0
+10_neg_noninv_prim.rev      REJECT   R010_NONINVERTIBLE_PRIM       R010_NONINVERTIBLE_PRIM       true  0
+
+负例诊断码互不相同：10/10 unique
+
+== 24 条常见变换语料：预注册判定 vs 实际 ==
+file                             verdict  code                          expect                        ok
+c01_arx_round.rev                ADMIT                                  ADMIT                         true
+c02_add_rot_xor_key.rev          ADMIT                                  ADMIT                         true
+c03_xorshift_left.rev            REJECT   R003_LOSSY_SHIFT              R003_LOSSY_SHIFT              true
+c04_xorshift_right.rev           REJECT   R003_LOSSY_SHIFT              R003_LOSSY_SHIFT              true
+c05_mask_low_byte.rev            REJECT   R002_LOSSY_MASK               R002_LOSSY_MASK               true
+c06_clear_accumulator.rev        REJECT   R001_ASSIGN_CONST             R001_ASSIGN_CONST             true
+c07_condswap_on_flag_reg.rev     REJECT   R004_DISCRIMINATOR_CLOBBERED  R004_DISCRIMINATOR_CLOBBERED  true
+c08_condswap_separate_flag.rev   ADMIT                                  ADMIT                         true
+c09_lookup_table.rev             REJECT   R012_PRIM_NOT_IN_ALGEBRA      R012_PRIM_NOT_IN_ALGEBRA      true
+c10_sbox_affine_declared.rev     ADMIT                                  ADMIT                         true
+c11_sbox_even_multiplier.rev     REJECT   R014_SBOX_NOT_BIJECTIVE       R014_SBOX_NOT_BIJECTIVE       true
+c12_mul_odd_constant.rev         REJECT   R012_PRIM_NOT_IN_ALGEBRA      R012_PRIM_NOT_IN_ALGEBRA      true
+c13_mul_pow2.rev                 REJECT   R012_PRIM_NOT_IN_ALGEBRA      R012_PRIM_NOT_IN_ALGEBRA      true
+c14_perm_rotate_regs.rev         ADMIT                                  ADMIT                         true
+c15_perm_not_bijective.rev       REJECT   R010_NONINVERTIBLE_PRIM       R010_NONINVERTIBLE_PRIM       true
+c16_rot_by_zero.rev              REJECT   R010_NONINVERTIBLE_PRIM       R010_NONINVERTIBLE_PRIM       true
+c17_rot_by_word_size.rev         REJECT   R010_NONINVERTIBLE_PRIM       R010_NONINVERTIBLE_PRIM       true
+c18_three_stage_mix.rev          ADMIT                                  ADMIT                         true
+c19_loop_over_block.rev          REJECT   R011_UNBOUNDED_LOOP           R011_UNBOUNDED_LOOP           true
+c20_write_key.rev                REJECT   R013_WRITE_IMMUTABLE_KEY      R013_WRITE_IMMUTABLE_KEY      true
+c21_escape_slice_alias.rev       REJECT   R006_ALIAS_ESCAPE             R006_ALIAS_ESCAPE             true
+c22_channel_send.rev             REJECT   R007_EFFECT_CHANSEND          R007_EFFECT_CHANSEND          true
+c23_indirect_call.rev            REJECT   R008_FOREIGN_CALL             R008_FOREIGN_CALL             true
+c24_nested_branch_preserved.rev  ADMIT                                  ADMIT                         true
+
+语料接纳率：7/24 = 29.2%
+
+== 发射的 Go 代码规模（字节 / 行）==
+case                 fwd_bytes  fwd_lines  inv_bytes  inv_lines  ratio
+pos_rotl_xor_key     227        6          228        6          1.00
+pos_swap_pair        241        7          241        7          1.00
+pos_arx_round        268        10         269        10         1.00
+pos_perm_cycle       316        17         316        17         1.00
+pos_branch_addsub    270        9          270        9          1.00
+pos_branch_nested    401        16         403        16         1.00
+pos_branch_xor_key   321        11         322        11         1.00
+pos_wide_mix         357        13         357        13         1.00
+pos_sbox_bytes       269        8          276        8          1.03
+pos_full_mix_branch  457        23         468        23         1.02
+合计 forward=3127 B  inverse=3150 B  ratio=1.01
+
+预测审计：44/44 条预注册判定成立；写出 gen/gen_cases.go 与 out/summary.json

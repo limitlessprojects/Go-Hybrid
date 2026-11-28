@@ -1,0 +1,6 @@
+# name: c23_indirect_call
+# expect: R008_FOREIGN_CALL
+# 类别：外部调用（无逆向契约）
+program c23_indirect_call
+
+call "shard.Write"

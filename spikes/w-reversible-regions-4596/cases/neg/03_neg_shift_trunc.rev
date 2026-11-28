@@ -1,0 +1,7 @@
+# name: neg_shift_trunc
+# expect: R003_LOSSY_SHIFT
+# 例 3（负）：x >>= 8。右移丢掉低 8 位；左移丢高位，两者都不可逆。
+# 这个案例与 #4596 的"定宽语义"一节对应：位的移动不是双射。
+program neg_shift_trunc
+
+shr x2, 8

@@ -1,0 +1,19 @@
+# name: pos_branch_nested
+# expect: ADMIT
+# 例 6（正）：嵌套分支。x6 同时是外层（bit3）与内层（bit5）的判别子，
+# 两条臂都没有写 x6，所以两个判别子都能从出口状态重建。
+# 内层 if 位于外层 then 臂里：只有外层取 then 时才可能被遍历到。
+program pos_branch_nested
+
+if bit x6, 3 == 1
+  rotl x0, 9
+  if bit x6, 5 == 0
+    xori x1, 0xdeadbeef
+  else
+    add x2, 0xcafe
+  end
+  xor x0, x1
+else
+  subv x0, x2
+  rotl x2, 17
+end

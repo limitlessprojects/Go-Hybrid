@@ -1,0 +1,6 @@
+# name: c17_rot_by_word_size
+# expect: R010_NONINVERTIBLE_PRIM
+# 类别：退化原语（rot by 64 = 恒等）
+program c17_rot_by_word_size
+
+rotr x0, 64

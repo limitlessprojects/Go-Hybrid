@@ -1,0 +1,8 @@
+# name: pos_rotl_xor_key
+# expect: ADMIT
+# 例 1（正）：issue 原文的最小混合。正向 x0 = rotl64(x0,7) ^ key；逆向 x0 = rotr64(x0 ^ key, 7)。
+# 这是"整段只有一个原语 + 一个保留值"的基线，用来确认发射器与逆合成器的最小路径。
+program pos_rotl_xor_key
+
+rotl x0, 7
+xori x0, key

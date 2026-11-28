@@ -1,0 +1,13 @@
+# name: pos_arx_round
+# expect: ADMIT
+# 例 3（正）：典型 ARX 轮（add-rotate-xor）+ 立即数 sub。全部 mod 2^64。
+# 逆序为：subv x3,x2 / add x2,7 / xori x2,0xa5 / xor x0,x1 / rotr x1,13 / subv x0,x1。
+# 注意 addv/subv 的可逆性依赖"逆序执行"：撤销第 i 步时状态正好等于第 i 步之后的状态。
+program pos_arx_round
+
+addv x0, x1
+rotl x1, 13
+xor x0, x1
+xori x2, 0xa5
+sub x2, 7
+addv x3, x2

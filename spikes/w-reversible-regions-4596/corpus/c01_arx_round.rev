@@ -1,0 +1,8 @@
+# name: c01_arx_round
+# expect: ADMIT
+# 类别：算术混合（ARX 轮）
+program c01_arx_round
+
+addv x0, x1
+rotl x0, 15
+xor x1, x0

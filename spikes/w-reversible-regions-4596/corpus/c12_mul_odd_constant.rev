@@ -1,0 +1,6 @@
+# name: c12_mul_odd_constant
+# expect: R012_PRIM_NOT_IN_ALGEBRA
+# 类别：乘法混合（奇数乘子在数学上可逆，但不在声明代数里 —— 这是代数的边界，不是数学的边界）
+program c12_mul_odd_constant
+
+mul x0, 3

@@ -1,0 +1,6 @@
+# name: c04_xorshift_right
+# expect: R003_LOSSY_SHIFT
+# 类别：移位混合（xorshift 家族右移半步）
+program c04_xorshift_right
+
+shr x0, 17

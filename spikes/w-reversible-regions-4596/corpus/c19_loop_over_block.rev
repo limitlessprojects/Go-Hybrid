@@ -1,0 +1,6 @@
+# name: c19_loop_over_block
+# expect: R011_UNBOUNDED_LOOP
+# 类别：循环（按块迭代，行程数不是状态的函数）
+program c19_loop_over_block
+
+loop 4
