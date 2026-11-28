@@ -3119,3 +3119,41 @@ fn utf8_byte_escapes_emit_exact_utf8_strings_issue_1199() {
         go
     );
 }
+
+// ---------------------------------------------------------------------------
+// #2207 - a `:=` binding of a foreign field keeps the foreign shape
+// ---------------------------------------------------------------------------
+
+fn emit2207(src: &str) -> String {
+    let file = parse_file("t.hy", src).expect("parse");
+    emit_go(&file).expect("emit")
+}
+
+#[test]
+fn issue2207_field_binding_keeps_shape_for_member_access() {
+    let go = emit2207("import \"net/http\"\n\nfn f(r *http.request) string {\n    u := r.url\n    return u.path\n}\n\nfn main() {\n    fmt.println(\"ok\")\n}\n");
+    assert!(
+        go.contains("u.Path"),
+        "the binding must resolve to the Go member: {}",
+        go
+    );
+    assert!(
+        !go.contains("u.path"),
+        "the raw Hybrid spelling must not survive: {}",
+        go
+    );
+}
+
+#[test]
+fn issue2207_direct_chain_unchanged() {
+    // The positive control from the issue: no intermediate binding, which
+    // always resolved correctly and must keep doing so.
+    let go = emit2207("import \"net/http\"\n\nfn f(r *http.request) string {\n    return r.url.path\n}\n\nfn main() {\n    fmt.println(\"ok\")\n}\n");
+    assert!(go.contains("r.URL.Path"), "direct chain: {}", go);
+}
+
+#[test]
+fn issue2207_local_binding_shape_survives_a_second_hop() {
+    let go = emit2207("import \"net/http\"\n\nfn f(r *http.request) string {\n    u := r.url\n    return u.raw_path\n}\n\nfn main() {\n    fmt.println(\"ok\")\n}\n");
+    assert!(go.contains("u.RawPath"), "second member hop: {}", go);
+}
