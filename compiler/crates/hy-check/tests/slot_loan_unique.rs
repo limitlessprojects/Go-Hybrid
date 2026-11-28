@@ -84,3 +84,39 @@ fn distinct_slots_and_closed_windows_stay_legal() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Accept, "got {:?}", codes(&r));
 }
+
+#[test]
+fn issue_2226_second_loan_differently_spelled_integer_literals_is_e3102() {
+    assert_e3102(
+        "    m := map[int]acct{10: acct{bal: 1}}\n    p := &m[10]\n    q := &m[0xA]\n    q.bal = 50\n    p.bal = p.bal + 1\n",
+        "differently spelled hex int literal 0xA vs 10 on map slot",
+    );
+    assert_e3102(
+        "    m := map[int]acct{10: acct{bal: 1}}\n    p := &m[10]\n    q := &m[0b1010]\n    q.bal = 50\n    p.bal = p.bal + 1\n",
+        "differently spelled binary int literal 0b1010 vs 10 on map slot",
+    );
+    assert_e3102(
+        "    m := map[int]acct{10: acct{bal: 1}}\n    p := &m[10]\n    q := &m[0o12]\n    q.bal = 50\n    p.bal = p.bal + 1\n",
+        "differently spelled octal int literal 0o12 vs 10 on map slot",
+    );
+    assert_e3102(
+        "    m := map[int]acct{10: acct{bal: 1}}\n    p := &m[10]\n    q := &m[1_0]\n    q.bal = 50\n    p.bal = p.bal + 1\n",
+        "differently spelled underscore int literal 1_0 vs 10 on map slot",
+    );
+    assert_e3102(
+        "    m := map[int]acct{10: acct{bal: 1}}\n    p := &m[10]\n    q := &m['\\n']\n    q.bal = 50\n    p.bal = p.bal + 1\n",
+        "differently spelled rune literal '\\n' vs 10 on map slot",
+    );
+    assert_e3102(
+        "    ns := []acct{acct{bal: 1}, acct{bal: 2}}\n    p := &ns[1]\n    q := &ns[0x1]\n    q.bal = 50\n    p.bal = p.bal + 1\n",
+        "differently spelled hex int literal 0x1 vs 1 on slice slot",
+    );
+}
+
+#[test]
+fn issue_2226_field_store_differently_spelled_integer_literal_is_e3102() {
+    assert_e3102(
+        "    ns := []acct{acct{bal: 1}, acct{bal: 2}}\n    p := &ns[1]\n    ns[0x1].bal = 50\n    p.bal = p.bal + 1\n",
+        "field store with 0x1 while slice slot loan on 1 is live",
+    );
+}
