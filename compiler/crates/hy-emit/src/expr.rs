@@ -1078,15 +1078,13 @@ impl Emitter {
                     // — a clean failure, never a wrong emission.
                 }
             }
-            if let Expr::Ident { name: root, .. } = Self::unwrap_parens_and_addr(base) {
-                if let Some(BindingKind::Foreign) = self.bindings.get(root) {
-                    let b = self.emit_expr(base, ATOM)?;
-                    let mut parts = Vec::new();
-                    for a in args {
-                        parts.push(self.emit_call_arg(a)?);
-                    }
-                    return Ok(format!("{}.{}({})", b, to_go_name(name), parts.join(", ")));
-                }
+            if self.is_foreign_method_base(base) {
+                let b = self.emit_expr(base, ATOM)?;
+                let parts = match format_method_param_index(name) {
+                    Some(fmt_idx) => self.emit_format_call_args(args, fmt_idx)?,
+                    None => self.emit_call_args(args)?,
+                };
+                return Ok(format!("{}.{}({})", b, to_go_name(name), parts.join(", ")));
             }
         }
 
@@ -1551,8 +1549,10 @@ impl Emitter {
                 MemberSpecial::StderrCall(go_name) => {
                     self.use_package("os");
                     let mut parts = vec!["os.Stderr".to_string()];
-                    for a in args {
-                        parts.push(self.emit_call_arg(a)?);
+                    if go_name == "Fprintf" {
+                        parts.extend(self.emit_format_call_args(args, 0)?);
+                    } else {
+                        parts.extend(self.emit_call_args(args)?);
                     }
                     Ok(format!("{}.{}({})", pkg, go_name, parts.join(", ")))
                 }
@@ -1600,33 +1600,10 @@ impl Emitter {
             }
         }
 
-        // Interpolation in a FORMAT-carrying call (Batch E, example 06):
-        // `fmt.fprintf(w, "{a}+{b}={a+b}\n")` must splice the interp's
-        // arguments into the call — `fmt.Fprintf(w, "%v+%v=%v\n", a, b, a+b)`.
-        // (Wrapping the whole interp in Sprintf would print the %v's as
-        // literals — Fprintf's format param consumes them.)
-        if (pkg == "fmt" && (name == "fprintf" || name == "printf")) && !args.is_empty() {
-            if let Expr::Interp { parts, .. } = &args[args.len() - 1].value {
-                let (fmt_str, interp_args) = self.interp_parts(parts)?;
-                let mut call_args = Vec::new();
-                for a in &args[..args.len() - 1] {
-                    call_args.push(self.emit_call_arg(a)?);
-                }
-                call_args.push(go_quote(&fmt_str));
-                call_args.extend(interp_args);
-                return Ok(format!(
-                    "{}.{}({})",
-                    pkg,
-                    to_go_name(name),
-                    call_args.join(", ")
-                ));
-            }
-        }
-
-        let mut parts = Vec::new();
-        for a in args {
-            parts.push(self.emit_call_arg(a)?);
-        }
+        let parts = match format_param_index(pkg, name) {
+            Some(fmt_idx) => self.emit_format_call_args(args, fmt_idx)?,
+            None => self.emit_call_args(args)?,
+        };
         Ok(format!(
             "{}.{}({})",
             pkg,
@@ -1634,6 +1611,201 @@ impl Emitter {
             parts.join(", ")
         ))
     }
+
+    fn emit_call_args(&mut self, args: &[CallArg]) -> Result<Vec<String>, EmitError> {
+        args.iter().map(|a| self.emit_call_arg(a)).collect()
+    }
+
+    fn is_foreign_method_base(&self, base: &Expr) -> bool {
+        match Self::unwrap_parens_and_addr(base) {
+            Expr::Ident { name: root, .. } => {
+                matches!(self.bindings.get(root), Some(BindingKind::Foreign))
+            }
+            Expr::Move { operand, .. } => self.is_foreign_method_base(operand),
+            Expr::Field { base: fb, name, .. } => self
+                .user_struct_name_of(fb)
+                .and_then(|sn| self.struct_fields.get(sn))
+                .and_then(|fs| fs.iter().find(|(f, _)| f == name))
+                .is_some_and(|(_, fty)| fty.eq_ignore_ascii_case("log.logger")),
+            Expr::Call { callee, .. } => {
+                if let Expr::Field { base: pb, name, .. } = Self::unwrap_parens(callee) {
+                    if let Expr::Ident { name: pkg, .. } = Self::unwrap_parens(pb) {
+                        return pkg == "log"
+                            && self.is_unshadowed_pkg_root(pkg)
+                            && matches!(name.as_str(), "new" | "New" | "default" | "Default");
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Splice an interpolated format argument at `fmt_idx` directly into the
+    /// enclosing printf-family call (#4618).
+    fn emit_format_call_args(
+        &mut self,
+        args: &[CallArg],
+        fmt_idx: usize,
+    ) -> Result<Vec<String>, EmitError> {
+        if fmt_idx >= args.len() || args[..=fmt_idx].iter().any(|a| a.spread || a.name.is_some()) {
+            return self.emit_call_args(args);
+        }
+        let Expr::Interp { parts, .. } = Self::unwrap_parens(&args[fmt_idx].value) else {
+            return self.emit_call_args(args);
+        };
+        if !parts.iter().any(|p| matches!(p, InterpPart::Expr(_))) {
+            return self.emit_call_args(args);
+        }
+
+        if args.len() == fmt_idx + 1 {
+            let mut out = self.emit_call_args(&args[..fmt_idx])?;
+            let (fmt_str, interp_args) = self.interp_parts(parts)?;
+            out.push(go_quote(&fmt_str));
+            out.extend(interp_args);
+            return Ok(out);
+        }
+
+        let trailing = &args[fmt_idx + 1..];
+        if trailing.iter().any(|a| a.spread || a.name.is_some()) {
+            return self.emit_call_args(args);
+        }
+        let Some(fmt_str) = rewrite_printf_format(parts, trailing.len()) else {
+            return self.emit_call_args(args);
+        };
+
+        let mut out = self.emit_call_args(&args[..fmt_idx])?;
+        out.push(go_quote(&fmt_str));
+        for p in parts {
+            if let InterpPart::Expr(x) = p {
+                out.push(self.emit_expr(x, 0)?);
+            }
+        }
+        out.extend(self.emit_call_args(trailing)?);
+        Ok(out)
+    }
+}
+
+fn format_param_index(pkg: &str, name: &str) -> Option<usize> {
+    match (pkg, name) {
+        ("fmt", "printf" | "Printf" | "sprintf" | "Sprintf" | "errorf" | "Errorf") => Some(0),
+        ("fmt", "fprintf" | "Fprintf" | "appendf" | "Appendf") => Some(1),
+        ("log", n) => format_method_param_index(n),
+        _ => None,
+    }
+}
+
+fn format_method_param_index(name: &str) -> Option<usize> {
+    match name {
+        "printf" | "Printf" | "fatalf" | "Fatalf" | "panicf" | "Panicf" => Some(0),
+        _ => None,
+    }
+}
+
+fn parse_bracket_index(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) -> Result<Option<usize>, ()> {
+    if chars.peek() != Some(&'[') {
+        return Ok(None);
+    }
+    chars.next();
+    let mut idx: usize = 0;
+    let mut has_digit = false;
+    while let Some(&c) = chars.peek() {
+        let Some(d) = c.to_digit(10) else { break };
+        has_digit = true;
+        idx = idx.checked_mul(10).and_then(|v| v.checked_add(d as usize)).ok_or(())?;
+        chars.next();
+    }
+    if !has_digit || idx == 0 || chars.next() != Some(']') {
+        return Err(());
+    }
+    Ok(Some(idx))
+}
+
+fn rewrite_printf_format(parts: &[InterpPart], explicit_count: usize) -> Option<String> {
+    let offset = parts.iter().filter(|p| matches!(p, InterpPart::Expr(_))).count();
+    let (mut out, mut slot, mut next_arg, mut max_used) = (String::new(), 0usize, 1usize, 0usize);
+    let take_arg = |idx: Option<usize>, next: &mut usize, max_u: &mut usize| -> Option<usize> {
+        let used = idx.unwrap_or(*next);
+        *next = used.checked_add(1)?;
+        *max_u = (*max_u).max(used);
+        used.checked_add(offset)
+    };
+
+    for part in parts {
+        match part {
+            InterpPart::Expr(_) => {
+                slot += 1;
+                out.push_str(&format!("%[{slot}]v"));
+            }
+            InterpPart::Lit(lit) => {
+                let mut chars = lit.chars().peekable();
+                while let Some(ch) = chars.next() {
+                    if ch != '%' {
+                        out.push(ch);
+                        continue;
+                    }
+                    if chars.peek().copied()? == '%' {
+                        chars.next();
+                        out.push_str("%%");
+                        continue;
+                    }
+                    out.push('%');
+                    while chars.peek().is_some_and(|f| matches!(f, '+' | '-' | '#' | ' ' | '0')) {
+                        out.push(chars.next()?);
+                    }
+                    let pre_width_idx = parse_bracket_index(&mut chars).ok()?;
+                    let mut verb_idx = None;
+                    if chars.peek() == Some(&'*') {
+                        chars.next();
+                        let shifted = take_arg(pre_width_idx, &mut next_arg, &mut max_used)?;
+                        out.push_str(&format!("[{shifted}]*"));
+                    } else {
+                        let mut has_width_digits = false;
+                        while chars.peek().is_some_and(|d| d.is_ascii_digit()) {
+                            has_width_digits = true;
+                            out.push(chars.next()?);
+                        }
+                        if let Some(k) = pre_width_idx {
+                            if has_width_digits || chars.peek() == Some(&'.') {
+                                return None;
+                            }
+                            verb_idx = Some(k);
+                        }
+                    }
+                    if chars.peek() == Some(&'.') {
+                        chars.next();
+                        out.push('.');
+                        let prec_idx = parse_bracket_index(&mut chars).ok()?;
+                        if chars.peek() == Some(&'*') {
+                            chars.next();
+                            let shifted = take_arg(prec_idx, &mut next_arg, &mut max_used)?;
+                            out.push_str(&format!("[{shifted}]*"));
+                        } else {
+                            if prec_idx.is_some() {
+                                return None;
+                            }
+                            while chars.peek().is_some_and(|d| d.is_ascii_digit()) {
+                                out.push(chars.next()?);
+                            }
+                        }
+                    }
+                    if verb_idx.is_none() {
+                        verb_idx = parse_bracket_index(&mut chars).ok()?;
+                    }
+                    let shifted = take_arg(verb_idx, &mut next_arg, &mut max_used)?;
+                    let verb = chars.next()?;
+                    if !verb.is_ascii_alphabetic() {
+                        return None;
+                    }
+                    out.push_str(&format!("[{shifted}]{verb}"));
+                }
+            }
+        }
+    }
+
+    (max_used <= explicit_count).then_some(out)
 }
 
 /// `new[string, int]` → ("new", Some("[string, int]")).

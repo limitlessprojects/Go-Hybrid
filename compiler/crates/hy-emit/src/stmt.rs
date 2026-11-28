@@ -822,6 +822,14 @@ impl Emitter {
     fn hoist_order_before_try(&mut self, e: &Expr) -> Result<(), EmitError> {
         self.hoist_tries_expr(e)?;
         let inner = Self::peel_parens(e);
+        if let Expr::Interp { parts, .. } = inner {
+            for p in parts {
+                if let InterpPart::Expr(x) = p {
+                    self.hoist_order_before_try(x)?;
+                }
+            }
+            return Ok(());
+        }
         if matches!(inner, Expr::Try { .. })
             || self.expr_temps.contains_key(&Self::expr_key(e))
             || self.expr_temps.contains_key(&Self::expr_key(inner))
