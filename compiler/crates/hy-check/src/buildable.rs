@@ -9663,6 +9663,7 @@ impl<'a> Collector<'a> {
                 if args.len() != 2 {
                     return; // arity handled by builtins.rs
                 }
+                let mut had_invalid = false;
                 for arg in args {
                     let ak = self.kind_of_expr(&arg.value);
                     if matches!(
@@ -9678,6 +9679,7 @@ impl<'a> Collector<'a> {
                             | OpKind::Fn(..)
                             | OpKind::Interface
                     ) {
+                        had_invalid = true;
                         self.emit_e1002(
                             arg.value.span(),
                             format!(
@@ -9688,6 +9690,34 @@ impl<'a> Collector<'a> {
                             ),
                             "arguments to `complex` must be floating-point numbers (`float32` or `float64`)",
                         );
+                    }
+                }
+                if !had_invalid {
+                    let real_arg = &args[0].value;
+                    let imag_arg = &args[1].value;
+                    let rk = self.kind_of_expr(real_arg);
+                    let ik = self.kind_of_expr(imag_arg);
+                    if rk != OpKind::Unknown && ik != OpKind::Unknown {
+                        let is_compatible = if rk == ik {
+                            true
+                        } else if rk == OpKind::Float && ik == OpKind::Int {
+                            self.is_untyped_int_const(imag_arg)
+                        } else if rk == OpKind::Int && ik == OpKind::Float {
+                            self.is_untyped_int_const(real_arg)
+                        } else {
+                            false
+                        };
+                        if !is_compatible {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "mismatched types `{}` and `{}` in `complex` (HYB-E1002)",
+                                    rk.label(),
+                                    ik.label()
+                                ),
+                                "arguments to `complex` must have matching floating-point types",
+                            );
+                        }
                     }
                 }
             }
