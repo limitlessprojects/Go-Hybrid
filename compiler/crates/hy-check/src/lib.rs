@@ -5401,4 +5401,38 @@ mod tests {
             .count();
         assert_eq!(e3006_count, 2, "{:?}", r.diagnostics);
     }
+
+    #[test]
+    fn rejects_foreign_option_and_type_param_in_complex_real_imag_and_pop() {
+        let cases = [
+            "fn bad_real_foreign(b bytes.buffer) float64 {
+  return real(b)
+}",
+            "fn bad_complex_foreign(b bytes.buffer) complex128 {
+  return complex(b, 1.0)
+}",
+            "fn bad_imag_option(o option[float64]) float64 {
+  return imag(o)
+}",
+            "fn bad_real_typeparam[t](x t) float64 {
+  return real(x)
+}",
+            "fn bad_pop_foreign() {
+  var b bytes.buffer
+  b.pop()
+}",
+            "fn bad_pop_typeparam[t](v t) {
+  var x t = v
+  x.pop()
+}",
+        ];
+        for src in cases {
+            let out = check(src);
+            assert!(
+                out.diagnostics.iter().any(|d| d.code == "HYB-E1002"),
+                "expected HYB-E1002 for:\n{src}\ngot: {:?}",
+                out.diagnostics
+            );
+        }
+    }
 }
