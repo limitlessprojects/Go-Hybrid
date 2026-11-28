@@ -1985,6 +1985,27 @@ fn update_pre_defer_peers(
                             link_peer_nodes(peers, target, &r);
                         }
                     }
+                } else if matches!(
+                    t.kind,
+                    hy_syntax::PlaceKind::Field { .. } | hy_syntax::PlaceKind::Index { .. }
+                ) {
+                    let root = t.root();
+                    if !root.is_empty() && root != "_" {
+                        let val = values.get(i).or_else(|| values.first());
+                        let mut refs = Vec::new();
+                        if let Some(v) = val {
+                            expr_referenced_bindings(v, &mut refs);
+                        }
+                        for r in refs {
+                            let may_share = ck
+                                .lookup_binding(st, &r)
+                                .map(|b| ck.shape_may_share(&b.shape))
+                                .unwrap_or(true);
+                            if may_share {
+                                link_peer_nodes(peers, root, &r);
+                            }
+                        }
+                    }
                 }
             }
             if values.len() == 1 && targets.len() > 1 {
@@ -2074,14 +2095,16 @@ fn update_post_defer_watch(
     watch: &mut std::collections::HashSet<String>,
     rebound_self: &mut bool,
 ) {
-    let mut handle_bind = |target: &str, val: Option<&Expr>| {
-        if target == "_" {
+    let mut handle_bind = |target: &str, val: Option<&Expr>, store_only: bool| {
+        if target.is_empty() || target == "_" {
             return;
         }
         let Some(v) = val else {
-            watch.remove(target);
-            if target == deferred_name {
-                *rebound_self = true;
+            if !store_only {
+                watch.remove(target);
+                if target == deferred_name {
+                    *rebound_self = true;
+                }
             }
             return;
         };
@@ -2090,7 +2113,7 @@ fn update_post_defer_watch(
             .any(|w| ck.value_reads_storage_of(st, v, w));
         if reads_watched {
             watch.insert(target.to_string());
-        } else {
+        } else if !store_only {
             watch.remove(target);
             if target == deferred_name {
                 *rebound_self = true;
@@ -2102,7 +2125,7 @@ fn update_post_defer_watch(
         Stmt::Local(l) => {
             for (i, target) in l.names.iter().enumerate() {
                 let val = l.values.get(i).or_else(|| l.values.first());
-                handle_bind(target, val);
+                handle_bind(target, val, false);
             }
         }
         Stmt::Assign {
@@ -2112,9 +2135,14 @@ fn update_post_defer_watch(
             ..
         } => {
             for (i, t) in targets.iter().enumerate() {
+                let val = values.get(i).or_else(|| values.first());
                 if let hy_syntax::PlaceKind::Ident(target) = &t.kind {
-                    let val = values.get(i).or_else(|| values.first());
-                    handle_bind(target, val);
+                    handle_bind(target, val, false);
+                } else if matches!(
+                    t.kind,
+                    hy_syntax::PlaceKind::Field { .. } | hy_syntax::PlaceKind::Index { .. }
+                ) {
+                    handle_bind(t.root(), val, true);
                 }
             }
         }
@@ -2126,9 +2154,9 @@ fn update_post_defer_watch(
                 let shapes = ck.iterate_var_shapes(st, expr, vars.len());
                 for (target, shape) in vars.iter().zip(shapes) {
                     if ck.shape_may_share(&shape) {
-                        handle_bind(target, Some(expr));
+                        handle_bind(target, Some(expr), false);
                     } else {
-                        handle_bind(target, None);
+                        handle_bind(target, None, false);
                     }
                 }
             }
